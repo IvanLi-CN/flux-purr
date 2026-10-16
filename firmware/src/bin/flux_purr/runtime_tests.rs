@@ -1300,6 +1300,42 @@ fn fan_start_waits_for_heating_and_does_not_preempt_its_working_request() {
         transition_pending: true,
         ..working
     };
+    assert!(adjusting.settled_observation().is_none());
+    assert_eq!(
+        adjusting.conducting_observation().unwrap().contract,
+        working.observation.unwrap().contract
+    );
+    let observation = working.observation;
+    assert!(calibration_contract_matches(
+        observation,
+        Some(12_000),
+        Some(3_000),
+        false
+    ));
+    assert!(!calibration_contract_matches(
+        observation,
+        Some(12_000),
+        Some(3_000),
+        true
+    ));
+    assert!(!calibration_contract_matches(
+        observation,
+        Some(11_900),
+        Some(3_000),
+        false
+    ));
+    assert!(!calibration_contract_matches(
+        observation,
+        Some(12_000),
+        Some(2_900),
+        false
+    ));
+    assert!(
+        adjusting
+            .with_fresh_observation(u64::MAX)
+            .conducting_observation()
+            .is_none()
+    );
     assert_eq!(
         fan_working_power_admission(adjusting, true, true, false),
         FanWorkingPowerAdmission::Confirmed
@@ -1567,41 +1603,121 @@ fn ordinary_heater_restart_requires_exact_live_working_pps_confirmation() {
 }
 
 #[test]
-fn automatic_pps_recovery_rearms_after_a_pd_transition_without_voltage_change() {
+fn supply_scan_requires_its_pinned_apdo_before_sampling_or_conduction() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual
+        .enable(ManualPpsOwner::Calibration, 6_000, Some(1_500))
+        .unwrap();
+    manual.supply_scan_range = manual.thermal_plant_pps_range();
+    let request = manual_pps_contract_request(&manual, true).unwrap();
+    assert_eq!(request.operating_current_ma(), 1_500);
+    assert_eq!(request.pps_range(), manual.supply_scan_range);
+    assert!(manual_pps_contract_request(&manual, false).is_none());
+    let source = SourceCapabilities::from_pdos(&[
+        pps_source_capability(5_000, 12_000, 3_000),
+        pps_source_capability(5_000, 21_000, 3_000),
+    ]);
+    let contract = source.select_exact_contract(request).unwrap();
+    let snapshot = PdServiceSnapshot {
+        observation: Some(PdStatusObservation {
+            status_raw: FUSB302B_STATUS0_VBUSOK,
+            status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
+            current_raw: 0,
+            current_ma: 1_500,
+            contract_voltage_mv: Some(6_000),
+            contract,
+        }),
+        active: ConfirmedActiveContract::from_private_contract(contract, source),
+        source: source.view(),
+        published_at_ms: 100,
+        ..PdServiceSnapshot::unavailable()
+    };
+    assert!(supply_scan_contract_matches(snapshot, &manual));
+    let wrong = source
+        .select_exact_contract(PdContractRequest::calibration_pps(6_000, 1_500).unwrap())
+        .unwrap();
+    assert!(!supply_scan_contract_matches(
+        PdServiceSnapshot {
+            active: ConfirmedActiveContract::from_private_contract(wrong, source),
+            ..snapshot
+        },
+        &manual
+    ));
+    assert!(!supply_scan_contract_matches(
+        PdServiceSnapshot {
+            transition_pending: true,
+            ..snapshot
+        },
+        &manual
+    ));
+    assert!(!supply_scan_contract_matches(
+        snapshot.with_fresh_observation(u64::MAX),
+        &manual
+    ));
+}
+
+#[test]
+fn automatic_confirmed_contract_is_rechecked_during_pending_transitions() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let contract = source
+        .select_exact_contract(PdContractRequest::pps(8_900, 3_000).unwrap())
+        .unwrap();
     let observation = PdStatusObservation {
         status_raw: FUSB302B_STATUS0_VBUSOK,
         status: fusb302b_status_projection(FUSB302B_STATUS0_VBUSOK),
         current_raw: 0,
         current_ma: 3_000,
         contract_voltage_mv: Some(8_900),
-        contract: Contract::observed(ContractKind::Pps, 8_900, 3_000),
+        contract,
     };
-
-    assert!(automatic_pps_contract_requires_recovery(
-        8_900, 8_900, 5_000, 3_000, None, false,
+    let snapshot = PdServiceSnapshot {
+        observation: Some(observation),
+        active: ConfirmedActiveContract::from_private_contract(contract, source),
+        source: source.view(),
+        published_at_ms: 100,
+        ..PdServiceSnapshot::unavailable()
+    };
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0].as_mut().unwrap().min_mv = 5_500;
+    let config = MemoryConfig::default();
+    let safe = |temp, state| {
+        manual
+            .automatic_heater_confirmed_pps_candidate(temp, &config, state)
+            .is_some()
+    };
+    assert!(safe(20.0, snapshot));
+    assert!(
+        safe(
+            20.0,
+            PdServiceSnapshot {
+                transition_pending: true,
+                ..snapshot
+            }
+        ),
+        "a safe old contract can conduct during an ordinary pending change"
+    );
+    assert!(
+        !safe(-10.0, snapshot),
+        "latest temperature can invalidate the old contract"
+    );
+    assert!(!safe(20.0, PdServiceSnapshot::unavailable()));
+    assert!(!safe(20.0, snapshot.with_fresh_observation(10_000)));
+    assert!(!safe(
+        20.0,
+        PdServiceSnapshot {
+            observation: Some(PdStatusObservation {
+                current_ma: 2_950,
+                ..observation
+            }),
+            ..snapshot
+        }
     ));
-    assert!(!automatic_pps_contract_requires_recovery(
-        8_900, 8_900, 5_000, 3_000, None, true,
-    ));
-    assert!(!automatic_pps_contract_requires_recovery(
-        8_900,
-        8_900,
-        5_000,
-        3_000,
-        Some(observation),
-        false,
-    ));
-    assert!(automatic_pps_contract_requires_recovery(
-        8_900,
-        8_900,
-        5_000,
-        3_000,
-        Some(PdStatusObservation {
-            current_ma: 2_950,
-            contract: Contract::observed(ContractKind::Pps, 8_900, 2_950),
-            ..observation
-        }),
-        false,
+    assert!(!safe(
+        20.0,
+        PdServiceSnapshot {
+            active: None,
+            ..snapshot
+        }
     ));
 }
 
@@ -4482,10 +4598,15 @@ fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    now_ms: 0,
+                    latest_rtd_raw_code: 1_500,
+                    latest_vin_raw_code: 1_000,
+                    wifi_started: Some(false),
+                    pd_confirmed: true,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: vin_raw_mv,
                     latest_temp_c: 25.0,
-                    pd_current_ma: 3_000,
+                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv,
                     heater_duty_percent: 0,
                 },
@@ -4564,10 +4685,15 @@ fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
             &mut memory_config,
             &mut manual_pps,
             CalibrationJobUpdateInput {
+                now_ms: 0,
+                latest_rtd_raw_code: 1_500,
+                latest_vin_raw_code: 1_000,
+                wifi_started: Some(false),
+                pd_confirmed: true,
                 latest_rtd_raw_adc_mv: 0,
                 latest_vin_raw_adc_mv: vin_raw_mv,
                 latest_temp_c: 25.0,
-                pd_current_ma: 3_000,
+                confirmed_voltage_mv: Some(20_000),
                 latest_vin_mv: u32::from(request_mv),
                 heater_duty_percent: 0,
             },
@@ -4631,10 +4757,15 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    now_ms: 0,
+                    latest_rtd_raw_code: 1_500,
+                    latest_vin_raw_code: 1_000,
+                    wifi_started: Some(false),
+                    pd_confirmed: true,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv.saturating_sub(80),
                     latest_temp_c: 25.0,
-                    pd_current_ma: 3_000,
+                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv: u32::from(request_mv),
                     heater_duty_percent: 0,
                 },
@@ -4648,10 +4779,15 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    now_ms: 0,
+                    latest_rtd_raw_code: 1_500,
+                    latest_vin_raw_code: 1_000,
+                    wifi_started: Some(false),
+                    pd_confirmed: true,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv,
                     latest_temp_c: 25.0,
-                    pd_current_ma: 3_000,
+                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv: u32::from(request_mv),
                     heater_duty_percent: 0,
                 },
@@ -4665,7 +4801,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
 }
 
 #[test]
-fn thermal_plant_auto_job_requests_the_selected_apdo_ceiling_for_3a_and_5a() {
+fn thermal_plant_auto_job_starts_at_the_selected_apdo_floor_and_caps_current_at_3a() {
     for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 3_000), (21_000, 5_000)] {
         let mut calibration = CalibrationRuntimeState::default();
         let mut memory_config = MemoryConfig::default();
@@ -4711,9 +4847,9 @@ fn thermal_plant_auto_job_requests_the_selected_apdo_ceiling_for_3a_and_5a() {
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
         assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
-        assert_eq!(calibration.pps_mv, Some(max_mv));
-        assert_eq!(calibration.job.next_request_mv, Some(max_mv));
-        assert_eq!(calibration.pps_ma, Some(max_ma));
+        assert_eq!(calibration.pps_mv, Some(5_500));
+        assert_eq!(calibration.job.next_request_mv, Some(5_500));
+        assert_eq!(calibration.pps_ma, Some(3_000));
     }
 }
 
@@ -4756,9 +4892,9 @@ fn thermal_plant_auto_job_uses_the_apdo_that_covers_20v_not_another_range() {
     )
     .unwrap();
 
-    assert_eq!(calibration.pps_mv, Some(21_000));
+    assert_eq!(calibration.pps_mv, Some(5_500));
     assert_eq!(calibration.pps_ma, Some(3_000));
-    assert_eq!(calibration.job.next_request_mv, Some(21_000));
+    assert_eq!(calibration.job.next_request_mv, Some(5_500));
 }
 
 #[test]
@@ -4858,68 +4994,54 @@ fn thermal_plant_auto_job_starts_one_transient_run_for_3a_and_5a_pps() {
 }
 
 fn assert_auto_thermal_plant_job_start(max_mv: u16, max_ma: u16) {
-    let mut calibration = CalibrationRuntimeState {
-        mode: CalibrationMode::ThermalPlant,
-        ..CalibrationRuntimeState::default()
-    };
-    let mut memory_config = thermal_plant_job_memory_config(max_mv, max_ma);
-    let mut manual_pps = thermal_plant_job_manual_pps(max_mv, max_ma);
-    calibration_job_start(
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut config = thermal_plant_job_memory_config(max_mv, max_ma);
+    let mut manual = thermal_plant_job_manual_pps(max_mv, max_ma);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
         &mut calibration,
         CalibrationJobKind::ThermalPlant,
-        &mut memory_config,
-        &mut manual_pps,
+        &mut config,
+        &mut manual,
+        &mut workspace,
     )
     .unwrap();
-
+    let mut plant = SupplyCalibrationPlant {
+        temperature_c: 25.0,
+        now_ms: 0,
+    };
     for _ in 0..THERMAL_PLANT_AMBIENT_TICKS {
-        update_thermal_plant_job(
-            &mut calibration,
-            &mut memory_config,
-            &mut manual_pps,
-            ThermalPlantJobUpdate {
-                raw_rtd_adc_mv: 250,
-                temp_c: 25.0,
-                max_mv,
-                max_ma,
-                heater_duty_percent: 0,
-            },
+        plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
+        assert!(
+            !calibration.heater_enabled,
+            "ambient sampling must remain unpowered"
         );
+    }
+    assert_eq!(
+        workspace.job.as_ref().unwrap().phase,
+        ThermalPlantAutoPhase::Heating
+    );
+    while plant.now_ms < 4_000 && !calibration.heater_enabled {
+        plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
     }
     assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
-    assert!(calibration.heater_enabled);
-    assert_eq!(calibration.model_target_temp_c, None);
-    assert_eq!(calibration.job_data, Some(CalibrationJobData::ThermalPlant));
-    assert_eq!(
-        test_thermal_plant_phase(),
-        Some(ThermalPlantAutoPhase::Heating)
+    assert!(
+        calibration.heater_enabled,
+        "confirmed low-voltage preflight may now conduct"
     );
-
-    for (raw_rtd_adc_mv, temp_c) in [(400, 60.0), (700, 140.0), (1_100, 215.0)] {
-        update_thermal_plant_job(
-            &mut calibration,
-            &mut memory_config,
-            &mut manual_pps,
-            ThermalPlantJobUpdate {
-                raw_rtd_adc_mv,
-                temp_c,
-                max_mv,
-                max_ma,
-                heater_duty_percent: 100,
-            },
-        );
-        assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
-        assert_eq!(calibration.job.next_request_mv, Some(max_mv));
-        assert_eq!(calibration.pps_mv, Some(max_mv));
-        assert_eq!(
-            thermal_plant_calibration_snapshot(temp_c, calibration.heater_enabled).duty_percent,
-            100
-        );
-        assert_eq!(
-            test_thermal_plant_phase(),
-            Some(ThermalPlantAutoPhase::Heating)
-        );
-    }
+    assert_eq!(manual.target_mv, Some(5_500));
+    assert_eq!(manual.target_ma, Some(3_000));
+    assert_eq!(
+        workspace
+            .job
+            .as_ref()
+            .unwrap()
+            .supply_scan
+            .as_ref()
+            .unwrap()
+            .phase,
+        flux_purr_firmware::heater_supply::scan::ScanPhase::Preflight
+    );
 }
 
 fn thermal_plant_job_memory_config(max_mv: u16, max_ma: u16) -> MemoryConfig {
@@ -4946,34 +5068,6 @@ fn thermal_plant_job_manual_pps(max_mv: u16, max_ma: u16) -> ManualPpsState {
     }))
 }
 
-struct ThermalPlantJobUpdate {
-    raw_rtd_adc_mv: u16,
-    temp_c: f32,
-    max_mv: u16,
-    max_ma: u16,
-    heater_duty_percent: u8,
-}
-
-fn update_thermal_plant_job(
-    calibration: &mut CalibrationRuntimeState,
-    memory_config: &mut MemoryConfig,
-    manual_pps: &mut ManualPpsState,
-    update: ThermalPlantJobUpdate,
-) {
-    update_calibration_job_state(
-        calibration,
-        memory_config,
-        manual_pps,
-        CalibrationJobUpdateInput {
-            latest_rtd_raw_adc_mv: update.raw_rtd_adc_mv,
-            latest_vin_raw_adc_mv: 0,
-            latest_temp_c: update.temp_c,
-            pd_current_ma: update.max_ma,
-            latest_vin_mv: update.max_mv.into(),
-            heater_duty_percent: update.heater_duty_percent,
-        },
-    );
-}
 const SYNTHETIC_TARGET_MARGIN_C: f32 = 2.0;
 
 fn runtime_test_raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
@@ -4981,6 +5075,37 @@ fn runtime_test_raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
     (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
         / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
         .round() as u16
+}
+
+fn synthetic_supply_boundary() -> flux_purr_firmware::heater_supply::SupplyBoundary {
+    use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
+    let mut boundary = SupplyBoundary {
+        adc: BoundaryAdcMetadata {
+            divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
+            ..Default::default()
+        },
+        wifi_started: false,
+        source_min_mv: 5_500,
+        source_max_mv: 20_000,
+        source_max_ma: 3_000,
+        advertised_min_mv: 5_000,
+        advertised_max_mv: 20_000,
+        point_count: 1,
+        ..Default::default()
+    };
+    boundary.points[0] = BoundaryPoint {
+        elapsed_ms: 1_000,
+        rtd_code: 1_500,
+        rtd_mv: runtime_test_raw_rtd_adc_mv_for_temp(100.0),
+        vin_code: 1_500,
+        vin_mv: 750,
+        request_current_ma: 3_000,
+        tracking_request_mv: 10_000,
+        flat_request_mv: 10_100,
+        tracking_only: true,
+    };
+    assert!(boundary.is_valid());
+    boundary
 }
 
 fn synthetic_memory_config() -> MemoryConfig {
@@ -5006,6 +5131,7 @@ fn synthetic_memory_config() -> MemoryConfig {
             resistance_milliohms,
         });
     }
+    config.heater_supply_boundary = Some(synthetic_supply_boundary());
     config
 }
 
@@ -5047,7 +5173,7 @@ fn synthetic_trace(
         if should_save {
             assert!(sample_count < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES);
             samples[sample_count] = ThermalPlantTransientSample {
-                elapsed_ticks: tick,
+                elapsed_ticks: u32::from(tick),
                 raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
                 heater_voltage_125mv: if heating { 160 } else { 0 },
                 duty_percent,
@@ -5259,17 +5385,11 @@ fn assert_synthetic_apdo_and_persistence(
     let mut persisted_bytes = [0_u8; MEMORY_SLOT_SIZE];
     let persisted_len = encode_memory_record(&persisted_record, &mut persisted_bytes)
         .expect("transient record encodes");
-    let persisted_transaction = decode_memory_record(&persisted_bytes[..persisted_len])
-        .expect("transient record decodes")
-        .config
-        .thermal_plant_transient_active
-        .expect("transient model persists");
-    let persisted_last =
-        persisted_transaction.samples[usize::from(persisted_transaction.sample_count) - 1];
-    assert_eq!(persisted_last.duty_percent, 0);
+    let decoded = decode_memory_record(&persisted_bytes[..persisted_len])
+        .expect("legacy snapshot still decodes unrelated configuration");
     assert!(
-        projected_rtd_temperature_c(memory_config, persisted_last.raw_rtd_adc_mv)
-            .is_some_and(|temperature_c| temperature_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C)
+        decoded.config.thermal_plant_transient_active.is_none(),
+        "the legacy snapshot format must not restore heater calibration"
     );
 }
 
@@ -5534,7 +5654,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.iter().copied().enumerate() {
         samples[index] = ThermalPlantTransientSample {
-            elapsed_ticks,
+            elapsed_ticks: u32::from(elapsed_ticks),
             raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temp_c),
             heater_voltage_125mv: 160,
             duty_percent,
@@ -5954,11 +6074,11 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     let mut job = CalibrationThermalPlantAutoJob {
         run_id: 1,
         phase: ThermalPlantAutoPhase::Ambient,
-        source_max_mv: 20_000,
         source_current_ma: 3_000,
         ambient_raw_rtd_adc_mv: 250,
         idle_samples: 1,
-        heater_curve: ThermalPlantCurveSampler::default(),
+        supply_scan: None,
+        started_at_ms: None,
         elapsed_ticks: 1,
         phase_started_tick: 0,
         sample_count: 0,
@@ -5986,112 +6106,178 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     assert_eq!(job.samples[1].duty_percent, 100);
 }
 
-#[test]
-fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
-    fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
-        let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-        (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-            / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
-            .round() as u16
-    }
+struct SupplyCalibrationPlant {
+    temperature_c: f32,
+    now_ms: u64,
+}
 
-    for source_current_ma in [3_000, 5_000] {
-        let mut calibration = CalibrationRuntimeState {
-            mode: CalibrationMode::ThermalPlant,
-            ..CalibrationRuntimeState::default()
+impl SupplyCalibrationPlant {
+    fn tick(
+        &mut self,
+        calibration: &mut CalibrationRuntimeState,
+        config: &mut MemoryConfig,
+        manual_pps: &mut ManualPpsState,
+        workspace: &mut CalibrationThermalPlantWorkspace,
+    ) {
+        let duty = u8::from(calibration.heater_enabled) * 100;
+        let source_mv = manual_pps.target_mv.unwrap_or(5_500);
+        let current_a = f32::from(manual_pps.target_ma.unwrap_or(3_000)) / 1_000.0;
+        let resistance = 3.2 * (1.0 + 0.00393 * (self.temperature_c - 20.0));
+        // An independent synthetic board load and source CC loop. No such
+        // current or watt measurement is supplied to the product algorithm.
+        let cc_voltage =
+            resistance * (current_a + (current_a.powi(2) - 3.2 / resistance).sqrt()) / 2.0;
+        let delivered_v =
+            (f32::from(source_mv) / 1_000.0).min(if duty > 0 { cc_voltage } else { 21.0 });
+        let raw_rtd = runtime_test_raw_rtd_adc_mv_for_temp(self.temperature_c);
+        let projected = projected_rtd_temperature_c(config, raw_rtd).unwrap();
+        update_calibration_job_state_with_workspace(
+            calibration,
+            config,
+            manual_pps,
+            workspace,
+            CalibrationJobUpdateInput {
+                now_ms: self.now_ms,
+                latest_rtd_raw_code: raw_rtd * 2,
+                latest_vin_raw_code: (delivered_v * 150.0).round() as u16,
+                wifi_started: Some(false),
+                pd_confirmed: true,
+                latest_rtd_raw_adc_mv: raw_rtd,
+                latest_vin_raw_adc_mv: (delivered_v * 75.0).round() as u16,
+                latest_temp_c: projected,
+                confirmed_voltage_mv: Some(source_mv),
+                latest_vin_mv: (delivered_v * 1_000.0).round() as u32,
+                heater_duty_percent: duty,
+            },
+        );
+        let power_w = if duty > 0 {
+            delivered_v.powi(2) / resistance
+        } else {
+            0.0
         };
-        let mut memory_config = MemoryConfig::default();
-        let mut manual_pps =
-            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
-                pps_covers_20v: true,
-                pps_min_mv: Some(5_000),
-                pps_max_mv: Some(20_000),
-                pps_max_ma: Some(source_current_ma),
-                ..Default::default()
-            }));
-        calibration_job_start(
-            &mut calibration,
-            CalibrationJobKind::ThermalPlant,
-            &mut memory_config,
-            &mut manual_pps,
-        )
-        .unwrap();
+        self.temperature_c += (power_w - 0.16 * (self.temperature_c - 25.0)) / 12.0 * 0.05;
+        self.now_ms += 50;
+    }
+}
 
-        let ambient_temp_c = 25.0_f32;
-        let capacity_mj_per_c = 30_000.0_f32;
-        let convection_mw_per_c = 100.0_f32;
-        let radiation_mw_per_k4 = 0.00000005_f32;
-        let mut temperature_c = ambient_temp_c;
-        for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
-            + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
-            + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
-        {
-            let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
-            match test_thermal_plant_phase() {
-                Some(ThermalPlantAutoPhase::Heating) => assert_eq!(heater_duty_percent, 100),
-                Some(ThermalPlantAutoPhase::Cooling) => assert_eq!(heater_duty_percent, 0),
-                Some(ThermalPlantAutoPhase::Ambient) | None => {}
-            }
-            let source_mv = manual_pps.target_mv.unwrap_or(0);
-            let resistance_ohms =
-                estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
-            let pd_current_ma = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
-            } else {
-                0
-            };
-            let measured_heater_mv = if heater_duty_percent > 0 {
-                u32::from(source_mv)
-                    .min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
-            } else {
-                0
-            };
-            let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
-            let reported_temp_c =
-                projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
-            update_calibration_job_state(
-                &mut calibration,
-                &mut memory_config,
-                &mut manual_pps,
-                CalibrationJobUpdateInput {
-                    latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
-                    latest_vin_raw_adc_mv: 0,
-                    latest_temp_c: reported_temp_c,
-                    pd_current_ma,
-                    latest_vin_mv: measured_heater_mv,
-                    heater_duty_percent,
-                },
+fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualPpsState) {
+    let mut temperature = 25.0_f32;
+    let mut boundary_was_used = false;
+    for _ in 0..36_000 {
+        let raw = runtime_test_raw_rtd_adc_mv_for_temp(temperature);
+        let projected = projected_rtd_temperature_c(config, raw).unwrap();
+        let candidate = manual
+            .automatic_heater_pps_candidate(projected, None, config, None)
+            .unwrap();
+        boundary_was_used |= candidate.boundary_applied;
+        let resistance = default_estimated_heater_resistance_ohms(temperature);
+        let current = f32::from(candidate.current_ma) / 1_000.0;
+        let cc_voltage = resistance * (current + (current.powi(2) - 3.2 / resistance).sqrt()) / 2.0;
+        let voltage = (f32::from(candidate.allowed_mv) / 1_000.0).min(cc_voltage);
+        let power_w = voltage.powi(2) / resistance;
+        temperature += (power_w - 0.16 * (temperature - 25.0)) / 12.0 * 0.05;
+        if temperature >= 220.0 {
+            assert!(
+                boundary_was_used,
+                "warmup must use retained points, not only the preset fallback"
             );
-            if calibration.job.status == CalibrationJobStatus::Completed {
-                break;
-            }
-            if calibration.job.status == CalibrationJobStatus::Failed {
-                panic!(
-                    "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
-                    calibration.job.message, calibration.job.samples_collected
+            return;
+        }
+    }
+    panic!("calibrated boundary stalled automatic warmup at {temperature} C");
+}
+
+#[test]
+fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() {
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut config = MemoryConfig::default();
+    let mut manual_pps = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut config,
+        &mut manual_pps,
+        &mut workspace,
+    )
+    .unwrap();
+    let mut plant = SupplyCalibrationPlant {
+        temperature_c: 25.0,
+        now_ms: 0,
+    };
+    while plant.now_ms < 22_000_000 && calibration.job.status == CalibrationJobStatus::Running {
+        plant.tick(
+            &mut calibration,
+            &mut config,
+            &mut manual_pps,
+            &mut workspace,
+        );
+    }
+    if calibration.job.status != CalibrationJobStatus::Completed {
+        {
+            let job = workspace.job.as_ref().unwrap();
+            for sample in &job.samples[..usize::from(job.sample_count)] {
+                eprintln!(
+                    "FIT,{},{},{},{}",
+                    sample.elapsed_ticks,
+                    projected_rtd_temperature_c(&config, sample.raw_rtd_adc_mv).unwrap(),
+                    sample.heater_voltage_125mv,
+                    sample.duty_percent
                 );
             }
-
-            let power_mw = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0)
-                    .min(f32::from(source_mv) * f32::from(source_current_ma) / 1_000.0)
-            } else {
-                0.0
-            };
-            let temperature_k = temperature_c + 273.15;
-            let ambient_k = ambient_temp_c + 273.15;
-            let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
-                + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-            temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
         }
-
-        assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
-        assert_eq!(calibration.mode, CalibrationMode::Off);
-        assert!(!calibration.heater_enabled);
-        assert!(!manual_pps.enabled);
-        assert!(memory_config.thermal_plant_transient_active.is_some());
-        assert!(has_calibrated_heater_resistance_curve(&memory_config));
     }
+    assert_eq!(
+        calibration.job.status,
+        CalibrationJobStatus::Completed,
+        "error={:?}, T={}, ms={}",
+        calibration.job.message,
+        plant.temperature_c,
+        plant.now_ms
+    );
+    assert_eq!(calibration.mode, CalibrationMode::Off);
+    assert!(!calibration.heater_enabled);
+    assert!(!manual_pps.enabled);
+    assert!(config.thermal_plant_transient_active.is_some());
+    assert_boundary_warmup_reaches_cutoff(&config, &manual_pps);
+    let transaction = config.thermal_plant_transient_active.unwrap();
+    let projection = thermal_plant_projection_from_transient(&transaction).unwrap();
+    assert!(
+        (6_000.0..=18_000.0).contains(&projection.thermal_capacity_mj_per_c),
+        "{projection:?}"
+    );
+    assert!(transaction.sample_count <= 48);
+    let raw_samples = transaction.samples;
+    assert!(rebuild_transient_thermal_plant_for_current_inputs(
+        &mut config
+    ));
+    assert_eq!(
+        config.thermal_plant_transient_active.unwrap().samples,
+        raw_samples
+    );
+    assert_eq!(
+        config.thermal_plant_transient_active.unwrap().projection,
+        transaction.projection
+    );
+    assert!(
+        config
+            .heater_supply_boundary
+            .is_some_and(|boundary| boundary.is_valid())
+    );
+    assert!(
+        config
+            .active_heater_curve
+            .points
+            .iter()
+            .all(Option::is_none)
+    );
+    assert!(
+        config
+            .heater_curve_raw_observations
+            .points
+            .iter()
+            .all(Option::is_none)
+    );
 }
 
 #[test]
@@ -6110,11 +6296,13 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
     test_install_thermal_plant_job(CalibrationThermalPlantAutoJob {
         run_id: 1,
         phase: ThermalPlantAutoPhase::Heating,
-        source_max_mv: 20_000,
         source_current_ma: 3_000,
         ambient_raw_rtd_adc_mv: 250,
         idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
-        heater_curve: ThermalPlantCurveSampler::default(),
+        supply_scan: flux_purr_firmware::heater_supply::scan::SupplyScan::new(
+            synthetic_supply_boundary(),
+        ),
+        started_at_ms: Some(0),
         elapsed_ticks: 100,
         phase_started_tick: THERMAL_PLANT_AMBIENT_TICKS.into(),
         sample_count: 1,
@@ -6137,7 +6325,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
             ..Default::default()
         }));
     manual_pps
-        .enable(ManualPpsOwner::Calibration, 20_000, Some(3_000))
+        .enable(ManualPpsOwner::Calibration, 5_500, Some(3_000))
         .unwrap();
 
     update_calibration_job_state(
@@ -6145,10 +6333,15 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
-            latest_rtd_raw_adc_mv: 1_200,
-            latest_vin_raw_adc_mv: 0,
+            now_ms: 5_050,
+            latest_rtd_raw_code: 1_500,
+            latest_vin_raw_code: 1_000,
+            wifi_started: Some(false),
+            pd_confirmed: true,
+            latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(221.0),
+            latest_vin_raw_adc_mv: 750,
             latest_temp_c: THERMAL_PLANT_TARGET_TEMP_C,
-            pd_current_ma: 3_000,
+            confirmed_voltage_mv: Some(5_500),
             latest_vin_mv: 20_000,
             heater_duty_percent: 100,
         },
@@ -6156,7 +6349,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
 
     assert!(!calibration.heater_enabled);
     assert!(manual_pps.enabled);
-    assert_eq!(manual_pps.target_mv, Some(20_000));
+    assert_eq!(manual_pps.target_mv, Some(5_500));
     assert!(!take_immediate_heater_disarm(&mut calibration));
     assert_eq!(calibration.job_data, Some(CalibrationJobData::ThermalPlant));
     assert_eq!(
@@ -6244,10 +6437,15 @@ fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
+            now_ms: 0,
+            latest_rtd_raw_code: 1_500,
+            latest_vin_raw_code: 1_000,
+            wifi_started: Some(false),
+            pd_confirmed: true,
             latest_rtd_raw_adc_mv: 0,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: 20.0,
-            pd_current_ma: 0,
+            confirmed_voltage_mv: Some(20_000),
             latest_vin_mv: 20_000,
             heater_duty_percent: 0,
         },
@@ -6259,151 +6457,60 @@ fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
 }
 
 #[test]
-fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
-    for (latest_vin_mv, pd_current_ma) in [(0, 3_000), (20_000, 0)] {
-        let mut calibration = CalibrationRuntimeState {
-            mode: CalibrationMode::ThermalPlant,
-            ..CalibrationRuntimeState::default()
-        };
-        let mut memory_config = MemoryConfig::default();
-        let mut manual_pps =
-            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
-                pps_covers_20v: true,
-                pps_min_mv: Some(5_000),
-                pps_max_mv: Some(20_000),
-                pps_max_ma: Some(3_000),
-                ..Default::default()
-            }));
-        calibration_job_start(
+fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract() {
+    for invalid_adc in [false, true] {
+        let mut calibration = CalibrationRuntimeState::default();
+        let mut config = MemoryConfig::default();
+        let mut manual = thermal_plant_job_manual_pps(20_000, 3_000);
+        let mut workspace = CalibrationThermalPlantWorkspace::default();
+        calibration_job_start_with_workspace(
             &mut calibration,
             CalibrationJobKind::ThermalPlant,
-            &mut memory_config,
-            &mut manual_pps,
+            &mut config,
+            &mut manual,
+            &mut workspace,
         )
         .unwrap();
-
-        for _ in 0..THERMAL_PLANT_AMBIENT_TICKS {
-            update_calibration_job_state(
-                &mut calibration,
-                &mut memory_config,
-                &mut manual_pps,
-                CalibrationJobUpdateInput {
-                    latest_rtd_raw_adc_mv: 250,
-                    latest_vin_raw_adc_mv: 0,
-                    latest_temp_c: 25.0,
-                    pd_current_ma: 3_000,
-                    latest_vin_mv: 20_000,
-                    heater_duty_percent: 0,
-                },
-            );
+        let mut plant = SupplyCalibrationPlant {
+            temperature_c: 25.0,
+            now_ms: 0,
+        };
+        while plant.now_ms < 4_000 && !calibration.heater_enabled {
+            plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
         }
         assert!(calibration.heater_enabled);
-
-        update_calibration_job_state(
+        update_calibration_job_state_with_workspace(
             &mut calibration,
-            &mut memory_config,
-            &mut manual_pps,
+            &mut config,
+            &mut manual,
+            &mut workspace,
             CalibrationJobUpdateInput {
-                latest_rtd_raw_adc_mv: 260,
-                latest_vin_raw_adc_mv: 0,
+                now_ms: plant.now_ms,
+                latest_rtd_raw_code: 1_500,
+                latest_vin_raw_code: 1_000,
+                wifi_started: Some(false),
+                pd_confirmed: invalid_adc,
+                latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(26.0),
+                latest_vin_raw_adc_mv: if invalid_adc { 0 } else { 400 },
                 latest_temp_c: 26.0,
-                pd_current_ma,
-                latest_vin_mv,
+                confirmed_voltage_mv: invalid_adc.then_some(5_500),
+                latest_vin_mv: if invalid_adc { 0 } else { 5_500 },
                 heater_duty_percent: 100,
             },
         );
-
-        assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
         assert!(!calibration.heater_enabled);
-        assert!(!manual_pps.enabled);
-        assert!(take_immediate_heater_disarm(&mut calibration));
-        assert_eq!(memory_config.thermal_plant_transient_active, None);
+        assert_eq!(
+            calibration.job.status,
+            if invalid_adc {
+                CalibrationJobStatus::Failed
+            } else {
+                CalibrationJobStatus::Running
+            }
+        );
+        assert_eq!(manual.enabled, !invalid_adc);
+        assert_eq!(take_immediate_heater_disarm(&mut calibration), invalid_adc);
+        assert_eq!(config.thermal_plant_transient_active, None);
     }
-}
-
-#[test]
-fn transient_curve_projection_includes_low_temperature_anchors() {
-    let mut bins = ThermalPlantCurveSampler::default().bins;
-    bins[0].observe(100.0, 3.911);
-    bins[1].observe(140.0, 3.918);
-    bins[2].observe(175.0, 3.924);
-    bins[3].observe(210.0, 3.929);
-
-    let preview = heater_curve_from_transient_bins(&bins).unwrap();
-
-    assert_eq!(
-        preview.points[0],
-        Some(default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C))
-    );
-    assert_eq!(
-        preview.points[1],
-        Some(default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C))
-    );
-    assert_eq!(
-        preview.points[2].map(|point| point.temp_centi_c),
-        Some(10_000)
-    );
-    assert!(preview.points[5].is_some());
-    assert!(preview.points[6].is_none());
-}
-
-#[test]
-fn transient_curve_sampling_requires_each_temperature_band() {
-    let mut job = ThermalPlantCurveSampler::default();
-    for _ in 0..THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN {
-        job.cold_bin.observe(100.0, 3.8);
-        for bin in &mut job.bins {
-            bin.observe((bin.min_temp_c + bin.max_temp_c) / 2.0, 3.9);
-        }
-    }
-
-    assert!(thermal_plant_curve_samples_ready(&job));
-
-    job.bins[3].samples = THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN - 1;
-    assert!(!thermal_plant_curve_samples_ready(&job));
-}
-
-#[test]
-fn transient_curve_projection_never_underestimates_nominal_heater_model() {
-    let mut bins = ThermalPlantCurveSampler::default().bins;
-    bins[0].observe(100.0, 3.911);
-    bins[1].observe(140.0, 3.918);
-    bins[2].observe(175.0, 3.924);
-    bins[3].observe(210.0, 3.929);
-
-    let preview = heater_curve_from_transient_bins(&bins).unwrap();
-
-    for point in preview.points.into_iter().flatten() {
-        let temp_c = f32::from(point.temp_centi_c) / 100.0;
-        let expected_floor =
-            round_to_u16_nonnegative(default_estimated_heater_resistance_ohms(temp_c) * 1000.0);
-        assert!(point.resistance_milliohms >= expected_floor);
-    }
-}
-
-#[test]
-fn transient_curve_projection_does_not_clamp_low_temp_voltage_to_first_hot_bin() {
-    let mut bins = ThermalPlantCurveSampler::default().bins;
-    bins[0].observe(100.0, 3.911);
-    bins[1].observe(140.0, 3.918);
-    bins[2].observe(175.0, 3.924);
-    bins[3].observe(210.0, 3.929);
-
-    let preview = heater_curve_from_transient_bins(&bins).unwrap();
-    let memory_config = MemoryConfig::default();
-
-    assert_eq!(
-        heater_safe_max_mv_for_temp(20.0, 5_000, 24_000, Some(&preview), &memory_config),
-        16_000
-    );
-    assert_eq!(
-        heater_safe_max_mv_for_temp(60.0, 5_000, 24_000, Some(&preview), &memory_config),
-        18_500
-    );
-    assert_eq!(
-        heater_safe_max_mv_for_temp(220.0, 4_800, 21_000, Some(&preview), &memory_config),
-        21_000
-    );
 }
 
 #[test]
@@ -9517,7 +9624,7 @@ fn heater_safe_max_preserves_higher_power_sources() {
 }
 
 #[test]
-fn calibrated_resistance_curve_sets_3a_plant_power_ceiling() {
+fn obsolete_resistance_curve_does_not_set_the_power_ceiling() {
     let mut config = MemoryConfig::default();
     config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
         temp_centi_c: 2_000,
@@ -9527,20 +9634,27 @@ fn calibrated_resistance_curve_sets_3a_plant_power_ceiling() {
         temp_centi_c: 22_000,
         resistance_milliohms: 5_674,
     });
-    assert!(has_calibrated_heater_resistance_curve(&config));
+
     let pps3a_power_mw =
         heater_available_power_mw_for_temp(160.0, Some(20_000), Some(3_250), None, &config);
     let pps5a_power_mw =
         heater_available_power_mw_for_temp(160.0, Some(21_000), Some(5_000), None, &config);
 
-    // The selected curve is used directly and the automatic path reserves
-    // 200 mA before deriving the safe voltage and available heater power.
-    assert!((46_000..=49_000).contains(&pps3a_power_mw));
+    assert_eq!(
+        pps3a_power_mw,
+        heater_available_power_mw_for_temp(
+            160.0,
+            Some(20_000),
+            Some(3_250),
+            None,
+            &MemoryConfig::default()
+        )
+    );
     assert!(pps5a_power_mw > 70_000);
 }
 
 #[test]
-fn production_pps_ceiling_uses_the_selected_resistance_and_current_budget() {
+fn production_pps_ceiling_ignores_obsolete_resistance_and_current_reserve() {
     let mut config = MemoryConfig::default();
     config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
         temp_centi_c: 2_000,
@@ -9553,7 +9667,7 @@ fn production_pps_ceiling_uses_the_selected_resistance_and_current_budget() {
 
     assert_eq!(
         production_pps_request_ceiling_mv(215.0, 3_000, 200, 21_000, None, &config),
-        18_700
+        16_900
     );
 }
 
@@ -9574,9 +9688,8 @@ fn pps_request_path_drop_compensation_cannot_relax_the_plate_limit() {
 }
 
 #[test]
-fn calibrated_heater_resistance_curve_remains_available_for_legacy_paths() {
+fn obsolete_resistance_curve_is_absent_from_product_wire_state() {
     let mut config = MemoryConfig::default();
-    assert!(!has_calibrated_heater_resistance_curve(&config));
 
     config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
         temp_centi_c: 2_000,
@@ -9587,11 +9700,13 @@ fn calibrated_heater_resistance_curve_remains_available_for_legacy_paths() {
         resistance_milliohms: 5_600,
     });
 
-    assert!(has_calibrated_heater_resistance_curve(&config));
+    let wire = flux_purr_firmware::control_plane::heater_curve_state_from_memory(&config, None);
+    assert!(wire.active.points.iter().all(Option::is_none));
+    assert!(wire.preview.is_none());
 }
 
 #[test]
-fn raw_heater_observations_reproject_without_underestimating_the_model_floor() {
+fn obsolete_raw_observations_cannot_reenter_the_automatic_resistance_model() {
     let mut config = MemoryConfig::default();
     config.active_heater_curve.points[0] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
         temp_centi_c: 0,
@@ -9617,10 +9732,10 @@ fn raw_heater_observations_reproject_without_underestimating_the_model_floor() {
         });
 
     let resistance = automatic_heater_resistance_ohms(216.7, None, &config);
-    assert!(resistance < default_estimated_heater_resistance_ohms(216.7));
+    assert_eq!(resistance, default_estimated_heater_resistance_ohms(216.7));
     assert_eq!(
         estimated_heater_resistance_with_source(216.7, None, &config).1,
-        AutomaticHeaterResistanceSource::ProjectedRaw
+        AutomaticHeaterResistanceSource::Theoretical
     );
     assert_eq!(
         heater_safe_max_mv_for_temp(216.7, 4_700, 21_000, None, &config),
@@ -9716,6 +9831,47 @@ fn automatic_controller_power_budget_tracks_the_confirmed_contract_current() {
 }
 
 #[test]
+fn automatic_full_power_reaches_the_quantized_voltage_ceiling_and_full_conduction() {
+    // The watt interface carries integer mW. Truncating the same physical
+    // ceiling must not lose another 100 mV or turn full conduction into 99%.
+    for resistance_ohms in [2.8_f32, 3.2, 3.74, 5.0, 7.5] {
+        for ceiling_mv in [5_500_u16, 8_500, 9_700, 10_400, 15_200, 21_000] {
+            let maximum_mw = (f32::from(ceiling_mv).powi(2) / resistance_ohms / 1_000.0) as u32;
+            assert_eq!(
+                automatic_heater_request_mv_from_power(
+                    maximum_mw,
+                    resistance_ohms,
+                    5_500,
+                    ceiling_mv,
+                ),
+                ceiling_mv,
+            );
+            assert_eq!(
+                automatic_heater_pwm_percent_for_power(
+                    maximum_mw,
+                    resistance_ohms,
+                    ceiling_mv,
+                    100
+                ),
+                100,
+            );
+            assert_eq!(
+                automatic_heater_pwm_percent_for_power(maximum_mw, resistance_ohms, ceiling_mv, 42),
+                42,
+            );
+            assert!(
+                automatic_heater_pwm_percent_for_power(
+                    maximum_mw.saturating_sub(1),
+                    resistance_ohms,
+                    ceiling_mv,
+                    100,
+                ) < 100,
+            );
+        }
+    }
+}
+
+#[test]
 fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
     let apdos = [
         Some(ch224q::PpsApdo {
@@ -9740,8 +9896,8 @@ fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
     )
     .expect("3.25 A APDO leaves a safe automatic range");
     assert_eq!(candidate.current_ma, 3_250);
-    assert_eq!(candidate.allowed_mv, 9_700);
-    assert!((29_000..=30_000).contains(&candidate.power_mw));
+    assert_eq!(candidate.allowed_mv, 10_400);
+    assert!((33_000..=34_000).contains(&candidate.power_mw));
     assert_eq!(
         heater_available_power_mw_for_temp(
             20.0,
@@ -9750,7 +9906,7 @@ fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
             None,
             &MemoryConfig::default(),
         ),
-        29_403
+        33_800
     );
     assert_eq!(
         automatic_heater_request_mv_from_power(15_000, 3.2, 5_000, 9_700),
@@ -9760,7 +9916,8 @@ fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
         automatic_heater_pwm_percent_for_power(5_000, 3.2, 5_500, 100),
         52
     );
-    assert!(!automatic_heater_fixed_is_safe(9_000, 3_000, 28_000, 3.2));
+    assert!(automatic_heater_fixed_is_safe(9_000, 3_000, 28_000, 3.2));
+    assert!(!automatic_heater_fixed_is_safe(9_000, 3_000, 28_000, 2.8));
     assert!(automatic_heater_fixed_is_safe(9_000, 3_250, 28_000, 3.2));
 }
 
@@ -9789,8 +9946,8 @@ fn automatic_heater_policy_accepts_exact_3a_apdo_budget() {
     )
     .expect("3 A APDO leaves a safe automatic range");
     assert_eq!(candidate.current_ma, 3_000);
-    assert_eq!(candidate.allowed_mv, 8_900);
-    assert_eq!(candidate.power_mw, 24_753);
+    assert_eq!(candidate.allowed_mv, 9_600);
+    assert_eq!(candidate.power_mw, 28_800);
 }
 
 #[test]
@@ -9832,21 +9989,21 @@ fn automatic_heater_fixed_fallback_uses_only_advertised_safe_contracts() {
     source.fixed[2] = Some((15_000, 4_000));
 
     let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
-        .expect("the advertised 9 V fixed PDO is safe after the current reserve");
+        .expect("the advertised 9 V fixed PDO is safe under the preset load model");
     assert_eq!(request, ch224q::VoltageRequest::V9);
     assert_eq!(request_ma, 3_250);
 
     source.fixed[1] = Some((9_000, 3_000));
-    let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
+    let (request, request_ma) = automatic_heater_fixed_request(source, 2.8)
         .expect("the advertised 5 V fixed PDO remains safe");
     assert_eq!(request, ch224q::VoltageRequest::V5);
     assert_eq!(request_ma, 3_000);
 
     source.fixed[0] = Some((5_000, 1_500));
-    assert!(automatic_heater_fixed_request(source, 3.2).is_none());
+    assert!(automatic_heater_fixed_request(source, 2.8).is_none());
 
     source.fixed = [Some((28_000, 5_000)), None, None, None, None, None, None];
-    assert!(automatic_heater_fixed_request(source, 3.2).is_none());
+    assert!(automatic_heater_fixed_request(source, 2.8).is_none());
 }
 
 #[test]
@@ -11203,6 +11360,7 @@ fn valid_rtd_measurement_updates_display_and_control_on_request_change() {
 #[test]
 fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
     let retry_sample = RtdSample::Valid(RtdMeasurement {
+        raw_adc_code: 1_500,
         raw_adc_mv: 983,
         raw_adc_min_mv: 982,
         raw_adc_max_mv: 984,
@@ -11436,6 +11594,41 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
         effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
         15_000
     );
+}
+
+#[test]
+fn supply_scan_admission_uses_capability_instead_of_a_prior_twenty_volt_contract() {
+    let capable =
+        ManualPpsState::from_fusb302b_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+            pps_min_mv: Some(5_000),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..Default::default()
+        }));
+    assert!(pd_allows_calibration_job_start(
+        ControllerKind::Fusb302b,
+        None,
+        Some(CalibrationJobKindWire::ThermalPlantAuto),
+        &capable,
+    ));
+    assert!(!pd_allows_calibration_job_start(
+        ControllerKind::Fusb302b,
+        None,
+        Some(CalibrationJobKindWire::VinAdcAuto),
+        &capable,
+    ));
+    assert!(!pd_allows_calibration_job_start(
+        ControllerKind::Fusb302b,
+        None,
+        Some(CalibrationJobKindWire::ThermalPlantAuto),
+        &ManualPpsState::default(),
+    ));
+    assert!(!pd_allows_calibration_job_start(
+        ControllerKind::Ch224q,
+        None,
+        Some(CalibrationJobKindWire::ThermalPlantAuto),
+        &capable,
+    ));
 }
 
 #[test]
@@ -13040,4 +13233,74 @@ fn canceling_a_running_job_latches_immediate_disarm_and_preserves_terminal_state
     calibration_job_canceled(&mut calibration, &mut manual_pps);
     assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
     assert!(!take_immediate_heater_disarm(&mut calibration));
+}
+
+#[test]
+fn automatic_supply_response_fault_cannot_retry_on_unloaded_voltage_recovery() {
+    assert!(automatic_supply_response_fault_latched(
+        false, true, true, 100, false
+    ));
+    assert!(automatic_supply_response_fault_latched(
+        true, true, true, 0, true
+    ));
+    assert!(!automatic_supply_response_fault_latched(
+        true, true, false, 0, true
+    ));
+    assert!(!automatic_supply_response_fault_latched(
+        true, false, true, 100, false
+    ));
+    assert!(!automatic_supply_response_fault_latched(
+        false, true, true, 0, false
+    ));
+}
+
+#[test]
+fn automatic_pps_contract_safety_uses_its_own_apdo_and_current_budget() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 5_000);
+    manual.capability_apdos[1] = Some(ch224q::PpsApdo {
+        min_mv: 5_500,
+        max_mv: 11_000,
+        max_ma: 3_000,
+    });
+    let config = MemoryConfig::default();
+    let actual_range = PpsAdjustmentRange {
+        min_mv: 5_500,
+        max_mv: 11_000,
+        max_current_ma: 3_000,
+    };
+    let candidate = manual
+        .automatic_heater_pps_for_contract(20.0, &config, 9_000, 3_000, Some(actual_range))
+        .unwrap();
+    assert_eq!(candidate.advertisement_index, 1);
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 9_600);
+    assert!(
+        manual
+            .automatic_heater_pps_for_contract(20.0, &config, 9_000, 2_950, Some(actual_range))
+            .is_none()
+    );
+    assert!(
+        manual
+            .automatic_heater_pps_for_contract(20.0, &config, 12_000, 3_000, Some(actual_range))
+            .is_none()
+    );
+}
+
+#[test]
+fn automatic_relative_supply_response_waits_for_matching_settled_voltage() {
+    assert!(!automatic_supply_response_sample_ready(
+        9_600, 9_700, 1_000, false, 2_000
+    ));
+    assert!(!automatic_supply_response_sample_ready(
+        9_700, 9_700, 1_000, true, 2_000
+    ));
+    assert!(!automatic_supply_response_sample_ready(
+        9_700, 9_700, 2_000, false, 1_950
+    ));
+    assert!(automatic_supply_response_sample_ready(
+        9_700, 9_700, 2_000, false, 2_000
+    ));
+    assert!(!automatic_supply_response_fault_latched(
+        false, true, true, 52, false
+    ));
 }

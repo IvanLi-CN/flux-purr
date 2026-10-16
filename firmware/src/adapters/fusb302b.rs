@@ -108,6 +108,7 @@ pub struct SinkPolicy {
     requested_mv: u16,
     preferred_ma: u16,
     requested_mode: Option<crate::adapters::pd::PdContractRequestMode>,
+    explicit_request: Option<crate::adapters::pd::PdContractRequest>,
     idle_standby: bool,
     standby_minimum_mv: u16,
     pending_contract: Contract,
@@ -125,6 +126,7 @@ impl SinkPolicy {
             requested_mv,
             preferred_ma,
             requested_mode: None,
+            explicit_request: None,
             idle_standby: false,
             standby_minimum_mv: FUSB302B_PD_ABSOLUTE_MIN_MV,
             pending_contract: Contract::none(),
@@ -173,7 +175,9 @@ impl SinkPolicy {
         self.idle_standby = false;
         self.requested_mv = request.voltage_mv;
         self.preferred_ma = request.operating_current_ma;
+        self.explicit_request = None;
         self.requested_mode = Some(request.mode);
+        self.explicit_request = Some(request);
         self.pending_contract = contract;
         self.phase = SinkPhase::WaitingForAccept;
         Some(rdo)
@@ -251,7 +255,9 @@ impl SinkPolicy {
     ) -> bool {
         self.requested_mv = request.voltage_mv;
         self.preferred_ma = request.operating_current_ma;
+        self.explicit_request = None;
         self.requested_mode = Some(request.mode);
+        self.explicit_request = Some(request);
         self.idle_standby = false;
         true
     }
@@ -352,6 +358,8 @@ impl SinkPolicy {
             } else {
                 standby
             }
+        } else if let Some(request) = self.explicit_request {
+            capabilities.select_exact_contract(request)?
         } else {
             match self.requested_mode {
                 Some(crate::adapters::pd::PdContractRequestMode::Pps) => {
@@ -400,6 +408,7 @@ impl SinkPolicy {
         }
         self.requested_mv = requested_mv;
         self.idle_standby = false;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         true
     }
@@ -407,6 +416,7 @@ impl SinkPolicy {
     pub fn request_pps_voltage(&mut self, requested_mv: u16) -> Option<[u8; 4]> {
         let contract = self.select_pps_contract(requested_mv)?;
         self.requested_mv = requested_mv;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         self.idle_standby = false;
         let rdo = request_data_object(contract)?;
@@ -427,6 +437,7 @@ impl SinkPolicy {
             return None;
         }
         self.requested_mv = FUSB302B_PD_ABSOLUTE_MIN_MV;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
         self.idle_standby = true;
         self.begin_request(self.source_capabilities)
@@ -440,6 +451,7 @@ impl SinkPolicy {
             .source_capabilities
             .select_fusb302b_standby_pps_step(self.active_contract, requested_mv)?;
         self.requested_mv = requested_mv;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Pps);
         self.idle_standby = true;
         self.pending_contract = contract;
@@ -449,6 +461,7 @@ impl SinkPolicy {
 
     pub fn prepare_automatic_idle_refresh(&mut self) {
         self.requested_mv = FUSB302B_PD_ABSOLUTE_MIN_MV;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
         self.idle_standby = true;
     }
@@ -465,6 +478,7 @@ impl SinkPolicy {
             .select_fusb302b_fixed_contract(requested_mv, self.preferred_ma)?;
         let rdo = request_data_object(contract)?;
         self.pending_contract = contract;
+        self.explicit_request = None;
         self.requested_mode = Some(crate::adapters::pd::PdContractRequestMode::Fixed);
         self.idle_standby = false;
         self.phase = SinkPhase::WaitingForAccept;
@@ -510,6 +524,7 @@ impl SinkPolicy {
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
+        self.explicit_request = None;
         self.requested_mode = None;
         self.idle_standby = idle_standby;
         self.source_capabilities = SourceCapabilities::empty();
@@ -566,6 +581,7 @@ impl SinkPolicy {
         self.active_contract = Contract::none();
         self.source_message_id = None;
         self.requested_mv = self.default_requested_mv;
+        self.explicit_request = None;
         self.requested_mode = None;
         self.idle_standby = idle_standby;
         self.source_capabilities = SourceCapabilities::empty();
@@ -784,6 +800,35 @@ mod tests {
         assert!(policy.prepare_contract_refresh(request));
         assert_eq!(policy.requested_mv, 17_500);
         assert_eq!(policy.preferred_ma, 3_000);
+    }
+
+    #[test]
+    fn capability_refresh_retains_the_low_current_request_and_selected_apdo() {
+        use crate::adapters::pd::{PdContractRequest, PpsAdjustmentRange};
+        let first = (0b11_u32 << 30) | (120 << 17) | (50 << 8) | 60;
+        let second = (0b11_u32 << 30) | (210 << 17) | (50 << 8) | 60;
+        let range = PpsAdjustmentRange {
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_current_ma: 3_000,
+        };
+        let request = PdContractRequest::calibration_pps(6_000, 1_500)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+        let mut policy = SinkPolicy::new(5_000, 3_000);
+        assert!(policy.prepare_contract_refresh(request));
+        assert!(policy.on_source_capabilities(&[first, second]).is_some());
+        assert_eq!(policy.pending_contract().object_position, 2);
+        assert_eq!(policy.pending_contract().current_ma, 1_500);
+        policy.on_control_message(3, 0);
+        policy.on_control_message(6, 0);
+        assert_eq!(
+            policy.confirmed_active_contract().unwrap().pps_range,
+            Some(range)
+        );
+        // The remaining overlapping APDO cannot silently replace the selected one.
+        assert_eq!(policy.on_source_capabilities(&[first]), None);
     }
 
     #[test]

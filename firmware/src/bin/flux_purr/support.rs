@@ -101,7 +101,8 @@ pub(crate) use flux_purr_firmware::adapters::pd::SourceCapabilities;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
     ConfirmedActiveContract, Contract, ContractKind, ControllerKind, FUSB302B_PPS_MAX_MV,
-    PdContractRequest, PdContractRequestError, PdContractRequestMode, SourceCapabilitiesView,
+    PdContractRequest, PdContractRequestError, PdContractRequestMode, PpsAdjustmentRange,
+    SourceCapabilitiesView,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::adapters::pd::{
@@ -155,11 +156,10 @@ pub(crate) use flux_purr_firmware::control_plane::{
     InstallRuntimeSnapshot, InstallStatus, PersistenceFault, RuntimeConfigCommand,
     ThermalControlProfileOp, ThermalControlProfilePointWire, ThermalControlProfileSettingsWire,
     ThermalControlProfileWire, ThermalControlRuntimeWire, ThermalPlantActiveResultWire,
-    ThermalPlantProvisionalCurveWire, ThermalPlantRunAttemptWire, ThermalPlantRunPhaseWire,
-    ThermalPlantRunSnapshotWire, ThermalPlantRuntimeWire, ThermalPlantTracePageWire,
-    ThermalPlantTracePointWire, UsbFrame, UsbFrameError, UsbRequestOp, UsbResponsePayload,
-    calibration_state_from_memory, heater_curve_state_from_memory, network_from_memory,
-    parse_usb_frame, write_usb_frame,
+    ThermalPlantRunAttemptWire, ThermalPlantRunPhaseWire, ThermalPlantRunSnapshotWire,
+    ThermalPlantRuntimeWire, ThermalPlantTracePageWire, ThermalPlantTracePointWire, UsbFrame,
+    UsbFrameError, UsbRequestOp, UsbResponsePayload, calibration_state_from_memory,
+    heater_curve_state_from_memory, network_from_memory, parse_usb_frame, write_usb_frame,
 };
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-test"))]
 pub(crate) use flux_purr_firmware::control_plane::{BuzzerTestCommand, BuzzerTestOp};
@@ -195,8 +195,7 @@ pub(crate) use flux_purr_firmware::frontpanel::{
 pub(crate) use flux_purr_firmware::lan::LanEndpoint;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) use flux_purr_firmware::memory::{
-    ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationSample, HEATER_CURVE_MAX_POINTS, HeaterCurvePoint,
-    HeaterCurveRawObservation, HeaterCurveRawObservations,
+    ADC_CALIBRATION_MAX_SAMPLES, AdcCalibrationSample, HeaterCurveRawObservations,
 };
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) use flux_purr_firmware::memory::{AdcCalibrationChannel, correct_adc_mv};
@@ -230,10 +229,11 @@ pub(crate) use flux_purr_firmware::memory::{
     ThermalControlProfileConfig, ThermalControlProfilePointConfig,
     ThermalControlProfileSettingsConfig, ThermalPlantProjection, ThermalPlantProjectionRecord,
     ThermalPlantTransientSample, ThermalPlantTransientTransaction, ThermalProfileBank,
-    ThermalProfileMode, heater_resistance_ohms_from_curve,
-    quantize_thermal_plant_heater_voltage_mv, thermal_plant_heater_voltage_mv,
+    ThermalProfileMode, quantize_thermal_plant_heater_voltage_mv, thermal_plant_heater_voltage_mv,
     thermal_plant_projection_from_transient,
 };
+#[cfg(test)]
+pub(crate) use flux_purr_firmware::memory::{HeaterCurvePoint, HeaterCurveRawObservation};
 #[cfg(test)]
 pub(crate) use flux_purr_firmware::memory::{
     MEMORY_RECORD_FORMAT_VERSION, MEMORY_RECORD_HEADER_LEN, MEMORY_SLOT_SIZE, MemoryRecord,
@@ -1015,10 +1015,6 @@ pub(crate) const FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE: u16 = 1_000;
 pub(crate) const HEATER_APPROACH_DUTY_PERCENT: u8 = 32;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PROFILE_R20_OHMS: f32 = 3.2;
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_CURVE_COLD_ANCHOR_TEMP_C: f32 = 0.0;
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_CURVE_R20_ANCHOR_TEMP_C: f32 = 20.0;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PROFILE_TEMP_COEFFICIENT_PER_C: f32 = 0.00393;
 #[cfg(any(target_arch = "xtensa", test))]

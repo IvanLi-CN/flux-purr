@@ -1,17 +1,9 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// Current reserved for the controller, display and fan while automatic
-/// heating owns the remainder of the negotiated source contract.
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const AUTOMATIC_HEATER_CURRENT_RESERVE_MA: u16 = 200;
-
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomaticHeaterResistanceSource {
-    RamPreview,
-    ProjectedRaw,
-    SavedCurve,
     Theoretical,
 }
 
@@ -20,9 +12,6 @@ impl AutomaticHeaterResistanceSource {
     #[allow(dead_code)]
     pub(crate) const fn label(self) -> &'static str {
         match self {
-            Self::RamPreview => "ram-preview",
-            Self::ProjectedRaw => "projected-raw",
-            Self::SavedCurve => "saved-curve",
             Self::Theoretical => "theoretical",
         }
     }
@@ -37,6 +26,7 @@ pub(crate) struct AutomaticHeaterPpsCandidate {
     pub(crate) allowed_mv: u16,
     pub(crate) power_mw: u32,
     pub(crate) advertisement_index: usize,
+    pub(crate) boundary_applied: bool,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -71,7 +61,7 @@ pub(crate) fn automatic_heater_controller_current_ma(
     candidate_current_ma.min(observation.current_ma)
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn automatic_heater_pps_candidate(
     apdo: ch224q::PpsApdo,
     request_min_mv: u16,
@@ -79,6 +69,27 @@ pub(crate) fn automatic_heater_pps_candidate(
     hardware_max_mv: u16,
     resistance_ohms: f32,
     advertisement_index: usize,
+) -> Option<AutomaticHeaterPpsCandidate> {
+    automatic_heater_pps_candidate_with_limit(
+        apdo,
+        request_min_mv,
+        request_max_mv,
+        hardware_max_mv,
+        resistance_ohms,
+        advertisement_index,
+        None,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_pps_candidate_with_limit(
+    apdo: ch224q::PpsApdo,
+    request_min_mv: u16,
+    request_max_mv: u16,
+    hardware_max_mv: u16,
+    resistance_ohms: f32,
+    advertisement_index: usize,
+    observed_limit_mv: Option<u16>,
 ) -> Option<AutomaticHeaterPpsCandidate> {
     if !resistance_ohms.is_finite() || resistance_ohms <= 0.0 {
         return None;
@@ -89,11 +100,12 @@ pub(crate) fn automatic_heater_pps_candidate(
     if min_mv > max_mv || current_ma < MIN_HEATER_CONTRACT_MA {
         return None;
     }
-    let heater_budget_ma = current_ma.saturating_sub(AUTOMATIC_HEATER_CURRENT_RESERVE_MA);
+    let heater_budget_ma = current_ma;
     let electrical_limit_mv = (resistance_ohms * f32::from(heater_budget_ma))
         .floor()
         .clamp(0.0, f32::from(u16::MAX)) as u16;
-    let allowed_mv = floor_mv_to_100mv(max_mv.min(electrical_limit_mv));
+    let allowed_mv =
+        floor_mv_to_100mv(max_mv.min(observed_limit_mv.unwrap_or(electrical_limit_mv)));
     if allowed_mv < min_mv {
         return None;
     }
@@ -107,10 +119,11 @@ pub(crate) fn automatic_heater_pps_candidate(
         allowed_mv,
         power_mw,
         advertisement_index,
+        boundary_applied: observed_limit_mv.is_some(),
     })
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn select_automatic_heater_pps_candidate(
     apdos: &[Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     request_min_mv: u16,
@@ -162,8 +175,7 @@ pub(crate) fn automatic_heater_fixed_is_safe(
     let current_ma = encode_automatic_fixed_current_ma(source_max_ma);
     current_ma >= MIN_HEATER_CONTRACT_MA
         && voltage_mv <= hardware_max_mv
-        && f32::from(voltage_mv) / resistance_ohms
-            <= f32::from(current_ma.saturating_sub(AUTOMATIC_HEATER_CURRENT_RESERVE_MA))
+        && f32::from(voltage_mv) / resistance_ohms <= f32::from(current_ma)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -227,6 +239,13 @@ pub(crate) fn automatic_heater_request_mv_from_power(
     if requested_power_mw == 0 || !resistance_ohms.is_finite() || resistance_ohms <= 0.0 {
         return floor_mv;
     }
+    let ceiling_power_mw =
+        (f32::from(ceiling_mv) * f32::from(ceiling_mv) / resistance_ohms / 1_000.0) as u32;
+    // Saturation and the actuator share an integer-mW interface. Recognize
+    // that exact endpoint before sqrt/floor, which would truncate it twice.
+    if requested_power_mw >= ceiling_power_mw {
+        return ceiling_mv;
+    }
     let requested_mv = (requested_power_mw as f32 * 1_000.0 * resistance_ohms)
         .sqrt()
         .floor()
@@ -252,8 +271,36 @@ pub(crate) fn automatic_heater_pwm_percent_for_power(
     if !pon_mw.is_finite() || pon_mw <= 0.0 {
         return 0;
     }
-    let duty = (requested_power_mw as f32 / pon_mw * 100.0)
-        .floor()
-        .clamp(0.0, 100.0) as u8;
+    let duty = if requested_power_mw >= pon_mw as u32 {
+        100
+    } else {
+        (requested_power_mw as f32 / pon_mw * 100.0)
+            .floor()
+            .clamp(0.0, 100.0) as u8
+    };
     apply_warmup_soft_start(duty, warmup_soft_start_percent)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_supply_response_fault_latched(
+    previous: bool,
+    normal_auto: bool,
+    heater_enabled: bool,
+    physical_duty_percent: u8,
+    response_matches: bool,
+) -> bool {
+    normal_auto
+        && heater_enabled
+        && (previous || (physical_duty_percent == 100 && !response_matches))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_supply_response_sample_ready(
+    observed_mv: u16,
+    applied_mv: u16,
+    next_request_at_ms: u64,
+    transition_pending: bool,
+    now_ms: u64,
+) -> bool {
+    observed_mv == applied_mv && !transition_pending && now_ms >= next_request_at_ms
 }

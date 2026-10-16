@@ -200,6 +200,7 @@ export interface ThermalPlantActiveResult {
 }
 
 export interface ThermalPlantRunSnapshot {
+  supplyBoundary?: SupplyBoundary | null
   version: number
   attempt?: ThermalPlantRunAttempt | null
   tracePage: ThermalPlantTracePage
@@ -406,7 +407,28 @@ export interface HeaterCurvePackage {
   points: Array<HeaterCurvePoint | null>
 }
 
+export interface SupplyBoundary {
+  formatVersion: number
+  adc: {
+    dividerSupplyMv: number
+    referenceMv: number
+    referenceCode: number
+    initCode: number
+    efuseVersion: number
+    attenuationDb: number
+  }
+  wifiStarted: boolean
+  cutoffReached: boolean
+  sourceMinMv: number
+  sourceMaxMv: number
+  sourceMaxMa: number
+  advertisedMinMv: number
+  advertisedMaxMv: number
+  points: Array<[number, number, number, number, number, number, number, number, number]>
+}
+
 export interface HeaterCurveState {
+  supplyBoundary?: SupplyBoundary | null
   active: HeaterCurvePackage
   preview: HeaterCurvePackage | null
 }

@@ -2366,7 +2366,7 @@ async fn thermal_plant_mock_job_requires_20v_three_amp_capability() {
 
     assert_eq!(started.status, CalibrationJobStatus::Running);
     assert_eq!(started.kind, Some(CalibrationJobKind::ThermalPlantAuto));
-    assert_eq!(started.next_request_mv, Some(21_000));
+    assert_eq!(started.next_request_mv, Some(5_500));
     assert_eq!(
         state
             .lock()
@@ -2400,8 +2400,8 @@ async fn thermal_plant_mock_job_requires_20v_three_amp_capability() {
     assert!(!heater_enabled);
     assert_eq!(heater_output_percent, 0);
     assert_eq!(heater_physical_output_percent, 0);
-    assert_eq!(manual_pps_mv, Some(21_000));
-    assert_eq!(calibration_pps_mv, Some(21_000));
+    assert_eq!(manual_pps_mv, Some(5_500));
+    assert_eq!(calibration_pps_mv, Some(5_500));
 
     let _ = configure_calibration_job(
         State(state.clone()),
@@ -2551,6 +2551,14 @@ async fn thermal_plant_mock_job_locks_runtime_overrides_and_state_transitions() 
 }
 
 #[tokio::test]
+async fn thermal_plant_mock_rejects_a_controller_without_programmable_pps_current() {
+    let mut device = DeviceRecord::mock("mock-fp-lab-01", DeviceTransport::Mock);
+    device.status.pd_controller = Some("ch224q".to_string());
+    let error = thermal_plant_start_request_for_device(&device).unwrap_err();
+    assert_eq!(error.error.code, "thermal_plant_source_unsupported");
+}
+
+#[tokio::test]
 async fn thermal_plant_mock_job_requires_one_matching_apdo() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();
@@ -2620,11 +2628,11 @@ async fn thermal_plant_mock_job_accepts_an_apdo_whose_range_starts_at_20v() {
     .0;
 
     assert_eq!(started.status, CalibrationJobStatus::Running);
-    assert_eq!(started.next_request_mv, Some(21_000));
+    assert_eq!(started.next_request_mv, Some(20_000));
 }
 
 #[tokio::test]
-async fn thermal_plant_run_reader_pages_cooling_trace_without_raw_adc() {
+async fn thermal_plant_run_reader_pages_cooling_trace_with_raw_boundary() {
     let state = AppState::test();
     let lease = state.lease_device("mock-fp-lab-01").unwrap();
 
@@ -2649,7 +2657,26 @@ async fn thermal_plant_run_reader_pages_cooling_trace_without_raw_adc() {
             .any(|point| point.phase == ThermalPlantRunPhase::Cooling)
     );
     let serialized = serde_json::to_string(&first).unwrap();
-    assert!(!serialized.contains("rawAdc"));
+    assert_eq!(first.version, 2);
+    let boundary = first.supply_boundary.as_ref().unwrap();
+    assert_eq!(boundary.format_version, 1);
+    assert_eq!(boundary.adc.divider_supply_mv, 3_328);
+    assert_eq!(boundary.points[0][1], 2_500);
+    assert_eq!(boundary.points[0][5..8], [3_000, 9_500, 9_600]);
+    assert!(
+        first
+            .active_result
+            .as_ref()
+            .unwrap()
+            .curve
+            .points
+            .iter()
+            .all(Option::is_none)
+    );
+    assert_eq!(
+        serde_json::from_str::<ThermalPlantRunSnapshot>(&serialized).unwrap(),
+        first
+    );
     assert!(serialized.len() < 8 * 1024);
 
     let tail = device_thermal_plant_run(
@@ -2666,6 +2693,54 @@ async fn thermal_plant_run_reader_pages_cooling_trace_without_raw_adc() {
     assert_eq!(tail.trace_page.start_sample, 8);
     assert_eq!(tail.trace_page.points.len(), 6);
     assert_eq!(tail.trace_page.points[0].sample_index, 8);
+}
+
+#[tokio::test]
+async fn legacy_heater_curve_preview_and_save_are_rejected() {
+    let state = AppState::test();
+    let lease = state.lease_device("mock-fp-lab-01").unwrap();
+    let preview_error = configure_heater_curve(
+        State(state.clone()),
+        AxumPath("mock-fp-lab-01".to_string()),
+        Json(HeaterCurveConfigRequest {
+            lease_id: lease.lease_id.clone(),
+            op: HeaterCurveConfigOp::Preview,
+            package: Some(HeaterCurvePackage {
+                points: vec![Some(HeaterCurvePoint {
+                    temp_centi_c: 2500,
+                    resistance_milliohms: 3200,
+                })],
+                raw_observations: None,
+            }),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(preview_error.error.code, "heater_curve_format_obsolete");
+    let save_error = save_heater_curve(
+        State(state.clone()),
+        AxumPath("mock-fp-lab-01".to_string()),
+        Json(HeaterCurveSaveRequest {
+            lease_id: lease.lease_id.clone(),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(save_error.error.code, "heater_curve_format_obsolete");
+    let cleared = configure_heater_curve(
+        State(state),
+        AxumPath("mock-fp-lab-01".to_string()),
+        Json(HeaterCurveConfigRequest {
+            lease_id: lease.lease_id,
+            op: HeaterCurveConfigOp::ClearPreview,
+            package: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(cleared.preview.is_none());
+    assert!(cleared.active.points.iter().all(Option::is_none));
 }
 
 #[test]

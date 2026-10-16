@@ -20,13 +20,15 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage quantized to `125mV`, duty, and `50ms` time points; this compact encoding covers the complete `5V..28V` PD guard. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples. A framed transaction with an incomplete trace or invalid physical projection is never promoted to the active heater model after decode or reboot.
+Production heating uses a thermal model paired with a valid whole-device supply boundary. The protected calibration chooses one actual PPS APDO covering `20V` at `>=3A`, starts at its usable floor (at least `5.5V`), and preflights a sustainable starting current. It scans `1–3A` in `100mA` stages and voltage in `100mV` steps, retaining separate electrical tracking brackets and `1°C / 10s` equilibria. After each sub-3A equilibrium, a bounded `3A` probe adds transient temperature coverage. Powered observations require confirmed requests and `100%` physical PWM. At `220°C`, heating stops in the same cycle, followed by passive cooling to `80°C`. The boundary stores paired raw ADC codes/mV, WiFi-driver state and conversion assumptions; it never treats a contract current as measured heater current. Legacy resistance and associated thermal records are absent.
 
 The production controller is:
 
 `Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
 
-with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability; a valid thermal plant is sufficient for normal automatic heating even when no persisted resistance curve exists. Automatic resistance resolution is RAM preview, projected raw observations, saved curve, then the theoretical model. For each selected APDO, the actuator ceiling is derived at runtime as `Iheater=max(Icontract_encoded-0.2A,0)`, `Vlimit=min(Vsource_max,Vhardware_max,R(T)*Iheater)`, and `Pmax(T)=Vlimit^2/R(T)`. PPS voltage is quantized downward, fixed-PD fallback is eligible only when its full-on current fits the same budget, and PWM uses the confirmed contract voltage to allocate the watt request. The controller uses the same confirmed contract current for `Pmax`; during contract waits, safety pauses, and soft-start it freezes the thermal integral until physical output can resume. Automatic PD tickets remain owned by the runtime until a terminal result is polled; a matched settled contract is the only path back to PWM, while rejection, timeout, or a mismatched confirmation falls back to a safe Fixed candidate without blocking the control loop. If a settled contract disappears after a negotiation attempt, the automatic path re-requests the same safe contract before restoring PWM; no safe candidate remains paused with the `no-safe-heater-power` diagnostic. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. Normal automatic heating uses the applicable whole-device boundary for the current WiFi hardware state, source envelope, current class, and temperature. Uncovered conditions use the labelled preset model fallback. No fixed auxiliary current is subtracted and auxiliary watts remain unknown. One estimated watt reference, based on `R20=3.2Ω` and `α=0.00393/°C`, is shared by fitting, `Pmax`, voltage mapping and PWM allocation. PWM uses the confirmed contract voltage. Safe ordinary PPS changes preserve conduction and soft start; unsafe changes clear PWM before requesting a safe contract, then resume after confirmation and settling. The integral freezes during pauses and output saturation. No safe PPS or Fixed candidate means paused output. A relative VIN response fault is latched until heating is stopped and explicitly restarted, preventing repeated load/unload retries.
+
+The usable scan floor and advertised APDO minimum are different facts: a source advertising 5.0V may be scanned from 5.5V. Persist both ranges, and match later contracts against the advertised range. Pin the selected APDO through capability refresh and confirmation; equal voltage/current settings do not identify an overlapping APDO. Host regressions cover both mismatches and a complete calibration followed by automatic warm-up, asserting that retained points are actually used. A transient tracking point applies only from its projected temperature through 1°C warmer; outside that window, missing coverage uses the labelled preset fallback. Extending a low-voltage point indefinitely can stall warm-up despite otherwise valid calibration.
 
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
@@ -34,7 +36,7 @@ Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
 - one protected `thermal_plant_auto` transient calibration, from ambient through `220C` and passive cooling to `80C`
-- heater-curve raw observations captured during that same transient run
+- whole-device supply-boundary observations captured during that same run; legacy resistance fields remain empty
 - canonical HTML HIL bundles generated through the Rust report renderer
 
 ## Artifact model
@@ -108,7 +110,7 @@ Warmup is no longer a profile-tunable effective output level.
 
 Current firmware truth is:
 
-- while the heater state machine remains in `warmup`, output is forced to `100%`
+- after soft start, stable PPS warmup at its safe full-power ceiling uses exact `100%` physical conduction; Fixed supply may require PWM
 - PPS request follows the current temperature-and-source safety ceiling
 - host readback, candidate import, replay, and report generation must all materialize `warmupPowerPermille=1000` as the only effective value
 
@@ -179,11 +181,11 @@ Thermal runs must evaluate the source and heater together.
 Current reusable rule set:
 
 - capability-class resolution is based on configured / advertised source capability, not live current
-- when multiple PPS APDOs cover `20V`, select one APDO by highest maximum current, then highest maximum voltage, then lowest minimum voltage; never combine fields from separate APDOs
+- calibration selects one `20V / >=3A` APDO by current, ceiling and floor; normal heating selects the safe PPS candidate with the largest estimated usable power, then safe Fixed if none exists
 - explicit `65w` / `100w` are forced mode selections
-- normal automatic safety limiting uses the encoded APDO current with a fixed `200mA` board reserve; calibration and manual PPS retain their existing reserve/PWM strategy
+- normal automatic PPS limiting uses the whole-device observed boundary for the matching WiFi driver state and source envelope; uncovered regions use a labelled preset model, without a fixed auxiliary-current reserve
 - CH224Q `0x50` reports the active contract current and may reduce the safe current limit, but it must not promote a lower advertised capability into `pps5a`
-- the persisted `heaterCurrentReserveMa` field remains for compatibility and legacy paths; normal automatic heating always reserves `200mA` for the board before selecting a contract
+- `heaterCurrentReserveMa` is not applied by normal automatic heating or whole-device supply calibration; it remains outside those policy paths
 - a `20V/5A` live run requires a compliant eMarked 5A USB-C cable and both the source telemetry and CH224Q live-current readback must confirm the contract before heater arm
 
 ## Seed and baseline selection
@@ -306,7 +308,7 @@ Thermal tuning and source failures must not be conflated.
 Treat the run as a source-side failure, not a thermal-profile result, when any of the following holds:
 
 - source capability readback does not match the intended class
-- Flux Purr requests more than `5V`, but source telemetry remains near `5V`
+- a confirmed requested operating point persistently fails to track under load, supported by source/ADC and contract traces; a `5V` reading alone does not identify the failing component
 - source telemetry stops advancing
 - the source must be power-cycled before PPS negotiation recovers
 

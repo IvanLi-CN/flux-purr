@@ -1014,14 +1014,19 @@ pub(crate) fn process_calibration_job_frame(
         );
     }
     if matches!(command.op, CalibrationJobOpWire::Start)
-        && !pd_contract_allows_calibration(context.pd_controller, context.last_pd_observation)
+        && !pd_allows_calibration_job_start(
+            context.pd_controller,
+            context.last_pd_observation,
+            command.kind,
+            context.manual_pps,
+        )
     {
         return (
             false,
             usb_error_response(
                 request_id,
                 "pd_performance_not_guaranteed",
-                "Calibration requires a performance-guaranteed PPS contract.",
+                "Calibration requires a supported PPS source and controller.",
             ),
         );
     }
@@ -1111,118 +1116,15 @@ pub(crate) async fn process_heater_curve_save_frame(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
-    if flash_preparation::is_active() {
-        return (
-            false,
-            flash_preparation_blocked_response(
-                request_id,
-                "Heater curve writes are locked while flash preparation is active.",
-            ),
-        );
-    }
-    if context.ui_state.persistence_locked() {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "eeprom_required",
-                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-            ),
-        );
-    }
-    if thermal_plant_calibration_job_running(*context.calibration_runtime_state) {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                ManualPpsError::CalibrationInProgress.code(),
-                "Automatic thermal-model calibration is running; calibration inputs are locked.",
-            ),
-        );
-    }
-    let Some(preview) = *context.preview_heater_curve else {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "heater_curve_preview_required",
-                "Heater curve save requires an active preview package.",
-            ),
-        );
-    };
-    let previous_memory_config = context.memory_config.clone();
-    context.memory_config.active_heater_curve = preview.curve;
-    if let Some(raw_observations) = preview.raw_observations {
-        context.memory_config.heater_curve_raw_observations = raw_observations;
-    }
-    context.memory_config.sanitize();
-    if context.memory_config.heater_curve_raw_observations
-        != previous_memory_config.heater_curve_raw_observations
-        && previous_memory_config
-            .thermal_plant_transient_active
-            .is_some()
-    {
-        context.memory_config.heater_curve_transaction_id = None;
-        invalidate_transient_thermal_plant(context.memory_config);
-        disarm_calibration_after_transient_input_change(
-            context.calibration_runtime_state,
-            context.manual_pps,
-        );
-    }
-    if let Err(error) = persist_heater_curve(context).await {
-        let code = error.code();
-        let message = error.message();
-        restore_persisted_memory_domains(
-            context.memory_config,
-            context.ui_state,
-            context.last_persisted_memory_config,
-            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-        );
-        mark_eeprom_required(
-            context.ui_state,
-            context.calibration_runtime_state,
-            context.manual_pps,
-            context.memory_commit_due_ms,
-            Some(persistence_fault_from_commit(error)),
-        );
-        return (false, usb_error_response(request_id, code, message));
-    }
-    copy_persisted_domains(
-        context.last_persisted_memory_config,
-        context.memory_config,
-        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-    );
-    *context.memory_commit_due_ms = None;
+    *context.preview_heater_curve = None;
     (
         false,
-        usb_response(
+        usb_error_response(
             request_id,
-            UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                context.memory_config,
-                context
-                    .preview_heater_curve
-                    .as_ref()
-                    .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
-            )),
+            "heater_curve_format_obsolete",
+            "Legacy resistance calibration cannot be saved. Run thermal_plant_auto.",
         ),
     )
-}
-
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn persist_heater_curve(
-    context: &mut ControlLineContext<'_, '_, '_>,
-) -> Result<(), MemoryCommitFailure> {
-    commit_memory_config_now(
-        context.eeprom_i2c,
-        CommitMemoryConfigInput {
-            memory_sequence: context.memory_sequence,
-            memory_config: context.memory_config,
-            domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-            persistence_log_sink: context.persistence_log_sink,
-            record_staging: context.record_staging,
-        },
-    )
-    .await
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]

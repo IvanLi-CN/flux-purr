@@ -471,6 +471,8 @@ pub struct ThermalPlantActiveResultWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunSnapshotWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<Box<SupplyBoundaryWire>>,
     pub version: u8,
     pub attempt: Option<ThermalPlantRunAttemptWire>,
     pub trace_page: ThermalPlantTracePageWire,
@@ -1494,7 +1496,56 @@ pub struct HeaterCurveRawObservationsWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SupplyBoundaryWire {
+    pub format_version: u8,
+    pub adc: crate::heater_supply::BoundaryAdcMetadata,
+    pub wifi_started: bool,
+    pub cutoff_reached: bool,
+    pub source_min_mv: u16,
+    pub source_max_mv: u16,
+    pub source_max_ma: u16,
+    pub advertised_min_mv: u16,
+    pub advertised_max_mv: u16,
+    /// [ms, RTD code, RTD mV, VIN code, VIN mV, request mA, tracking mV, flat mV, tracking-only].
+    pub points: Vec<[u32; 9], { crate::heater_supply::MAX_BOUNDARY_POINTS }>,
+}
+
+impl From<crate::heater_supply::SupplyBoundary> for SupplyBoundaryWire {
+    fn from(value: crate::heater_supply::SupplyBoundary) -> Self {
+        let mut points = Vec::new();
+        for point in &value.points[..usize::from(value.point_count)] {
+            let _ = points.push([
+                point.elapsed_ms,
+                u32::from(point.rtd_code),
+                u32::from(point.rtd_mv),
+                u32::from(point.vin_code),
+                u32::from(point.vin_mv),
+                u32::from(point.request_current_ma),
+                u32::from(point.tracking_request_mv),
+                u32::from(point.flat_request_mv),
+                u32::from(point.tracking_only),
+            ]);
+        }
+        Self {
+            format_version: crate::heater_supply::BOUNDARY_FORMAT_VERSION,
+            adc: value.adc,
+            wifi_started: value.wifi_started,
+            cutoff_reached: value.cutoff_reached,
+            source_min_mv: value.source_min_mv,
+            source_max_mv: value.source_max_mv,
+            source_max_ma: value.source_max_ma,
+            advertised_min_mv: value.advertised_min_mv,
+            advertised_max_mv: value.advertised_max_mv,
+            points,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HeaterCurveStateWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<Box<SupplyBoundaryWire>>,
     pub active: HeaterCurvePackageWire,
     pub preview: Option<HeaterCurvePackageWire>,
     #[serde(default)]
@@ -1618,14 +1669,14 @@ pub fn heater_curve_state_from_memory(
     config: &MemoryConfig,
     preview: Option<(&HeaterCurveConfig, Option<&HeaterCurveRawObservations>)>,
 ) -> HeaterCurveStateWire {
+    let _ = preview;
     HeaterCurveStateWire {
-        active: HeaterCurvePackageWire::from_memory(
-            &config.active_heater_curve,
-            Some(&config.heater_curve_raw_observations),
-        ),
-        preview: preview.map(|(curve, raw_observations)| {
-            HeaterCurvePackageWire::from_memory(curve, raw_observations)
-        }),
+        supply_boundary: config
+            .heater_supply_boundary
+            .filter(crate::heater_supply::SupplyBoundary::is_valid)
+            .map(|value| Box::new(value.into())),
+        active: HeaterCurvePackageWire::from_memory(&HeaterCurveConfig::default(), None),
+        preview: None,
         eeprom_probe: None,
     }
 }
@@ -4583,22 +4634,44 @@ mod tests {
             }
         );
 
+        let mut boundary = crate::heater_supply::SupplyBoundary {
+            point_count: 41,
+            source_min_mv: 5_500,
+            source_max_mv: 21_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..Default::default()
+        };
+        boundary.points.fill(crate::heater_supply::BoundaryPoint {
+            elapsed_ms: 26_000_000,
+            rtd_code: 4_095,
+            rtd_mv: 4_095,
+            vin_code: 4_095,
+            vin_mv: 4_095,
+            request_current_ma: 3_000,
+            tracking_request_mv: 21_000,
+            flat_request_mv: 21_000,
+            tracking_only: true,
+        });
         let snapshot = ThermalPlantRunSnapshotWire {
-            version: 1,
+            supply_boundary: Some(Box::new(boundary.into())),
+            version: 2,
             attempt: None,
             trace_page: ThermalPlantTracePageWire {
                 start_sample: 32,
-                next_sample: None,
-                total_samples: 33,
-                points: heapless::Vec::from_slice(&[ThermalPlantTracePointWire {
-                    sample_index: 32,
-                    elapsed_ms: 1_600,
-                    temperature_centi_c: 8_000,
-                    heater_voltage_mv: 0,
-                    duty_percent: 0,
-                    phase: ThermalPlantRunPhaseWire::Cooling,
-                }])
-                .unwrap(),
+                next_sample: Some(48),
+                total_samples: 128,
+                points: (0..THERMAL_PLANT_TRACE_PAGE_MAX)
+                    .map(|_| ThermalPlantTracePointWire {
+                        sample_index: 32,
+                        elapsed_ms: 26_000_000,
+                        temperature_centi_c: 8_000,
+                        heater_voltage_mv: 0,
+                        duty_percent: 0,
+                        phase: ThermalPlantRunPhaseWire::Cooling,
+                    })
+                    .collect(),
             },
             provisional_curve: None,
             active_result: None,
@@ -4613,6 +4686,8 @@ mod tests {
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
+        assert!(json.contains(r#""formatVersion":1"#));
+        assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
     }
 

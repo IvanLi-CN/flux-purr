@@ -1102,6 +1102,7 @@ pub(crate) async fn runtime_read_heater_sensors(
             previous_vin_raw_adc_mv,
             raw_adc_mv,
         );
+        state.latest_vin_raw_code = raw_code;
         state.latest_vin_raw_adc_mv = raw_adc_mv;
         if state.latest_vin_mv != vin_mv {
             state.latest_vin_mv = vin_mv;
@@ -1234,6 +1235,7 @@ pub(crate) fn runtime_apply_rtd_sample(
     );
     let calibration_live_rtd_temp_c = match rtd_sample {
         RtdSample::Valid(measurement) => {
+            state.latest_rtd_raw_code = measurement.raw_adc_code;
             state.latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
             state.latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
             state.latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
@@ -1348,6 +1350,7 @@ pub(crate) fn runtime_update_calibration_job(
     state: &mut RuntimeLoopState,
     current_pd_observation: Option<PdStatusObservation>,
     calibration_live_rtd_temp_c: Option<f32>,
+    elapsed_ms: u64,
 ) -> bool {
     if flash_preparation::is_active() {
         if state.calibration_runtime_state.mode != CalibrationMode::Off
@@ -1383,21 +1386,29 @@ pub(crate) fn runtime_update_calibration_job(
             calibration_live_rtd_temp_c,
             state.latest_temp_c,
         );
+        let job_input = CalibrationJobUpdateInput {
+            now_ms: elapsed_ms,
+            latest_rtd_raw_code: state.latest_rtd_raw_code,
+            latest_vin_raw_code: state.latest_vin_raw_code,
+            wifi_started: flux_purr_firmware::heater_supply::wifi_hardware_started(),
+            pd_confirmed: supply_scan_contract_matches(
+                state.pd_port.snapshot().with_fresh_observation(elapsed_ms),
+                &state.manual_pps_state,
+            ),
+            latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
+            latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
+            latest_temp_c: calibration_temp_c,
+            confirmed_voltage_mv: current_pd_observation
+                .and_then(|observation| observation.contract_voltage_mv),
+            latest_vin_mv: state.latest_vin_mv,
+            heater_duty_percent: state.last_heater_duty,
+        };
         update_calibration_job_state(
             &mut state.calibration_runtime_state,
             &mut state.memory_config,
             &mut state.manual_pps_state,
             state.thermal_plant_workspace,
-            CalibrationJobUpdateInput {
-                latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
-                latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
-                latest_temp_c: calibration_temp_c,
-                pd_current_ma: current_pd_observation
-                    .map(|observation| observation.current_ma)
-                    .unwrap_or(0),
-                latest_vin_mv: state.latest_vin_mv,
-                heater_duty_percent: state.last_heater_duty,
-            },
+            job_input,
         );
     }
     thermal_plant_was_running
@@ -1675,13 +1686,20 @@ pub(crate) fn runtime_update_heater_controller(
             runtime_source_limits,
             force_output_off,
         );
-    let max_power_mw = heater_available_power_mw_for_temp(
-        state.latest_temp_c,
-        runtime_source_limits.map(|(_, max_mv, _)| max_mv),
-        Some(effective_source_current_ma),
-        preview_heater_curve_config(state.preview_heater_curve.as_ref()),
-        &state.memory_config,
-    );
+    let resistance_ohms = default_estimated_heater_resistance_ohms(state.latest_temp_c);
+    let max_power_mw = if normal_auto {
+        runtime_source_limits.map_or(0, |(_, ceiling_mv, _)| {
+            (f32::from(ceiling_mv).powi(2) / resistance_ohms / 1_000.0) as u32
+        })
+    } else {
+        heater_available_power_mw_for_temp(
+            state.latest_temp_c,
+            runtime_source_limits.map(|(_, max_mv, _)| max_mv),
+            Some(effective_source_current_ma),
+            preview_heater_curve_config(state.preview_heater_curve.as_ref()),
+            &state.memory_config,
+        )
+    };
     let thermal_plant_calibration_running = state.calibration_runtime_state.mode
         == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
@@ -1784,7 +1802,8 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
     let automatic_heater_safety_paused = normal_auto
         && !force_output_off
         && state.ui_state.heater_enabled
-        && runtime_heater_source_limits(state, true).is_none();
+        && (state.automatic_supply_response_latched
+            || runtime_heater_source_limits(state, true).is_none());
     let recovery_soft_start_percent = automatic_heater_recovery_soft_start_percent(
         state.automatic_heater_recovery_started_ms,
         elapsed_ms,
@@ -1805,6 +1824,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         manual_pps: &mut state.manual_pps_state,
         pd_observation: current_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
+        vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
         current_temp_c: state.latest_temp_c,
         source_capabilities: state.power_state.source_capabilities,
         requested_power_mw,
@@ -1817,6 +1837,8 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
             state.ui_state.heater_enabled
         },
         normal_auto,
+        supply_scan: thermal_plant_calibration_running,
+        automatic_supply_response_latched: &mut state.automatic_supply_response_latched,
         control_phase: pid_snapshot.phase,
         control_error_c: pid_snapshot.error_c,
         filtered_slope_c_per_s: pid_snapshot.filtered_slope_c_per_s,
@@ -2089,12 +2111,15 @@ pub(crate) async fn runtime_force_heater_safe_off(
         manual_pps: &mut state.manual_pps_state,
         pd_observation: state.last_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
+        vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
         current_temp_c: state.latest_temp_c,
         source_capabilities: state.power_state.source_capabilities,
         requested_power_mw: 0,
         duty_percent: 0,
         heater_enabled: false,
         normal_auto: false,
+        supply_scan: false,
+        automatic_supply_response_latched: &mut state.automatic_supply_response_latched,
         control_phase: HeaterControlPhase::Warmup,
         control_error_c: -1.0,
         filtered_slope_c_per_s: -1.0,
@@ -2402,7 +2427,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             runtime_apply_rtd_sample(state, rtd_sample, current_request_mv, elapsed_ms);
         needs_redraw |= rtd_needs_redraw;
 
-        let current_pd_observation = state.pd_port.snapshot().settled_observation();
+        let current_pd_observation = state.pd_port.snapshot().conducting_observation();
         state.last_pd_observation = current_pd_observation;
         needs_redraw |= runtime_update_fault_attention(state, elapsed_ms);
         let fusb302b_capabilities_changed = runtime_refresh_source_capabilities(state);
@@ -2414,6 +2439,7 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             state,
             current_pd_observation,
             calibration_live_rtd_temp_c,
+            elapsed_ms,
         );
         if fusb302b_capabilities_changed {
             disarm_calibration_after_capability_refresh(

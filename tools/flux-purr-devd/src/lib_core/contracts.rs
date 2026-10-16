@@ -156,7 +156,35 @@ pub struct HeaterCurvePackage {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct SupplyBoundaryAdc {
+    pub divider_supply_mv: u16,
+    pub reference_mv: u16,
+    pub reference_code: u16,
+    pub init_code: u16,
+    pub efuse_version: u8,
+    pub attenuation_db: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SupplyBoundary {
+    pub format_version: u8,
+    pub adc: SupplyBoundaryAdc,
+    pub wifi_started: bool,
+    pub cutoff_reached: bool,
+    pub source_min_mv: u16,
+    pub source_max_mv: u16,
+    pub source_max_ma: u16,
+    pub advertised_min_mv: u16,
+    pub advertised_max_mv: u16,
+    pub points: Vec<[u32; 9]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct HeaterCurveState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<SupplyBoundary>,
     pub active: HeaterCurvePackage,
     pub preview: Option<HeaterCurvePackage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,6 +259,8 @@ pub struct ThermalPlantActiveResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<SupplyBoundary>,
     pub version: u8,
     pub attempt: Option<ThermalPlantRunAttempt>,
     pub trace_page: ThermalPlantTracePage,

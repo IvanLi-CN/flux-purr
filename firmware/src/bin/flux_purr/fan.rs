@@ -1368,6 +1368,7 @@ pub(crate) fn temp_c_to_whole_c(temp_c: f32) -> i16 {
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RtdMeasurement {
+    pub(crate) raw_adc_code: u16,
     pub(crate) raw_adc_mv: u16,
     pub(crate) raw_adc_min_mv: u16,
     pub(crate) raw_adc_max_mv: u16,

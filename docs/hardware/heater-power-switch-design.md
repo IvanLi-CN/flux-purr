@@ -6,7 +6,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 - Heater supply bus: `VBUS`; CH224Q retains its legacy adjustable range, while FUSB302BMPX applies the `5V..28V` PD guard before selecting its live PPS APDO (currently `5V..21V`) and falls back to fixed PDOs when necessary
 - FUSB302BMPX treats a negotiated PPS `>=20V` and `>=3A` contract as performance-guaranteed. A lower-voltage PPS or fixed contract may run the heater in degraded mode but cannot run performance or calibration procedures.
-- Contract current is a source-negotiated upper bound used to cap normal automatic heater power: `20V @ 3A = 60W`, `20V @ 5A = 100W`. Automatic heating reserves `200mA` for the controller, display, and fan before deriving the heater voltage ceiling. It is not a live VBUS-current measurement or physical over-current protection.
+- Contract current is a source-negotiated upper bound used to cap normal automatic heater power: `20V @ 3A = 60W`, `20V @ 5A = 100W`. Automatic PPS heating uses an observed whole-device boundary for its WiFi hardware group, with a labelled preset-model fallback in uncovered regions; no fixed auxiliary-current reserve is subtracted. It is not a live VBUS-current measurement or physical over-current protection.
 - Load type: resistive hotplate heater
 - Heater plate baseline: [heater-plate-design.md](heater-plate-design.md)
 - Switch topology: low-side N-channel MOSFET
@@ -103,7 +103,7 @@ Preferred runtime mode:
 - CH224Q keeps its legacy adjustable-PD path; FUSB302BMPX applies the `5V..28V` PD guard before using its live PPS APDO (currently `5V..21V`) and fixed PDO fallback
 - `GPIO47` drives the low-side MOSFET through MCPWM at `100 Hz`; fixed-PD operation uses PWM for continuous power control
 - firmware enables heating only after the selected controller confirms a contract. The FUSB302B policy requires SourceCaps selection followed by `Accept` and `PS_RDY`; reset, detach, I2C fault, reject, or wait clears heater authority. `PdPort` dispatch prevents the FUSB302B path from receiving CH224Q register writes.
-- with the `3.2 ohm` heater plate, PD 65 W cold start is not valid at static `12 V`; normal automatic heating reserves `200mA`, requests a safe PPS voltage or an advertised Fixed PDO, and pauses when no safe candidate exists. Calibration and manual PPS debug retain their existing electrical path.
+- with the `3.2 ohm` heater plate, PD 65 W cold start is not valid at static `12 V`; normal automatic heating requests a safe PPS voltage or an advertised Fixed PDO at the current temperature and pauses when no safe candidate exists. Product calibration scans 1–3A with full conduction and a hard 220°C cutoff as specified in [ADR 0019](../adr/0019-heater-supply-boundary-calibration.md); manual PPS debug remains separate.
 
 Fallback mode:
 

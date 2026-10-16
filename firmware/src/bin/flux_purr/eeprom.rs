@@ -935,7 +935,9 @@ pub(crate) fn persist_domain_mask_between(
     {
         mask.0 |= PersistDomainMask::SAFETY.0;
     }
-    if current.thermal_plant_transient_active != persisted.thermal_plant_transient_active {
+    if current.thermal_plant_transient_active != persisted.thermal_plant_transient_active
+        || current.heater_supply_boundary != persisted.heater_supply_boundary
+    {
         mask.0 |= PersistDomainMask::THERMAL_PLANT.0;
     }
     if current.active_thermal_control_profile != persisted.active_thermal_control_profile
@@ -980,6 +982,7 @@ pub(crate) fn copy_persisted_domains(
     }
     if domains.includes(PersistDomain::ThermalPlant) {
         persisted.thermal_plant_transient_active = current.thermal_plant_transient_active;
+        persisted.heater_supply_boundary = current.heater_supply_boundary;
     }
     if domains.includes(PersistDomain::ThermalPolicy) {
         persisted.active_thermal_control_profile = current.active_thermal_control_profile;
@@ -1812,6 +1815,7 @@ pub(crate) fn memory_config_from_ui(
         heater_curve_transaction_id: previous.heater_curve_transaction_id,
         thermal_plant_active: previous.thermal_plant_active,
         thermal_plant_transient_active: previous.thermal_plant_transient_active,
+        heater_supply_boundary: previous.heater_supply_boundary,
         active_thermal_control_profile: previous.active_thermal_control_profile,
         thermal_control_profile_pps5a: previous.thermal_control_profile_pps5a,
         thermal_profile_mode: previous.thermal_profile_mode,
@@ -1831,60 +1835,13 @@ pub(crate) fn default_estimated_heater_resistance_ohms(current_temp_c: f32) -> f
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn projected_heater_curve(memory_config: &MemoryConfig) -> Option<HeaterCurveConfig> {
-    let mut curve = HeaterCurveConfig::default();
-    curve.points[0] = Some(default_heater_curve_point(HEATER_CURVE_COLD_ANCHOR_TEMP_C));
-    curve.points[1] = Some(default_heater_curve_point(HEATER_CURVE_R20_ANCHOR_TEMP_C));
-    let mut observed_count = 0;
-    let mut last_resistance_milliohms = curve.points[1]
-        .map(|point| point.resistance_milliohms)
-        .unwrap_or_default();
-    for (count, observation) in (2..).zip(
-        memory_config
-            .heater_curve_raw_observations
-            .points
-            .iter()
-            .flatten(),
-    ) {
-        let temp_c = projected_rtd_temperature_c(memory_config, observation.raw_rtd_adc_mv)?;
-        if !(-50.0..=450.0).contains(&temp_c) {
-            return None;
-        }
-        let resistance_milliohms = observation
-            .resistance_milliohms
-            .max(last_resistance_milliohms)
-            .max(heater_curve_model_floor_milliohms(temp_c));
-        last_resistance_milliohms = resistance_milliohms;
-        curve.points[count] = Some(flux_purr_firmware::memory::HeaterCurvePoint {
-            temp_centi_c: round_to_i16(temp_c * 100.0),
-            resistance_milliohms,
-        });
-        observed_count += 1;
-    }
-    (observed_count >= 2).then_some(curve)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn estimated_heater_resistance_with_source(
     current_temp_c: f32,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
 ) -> (f32, AutomaticHeaterResistanceSource) {
-    if let Some(resistance) = preview_heater_curve
-        .and_then(|curve| heater_resistance_ohms_from_curve(curve, current_temp_c))
-    {
-        return (resistance, AutomaticHeaterResistanceSource::RamPreview);
-    }
-    if let Some(resistance) = projected_heater_curve(memory_config)
-        .and_then(|curve| heater_resistance_ohms_from_curve(&curve, current_temp_c))
-    {
-        return (resistance, AutomaticHeaterResistanceSource::ProjectedRaw);
-    }
-    if let Some(resistance) =
-        heater_resistance_ohms_from_curve(&memory_config.active_heater_curve, current_temp_c)
-    {
-        return (resistance, AutomaticHeaterResistanceSource::SavedCurve);
-    }
+    let _ = (preview_heater_curve, memory_config);
+    // Legacy V / contract-current curves are not compatible calibration.
     (
         default_estimated_heater_resistance_ohms(current_temp_c),
         AutomaticHeaterResistanceSource::Theoretical,
@@ -1960,14 +1917,14 @@ pub(crate) fn heater_safe_max_mv_for_temp(
 pub(crate) fn production_pps_request_ceiling_mv(
     current_temp_c: f32,
     source_current_limit_ma: u16,
-    reserve_ma: u16,
+    _reserve_ma: u16,
     source_voltage_max_mv: u16,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
 ) -> u16 {
     automatic_heater_safe_max_mv_for_temp(
         current_temp_c,
-        heater_available_current_ma(source_current_limit_ma, reserve_ma),
+        source_current_limit_ma,
         floor_mv_to_100mv(source_voltage_max_mv.min(HEATER_ADJUSTABLE_MAX_MV)),
         preview_heater_curve,
         memory_config,
@@ -2007,8 +1964,7 @@ pub(crate) fn heater_available_power_mw_for_temp(
         return 0;
     }
 
-    let available_current_ma =
-        heater_available_current_ma(source_current_limit_ma, AUTOMATIC_HEATER_CURRENT_RESERVE_MA);
+    let available_current_ma = heater_available_current_ma(source_current_limit_ma, 0);
     if available_current_ma == 0 {
         return 0;
     }
@@ -2020,7 +1976,7 @@ pub(crate) fn heater_available_power_mw_for_temp(
     let safe_mv = production_pps_request_ceiling_mv(
         current_temp_c,
         source_current_limit_ma,
-        AUTOMATIC_HEATER_CURRENT_RESERVE_MA,
+        0,
         source_voltage_max_mv,
         preview_heater_curve,
         memory_config,
@@ -2038,18 +1994,6 @@ pub(crate) fn heater_source_request_ceiling_mv(
     source_voltage_max_mv: u16,
 ) -> u16 {
     floor_mv_to_100mv(safe_heater_mv.min(source_voltage_max_mv))
-}
-
-#[cfg(test)]
-pub(crate) fn has_calibrated_heater_resistance_curve(memory_config: &MemoryConfig) -> bool {
-    memory_config
-        .active_heater_curve
-        .points
-        .iter()
-        .flatten()
-        .count()
-        >= 2
-        || projected_heater_curve(memory_config).is_some()
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

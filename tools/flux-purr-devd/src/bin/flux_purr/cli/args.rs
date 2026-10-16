@@ -954,7 +954,7 @@ pub(crate) enum ThermalCommand {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ThermalModelCommand {
     #[command(
-        about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
+        about = "Scan a whole-device PPS supply boundary at 1-3A, capture raw ADC data, and fit a thermal model after the 220C cutoff."
     )]
     Calibrate(TargetSelector),
 }

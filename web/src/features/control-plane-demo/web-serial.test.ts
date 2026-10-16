@@ -406,6 +406,11 @@ describe('web serial control-plane client', () => {
       type: 'thermal_plant_run',
       afterSample: 16,
     })
+    expect(snapshot.version).toBe(2)
+    expect(snapshot.supplyBoundary?.adc.dividerSupplyMv).toBe(3328)
+    expect(snapshot.supplyBoundary?.points[0]).toEqual([
+      30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1,
+    ])
     expect(snapshot.tracePage).toMatchObject({
       startSample: 16,
       points: [{ sampleIndex: 16, phase: 'cooling' }],
@@ -814,7 +819,26 @@ function responseFor(request: Record<string, unknown>) {
       ok: true,
       result: {
         thermal_plant_run: {
-          version: 1,
+          version: 2,
+          supplyBoundary: {
+            formatVersion: 1,
+            adc: {
+              dividerSupplyMv: 3328,
+              referenceMv: 850,
+              referenceCode: 2000,
+              initCode: 100,
+              efuseVersion: 1,
+              attenuationDb: 6,
+            },
+            wifiStarted: true,
+            cutoffReached: true,
+            sourceMinMv: 5500,
+            sourceMaxMv: 21000,
+            sourceMaxMa: 3000,
+            advertisedMinMv: 5000,
+            advertisedMaxMv: 21000,
+            points: [[30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1]],
+          },
           attempt: {
             runId: 9,
             status: 'running',

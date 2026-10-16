@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded in its calibration source and auxiliary-load accounting by [ADR 0019](0019-heater-supply-boundary-calibration.md). The contract ordering, mode boundaries, final-request cap, and pause/recovery rules remain applicable.
 
 ## Decision
 

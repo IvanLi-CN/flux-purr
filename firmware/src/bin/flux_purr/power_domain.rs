@@ -337,6 +337,9 @@ pub(crate) fn request_matches_active(
         active.mode == request.mode()
             && active.voltage_mv == request.voltage_mv()
             && active.operating_current_ma == request.operating_current_ma()
+            && request
+                .pps_range()
+                .is_none_or(|range| active.pps_range == Some(range))
     })
 }
 
@@ -1720,6 +1723,14 @@ mod tests {
         let active =
             ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
         assert!(request_matches_active(request, Some(active)));
+        let pinned = request
+            .within_pps_range(PpsAdjustmentRange {
+                min_mv: 5_000,
+                max_mv: 21_000,
+                max_current_ma: 3_000,
+            })
+            .unwrap();
+        assert!(!request_matches_active(pinned, Some(active)));
         assert!(!request_matches_active(
             PdContractRequest::fixed(20_000, 3_000).unwrap(),
             Some(active),

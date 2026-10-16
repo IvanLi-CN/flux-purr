@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded in its resistance-curve projection, voltage interpretation and raw-observation exposure by [ADR 0019](0019-heater-supply-boundary-calibration.md). Run identity, bounded pagination, transaction identity and transport/capability rules remain applicable.
 
 ## Context
 
