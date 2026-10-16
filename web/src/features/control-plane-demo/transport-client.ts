@@ -104,7 +104,11 @@ export interface ControlPlaneHttpClient {
     leaseId: string,
     afterSample?: number
   ): Promise<ThermalPlantRunSnapshot>
-  getThermalTuning(devdBaseUrl: string, deviceId: string, leaseId: string): Promise<ThermalTuningStatus>
+  getThermalTuning(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<ThermalTuningStatus>
   configureThermalTuning(
     devdBaseUrl: string,
     deviceId: string,

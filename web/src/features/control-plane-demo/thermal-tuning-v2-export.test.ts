@@ -402,6 +402,8 @@ describe('Web thermal-tuning-v2 export', () => {
     expect(await promotion('review_incomplete')).toBe('rejected')
   })
 
+  // This full-ladder fixture hashes 2,000+ events six times across its three
+  // export scenarios; it verifies qualification, not a five-second CPU budget.
   it('qualifies only an eight-target saved run with full receipts and trial evidence', async () => {
     const events: ThermalTuningEvent[] = []
     for (const targetC of TARGETS) {
@@ -539,5 +541,5 @@ describe('Web thermal-tuning-v2 export', () => {
     expect((await exportThermalTuningV2(captured, 'device-1', 'web_serial')).ownerOutcome).toBe(
       'failed'
     )
-  })
+  }, 20_000)
 })

@@ -258,7 +258,7 @@ test.describe('control plane direct LAN', () => {
     await pairingDialog.getByLabel('四位配对码').fill('4827')
     await pairingDialog.getByRole('button', { name: '配对设备' }).click()
 
-    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+    await expectLanConnected(page)
     await expect
       .poll(() => requests.some((request) => request.path === '/api/v1/leases'))
       .toBe(true)
@@ -333,7 +333,7 @@ test.describe('control plane direct LAN', () => {
     await page.getByLabel('设备地址').fill(deviceUrl)
     await page.getByRole('button', { name: '连接设备' }).click()
 
-    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+    await expectLanConnected(page)
     await expect(page.getByLabel('四位配对码')).toHaveCount(0)
     await expect(page.getByRole('dialog', { name: '输入 LAN 配对码' })).toHaveCount(0)
     expect(requests.find((request) => request.path === '/api/v1/pairing/claim')).toMatchObject({
@@ -433,7 +433,7 @@ test.describe('control plane direct LAN', () => {
     await page.goto('/?demo=false')
     await openLanPairing(page)
     await pairRequiredLanDevice(page)
-    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+    await expectLanConnected(page)
 
     rejectNextRuntimeAsStale = true
     await page.getByLabel('Dashboard target temperature').fill('155')
@@ -465,7 +465,7 @@ test.describe('control plane direct LAN', () => {
       )
     })
     await pairRequiredLanDevice(page)
-    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+    await expectLanConnected(page)
 
     await page.route('http://192.168.1.17/**', async (route) => {
       const requestOrigin = route.request().headers().origin ?? 'http://127.0.0.1:4173'
@@ -553,7 +553,7 @@ test.describe('control plane direct LAN', () => {
     await openLanPairing(page)
 
     await pairRequiredLanDevice(page)
-    await expect(page.getByText('LAN 设备已连接')).toBeVisible()
+    await expectLanConnected(page)
 
     rejectHeartbeat = true
     await expect(page.getByText('硬件连接受阻')).toBeVisible({ timeout: 5_000 })
@@ -583,6 +583,15 @@ async function pairRequiredLanDevice(page: Page) {
   await expect(dialog).toBeVisible()
   await dialog.getByLabel('四位配对码').fill('4827')
   await dialog.getByRole('button', { name: '配对设备' }).click()
+}
+
+async function expectLanConnected(page: Page) {
+  // Runtime polling can replace the brief pairing feedback. The selected
+  // target and enabled control persist only after the lease is acquired.
+  await expect(page.getByRole('button', { name: '目标设备', exact: true })).toContainText(
+    'flux-purr-001122334455'
+  )
+  await expect(page.getByLabel('Dashboard target temperature')).toBeEnabled()
 }
 
 function corsHeaders(allowedOrigin: string) {

@@ -8031,6 +8031,7 @@ function CalibrationView({
           <TabsContent
             value="firmware_tuning"
             className="industrial-calibration-tabs__content"
+            style={calibrationWorkspaceTab === 'firmware_tuning' ? undefined : { display: 'none' }}
             forceMount
           >
             {firmwareTuningWorkspace}

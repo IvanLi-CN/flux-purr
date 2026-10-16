@@ -14,7 +14,13 @@ test('persists device event pages across a browser refresh', async ({ page }) =>
       candidateHash: 'sha256:test',
       terminalDisposition: 'running',
       reviewDisposition: 'pending',
-      trace: { firstSequence: 0, lastSequence: 0, complete: false, gap: false, digest: 'sha256:page-0' },
+      trace: {
+        firstSequence: 0,
+        lastSequence: 0,
+        complete: false,
+        gap: false,
+        digest: 'sha256:page-0',
+      },
       events: { events: [], nextSequence: 0 },
     }
     const first = {
@@ -35,10 +41,7 @@ test('persists device event pages across a browser refresh', async ({ page }) =>
         terminalDisposition: 'candidate_ready',
         trace: { ...status.trace, lastSequence: 1, complete: true, digest: 'sha256:page-1' },
       },
-      events: [
-        ...first.events,
-        { sequence: 1, elapsedMs: 100, kind: 'decision', phase: 'hold' },
-      ],
+      events: [...first.events, { sequence: 1, elapsedMs: 100, kind: 'decision', phase: 'hold' }],
       acknowledgedThrough: 1,
       confirmedThrough: 1,
       complete: true,

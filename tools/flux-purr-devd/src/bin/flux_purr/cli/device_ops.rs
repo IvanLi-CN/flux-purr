@@ -1224,6 +1224,7 @@ fn open_snapshot_serial(
     ))
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn snapshot_uses_raw_usb_port(port: &str) -> bool {
     cfg!(target_os = "macos") && port.starts_with("/dev/cu.usbmodem")
 }

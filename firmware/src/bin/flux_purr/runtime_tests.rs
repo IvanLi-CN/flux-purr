@@ -12148,79 +12148,83 @@ fn pps_segments_keep_trajectory_recovery_available() {
 fn pps_epoch_anchor_does_not_turn_voltage_offset_into_thermal_velocity() {
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
         for offset_c in [-0.3, 0.3] {
-            let kind = ProductionThermalController::Profile(bank);
-            let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
-            controller.filtered_slope_c_per_profile_tick = 0.4;
-            let mut transition = RtdPpsTransitionGuard::new(21_000);
-            let mut measurement = RtdControlMeasurementGuard::default();
-            measurement.reseed(238.3, 3_000);
-            let mut control_temp = 238.3;
-            let mut accepted_count = 0;
-            for elapsed in (50..=350).step_by(50) {
-                input.now_ms = 3_000 + elapsed;
-                let accepted = accept_rtd_control_sample_after_pps_transition(
-                    &mut transition,
-                    &mut controller,
-                    &mut measurement,
-                    control_temp,
-                    20_500,
-                    input.now_ms,
-                    238.3 + offset_c,
-                );
-                if let Some(temp) = accepted {
-                    control_temp = temp;
-                }
-                input.measured_temp_c = control_temp;
-                input.measurement_accepted = accepted.is_some();
-                let snapshot = controller
-                    .update_production_at(kind, input, Some(profile))
-                    .0;
-                if accepted.is_some() {
-                    accepted_count += 1;
-                    assert_eq!(elapsed, 350, "the production settling wait must complete");
-                    assert!(
-                        (snapshot.filtered_slope_c_per_s - 0.4).abs() < 0.001,
-                        "bank={bank:?}, offset={offset_c}: new PPS origin fabricated velocity {}",
-                        snapshot.filtered_slope_c_per_s
-                    );
-                    assert_eq!(snapshot.filtered_temp_c, control_temp);
-                }
-            }
-            assert_eq!(accepted_count, 1);
-            // Compare the next local interval with an independently seeded
-            // controller: neither the old origin nor its 300ms blind wait
-            // may affect the derivative in the new voltage epoch.
-            let mut local_reference = controller;
-            local_reference.reseed_measurement(control_temp);
-            local_reference.filtered_slope_c_per_profile_tick = 0.4;
-            input.now_ms = 3_400;
-            let local_temp = control_temp - 0.05;
-            let accepted = accept_rtd_control_sample_after_pps_transition(
-                &mut transition,
-                &mut controller,
-                &mut measurement,
-                control_temp,
-                20_500,
-                input.now_ms,
-                local_temp,
-            );
-            assert_eq!(accepted, Some(local_temp));
-            input.measured_temp_c = local_temp;
-            input.measurement_accepted = true;
-            let actual = controller
-                .update_production_at(kind, input, Some(profile))
-                .0;
-            let expected = local_reference
-                .update_production_at(kind, input, Some(profile))
-                .0;
-            assert_eq!(actual.filtered_temp_c, expected.filtered_temp_c);
-            assert_eq!(
-                actual.filtered_slope_c_per_s,
-                expected.filtered_slope_c_per_s
-            );
-            assert_eq!(actual.duty_percent, expected.duty_percent);
+            assert_pps_epoch_anchor(bank, offset_c);
         }
     }
+}
+
+fn assert_pps_epoch_anchor(bank: ThermalProfileBank, offset_c: f32) {
+    let kind = ProductionThermalController::Profile(bank);
+    let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
+    controller.filtered_slope_c_per_profile_tick = 0.4;
+    let mut transition = RtdPpsTransitionGuard::new(21_000);
+    let mut measurement = RtdControlMeasurementGuard::default();
+    measurement.reseed(238.3, 3_000);
+    let mut control_temp = 238.3;
+    let mut accepted_count = 0;
+    for elapsed in (50..=350).step_by(50) {
+        input.now_ms = 3_000 + elapsed;
+        let accepted = accept_rtd_control_sample_after_pps_transition(
+            &mut transition,
+            &mut controller,
+            &mut measurement,
+            control_temp,
+            20_500,
+            input.now_ms,
+            238.3 + offset_c,
+        );
+        if let Some(temp) = accepted {
+            control_temp = temp;
+        }
+        input.measured_temp_c = control_temp;
+        input.measurement_accepted = accepted.is_some();
+        let snapshot = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        if accepted.is_some() {
+            accepted_count += 1;
+            assert_eq!(elapsed, 350, "the production settling wait must complete");
+            assert!(
+                (snapshot.filtered_slope_c_per_s - 0.4).abs() < 0.001,
+                "bank={bank:?}, offset={offset_c}: new PPS origin fabricated velocity {}",
+                snapshot.filtered_slope_c_per_s
+            );
+            assert_eq!(snapshot.filtered_temp_c, control_temp);
+        }
+    }
+    assert_eq!(accepted_count, 1);
+    // Compare the next local interval with an independently seeded
+    // controller: neither the old origin nor its 300ms blind wait
+    // may affect the derivative in the new voltage epoch.
+    let mut local_reference = controller;
+    local_reference.reseed_measurement(control_temp);
+    local_reference.filtered_slope_c_per_profile_tick = 0.4;
+    input.now_ms = 3_400;
+    let local_temp = control_temp - 0.05;
+    let accepted = accept_rtd_control_sample_after_pps_transition(
+        &mut transition,
+        &mut controller,
+        &mut measurement,
+        control_temp,
+        20_500,
+        input.now_ms,
+        local_temp,
+    );
+    assert_eq!(accepted, Some(local_temp));
+    input.measured_temp_c = local_temp;
+    input.measurement_accepted = true;
+    let actual = controller
+        .update_production_at(kind, input, Some(profile))
+        .0;
+    let expected = local_reference
+        .update_production_at(kind, input, Some(profile))
+        .0;
+    assert_eq!(actual.filtered_temp_c, expected.filtered_temp_c);
+    assert_eq!(
+        actual.filtered_slope_c_per_s,
+        expected.filtered_slope_c_per_s
+    );
+    assert_eq!(actual.duty_percent, expected.duty_percent);
 }
 
 #[test]

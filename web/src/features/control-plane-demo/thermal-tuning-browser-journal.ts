@@ -28,8 +28,10 @@ function database(): Promise<IDBDatabase> {
     const request = indexedDB.open(DATABASE, VERSION)
     request.onupgradeneeded = () => {
       const db = request.result
-      if (!db.objectStoreNames.contains('runs')) db.createObjectStore('runs', { keyPath: 'deviceId' })
-      if (!db.objectStoreNames.contains('events')) db.createObjectStore('events', { keyPath: 'key' })
+      if (!db.objectStoreNames.contains('runs'))
+        db.createObjectStore('runs', { keyPath: 'deviceId' })
+      if (!db.objectStoreNames.contains('events'))
+        db.createObjectStore('events', { keyPath: 'key' })
     }
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => reject(request.error ?? new Error('无法打开调优事件日志。'))
@@ -90,7 +92,10 @@ export async function persistThermalTuningRecording(
     const events = transaction.objectStore('events')
     for (const event of recording.events) {
       if (event.sequence > priorSequence) {
-        events.put({ key: [deviceId, recording.runId, event.sequence], event } satisfies StoredEvent)
+        events.put({
+          key: [deviceId, recording.runId, event.sequence],
+          event,
+        } satisfies StoredEvent)
       }
     }
     const { events: _events, ...withoutEvents } = recording

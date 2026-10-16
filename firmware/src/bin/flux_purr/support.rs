@@ -1132,12 +1132,16 @@ pub(crate) const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 #[cfg(all(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv"))]
 compile_error!("Select only one board RTD divider supply");
 #[cfg(not(any(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv")))]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_328;
 #[cfg(feature = "rtd-supply-3208mv")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_208;
 #[cfg(all(feature = "rtd-supply-3340mv", not(feature = "rtd-supply-3208mv")))]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_340;
 
+#[cfg(any(target_arch = "xtensa", test))]
 include!(concat!(env!("OUT_DIR"), "/rtd_adc_assumption.rs"));
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_SHORT_FAULT_MAX_MV: u16 = 150;

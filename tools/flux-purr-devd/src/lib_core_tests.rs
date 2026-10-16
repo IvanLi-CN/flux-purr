@@ -10,8 +10,10 @@ fn calibration_bridge_preserves_the_firmware_shutdown_response() {
         rmse_c: 0.4,
         maximum_error_c: 0.8,
     };
-    let mut active = ThermalPlantActiveResult::default();
-    active.heat_response = Some(response);
+    let active = ThermalPlantActiveResult {
+        heat_response: Some(response),
+        ..ThermalPlantActiveResult::default()
+    };
     let wire = serde_json::to_value(&active).unwrap();
     let decoded: ThermalPlantActiveResult = serde_json::from_value(wire.clone()).unwrap();
     assert_eq!(decoded.heat_response, Some(response));
