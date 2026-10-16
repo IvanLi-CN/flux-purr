@@ -2,7 +2,7 @@
 
 ## 结论与产物
 
-完整余热预测、最晚Warmup交接、同轮制动搜索和PPS采样连续性修正已实现。A组在`19d8f76d96ea349696845e813081b05f808cb49e`完成八目标独立确认，候选经匹配的原子保存与读回验证写入EEPROM；历史失败记录仍保留原判定。实现与模型边界见[NATURAL-COOLING-CONTROL.md](NATURAL-COOLING-CONTROL.md)。
+完整余热预测、最晚Warmup交接、同轮制动搜索和PPS采样连续性修正已实现。A组在`19d8f76d96ea349696845e813081b05f808cb49e`取得设备报告的八目标接纳结果，候选经匹配的原子保存与读回验证写入EEPROM；但220°C独立确认存在Hold退出后继续沿用首次入口计时的验收缺陷，整轮不满足连续60秒Hold要求，不能作为八目标HIL通过依据。原始报告与保存凭据保留，不改写历史事件。实现与模型边界见[NATURAL-COOLING-CONTROL.md](NATURAL-COOLING-CONTROL.md)。
 
 生产实现提交为`fde397adb9a96891bc835d8807dede17f02ad5bc`，PI初始化时间尺度文档为`b0e8ca74`，同轮制动反馈修正为`c6affb72e2f309756ebf4bcd5f4c1f83d25bee4a`。测试数据的ADC偏移反算修正提交为`205405b947896b706f4f8b215ab843421205aab0`。未导入历史调优候选，初值只来自设备绑定的标定事务。
 
@@ -87,11 +87,11 @@
 
 运行`firmware-pps5a-1792128448518`的100°C trial7完成独立60秒确认，过冲0.92°C、峰峰值1.50°C，稳定窗在Warmup退出后8007ms开始、连续10010ms后验证，原10000ms期限不延长。该窗口有40个真实接纳样本、3个拒收值，最大接纳间隔587ms。sequence9039在2128223ms接纳99.11°C并请求14.5V，确认合同仍15V；sequence9041又接纳99.52°C、合同仍15V；sequence9042–9044才观察到14.5V合同并进入采样等待，控制99.52°C、原始99.17–99.36°C。对应合同边沿使先前真实窗口得到保留，拒收值没有成为样本见证；sequence9045于2128911ms以真实99.42°C恢复接纳。它直接覆盖“请求后还有接纳样本、合同随后才生效”的遗漏路径，资格仍由后续真实样本完成。
 
-## 八目标独立确认与EEPROM保存
+## 设备接纳结果与EEPROM保存
 
-运行`firmware-pps5a-1792128448518`以同一标定事务`1346461204`初始化，全部八个目标实际运行并完成独立60秒确认；没有导入历史调优候选。每个接纳试验的采样时序均由CLI根据原始样本独立验证通过，稳定窗口起点满足原期限，没有使用条件延长。trial编号从0开始，60/80/100°C分别在trial3/6/7取得最终确认；这些结果不构成“三轮内必然收敛”的证明。
+运行`firmware-pps5a-1792128448518`以同一标定事务`1346461204`初始化，全部八个目标实际运行并被设备接纳；没有导入历史调优候选。CLI独立验证了原始期限和10秒稳定窗口，但没有独立验证60秒Hold阶段连续性。下表保留设备确认事件中的热指标与判定，不表示这些试验已全部满足连续Hold合同。没有使用条件延长。trial编号从0开始，60/80/100°C分别在trial3/6/7被设备接纳；这些结果不构成“三轮内必然收敛”的证明。
 
-| 目标 | 独立确认trial | 过冲 | Hold峰峰值 | 稳定窗口起点距Warmup退出 | 原期限 |
+| 目标 | 设备接纳的确认trial | 过冲 | 设备记录的Hold峰峰值 | 稳定窗口起点距Warmup退出 | 原期限 |
 | --- | --- | --- | --- | --- | --- |
 | 60°C | 3 | 1.00°C | 1.51°C | 8691ms | 10000ms |
 | 80°C | 6 | 1.00°C | 1.45°C | 7964ms | 10000ms |
@@ -102,8 +102,25 @@
 | 180°C | 1 | 0.99°C | 1.95°C | 2600ms | 5000ms |
 | 220°C | 1 | 0.73°C | 2.62°C | 0ms | 5000ms |
 
-设备返回`candidate_ready`后，使用标准`thermal confirm-firmware-save`对同一run、candidate及pps5a功率级执行seal、事件确认、原子保存和读回核验。保存回执为`bank=pps5a`、`bankRevision=64`、`atomic=true`、`readbackVerified=true`；candidateHash与bankHash均为`sha256:05dec9f8ebfaca2febc84cdda551773c512c075ab1026731c9ce6f4ff6734034`。完整事件0..11466连续，设备trace验证通过，标准报告结果为passed／review complete，trace摘要为`bf88e31cd6cc1a44599de2aa6f44f3da5e37d537fee51ec0f8d242450cfffe55`。
+设备返回`candidate_ready`后，使用标准`thermal confirm-firmware-save`对同一run、candidate及pps5a功率级执行seal、事件确认、原子保存和读回核验。保存回执为`bank=pps5a`、`bankRevision=64`、`atomic=true`、`readbackVerified=true`；candidateHash与bankHash均为`sha256:05dec9f8ebfaca2febc84cdda551773c512c075ab1026731c9ce6f4ff6734034`。完整事件0..11466连续，设备trace验证通过，原标准报告保留passed／review complete，trace摘要为`bf88e31cd6cc1a44599de2aa6f44f3da5e37d537fee51ec0f8d242450cfffe55`。这些事实证明数据完整与实际持久化，不能补足连续Hold验收缺口。
 
 原始目录为`firmware/target/hil-pps-applied-continuity-a-19d8f76d-retry/firmware-pps5a-1792128448518`，匹配保存回执的五文件报告为`firmware/target/hil-pps-applied-continuity-a-19d8f76d-retry-saved-bundle/index.html`。保存后设备读回`profileSource=saved`、`profileActive=true`、`profileCoversTarget=true`、preview关闭、无手动PPS覆盖；停热全速散热后读到34.45°C、MOS0，风扇按既有门槛释放。B组保持未操作。
 
 随后仅对A组已授权USB-C供电断电／上电，原串口及USB序列号保持，设备身份读回同一完整SHA、`resetReason=chip_power_on`。在始终停热状态下临时选择180°C，设备从`saved`来源读出的全部候选字段与报告180°C点一致，包括制动距离364、Hold基线423‰、Kp16和Ki1；目标随后恢复启动时的59°C。59°C低于60°C最低锚点，`profileCoversTarget=false`不表示保存失败。终态读回38.24°C、heater disabled、MOS0、preview关闭、无手动PPS覆盖、风扇关闭，Fixed5V待机，PPS能力仍为21V/5A。该读回证明断电持久化与参数加载，不构成新的测温精度或59°C温控资格验证。
+
+## 连续Hold验收缺陷与资格边界
+
+220°C的trial1在以下时刻发生真实控制器阶段切换；时间相对于该trial首个样本，温度来自接纳样本，不是PPS采样暂停的保持值。
+
+| 相对时间 | 阶段切换 | 实测温度 | sequence |
+| --- | --- | --- | --- |
+| 39.096s | Warmup → Approach | 219.72°C | 2171 |
+| 39.195s | Approach → Hold | 219.95°C | 2173 |
+| 53.328s | Hold → Approach | 218.32°C | 2235 |
+| 58.084s | Approach → Hold | 219.62°C | 2256 |
+
+第一次Hold仅14.133秒，恢复Approach为4.756秒，最后一次Hold至试验终点仅41.117秒；最长连续Hold不足60秒。进入恢复Approach时，请求与确认PPS合同都为21V，没有采样暂停可以解释该阶段退出。温度峰峰值2.62°C合格不替代阶段连续性要求。正常控制器允许欠温后恢复Approach，但独立确认必须从重新满足物理入口后的Hold重新计时。
+
+固件通过`elapsed_ms - first_hold_elapsed_ms`判断确认时长，阶段退出时未清除首次入口；主机将设备的`holdConfirm=true`映射为60秒，阶段路径仅检查是否曾出现Approach与Hold。因此固件、主机独立复核和保存资格链路共同漏检了中断。PPS有界暂停保留的只是已有真实样本的资格连续性，不能保留已退出Hold的阶段计时，也不能把恢复Approach计入60秒。
+
+整轮八目标合规通过结论撤回；其它目标须按连续阶段规则重新审计，不能由设备接纳标志推定通过。修复范围为Hold退出后的连续计时重置、主机对原始阶段序列的独立验证及保存门禁拒绝不连续确认，并以该220°C轨迹建立回归。新实现须重新取得真机证据，旧通过标志和真实保存回执均不能替代该验证。既有成果与该缺陷按主人指定分开提交及PR处理。
