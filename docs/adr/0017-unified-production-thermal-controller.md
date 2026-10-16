@@ -4,6 +4,8 @@
 
 Accepted. Supersedes [ADR-0015](0015-source-class-thermal-controller-selection.md).
 
+This decision also supersedes the source-class controller selection and 5A-only model-assistance boundary in [ADR-0016](0016-calibrated-natural-cooling-in-profile-control.md); its passive-loss, Hold-recovery and bounded-search decisions continue to apply to the shared controller.
+
 ## Context
 
 The Operator requires the same heating and parameter-tuning function on 3A and 5A Devices. A separate 3A plant PI ignores the tuned point-local parameters and cannot establish production equivalence. Both source classes therefore use the existing calibrated Warmup/Approach/Hold profile controller, with the same braking-first Approach, physical phase gates, bounded search and independent confirmation. The source class selects current limits and a separate saved parameter bank, never an alternative control law. This supersedes ADR-0015's production-controller split.

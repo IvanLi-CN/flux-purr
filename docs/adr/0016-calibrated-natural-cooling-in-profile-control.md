@@ -2,6 +2,10 @@
 
 Status: Accepted
 
+## Supersession
+
+[ADR 0017](0017-unified-production-thermal-controller.md) supersedes this decision's retention of ADR 0015 source-class controller selection and its 5A-only model-assistance boundary. Both source classes use the shared calibrated profile controller. The passive-loss, Hold-recovery and bounded-search decisions below remain applicable to that controller.
+
 ## Context
 
 The 5A profile controller discarded the calibrated plant input. Static profile braking and a per-frame raw cooling threshold left Hold recovery insensitive to a slow but sustained decline, while tuning classified the subsequent low-band exit as Approach underpower. The owner requires the cooling data to participate in control and the repeated saturated search to stop.
