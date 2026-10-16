@@ -12,6 +12,7 @@ describe('console route contract', () => {
     ['/devices/device-1/calibration/heater-curve', 'calibration', 'heater_curve', undefined],
     ['/devices/device-1/calibration/rtd-adc', 'calibration', 'rtd_adc', undefined],
     ['/devices/device-1/calibration/vin-adc', 'calibration', 'vin_adc', undefined],
+    ['/devices/device-1/calibration/firmware-tuning', 'calibration', 'firmware_tuning', undefined],
   ])('parses canonical leaf %s', (pathname, view, calibrationTab, settingsTab) => {
     const route = parseConsoleRoute(pathname)
     expect(route).toMatchObject({ kind: 'device', view })

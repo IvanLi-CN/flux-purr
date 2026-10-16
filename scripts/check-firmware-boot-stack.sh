@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 elf_path="${1:-${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr}"
 min_boot_stack_headroom_bytes="${FLUX_PURR_BOOT_STACK_MIN_HEADROOM_BYTES:-32768}"
+min_pd_interrupt_headroom_bytes=65536
 
 if [[ ! -f "$elf_path" ]]; then
   echo "firmware ELF not found: $elf_path" >&2
@@ -96,6 +97,7 @@ fi
 
 max_frame_bytes=0
 max_frame_label=""
+max_pd_interrupt_frame_bytes=0
 while read -r address label; do
   frame_bytes="$(frame_bytes_for_symbol "$address")"
   headroom_bytes=$((stack_capacity_bytes - frame_bytes))
@@ -104,6 +106,12 @@ while read -r address label; do
   if (( frame_bytes > max_frame_bytes )); then
     max_frame_bytes="$frame_bytes"
     max_frame_label="$label"
+  fi
+  if [[ "$label" == *"::pd_service::__pd_service_task_task"* ||
+        "$label" == *"::power_domain::__power_coordinator_task_task"* ]]; then
+    if (( frame_bytes > max_pd_interrupt_frame_bytes )); then
+      max_pd_interrupt_frame_bytes="$frame_bytes"
+    fi
   fi
   if (( frame_bytes >= stack_capacity_bytes )); then
     echo "task stack frame exceeds CPU0 stack: ${frame_bytes}B >= ${stack_capacity_bytes}B (${label})" >&2
@@ -120,4 +128,15 @@ done < <(
   printf '%s\n' "$runtime_loop_symbol"
 )
 
+if (( max_pd_interrupt_frame_bytes == 0 )); then
+  echo "failed to resolve priority-3 PD task stack frame" >&2
+  exit 1
+fi
+pd_interrupt_headroom_bytes=$((stack_capacity_bytes - max_frame_bytes - max_pd_interrupt_frame_bytes))
+if (( pd_interrupt_headroom_bytes < min_pd_interrupt_headroom_bytes )); then
+  echo "nested PD interrupt stack headroom is below budget: ${pd_interrupt_headroom_bytes}B < ${min_pd_interrupt_headroom_bytes}B" >&2
+  exit 1
+fi
+
 echo "CPU0 stack capacity=${stack_capacity_bytes}B largest_frame=${max_frame_bytes}B task=${max_frame_label} headroom=$((stack_capacity_bytes - max_frame_bytes))B minimum=${min_boot_stack_headroom_bytes}B"
+echo "nested PD interrupt headroom=${pd_interrupt_headroom_bytes}B minimum=${min_pd_interrupt_headroom_bytes}B"

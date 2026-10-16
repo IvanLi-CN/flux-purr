@@ -21,6 +21,9 @@ frontpanel-key-test = []
 web_serial = []
 buzzer-test = ["web_serial"]
 buzzer-observe = ["buzzer-test"]
+fan-observe = ["web_serial"]
+rtd-supply-3208mv = []
+rtd-supply-3340mv = []
 hil-eeprom-commit-fault = []
 net_http = [
     "web_serial",

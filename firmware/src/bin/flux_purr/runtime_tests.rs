@@ -1,4 +1,230 @@
 use super::*;
+use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
+
+include!("calibration_cutoff_fixture.rs");
+
+#[test]
+fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
+    struct Pwm {
+        applied: u16,
+    }
+    impl embedded_hal::pwm::ErrorType for Pwm {
+        type Error = core::convert::Infallible;
+    }
+    impl embedded_hal::pwm::SetDutyCycle for Pwm {
+        fn max_duty_cycle(&self) -> u16 {
+            100
+        }
+        fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
+            self.applied = duty;
+            Ok(())
+        }
+    }
+
+    // The PD task can clear the pin between front-panel control frames without
+    // updating the front panel's cached last output.
+    let mut pwm = Pwm { applied: 0 };
+    let mut last_percent = 0;
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100);
+    pwm.applied = 0;
+    assert_eq!(last_percent, 100);
+
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100, "a fresh permit must restore full Warmup");
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, false).unwrap();
+    assert_eq!(pwm.applied, 0, "a missing permit must still fail closed");
+    assert_eq!(last_percent, 0);
+    apply_permitted_heater_duty(&mut pwm, 100, &mut last_percent, true).unwrap();
+    assert_eq!(pwm.applied, 100);
+}
+
+#[test]
+fn vin_adc_range_covers_the_board_and_confirmed_pps_input() {
+    // Espressif specifies 1750mV at 6dB and 3100mV at 11dB. The actual
+    // board divider, rather than the RTD range, defines VIN's requirement.
+    let maximum_mv = match adc1_attenuation_db(AdcCalibrationChannel::Vin) {
+        6 => 1_750,
+        11 => 3_100,
+        attenuation => panic!("unverified VIN attenuation {attenuation}"),
+    };
+    for input_mv in [5_000, 12_000, 20_000, 21_000, 21_300, 28_000] {
+        let adc_mv = vin_adc_mv_for_input_mv(input_mv);
+        assert!(
+            adc_mv <= maximum_mv,
+            "{input_mv}mV input puts {adc_mv}mV on VIN ADC, above its {maximum_mv}mV range"
+        );
+    }
+}
+
+#[test]
+fn heater_coast_releases_on_smooth_cooling_at_fast_control_cadence() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 750;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.hold_on_centi_c = 11;
+    point.hold_exit_centi_c = 160;
+    point.hold_entry_centi_c = 150;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    for interval_ms in [20, 50, 100] {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 240;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.hold_coast_active = true;
+        controller.filtered_temp_c = Some(240.5);
+        controller.previous_measured_temp_c = Some(240.5);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        let mut recovered = false;
+        for now_ms in (interval_ms..=3_000).step_by(interval_ms as usize) {
+            let snapshot = controller.update_at(
+                240,
+                240.5 - now_ms as f32 * 0.0005,
+                true,
+                Some(profile),
+                now_ms,
+            );
+            recovered |= !snapshot.coast_active && snapshot.duty_percent > 0;
+        }
+        assert!(
+            recovered,
+            "coast never recovers at {interval_ms} ms cadence"
+        );
+    }
+}
+
+#[test]
+fn heater_profile_uses_calibrated_cooling_for_braking_and_early_recovery() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.brake_distance_centi_c = 150;
+    point.warmup_reenter_centi_c = 1000;
+    point.hold_power_permille = 1000;
+    point.overshoot_cutoff_centi_c = 300;
+    point.hold_off_centi_c = 100;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let input = ThermalPlantRuntimeInput {
+        target_temp_c: 240,
+        measured_temp_c: 237.0,
+        measurement_accepted: true,
+        ambient_temp_c: 25.0,
+        heater_enabled: true,
+        // Observed rise exceeds the nominal calibrated rise, so live model
+        // prediction must still brake early after candidate correction.
+        max_power_mw: 25_000.0,
+        now_ms: 50,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 10_000.0,
+            transport_delay_ms: 2000,
+        },
+    };
+    let mut calibrated = HeaterController::new();
+    calibrated.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    calibrated.last_target_temp_c = 240;
+    calibrated.filtered_temp_c = Some(236.9);
+    calibrated.previous_measured_temp_c = Some(236.9);
+    calibrated.filtered_slope_c_per_profile_tick = 2.0;
+    let mut legacy = calibrated;
+    let plain = legacy.update_at(240, 237.0, true, Some(profile), 50);
+    let (modelled, _) = calibrated.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
+    assert_eq!(plain.phase, HeaterControlPhase::Warmup);
+    assert_eq!(modelled.phase, HeaterControlPhase::Approach);
+
+    calibrated.phase = HeaterControlPhase::Hold;
+    calibrated.hold_coast_active = true;
+    calibrated.filtered_temp_c = Some(240.7);
+    calibrated.previous_measured_temp_c = Some(240.7);
+    calibrated.filtered_slope_c_per_profile_tick = -0.5;
+    let mut recovery = None;
+    for tick in 1..=10 {
+        let (snapshot, _) = calibrated.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            ThermalPlantRuntimeInput {
+                measured_temp_c: 240.7 - tick as f32 * 0.025,
+                now_ms: 50 + tick * 50,
+                ..input
+            },
+            Some(profile),
+        );
+        if !snapshot.coast_active && snapshot.duty_percent > 0 {
+            recovery = Some(snapshot);
+            break;
+        }
+    }
+    let recovery =
+        recovery.expect("modelled loss must recover before the plate falls below target");
+    assert!(recovery.error_c < 0.0);
+    // The first positive recovery includes the existing entry blend; it does
+    // not need to jump immediately to twenty percent.
+    assert!(
+        recovery.duty_percent > 0 && recovery.duty_percent < 100,
+        "{recovery:?}"
+    );
+}
+
+#[test]
+fn heater_cooling_brake_does_not_double_count_loss_in_observed_net_slope() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.brake_distance_centi_c = 150;
+    point.warmup_reenter_centi_c = 1000;
+    point.hold_entry_centi_c = 150;
+    point.approach_lead_ticks = 0;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    controller.last_target_temp_c = 240;
+    controller.filtered_temp_c = Some(231.7);
+    controller.previous_measured_temp_c = Some(231.7);
+    controller.filtered_slope_c_per_profile_tick = 1.0;
+    let input = ThermalPlantRuntimeInput {
+        target_temp_c: 240,
+        measured_temp_c: 231.725,
+        measurement_accepted: true,
+        ambient_temp_c: 25.0,
+        heater_enabled: true,
+        max_power_mw: 100_000.0,
+        now_ms: 50,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 139.1813,
+            radiation_mw_per_k4: 4.397_830_7e-7,
+            thermal_capacity_mj_per_c: 13_996.655,
+            transport_delay_ms: 1950,
+        },
+    };
+    let (snapshot, _) = controller.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
+    assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
+}
 
 fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
     (0b11 << 30)
@@ -189,21 +415,25 @@ fn runtime_pd_snapshot_refreshes_after_display_consumes_a_notification() {
 }
 
 #[test]
-fn pd_service_is_owned_by_an_independent_normal_task() {
+fn pd_service_preempts_lower_priority_application_work() {
     let source = RUNTIME_IMPLEMENTATION;
     let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");
     let runtime_loop = include_str!("runtime_loop.rs");
+    let boot = include_str!("boot.rs");
 
     assert!(
         pd_service.contains("#[embassy_executor::task]\nasync fn pd_service_task"),
         "PD policy must have a dedicated Embassy task"
     );
     assert!(
-        !source.contains("PD_REALTIME_EXECUTOR")
-            && !source.contains("software_interrupt2")
-            && !source.contains("Priority::Priority3"),
-        "the full PD protocol must not run in an interrupt executor"
+        boot.contains("start_pd_realtime_executor(software_interrupts.software_interrupt2)")
+            && boot.contains("InterruptExecutor::new(software_interrupt)")
+            && boot.contains("executor.start(Priority::Priority3)")
+            && boot.contains("buzzer_realtime_executor.start(Priority::Priority2)")
+            && pd_service.contains("PD_REALTIME_EXECUTOR_STORAGE")
+            && pd_service.contains("spawn_pd_service(\n    spawner: embassy_executor::SendSpawner"),
+        "PD protocol must preempt ordinary work and the priority-2 buzzer"
     );
     assert!(
         pd_service
@@ -214,8 +444,9 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
     assert!(
         !pd_service.contains("PD_SERVICE_TICK_SIGNAL")
             && !pd_service.contains("async fn run_pd_service_tick")
-            && pd_service.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
-        "the PD task must own its normal-executor cadence timer"
+            && pd_service.contains("pd_service_delay_ms(")
+            && pd_service.contains("EmbassyTimer::after_millis(delay_ms).await"),
+        "the PD task must own its bounded cadence timer"
     );
     let pd_task = pd_service
         .split("async fn pd_service_task")
@@ -223,8 +454,8 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
         .and_then(|source| source.split("pub(crate) fn spawn_pd_service").next())
         .expect("PD task body must remain present");
     assert!(
-        pd_task.contains("EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await"),
-        "the normal PD task must yield between bounded service turns"
+        pd_task.contains("EmbassyTimer::after_millis(delay_ms).await"),
+        "the PD task must yield between bounded service turns"
     );
     assert!(
         !source.contains("Spawner::for_current_executor")
@@ -233,16 +464,13 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
             && FIRMWARE_ENTRYPOINT.contains("runtime::run(spawner).await"),
         "the main task must start PD during direct boot"
     );
-    let boot = include_str!("boot.rs");
-    let pd_service = include_str!("pd_service.rs");
     assert!(
-        !boot.contains("PD_REALTIME_EXECUTOR_STORAGE")
-            && !boot.contains("software_interrupt2")
-            && boot.contains("pub(crate) async fn initialize_boot_pd(")
-            && boot.contains("spawner: Spawner,")
-            && !pd_service.contains("PD_REALTIME_EXECUTOR_REF")
-            && !pd_service.contains("pd_realtime_spawner()"),
-        "PD service startup must use the normal executor spawner"
+        boot.contains("pub(crate) async fn initialize_boot_pd(")
+            && boot.contains("spawn_pd_service(system.pd_realtime_spawner")
+            && pd_service.contains("let bus = unsafe { &*(bus_address as *const SharedI2cBus) }")
+            && pd_service.contains("esp_hal::system::Cpu::current()")
+            && support.contains("pub(crate) fn into_bus_address(mut self) -> usize"),
+        "PD startup must keep the non-Send async bus on CPU0 while using its own executor"
     );
     assert!(
         !runtime_loop.contains("runtime_service_pd")
@@ -268,6 +496,15 @@ fn pd_service_is_owned_by_an_independent_normal_task() {
             && !support.contains("BlockingMutex<CriticalSectionRawMutex, HalI2c"),
         "shared I2C access must not wrap the bus in a blocking async adapter"
     );
+}
+
+#[test]
+fn pd_service_cadence_compensates_for_work_and_bus_contention() {
+    assert_eq!(pd_service_delay_ms(0, true), PD_SERVICE_TICK_MS);
+    assert_eq!(pd_service_delay_ms(3, true), 2);
+    assert_eq!(pd_service_delay_ms(PD_SERVICE_TICK_MS, true), 1);
+    assert_eq!(pd_service_delay_ms(20, true), 1);
+    assert_eq!(pd_service_delay_ms(0, false), PD_SERVICE_BUSY_RETRY_MS);
 }
 
 #[test]
@@ -299,7 +536,9 @@ fn pd_service_never_waits_for_the_shared_i2c_bus() {
         "PD bus acquisition must be an immediate try-lock"
     );
     assert!(
-        pd_service.contains("if i2c.try_acquire()") && pd_service.contains("i2c.release()"),
+        pd_service.contains("let acquired_bus = i2c.try_acquire()")
+            && pd_service.contains("if acquired_bus")
+            && pd_service.contains("i2c.release()"),
         "a busy EEPROM transaction must make PD skip this turn and retry later"
     );
     assert!(
@@ -589,6 +828,15 @@ fn front_panel_cannot_service_pd_or_borrow_the_pd_bus() {
             && !eeprom.contains("pd_port: &mut PdPort"),
         "front-panel modules must not expose FUSB register access or mutable PD ownership"
     );
+}
+
+#[test]
+fn runtime_display_cannot_consume_the_thermal_power_subscription() {
+    let assembly = include_str!("runtime_assembly.rs");
+    let runtime = include_str!("runtime_loop.rs");
+    assert!(assembly.contains("let display_power_state_subscription = pd_port"));
+    assert!(runtime.contains("&mut state.display_power_state_subscription"));
+    assert!(runtime.contains("state.power_state_subscription.changed()"));
 }
 
 #[test]
@@ -1042,6 +1290,7 @@ fn automatic_idle_restore_rejects_a_low_current_twelve_volt_contract() {
 fn complete_idle_input() -> CompleteIdleInput {
     CompleteIdleInput {
         heater_enabled: false,
+        thermal_tuning_active: false,
         physical_duty_percent: 0,
         manual_pps: ManualPpsState::default(),
         calibration: CalibrationRuntimeState::default(),
@@ -1054,6 +1303,9 @@ fn complete_idle_input() -> CompleteIdleInput {
 #[test]
 fn complete_idle_excludes_armed_zero_pwm_pulse_gaps_and_pending_work() {
     assert!(complete_idle_power_allowed(complete_idle_input()));
+    let mut tuning = complete_idle_input();
+    tuning.thermal_tuning_active = true;
+    assert!(!complete_idle_power_allowed(tuning));
     let mut armed = complete_idle_input();
     armed.heater_enabled = true;
     assert!(!complete_idle_power_allowed(armed));
@@ -1559,10 +1811,11 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: false,
     };
-    assert!(automatic_heater_power_is_idle(false, 0, false));
-    assert!(!automatic_heater_power_is_idle(true, 0, false));
-    assert!(!automatic_heater_power_is_idle(false, 0, true));
-    assert!(!automatic_heater_power_is_idle(false, 1, false));
+    assert!(automatic_heater_power_is_idle(false, 0, false, false));
+    assert!(!automatic_heater_power_is_idle(true, 0, false, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, true, false));
+    assert!(!automatic_heater_power_is_idle(false, 1, false, false));
+    assert!(!automatic_heater_power_is_idle(false, 0, false, true));
     reset_automatic_heater_backend(&mut backend);
     let HeaterPowerBackend::PpsMos {
         current_mode,
@@ -2829,6 +3082,36 @@ fn early_usb_control_defers_runtime_status_until_main_loop() {
 }
 
 #[test]
+fn thermal_tuning_is_unavailable_during_startup_and_recovery() {
+    let memory_config = MemoryConfig::default();
+    for request in [
+        r#"{"type":"thermal_tuning","requestId":"tune-startup","op":"read"}"#,
+        r#"{"type":"request","requestId":"tune-startup","op":"get_thermal_tuning"}"#,
+    ] {
+        for (response, expected_code) in [
+            (usb_early_response(request, &memory_config), "startup_busy"),
+            (
+                usb_recovery_response(request, &memory_config, 0),
+                "hardware_bringup_failed",
+            ),
+        ] {
+            match response {
+                UsbFrame::Response {
+                    request_id,
+                    ok: false,
+                    result: None,
+                    error: Some(error),
+                } => {
+                    assert_eq!(request_id.as_str(), "tune-startup");
+                    assert_eq!(error.code.as_str(), expected_code);
+                }
+                other => panic!("unexpected thermal tuning response: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn startup_recovery_defers_network_and_status_until_persistent_state_is_ready() {
     let memory_config = MemoryConfig::default();
     for (request_id, request) in [
@@ -3566,6 +3849,7 @@ fn runtime_status_reports_rtd_batch_extrema() {
     );
 
     assert_eq!(status.rtd_raw_adc_mv, 900);
+    assert_eq!(status.rtd_divider_supply_mv, Some(RTD_DIVIDER_SUPPLY_MV));
     assert_eq!(status.rtd_raw_adc_min_mv, 899);
     assert_eq!(status.rtd_raw_adc_max_mv, 902);
     assert_eq!(status.rtd_raw_adc_spread_mv, 3);
@@ -3711,6 +3995,25 @@ fn manual_pps_config_validates_capability_and_updates_status_payload() {
     assert_eq!(manual_pps.target_mv, None);
     assert_eq!(manual_pps.target_ma, None);
     assert!(manual_pps.consume_automatic_restore_pending());
+}
+
+#[test]
+fn clearing_manual_pps_requires_coordinator_idle_release() {
+    let mut manual_pps = ManualPpsState {
+        enabled: true,
+        owner: ManualPpsOwner::Debug,
+        target_mv: Some(20_000),
+        target_ma: Some(3_000),
+        applied_mv: Some(20_000),
+        ..ManualPpsState::default()
+    };
+
+    manual_pps.clear();
+
+    assert_eq!(
+        manual_pps.automatic_restore_phase(),
+        AutomaticRestorePhase::RequestIdle,
+    );
 }
 
 fn manual_pps_enable_command() -> RuntimeConfigCommand {
@@ -4230,6 +4533,7 @@ fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: vin_raw_mv,
                     latest_temp_c: 25.0,
@@ -4312,6 +4616,7 @@ fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
             &mut memory_config,
             &mut manual_pps,
             CalibrationJobUpdateInput {
+                elapsed_ticks_delta: 1,
                 latest_rtd_raw_adc_mv: 0,
                 latest_vin_raw_adc_mv: vin_raw_mv,
                 latest_temp_c: 25.0,
@@ -4379,6 +4684,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv.saturating_sub(80),
                     latest_temp_c: 25.0,
@@ -4396,6 +4702,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv,
                     latest_temp_c: 25.0,
@@ -4713,6 +5020,7 @@ fn update_thermal_plant_job(
         memory_config,
         manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: update.raw_rtd_adc_mv,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: update.temp_c,
@@ -4727,8 +5035,22 @@ const SYNTHETIC_TARGET_MARGIN_C: f32 = 2.0;
 fn runtime_test_raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
     let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
     (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms)
+        - RTD_ASSUMED_ADC_OFFSET_UV as f32 / 1_000.0)
         .round() as u16
+}
+
+#[test]
+fn synthetic_raw_rtd_temperatures_invert_the_active_assumed_offset() {
+    let memory = MemoryConfig::default();
+    for temperature in [25.0, 30.0, 80.0, 100.0, 160.0, 220.0] {
+        let raw_mv = runtime_test_raw_rtd_adc_mv_for_temp(temperature);
+        let projected = projected_rtd_temperature_c(&memory, raw_mv).unwrap();
+        assert!(
+            (projected - temperature).abs() < 0.3,
+            "{temperature}: {projected}"
+        );
+    }
 }
 
 fn synthetic_memory_config() -> MemoryConfig {
@@ -4764,6 +5086,19 @@ fn synthetic_trace(
     [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     usize,
 ) {
+    synthetic_trace_with_delay(memory_config, ambient_temp_c, 0)
+}
+
+fn synthetic_trace_with_delay(
+    memory_config: &MemoryConfig,
+    ambient_temp_c: f32,
+    delay_ticks: usize,
+) -> (
+    [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    usize,
+) {
+    let mut input_history = [0.0; 41];
+    assert!(delay_ticks < input_history.len());
     let capacity_mj_per_c = 100_000.0_f32;
     let convection_mw_per_c = 100.0_f32;
     let radiation_mw_per_k4 = 0.0000005_f32;
@@ -4805,6 +5140,7 @@ fn synthetic_trace(
         }
         if reached_cutoff {
             heating = false;
+            input_history[usize::from(tick) % input_history.len()] = 0.0;
             last_saved_temp_c = f32::MIN;
             continue;
         }
@@ -4819,11 +5155,14 @@ fn synthetic_trace(
         } else {
             0.0
         };
+        input_history[usize::from(tick) % input_history.len()] = power_mw;
+        let delayed_power_mw = input_history
+            [(usize::from(tick) + input_history.len() - delay_ticks) % input_history.len()];
         let temperature_k = temperature_c + 273.15;
         let ambient_k = ambient_temp_c + 273.15;
         let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
             + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-        temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
+        temperature_c += (delayed_power_mw - losses_mw) / capacity_mj_per_c * 0.05;
     }
     (samples, sample_count)
 }
@@ -5118,6 +5457,179 @@ fn assert_synthetic_invalid_trace_guards(
 }
 
 #[test]
+fn transient_thermal_fit_excludes_captured_instantaneous_spike_windows() {
+    let rows: std::vec::Vec<[u32; 4]> = serde_json::from_str(include_str!(
+        "../../../testdata/thermal-plant-a-spike-trace.json"
+    ))
+    .unwrap();
+    let mut memory = MemoryConfig::default();
+    for (index, (temp_centi_c, resistance_milliohms)) in [
+        (0, 2948),
+        (2000, 3200),
+        (10046, 4212),
+        (14079, 4719),
+        (17585, 5160),
+        (20665, 5547),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        memory.active_heater_curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c,
+            resistance_milliohms,
+        });
+    }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (sample, row) in samples.iter_mut().zip(&rows) {
+        *sample = ThermalPlantTransientSample {
+            elapsed_ticks: row[0] as u16,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(row[1] as f32 / 100.0),
+            heater_voltage_125mv: row[2] as u8,
+            duty_percent: row[3] as u8,
+        };
+    }
+    let data = prepare_transient_fit(
+        &samples,
+        rows.len() as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .unwrap();
+    let peak_index = rows.iter().position(|row| row[1] == 8014).unwrap();
+    assert!(data.row(peak_index, 0).is_none());
+    assert!(data.row(peak_index + 1, 0).is_none());
+    assert!(data.row(rows.len() - 1, 0).is_some());
+}
+
+#[test]
+fn transient_thermal_fit_recovers_with_an_instantaneous_contact_spike() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    samples[5].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(280.0);
+    let (transaction, residual) = fit_thermal_plant_transient(
+        123,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("an isolated contact spike must not corrupt a physical trace");
+    assert_eq!(transaction.samples, samples);
+    assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    let cooling_start = (1..count)
+        .find(|index| samples[*index].duty_percent == 0)
+        .expect("synthetic trace has a cooling phase");
+    let spike_index = (cooling_start..count)
+        .find(|index| {
+            samples[*index]
+                .elapsed_ticks
+                .saturating_sub(samples[cooling_start].elapsed_ticks)
+                >= 400
+        })
+        .expect("synthetic trace has a late cooling sample");
+    let base_temp_c = projected_rtd_temperature_c(&memory, samples[spike_index - 1].raw_rtd_adc_mv)
+        .expect("synthetic temperature projects");
+    samples[spike_index].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(base_temp_c + 5.0);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("a late cooling contact excursion must be excluded, not abort the fit");
+    assert!(data.row(spike_index, 0).is_none());
+    let (_, residual) = fit_thermal_plant_transient(
+        321,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("the physical trace remains fit-capable after excluding the excursion");
+    assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_thermal_fit_excludes_sub_slew_heating_contact_peaks() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    let spike_index = (24..count - 1)
+        .find(|index| {
+            samples[*index + 1].duty_percent > 0
+                && samples[*index].elapsed_ticks - samples[*index - 1].elapsed_ticks >= 10
+                && samples[*index + 1].elapsed_ticks - samples[*index].elapsed_ticks >= 10
+        })
+        .expect("trace has a sparse powered interval");
+    let previous =
+        projected_rtd_temperature_c(&memory, samples[spike_index - 1].raw_rtd_adc_mv).unwrap();
+    let next =
+        projected_rtd_temperature_c(&memory, samples[spike_index + 1].raw_rtd_adc_mv).unwrap();
+    let peak = previous.max(next) + 5.0;
+    samples[spike_index].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(peak);
+    let elapsed_s =
+        f32::from(samples[spike_index].elapsed_ticks - samples[spike_index - 1].elapsed_ticks)
+            * 0.05;
+    assert!((peak - previous) / elapsed_s < RTD_CONTROL_MAX_SLEW_C_PER_S);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("an isolated sub-slew contact peak must not invalidate the physical trace");
+    assert!(data.row(spike_index, 0).is_none());
+    let (transaction, residual) = fit_thermal_plant_transient(
+        1,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("the accepted physical observations remain fit-capable");
+    assert_eq!(transaction.samples, samples);
+    assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_thermal_fit_cannot_use_a_spike_for_heating_coverage() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    for sample in &mut samples[..count] {
+        sample.raw_rtd_adc_mv = sample
+            .raw_rtd_adc_mv
+            .min(runtime_test_raw_rtd_adc_mv_for_temp(200.0));
+    }
+    samples[5].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(280.0);
+    assert!(
+        prepare_transient_fit(
+            &samples,
+            count as u8,
+            None,
+            &memory,
+            samples[0].raw_rtd_adc_mv
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
     let ambient_temp_c = 25.0_f32;
     let mut memory_config = synthetic_memory_config();
@@ -5126,6 +5638,230 @@ fn transient_thermal_fit_recovers_a_physical_model_from_heat_and_cool_trace() {
     assert_synthetic_model_guards(&mut memory_config, transaction, ambient_temp_c);
     assert_synthetic_apdo_and_persistence(&mut memory_config, transaction);
     assert_synthetic_invalid_trace_guards(&mut memory_config, transaction, ambient_temp_c);
+}
+
+#[test]
+fn thermal_plant_export_uses_the_runtime_resistance_projection() {
+    let mut memory = synthetic_memory_config();
+    let (samples, sample_count) = synthetic_trace(&memory, 25.0);
+    let transaction = assert_synthetic_fit(&memory, &samples, sample_count, 25.0);
+    memory.thermal_plant_transient_active = Some(transaction);
+    memory.heater_curve_transaction_id = Some(transaction.transaction_id);
+    // Stored temperatures may predate the currently effective ADC mapping.
+    // Raw observations remain the source for production resistance estimates.
+    memory.active_heater_curve.points[0]
+        .as_mut()
+        .unwrap()
+        .temp_centi_c = 5_000;
+    memory.active_heater_curve.points[1]
+        .as_mut()
+        .unwrap()
+        .temp_centi_c = 30_000;
+
+    let exported = thermal_plant_active_result(&memory, &transaction).unwrap();
+    let mut curve = HeaterCurveConfig::default();
+    for (index, point) in exported.curve.points.iter().enumerate() {
+        curve.points[index] = point.map(Into::into);
+    }
+    for temperature in [60.0, 120.0, 220.0] {
+        let exported_resistance = heater_resistance_ohms_from_curve(&curve, temperature)
+            .unwrap()
+            .max(default_estimated_heater_resistance_ohms(temperature));
+        let production_resistance = estimated_heater_resistance_ohms(temperature, None, &memory);
+        assert!(
+            (exported_resistance - production_resistance).abs() < 0.001,
+            "cold seed and production must use the same resistance at {temperature}C"
+        );
+    }
+}
+
+#[test]
+fn transient_heat_coverage_preserves_the_integer_adc_cutoff_bin() {
+    let memory = synthetic_memory_config();
+    let raw_offset_mv =
+        -rtd_assumed_adc_offset_uv(&memory, RTD_ASSUMED_ADC_OFFSET_UV) as f32 / 1_000.0;
+    let (mut samples, count) = synthetic_trace(&memory, 30.0);
+    let resistance = pt1000_resistance_ohms_at(THERMAL_PLANT_TARGET_TEMP_C);
+    let cutoff_raw_mv = (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance)
+        + raw_offset_mv)
+        .round() as u16;
+    let cutoff_c = projected_rtd_temperature_c(&memory, cutoff_raw_mv).unwrap();
+    if RTD_ASSUMED_ADC_OFFSET_UV == -13_500 {
+        assert!(cutoff_c < THERMAL_PLANT_TARGET_TEMP_C);
+    }
+    for sample in samples[..count]
+        .iter_mut()
+        .filter(|sample| sample.duty_percent > 0)
+    {
+        sample.raw_rtd_adc_mv = sample.raw_rtd_adc_mv.min(cutoff_raw_mv);
+    }
+    samples[count - 1].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(79.0);
+    let ambient_raw_mv = samples[0].raw_rtd_adc_mv;
+    let mut transaction = ThermalPlantTransientTransaction {
+        transaction_id: 1,
+        ambient_raw_rtd_adc_mv: ambient_raw_mv,
+        sample_count: count as u8,
+        projection: ThermalPlantProjectionRecord::from_projection(ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 100_000.0,
+            transport_delay_ms: 50,
+        }),
+        samples,
+    };
+    assert!(thermal_plant_transient_trace_reaches_targets(
+        &transaction,
+        &memory
+    ));
+    assert!(prepare_transient_fit(&samples, count as u8, None, &memory, ambient_raw_mv).is_some());
+
+    for sample in transaction.samples[..count]
+        .iter_mut()
+        .filter(|sample| sample.duty_percent > 0)
+    {
+        sample.raw_rtd_adc_mv = sample.raw_rtd_adc_mv.min(cutoff_raw_mv - 1);
+    }
+    assert!(!thermal_plant_transient_trace_reaches_targets(
+        &transaction,
+        &memory
+    ));
+    assert!(
+        prepare_transient_fit(
+            &transaction.samples,
+            count as u8,
+            None,
+            &memory,
+            ambient_raw_mv,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn transient_zero_delay_model_does_not_invent_a_multi_second_delay() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace(&memory, 25.0);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let (model, residual) = best_transient_projection(&data).unwrap();
+    assert!(
+        model.transport_delay_ms <= 500,
+        "zero-delay physical trace fitted {}ms of transport delay, residual={residual}",
+        model.transport_delay_ms
+    );
+}
+
+#[test]
+fn transient_fit_preserves_a_real_transport_delay() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace_with_delay(&memory, 25.0, 20);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let (model, residual) = best_transient_projection(&data).unwrap();
+    assert!(residual <= 0.2);
+    assert!(
+        (700..=1_300).contains(&model.transport_delay_ms),
+        "1000ms physical transport delay fitted {}ms, residual={residual}",
+        model.transport_delay_ms
+    );
+}
+
+#[test]
+fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
+    let memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace_with_delay(&memory, 25.0, 20);
+    let data = prepare_transient_fit(
+        &samples,
+        count as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+    )
+    .unwrap();
+    let temperatures: Vec<_> = samples[..count]
+        .iter()
+        .map(|sample| projected_rtd_temperature_c(&memory, sample.raw_rtd_adc_mv).unwrap())
+        .collect();
+    let powers: Vec<_> = samples[..count]
+        .iter()
+        .zip(&temperatures)
+        .map(|(sample, temperature)| {
+            transient_sample_power_mw(*sample, *temperature, None, &memory).unwrap()
+        })
+        .collect();
+    let ambient =
+        projected_rtd_temperature_c(&memory, runtime_test_raw_rtd_adc_mv_for_temp(25.0)).unwrap();
+    for delay in [0, 1, 20, 99, 200] {
+        for index in 1..count {
+            let direct = transient_fit_row(
+                &samples[..count],
+                &temperatures,
+                &powers,
+                index,
+                delay,
+                ambient,
+            );
+            let cached = data.row(index, delay);
+            assert_eq!(direct.is_some(), cached.is_some());
+            if let (Some((values, energy)), Some((cached_values, cached_energy))) = (direct, cached)
+            {
+                assert_eq!(values, cached_values);
+                assert!(
+                    (energy - cached_energy).abs() <= 1.0 + energy.abs() * 0.0001,
+                    "energy mismatch at index={index} delay={delay}: direct={energy} cached={cached_energy}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn transient_power_matches_the_temperature_derivative_interval() {
+    let samples = [0, 5, 10, 20].map(|elapsed_ticks| ThermalPlantTransientSample {
+        elapsed_ticks,
+        raw_rtd_adc_mv: 1000,
+        heater_voltage_125mv: 160,
+        duty_percent: if elapsed_ticks == 0 { 100 } else { 0 },
+    });
+    // A 250ms powered interval followed by 250ms off must contribute its
+    // energy to the 500ms temperature derivative, even though its endpoint
+    // power is zero. A delayed window includes only its actual overlap.
+    let powers = [1000.0, 0.0, 0.0, 0.0];
+    let (_, energy_mj) =
+        transient_fit_row(&samples, &[25.0, 26.0, 26.0, 26.0], &powers, 3, 0, 25.0).unwrap();
+    assert_eq!(energy_mj, 125.0);
+    assert_eq!(
+        transient_mean_delayed_power_mw(&samples, &powers, 0.0, 10.0, 0),
+        Some(500.0)
+    );
+    assert_eq!(
+        transient_mean_delayed_power_mw(&samples, &powers, 0.0, 10.0, 8),
+        Some(200.0)
+    );
+    let continuous_vin_samples = [0, 10].map(|elapsed_ticks| ThermalPlantTransientSample {
+        elapsed_ticks,
+        raw_rtd_adc_mv: 1000,
+        heater_voltage_125mv: if elapsed_ticks == 0 { 96 } else { 160 },
+        duty_percent: 100,
+    });
+    assert_eq!(
+        transient_mean_delayed_power_mw(&continuous_vin_samples, &[1000.0, 2000.0], 0.0, 10.0, 0),
+        Some(1500.0),
+        "measured VIN drift under fixed PPS is not a discrete duty edge"
+    );
 }
 
 const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
@@ -5239,14 +5975,67 @@ const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
 ];
 
 #[test]
-fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
-    fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
-        let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-        (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-            / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
-            .round() as u16
+fn captured_calibration_rejects_impossible_startup_temperature_spikes() {
+    let trace = CALIBRATION_CUTOFF_TRACE;
+    let memory = MemoryConfig::default();
+    let mut curve = HeaterCurveConfig::default();
+    for (index, (temp_centi_c, resistance_milliohms)) in [
+        (0, 2948),
+        (2000, 3200),
+        (10096, 4218),
+        (14113, 4723),
+        (17632, 5166),
+        (20623, 5542),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        curve.points[index] = Some(HeaterCurvePoint {
+            temp_centi_c,
+            resistance_milliohms,
+        });
     }
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, (elapsed_ticks, centi_c, heater_voltage_125mv, duty_percent)) in
+        trace.iter().copied().enumerate()
+    {
+        let resistance = pt1000_resistance_ohms_at(f32::from(centi_c) / 100.0);
+        let raw = f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance
+            / (RTD_REFERENCE_RESISTOR_OHMS + resistance)
+            - RTD_ASSUMED_ADC_OFFSET_UV as f32 / 1000.0;
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks,
+            raw_rtd_adc_mv: raw.round() as u16,
+            heater_voltage_125mv,
+            duty_percent,
+        };
+    }
+    let data = prepare_transient_fit(
+        &samples,
+        trace.len() as u8,
+        Some(&curve),
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    );
+    if RTD_ASSUMED_ADC_OFFSET_UV == -13_500 {
+        assert!(
+            data.is_some(),
+            "the actual mapping covers both cutoff temperatures"
+        );
+    }
+    assert!(
+        data.as_ref().and_then(best_transient_projection).is_none(),
+        "37-to-51-to-36C startup spikes must not qualify a physical model"
+    );
+}
 
+#[test]
+fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     let memory_config = MemoryConfig {
         commissioning_required: false,
         ..MemoryConfig::default()
@@ -5283,7 +6072,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.iter().copied().enumerate() {
         samples[index] = ThermalPlantTransientSample {
             elapsed_ticks,
-            raw_rtd_adc_mv: raw_rtd_adc_mv_for_temp(temp_c),
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temp_c),
             heater_voltage_125mv: 160,
             duty_percent,
         };
@@ -5300,7 +6089,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     assert!(
         fit_thermal_plant_transient(
             0x4c49_5645,
-            raw_rtd_adc_mv_for_temp(32.67),
+            runtime_test_raw_rtd_adc_mv_for_temp(32.67),
             &samples,
             trace.len() as u8,
             Some(&preview_curve),
@@ -5311,7 +6100,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     );
 
     let mut terminal_samples = samples;
-    terminal_samples[trace.len() - 1].raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(79.73);
+    terminal_samples[trace.len() - 1].raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(79.73);
     let terminal_temp_c = projected_rtd_temperature_c(
         &memory_config,
         terminal_samples[trace.len() - 1].raw_rtd_adc_mv,
@@ -5320,7 +6109,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
     assert!(thermal_plant_cooling_complete(79.73, terminal_temp_c));
     let (_, residual) = fit_thermal_plant_transient(
         0x4c49_5645,
-        raw_rtd_adc_mv_for_temp(32.67),
+        runtime_test_raw_rtd_adc_mv_for_temp(32.67),
         &terminal_samples,
         trace.len() as u8,
         Some(&preview_curve),
@@ -5514,6 +6303,27 @@ fn boot_output_initialization_stays_in_one_boot_container() {
             && !boot.contains("pub(crate) struct BootOutput {"),
         "boot output initialization must not return another full boot container through the startup future"
     );
+}
+
+#[test]
+fn boot_backlight_is_enabled_before_display_initialization() {
+    let boot = include_str!("boot.rs");
+    let boot_system = boot
+        .split("pub(crate) fn initialize_boot_system(")
+        .nth(1)
+        .expect("boot system initialization is present");
+    let backlight = boot_system
+        .find("let mut backlight = Output::new(tokens.gpio13, Level::Low")
+        .expect("backlight is configured active-low");
+    let backlight_enable = boot_system
+        .find("backlight.set_low();")
+        .expect("backlight is enabled during boot system initialization");
+    assert!(backlight < backlight_enable);
+    let display_stage = boot
+        .split("pub(crate) async fn initialize_boot_display(")
+        .nth(1)
+        .expect("display boot stage is present");
+    assert!(!display_stage.contains("runtime.backlight.set_low();"));
 }
 
 #[test]
@@ -5732,114 +6542,295 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     ));
     assert_eq!(job.samples[1].heater_voltage_125mv, 160);
     assert_eq!(job.samples[1].duty_percent, 100);
+
+    // Past the dense startup window, cutoff must still be recorded even
+    // when there is no temperature change. Otherwise the fit invents input
+    // energy until a later 4C cooling sample.
+    job.sample_count = 24;
+    job.samples[23] = job.samples[1];
+    job.elapsed_ticks = 3;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job, 260, 26.0, 20_000, 0, false
+    ));
+    assert_eq!(job.sample_count, 25);
+    assert_eq!(job.samples[24].elapsed_ticks, 3);
+    assert_eq!(job.samples[24].duty_percent, 0);
+}
+
+#[test]
+fn transient_temperature_steps_are_rate_limited_after_dense_startup() {
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Heating,
+        source_max_mv: 21_000,
+        source_current_ma: 5_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        heater_curve: ThermalPlantCurveSampler::default(),
+        elapsed_ticks: 16,
+        phase_started_tick: 0,
+        sample_count: 16,
+        last_saved_temp_c: 25.0,
+        last_saved_tick: 16,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+    job.samples[15] = ThermalPlantTransientSample {
+        elapsed_ticks: 16,
+        raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        heater_voltage_125mv: 168,
+        duty_percent: 100,
+    };
+
+    job.elapsed_ticks = 17;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job,
+        runtime_test_raw_rtd_adc_mv_for_temp(30.0),
+        30.0,
+        21_000,
+        100,
+        false,
+    ));
+    assert_eq!(job.sample_count, 16);
+
+    job.elapsed_ticks = 26;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job,
+        runtime_test_raw_rtd_adc_mv_for_temp(35.0),
+        35.0,
+        21_000,
+        100,
+        false,
+    ));
+    assert_eq!(job.sample_count, 17);
+    assert_eq!(job.samples[16].elapsed_ticks, 26);
+}
+
+#[test]
+fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degrees() {
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_max_mv: 21_000,
+        source_current_ma: 5_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(30.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        heater_curve: ThermalPlantCurveSampler::default(),
+        elapsed_ticks: 1_001,
+        phase_started_tick: 1_000,
+        sample_count: 68,
+        last_saved_temp_c: 220.0,
+        last_saved_tick: 1_000,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+    job.samples[67] = ThermalPlantTransientSample {
+        elapsed_ticks: 1_000,
+        raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(220.0),
+        heater_voltage_125mv: 168,
+        duty_percent: 100,
+    };
+    for tick in 1_001..=1_220 {
+        job.elapsed_ticks = tick;
+        // A slow post-cut peak remains invisible to the old 4C recorder.
+        let temperature = 220.0 + ((tick - 1_001) as f32 * 0.005).min(0.8);
+        assert!(record_thermal_plant_transient_sample(
+            &mut job,
+            runtime_test_raw_rtd_adc_mv_for_temp(temperature),
+            temperature,
+            21_000,
+            0,
+            false,
+        ));
+    }
+    let cutoff = &job.samples[68..usize::from(job.sample_count)];
+    assert_eq!(cutoff.first().unwrap().elapsed_ticks, 1_001);
+    assert!(cutoff.len() >= 20, "post-cut samples={}", cutoff.len());
+    assert!(
+        cutoff
+            .windows(2)
+            .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks <= 10)
+    );
+    assert!(cutoff.last().unwrap().elapsed_ticks <= 1_200);
+    assert!(job.sample_count < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8);
+}
+
+fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
+    let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
+    (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
+        / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
+        .round() as u16
+}
+
+fn run_transient_calibration_cycle(
+    source_current_ma: u16,
+    cycle_ms: u32,
+) -> (CalibrationRuntimeState, MemoryConfig, f32) {
+    let mut calibration = CalibrationRuntimeState {
+        mode: CalibrationMode::ThermalPlant,
+        ..CalibrationRuntimeState::default()
+    };
+    let mut memory_config = MemoryConfig::default();
+    let mut manual_pps =
+        ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(5_000),
+            pps_max_mv: Some(20_000),
+            pps_max_ma: Some(source_current_ma),
+            ..Default::default()
+        }));
+    calibration_job_start(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut memory_config,
+        &mut manual_pps,
+    )
+    .unwrap();
+
+    let ambient_temp_c = 25.0_f32;
+    let capacity_mj_per_c = 30_000.0_f32;
+    let convection_mw_per_c = 100.0_f32;
+    let radiation_mw_per_k4 = 0.00000005_f32;
+    let mut temperature_c = ambient_temp_c;
+    let mut elapsed_clock = CalibrationElapsedClock::default();
+    for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
+        + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
+        + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
+    {
+        let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
+        match test_thermal_plant_phase() {
+            Some(ThermalPlantAutoPhase::Heating) => assert_eq!(heater_duty_percent, 100),
+            Some(ThermalPlantAutoPhase::Cooling) => assert_eq!(heater_duty_percent, 0),
+            Some(ThermalPlantAutoPhase::Ambient) | None => {}
+        }
+        let source_mv = manual_pps.target_mv.unwrap_or(0);
+        let resistance_ohms = estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
+        let pd_current_ma = if heater_duty_percent > 0 {
+            ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
+        } else {
+            0
+        };
+        let measured_heater_mv = if heater_duty_percent > 0 {
+            u32::from(source_mv).min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
+        } else {
+            0
+        };
+        let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
+        let reported_temp_c = projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
+        update_calibration_job_state(
+            &mut calibration,
+            &mut memory_config,
+            &mut manual_pps,
+            CalibrationJobUpdateInput {
+                elapsed_ticks_delta: elapsed_clock.advance(u64::from(cycle_ms)),
+                latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
+                latest_vin_raw_adc_mv: 0,
+                latest_temp_c: reported_temp_c,
+                pd_current_ma,
+                latest_vin_mv: measured_heater_mv,
+                heater_duty_percent,
+            },
+        );
+        if calibration.job.status == CalibrationJobStatus::Completed {
+            break;
+        }
+        if calibration.job.status == CalibrationJobStatus::Failed {
+            panic!(
+                "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
+                calibration.job.message, calibration.job.samples_collected
+            );
+        }
+
+        let power_mw = if heater_duty_percent > 0 {
+            // In current limiting, heater voltage falls to I*R. The source
+            // capability Vmax*Imax is not the actual resistor power.
+            (measured_heater_mv as f32 / 1_000.0).powi(2) / resistance_ohms * 1_000.0
+        } else {
+            0.0
+        };
+        let temperature_k = temperature_c + 273.15;
+        let ambient_k = ambient_temp_c + 273.15;
+        let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
+            + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
+        temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * cycle_ms as f32 / 1_000.0;
+    }
+
+    assert!(!manual_pps.enabled);
+    (calibration, memory_config, capacity_mj_per_c)
 }
 
 #[test]
 fn thermal_plant_auto_completes_one_transient_cycle_for_3a_and_5a_pps() {
-    fn raw_rtd_adc_mv_for_temp(temp_c: f32) -> u16 {
-        let resistance_ohms = pt1000_resistance_ohms_at(temp_c);
-        (f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance_ohms
-            / (RTD_REFERENCE_RESISTOR_OHMS + resistance_ohms))
-            .round() as u16
-    }
-
-    for source_current_ma in [3_000, 5_000] {
-        let mut calibration = CalibrationRuntimeState {
-            mode: CalibrationMode::ThermalPlant,
-            ..CalibrationRuntimeState::default()
-        };
-        let mut memory_config = MemoryConfig::default();
-        let mut manual_pps =
-            ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
-                pps_covers_20v: true,
-                pps_min_mv: Some(5_000),
-                pps_max_mv: Some(20_000),
-                pps_max_ma: Some(source_current_ma),
-                ..Default::default()
-            }));
-        calibration_job_start(
-            &mut calibration,
-            CalibrationJobKind::ThermalPlant,
-            &mut memory_config,
-            &mut manual_pps,
-        )
-        .unwrap();
-
-        let ambient_temp_c = 25.0_f32;
-        let capacity_mj_per_c = 30_000.0_f32;
-        let convection_mw_per_c = 100.0_f32;
-        let radiation_mw_per_k4 = 0.00000005_f32;
-        let mut temperature_c = ambient_temp_c;
-        for _ in 0..(THERMAL_PLANT_AMBIENT_TICKS as usize
-            + THERMAL_PLANT_HEAT_TIMEOUT_TICKS as usize
-            + THERMAL_PLANT_COOL_TIMEOUT_TICKS as usize)
-        {
-            let heater_duty_percent = u8::from(calibration.heater_enabled) * 100;
-            match test_thermal_plant_phase() {
-                Some(ThermalPlantAutoPhase::Heating) => assert_eq!(heater_duty_percent, 100),
-                Some(ThermalPlantAutoPhase::Cooling) => assert_eq!(heater_duty_percent, 0),
-                Some(ThermalPlantAutoPhase::Ambient) | None => {}
-            }
-            let source_mv = manual_pps.target_mv.unwrap_or(0);
-            let resistance_ohms =
-                estimated_heater_resistance_ohms(temperature_c, None, &memory_config);
-            let pd_current_ma = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / resistance_ohms).round() as u16).min(source_current_ma)
-            } else {
-                0
-            };
-            let measured_heater_mv = if heater_duty_percent > 0 {
-                u32::from(source_mv)
-                    .min((f32::from(pd_current_ma) * resistance_ohms).round() as u32)
-            } else {
-                0
-            };
-            let raw_rtd_adc_mv = raw_rtd_adc_mv_for_temp(temperature_c);
-            let reported_temp_c =
-                projected_rtd_temperature_c(&memory_config, raw_rtd_adc_mv).unwrap();
-            update_calibration_job_state(
-                &mut calibration,
-                &mut memory_config,
-                &mut manual_pps,
-                CalibrationJobUpdateInput {
-                    latest_rtd_raw_adc_mv: raw_rtd_adc_mv,
-                    latest_vin_raw_adc_mv: 0,
-                    latest_temp_c: reported_temp_c,
-                    pd_current_ma,
-                    latest_vin_mv: measured_heater_mv,
-                    heater_duty_percent,
-                },
-            );
-            if calibration.job.status == CalibrationJobStatus::Completed {
-                break;
-            }
-            if calibration.job.status == CalibrationJobStatus::Failed {
-                panic!(
-                    "thermal plant job failed: {:?}, physical_temp={temperature_c}, reported_temp={reported_temp_c}, samples={}",
-                    calibration.job.message, calibration.job.samples_collected
-                );
-            }
-
-            let power_mw = if heater_duty_percent > 0 {
-                ((f32::from(source_mv) / 1_000.0).powi(2) / resistance_ohms * 1_000.0)
-                    .min(f32::from(source_mv) * f32::from(source_current_ma) / 1_000.0)
-            } else {
-                0.0
-            };
-            let temperature_k = temperature_c + 273.15;
-            let ambient_k = ambient_temp_c + 273.15;
-            let losses_mw = convection_mw_per_c * (temperature_c - ambient_temp_c)
-                + radiation_mw_per_k4 * (temperature_k.powi(4) - ambient_k.powi(4));
-            temperature_c += (power_mw - losses_mw) / capacity_mj_per_c * 0.05;
-        }
+    for (source_current_ma, cycle_ms) in [(3_000, 50_u32), (5_000, 50), (3_000, 75), (5_000, 75)] {
+        let (calibration, memory_config, capacity_mj_per_c) =
+            run_transient_calibration_cycle(source_current_ma, cycle_ms);
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
         assert_eq!(calibration.mode, CalibrationMode::Off);
         assert!(!calibration.heater_enabled);
-        assert!(!manual_pps.enabled);
         assert!(memory_config.thermal_plant_transient_active.is_some());
         assert!(has_calibrated_heater_resistance_curve(&memory_config));
+        let transaction = memory_config
+            .thermal_plant_transient_active
+            .as_ref()
+            .unwrap();
+        let model = thermal_plant_projection_from_transient(transaction).unwrap();
+        assert!(
+            (model.thermal_capacity_mj_per_c / capacity_mj_per_c - 1.0).abs() < 0.15,
+            "actual {cycle_ms}ms cadence fitted capacity {} instead of {capacity_mj_per_c}, class={source_current_ma}",
+            model.thermal_capacity_mj_per_c
+        );
+        assert!(
+            model.transport_delay_ms <= 500,
+            "zero-delay auto calibration fitted {}ms, class={source_current_ma}",
+            model.transport_delay_ms
+        );
+        let cutoff = transaction.samples[..usize::from(transaction.sample_count)]
+            .windows(2)
+            .position(|pair| pair[0].duty_percent > 0 && pair[1].duty_percent == 0)
+            .unwrap()
+            + 1;
+        let cutoff_tick = transaction.samples[cutoff].elapsed_ticks;
+        let response = transaction.samples[cutoff..usize::from(transaction.sample_count)]
+            .iter()
+            .take_while(|sample| sample.elapsed_ticks - cutoff_tick <= 190)
+            .collect::<Vec<_>>();
+        assert!(response.len() >= 19);
+        assert!(
+            response
+                .windows(2)
+                .all(|pair| pair[1].elapsed_ticks - pair[0].elapsed_ticks
+                    <= 10 + cycle_ms.div_ceil(50) as u16)
+        );
     }
+}
+
+#[test]
+fn thermal_plant_elapsed_clock_retains_fractional_intervals() {
+    let mut clock = CalibrationElapsedClock::default();
+    let mut actual_ms = 0;
+    let mut ticks = 0;
+    for interval in [9, 47, 61, 75, 50, 115, 29, 2, 500] {
+        actual_ms += interval;
+        ticks += clock.advance(interval);
+        assert_eq!(u64::from(ticks), actual_ms / HEATER_CONTROL_INTERVAL_MS);
+    }
+    clock = CalibrationElapsedClock::default();
+    assert_eq!(clock.advance(49), 0);
+    assert_eq!(clock.advance(1), 1);
+    assert_eq!(clock.advance_for_run(Some(1), 49), 0);
+    assert_eq!(clock.advance_for_run(Some(2), 1), 0);
+    assert_eq!(clock.advance_for_run(Some(2), 49), 1);
+    assert_eq!(clock.advance_for_run(None, 49), 0);
+    assert_eq!(clock.advance_for_run(Some(3), 1), 0);
 }
 
 #[test]
@@ -5893,6 +6884,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: 1_200,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: THERMAL_PLANT_TARGET_TEMP_C,
@@ -5992,6 +6984,7 @@ fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
         &mut memory_config,
         &mut manual_pps,
         CalibrationJobUpdateInput {
+            elapsed_ticks_delta: 1,
             latest_rtd_raw_adc_mv: 0,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: 20.0,
@@ -6036,6 +7029,7 @@ fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
                 &mut memory_config,
                 &mut manual_pps,
                 CalibrationJobUpdateInput {
+                    elapsed_ticks_delta: 1,
                     latest_rtd_raw_adc_mv: 250,
                     latest_vin_raw_adc_mv: 0,
                     latest_temp_c: 25.0,
@@ -6052,6 +7046,7 @@ fn thermal_plant_job_disarms_on_missing_powered_electrical_observation() {
             &mut memory_config,
             &mut manual_pps,
             CalibrationJobUpdateInput {
+                elapsed_ticks_delta: 1,
                 latest_rtd_raw_adc_mv: 260,
                 latest_vin_raw_adc_mv: 0,
                 latest_temp_c: 26.0,
@@ -6199,6 +7194,30 @@ fn non_blank_eeprom_without_a_valid_record_is_incompatible() {
 }
 
 #[test]
+fn eeprom_maintenance_waits_for_delayed_power_confirmation() {
+    assert_eq!(eeprom_power_disarm_result(None, 0), None);
+    assert_eq!(eeprom_power_disarm_result(None, 200), None);
+    assert_eq!(eeprom_power_disarm_result(Some(true), 250), Some(true));
+}
+
+#[test]
+fn eeprom_maintenance_rejects_failed_or_expired_power_confirmation() {
+    assert_eq!(eeprom_power_disarm_result(Some(false), 250), Some(false));
+    assert_eq!(
+        eeprom_power_disarm_result(None, EEPROM_POWER_DISARM_TIMEOUT_MS - 1),
+        None
+    );
+    assert_eq!(
+        eeprom_power_disarm_result(None, EEPROM_POWER_DISARM_TIMEOUT_MS),
+        Some(false)
+    );
+    assert_eq!(
+        eeprom_power_disarm_result(Some(true), EEPROM_POWER_DISARM_TIMEOUT_MS + 1),
+        Some(false)
+    );
+}
+
+#[test]
 fn raw_eeprom_maintenance_locks_writes_and_clears_erased_runtime_state() {
     let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
     let mut config = MemoryConfig {
@@ -6294,15 +7313,15 @@ fn heater_control_saturates_when_far_below_target() {
 }
 
 #[test]
-fn warmup_soft_start_runs_once_per_arm_and_target_change() {
+fn warmup_soft_start_completes_in_100ms_per_arm_and_target_change() {
     let mut controller = HeaterController::new();
     let armed = controller.update_at(140, 25.0, true, None, 1_000);
     assert_eq!(armed.warmup_soft_start_percent, 0);
 
-    let mid_ramp = controller.update_at(140, 25.0, true, None, 1_500);
+    let mid_ramp = controller.update_at(140, 25.0, true, None, 1_050);
     assert_eq!(mid_ramp.warmup_soft_start_percent, 50);
 
-    let completed = controller.update_at(140, 25.0, true, None, 2_000);
+    let completed = controller.update_at(140, 25.0, true, None, 1_100);
     assert_eq!(completed.warmup_soft_start_percent, 100);
 
     let target_changed = controller.update_at(180, 25.0, true, None, 3_000);
@@ -6648,9 +7667,9 @@ fn heater_control_requires_actual_margin_before_entering_hold() {
         ],
     };
 
-    let snapshot = controller.update(180, 179.6, true, Some(profile));
+    let snapshot = controller.update(180, 179.4, true, Some(profile));
     assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
-    assert!(snapshot.error_c > 0.2);
+    assert!(snapshot.error_c > 0.5);
 }
 
 #[test]
@@ -6741,6 +7760,19 @@ fn heater_control_hold_reapplies_small_power_near_target_without_waiting_for_lar
         let measured = 99.95 - (step as f32 * 0.06);
         near_target = controller.update_at(100, measured, true, None, now_ms);
     }
+    assert!(near_target.coast_active);
+    assert_eq!(near_target.duty_percent, 0);
+    // Continue real cooling observations until the filtered low-error gate
+    // catches up, without simulating a large temperature drop.
+    for step in 13..=24 {
+        now_ms += HEATER_CONTROL_INTERVAL_MS;
+        let measured = 99.95 - (step as f32 * 0.06);
+        near_target = controller.update_at(100, measured, true, None, now_ms);
+        if near_target.duty_percent > 0 {
+            break;
+        }
+    }
+    assert!(near_target.error_c < 1.5);
     assert!(matches!(
         near_target.phase,
         HeaterControlPhase::Approach | HeaterControlPhase::Hold
@@ -7240,6 +8272,8 @@ fn heater_hold_coasts_after_predictive_cut_until_temperature_is_falling() {
     };
 
     let entered_hold = controller.update(60, 59.4, true, Some(profile));
+    assert_eq!(entered_hold.phase, HeaterControlPhase::Approach);
+    let entered_hold = controller.update(60, 59.5, true, Some(profile));
     assert_eq!(entered_hold.phase, HeaterControlPhase::Hold);
     assert!(controller.hold_coast_active);
     assert_eq!(entered_hold.duty_percent, 0);
@@ -7265,6 +8299,9 @@ fn heater_hold_coasts_after_predictive_cut_until_temperature_is_falling() {
     controller.filtered_slope_c_per_profile_tick = -0.5;
     controller.previous_measured_temp_c = Some(59.6);
     let falling_under_target = controller.update(60, 59.4, true, Some(profile));
+    assert!(falling_under_target.coast_active);
+    assert_eq!(falling_under_target.duty_percent, 0);
+    let falling_under_target = controller.update(60, 59.3, true, Some(profile));
     assert!(!controller.hold_coast_active);
     assert!(falling_under_target.duty_percent > 0);
     assert_eq!(controller.phase_ticks, 0);
@@ -7281,7 +8318,7 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
     controller.filtered_temp_c = Some(132.57);
     controller.previous_filtered_temp_c = Some(131.97);
     controller.filtered_slope_c_per_profile_tick = 2.4;
-    controller.previous_measured_temp_c = Some(138.0);
+    controller.previous_measured_temp_c = Some(139.2);
 
     let profile = ThermalControlProfile {
         settings: ThermalControlProfileSettings {
@@ -7323,7 +8360,7 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
         ],
     };
 
-    let snapshot = controller.update(140, 138.6, true, Some(profile));
+    let snapshot = controller.update(140, 139.5, true, Some(profile));
 
     assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
     assert!(controller.hold_coast_active);
@@ -7350,12 +8387,15 @@ fn heater_hold_coasts_when_projection_crosses_target_with_nonzero_approach_power
     controller.filtered_slope_c_per_profile_tick = -0.5;
     controller.previous_measured_temp_c = Some(139.6);
     let falling_under_target = controller.update(140, 139.4, true, Some(profile));
+    assert!(falling_under_target.coast_active);
+    assert_eq!(falling_under_target.duty_percent, 0);
+    let falling_under_target = controller.update(140, 139.3, true, Some(profile));
     assert!(!controller.hold_coast_active);
     assert!(falling_under_target.duty_percent > 0);
 }
 
 #[test]
-fn heater_hold_does_not_coast_below_target_just_because_previous_output_was_zero() {
+fn heater_approach_under_temperature_cannot_enter_hold_after_zero_output() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 180;
     controller.phase = HeaterControlPhase::Approach;
@@ -7408,7 +8448,7 @@ fn heater_hold_does_not_coast_below_target_just_because_previous_output_was_zero
 
     let snapshot = controller.update(180, 178.3, true, Some(profile));
 
-    assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
     assert!(!controller.hold_coast_active);
     assert!(snapshot.duty_percent > 0);
 }
@@ -7763,6 +8803,66 @@ fn heater_approach_uses_hold_base_without_inheriting_reheat_floor() {
 }
 
 #[test]
+fn heater_coast_release_requires_filtered_low_error() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 1;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.hold_on_centi_c = 30;
+    point.hold_exit_centi_c = 500;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 60;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.hold_coast_active = true;
+    controller.filtered_temp_c = Some(60.5);
+    controller.previous_measured_temp_c = Some(59.8);
+    controller.filtered_slope_c_per_profile_tick = -0.5;
+    controller.update_at(60, 59.6, true, Some(profile), 1_000);
+    let snapshot = controller.update_at(60, 59.4, true, Some(profile), 2_000);
+    assert!(snapshot.filtered_temp_c > 59.7);
+    assert!(
+        snapshot.coast_active,
+        "filtered low-error gate has not been met"
+    );
+    assert_eq!(snapshot.duty_percent, 0);
+}
+
+#[test]
+fn heater_approach_coast_requires_actual_hold_exit_error() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.temp_filter_alpha_permille = 1;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 140;
+    point.hold_entry_centi_c = 50;
+    point.hold_exit_centi_c = 100;
+    point.approach_lead_ticks = 5;
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 140;
+    controller.phase = HeaterControlPhase::Approach;
+    controller.filtered_temp_c = Some(139.3);
+    controller.previous_measured_temp_c = Some(139.3);
+    controller.filtered_slope_c_per_profile_tick = 1.0;
+    let snapshot = controller.update_at(140, 138.5, true, Some(profile), 1_000);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+    assert!(snapshot.control_error_c <= 1.0);
+    assert!(snapshot.error_c > 1.0);
+    assert!(
+        snapshot.duty_percent > 0,
+        "actual holdExit gate has not been met"
+    );
+}
+
+#[test]
 fn heater_approach_predictive_coast_waits_for_actual_error_to_shrink() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 100;
@@ -7869,7 +8969,7 @@ fn heater_approach_predictive_coast_cuts_power_once_actual_error_is_hold_ready()
 
     let snapshot = controller.update(100, 99.4, true, Some(profile));
     assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
-    assert_eq!(snapshot.duty_percent, 0);
+    assert!(snapshot.duty_percent >= 10);
 }
 
 #[test]
@@ -7939,7 +9039,7 @@ fn heater_approach_accepts_previous_sample_within_measurement_margin() {
     controller.filtered_temp_c = Some(135.05222);
     controller.previous_filtered_temp_c = Some(134.72865);
     controller.filtered_slope_c_per_profile_tick = 1.29428;
-    controller.previous_measured_temp_c = Some(137.5);
+    controller.previous_measured_temp_c = Some(139.0);
 
     let profile = ThermalControlProfile {
         settings: ThermalControlProfileSettings {
@@ -7981,7 +9081,7 @@ fn heater_approach_accepts_previous_sample_within_measurement_margin() {
         ],
     };
 
-    let snapshot = controller.update(140, 138.56143, true, Some(profile));
+    let snapshot = controller.update(140, 139.56143, true, Some(profile));
 
     assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
 }
@@ -8343,7 +9443,7 @@ fn heater_hold_prediction_does_not_zero_output_while_plate_is_still_well_below_t
 }
 
 #[test]
-fn heater_hold_entry_does_not_coast_far_below_target_after_zero_output_approach_sample() {
+fn heater_approach_does_not_enter_hold_far_below_target_after_zero_output() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 60;
     controller.phase = HeaterControlPhase::Approach;
@@ -8396,12 +9496,13 @@ fn heater_hold_entry_does_not_coast_far_below_target_after_zero_output_approach_
 
     let snapshot = controller.update(60, 57.99, true, Some(profile));
 
-    assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
     assert!(snapshot.error_c > 2.0);
     assert!(snapshot.control_error_c > 2.5);
     assert!(snapshot.filtered_slope_c_per_s > 0.0);
     assert!(!controller.hold_coast_active);
-    assert!(snapshot.duty_percent > 0);
+    // Predictive coast must not bypass the normal Approach positive-power floor.
+    assert!(snapshot.duty_percent >= 10);
 }
 
 #[test]
@@ -8524,6 +9625,23 @@ fn heater_armed_zero_output_steps_toward_working_floor() {
 }
 
 #[test]
+fn tuning_cooldown_stages_full_pps_voltage_without_heater_output() {
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 12_000, 12_000, 6_100, 21_000),
+        21_000
+    );
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 21_000, 12_000, 6_100, 21_000),
+        21_000
+    );
+    assert_eq!(
+        automatic_pps_request_mv(0, false, false, 21_000, 12_000, 6_100, 21_000),
+        12_000
+    );
+    assert_eq!(heater_physical_pwm_percent(0, 21_000, 12_000, 100), 0);
+}
+
+#[test]
 fn heater_pwm_frequency_is_100hz_for_all_heater_backends() {
     assert_eq!(HEATER_PWM_FREQUENCY_HZ, 100);
 }
@@ -8568,6 +9686,39 @@ fn heater_physical_pwm_reduces_power_below_6_5v_working_floor() {
     assert_eq!(heater_physical_pwm_percent(10, 14_000, 6_100, 100), 52);
     assert_eq!(heater_physical_pwm_percent(1, 14_000, 6_100, 100), 5);
     assert_eq!(heater_physical_pwm_percent(0, 14_000, 6_100, 100), 0);
+}
+
+#[test]
+fn hold_pps_restores_observed_high_temperature_headroom_before_the_window_deadline() {
+    // The 220 C HIL held 20.5 V at 81% logical output and about 1 C
+    // undershoot. A ten-second initial dwell changed voltage just before the
+    // first continuous ten-second witness could finish, invalidating it.
+    let mut governor = HoldPpsGovernor::new();
+    let input = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Hold,
+        duty_percent: 81,
+        actual_error_c: 1.0,
+        filtered_slope_c_per_s: 0.0,
+        current_request_mv: 20_500,
+        control_floor_mv: 12_000,
+        safe_max_mv: 21_000,
+        now_ms: 0,
+    };
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, false),
+        Some(20_500)
+    );
+    assert_eq!(
+        heater_phase_pps_request_mv(
+            &mut governor,
+            HoldPpsRequestInput {
+                now_ms: 1_000,
+                ..input
+            },
+            false
+        ),
+        Some(21_000)
+    );
 }
 
 #[test]
@@ -8652,6 +9803,129 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
             now_ms: HEATER_HOLD_PPS_INITIAL_SETTLE_MS,
         }),
         Some(14_000)
+    );
+}
+
+#[test]
+fn profile_first_approach_downramps_pps_but_hold_recovery_keeps_the_handoff() {
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    controller.phase = HeaterControlPhase::Approach;
+    assert!(controller.initial_profile_approach());
+    controller.recovering_from_hold = true;
+    assert!(!controller.initial_profile_approach());
+    controller.recovering_from_hold = false;
+    controller.production_controller = Some(ProductionThermalController::Unavailable);
+    assert!(!controller.initial_profile_approach());
+    let mut governor = HoldPpsGovernor::new();
+    let input = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Approach,
+        duty_percent: 10,
+        actual_error_c: 16.18,
+        filtered_slope_c_per_s: 2.4,
+        current_request_mv: 21_000,
+        control_floor_mv: 6_100,
+        safe_max_mv: 21_000,
+        now_ms: 4_000,
+    };
+    let automatic = automatic_pps_request_mv(10, true, false, 21_000, 12_000, 6_100, 21_000);
+    assert_eq!(automatic, 20_500);
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, true).unwrap_or(automatic),
+        20_500,
+    );
+    let hold = HoldPpsRequestInput {
+        phase: HeaterControlPhase::Hold,
+        current_request_mv: 10_000,
+        now_ms: 8_000,
+        ..input
+    };
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, hold, false),
+        Some(10_000)
+    );
+    assert_eq!(
+        heater_phase_pps_request_mv(
+            &mut governor,
+            HoldPpsRequestInput {
+                phase: HeaterControlPhase::Approach,
+                ..hold
+            },
+            false,
+        ),
+        Some(10_000),
+    );
+    // Re-entering Warmup/first Approach starts a new down-ramp, even after Hold.
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, true),
+        None
+    );
+    assert_eq!(governor, HoldPpsGovernor::new());
+    // The established 3A plant path does not receive the profile-only guard.
+    assert_eq!(
+        heater_phase_pps_request_mv(&mut governor, input, false),
+        Some(21_000)
+    );
+}
+
+#[test]
+fn tuning_continuous_pps_downramp_does_not_restart_the_trial_or_hide_failure() {
+    let (power, _) = production_power_fixture(5_000);
+    let request = PdContractRequest::pps(19_500, 5_000).unwrap();
+    for protocol in [
+        PowerProtocol::Ready,
+        PowerProtocol::WaitingForAccept,
+        PowerProtocol::WaitingForPsRdy,
+    ] {
+        let state = PowerState {
+            protocol,
+            requested: Some(request),
+            ..power
+        };
+        let pending = tuning_pd_wait_decision(state, None, 200, Some(100), false);
+        assert_eq!(pending, TuningPdWaitDecision::Wait);
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), false, false),
+            TuningPdWaitDecision::Continue,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), true, false),
+            TuningPdWaitDecision::Wait,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(pending, state, Some(request), false, true),
+            TuningPdWaitDecision::Wait,
+        );
+        let timeout = tuning_pd_wait_decision(
+            state,
+            None,
+            AUTOMATIC_PPS_TICKET_WAIT_MS + 101,
+            Some(100),
+            false,
+        );
+        assert_eq!(
+            tuning_pps_transition_decision(timeout, state, Some(request), false, false),
+            TuningPdWaitDecision::Fail("pd_request_timeout"),
+        );
+    }
+    for state in [PowerState::unavailable(), production_power_fixture(3_250).0] {
+        assert_eq!(
+            tuning_pps_transition_decision(
+                TuningPdWaitDecision::Wait,
+                state,
+                Some(request),
+                false,
+                false
+            ),
+            TuningPdWaitDecision::Wait,
+        );
+    }
+    let failure = TuningPdWaitDecision::Fail("pd_request_failed");
+    assert_eq!(
+        tuning_pps_transition_decision(failure, power, Some(request), false, false),
+        failure
     );
 }
 
@@ -9143,6 +10417,2191 @@ fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
     );
 }
 
+fn production_power_fixture(max_ma: u16) -> (PowerState, ManualPpsState) {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_000, 21_000, max_ma)]);
+    let request = PdContractRequest::pps(20_000, max_ma).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let power_state = PowerState {
+        protocol: PowerProtocol::Ready,
+        available: true,
+        requested: None,
+        active: Some(active),
+        source_capabilities: source.view(),
+        failure: None,
+    };
+    let manual_pps = ManualPpsState::from_capabilities(adjustable_capabilities_from_view(
+        power_state.source_capabilities,
+    ));
+    (power_state, manual_pps)
+}
+
+#[test]
+fn valid_fixed_idle_contract_still_requires_automatic_pps_bootstrap() {
+    let (mut power, manual_pps) = production_power_fixture(5_000);
+    let active = power.active.as_mut().unwrap();
+    active.mode = PdContractRequestMode::Fixed;
+    active.voltage_mv = 5_000;
+    active.operating_current_ma = 1_000;
+    assert!(power.available);
+    assert_eq!(power.protocol, PowerProtocol::Ready);
+    assert!(automatic_pps_working_contract_pending(
+        power,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+    assert_eq!(
+        automatic_pps_request_mv(0, true, true, 12_000, 12_000, 5_500, 21_000),
+        21_000
+    );
+
+    let (ready, _) = production_power_fixture(5_000);
+    assert!(!automatic_pps_working_contract_pending(
+        ready,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+    let (lower_current, _) = production_power_fixture(3_000);
+    assert!(automatic_pps_working_contract_pending(
+        lower_current,
+        ThermalProfileMode::W100,
+        &manual_pps,
+    ));
+}
+
+fn production_test_profile(approach_power_permille: u16) -> ThermalControlProfile {
+    let mut points = [None; FRONTPANEL_PRESET_COUNT];
+    points[0] = Some(ThermalControlProfilePoint {
+        target_temp_c: 60,
+        brake_distance_centi_c: 1_400,
+        warmup_power_permille: 1_000,
+        warmup_reenter_centi_c: 400,
+        approach_power_permille,
+        approach_floor_power_permille: 100,
+        approach_damping_exponent_permille: 1_000,
+        approach_tail_window_centi_c: 100,
+        hold_power_permille: 250,
+        hold_reheat_power_permille: 300,
+        hold_entry_centi_c: 150,
+        hold_exit_centi_c: 250,
+        hold_on_centi_c: 30,
+        hold_off_centi_c: 50,
+        overshoot_cutoff_centi_c: 300,
+        hold_kp_permille_per_c: 100,
+        hold_ki_permille_per_c_tick: 10,
+        hold_blend_ticks: 4,
+        approach_lead_ticks: 8,
+        hold_lead_ticks: 6,
+    });
+    ThermalControlProfile {
+        settings: ThermalControlProfileSettings::default(),
+        points,
+    }
+}
+
+fn production_test_input(measured_temp_c: f32) -> ThermalPlantRuntimeInput {
+    ThermalPlantRuntimeInput {
+        target_temp_c: 60,
+        measured_temp_c,
+        ambient_temp_c: 25.0,
+        measurement_accepted: true,
+        heater_enabled: true,
+        model: flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 100.0,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 15_000.0,
+            transport_delay_ms: 200,
+        },
+        max_power_mw: 65_000.0,
+        now_ms: 3_000,
+    }
+}
+
+fn calibrated_tail_test_setup() -> (
+    flux_purr_firmware::thermal_response::HeatResponse,
+    ThermalPlantRuntimeInput,
+    ThermalControlProfile,
+) {
+    use flux_purr_firmware::thermal_response::{HeatResponse, reference_brake_c};
+    let response = HeatResponse {
+        delay_ms: 0,
+        decay_ms: 3_900,
+        rmse_c: 0.4,
+        maximum_error_c: 0.8,
+    };
+    let mut input = production_test_input(35.0);
+    input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+        convection_mw_per_c: 198.67226,
+        radiation_mw_per_k4: 2.2978014e-7,
+        thermal_capacity_mj_per_c: 25_843.268,
+        transport_delay_ms: 850,
+    };
+    input.max_power_mw = 105_000.0;
+    input.ambient_temp_c = 29.83;
+    let brake = reference_brake_c(
+        response,
+        input.model,
+        input.ambient_temp_c,
+        input.max_power_mw,
+        60.0,
+    );
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.brake_distance_centi_c = (brake * 100.0).round() as u16;
+    point.approach_lead_ticks = 0;
+    point.hold_lead_ticks = 0;
+    point.approach_damping_exponent_permille = 1_000;
+    point.hold_power_permille = 66;
+    point.hold_reheat_power_permille = 66;
+    point.hold_kp_permille_per_c = 16;
+    config.points[1..].fill(None);
+    let profile = ThermalControlProfile::from_saved_config(&config).unwrap();
+    (response, input, profile)
+}
+
+#[test]
+fn calibrated_tail_drives_production_handoff_and_bounded_reheat() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    let mut controller = HeaterController::new();
+    controller.heat_response = Some(response);
+    let mut temperature = 35.0;
+    let mut received_mw = 0.0;
+    let mut handoff = None;
+    let mut handoff_ms = None;
+    let mut hold = None;
+    let mut stable_since = None;
+    let mut verified_since = None;
+    let mut peak = temperature;
+    for now_ms in (0..90_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        if output.phase == HeaterControlPhase::Approach {
+            if handoff.is_none() {
+                handoff = Some(temperature);
+                handoff_ms = Some(now_ms);
+                assert_eq!(output.duty_percent, 5);
+            }
+            assert!((5..=100).contains(&output.duty_percent), "{output:?}");
+        }
+        if output.phase == HeaterControlPhase::Hold {
+            assert!(temperature >= 59.5, "{temperature}");
+            hold.get_or_insert(now_ms);
+        }
+        if output.phase == HeaterControlPhase::Hold && (58.5..=61.5).contains(&temperature) {
+            let start = *stable_since.get_or_insert(now_ms);
+            if now_ms - start >= 10_000 {
+                verified_since.get_or_insert(start);
+            }
+        } else {
+            stable_since = None;
+        }
+        let applied_mw = input.max_power_mw * f32::from(output.duty_percent) / 100.0
+            * f32::from(output.warmup_soft_start_percent)
+            / 100.0;
+        controller.applied_heat.observe(now_ms, applied_mw);
+        let energy = response.step(&mut received_mw, applied_mw, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        temperature += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+        peak = peak.max(temperature);
+    }
+    let handoff = handoff.unwrap();
+    assert!((46.0..=51.0).contains(&handoff), "{handoff}");
+    assert!(
+        hold.is_some(),
+        "handoff={handoff}, final={temperature}, peak={peak}"
+    );
+    assert!(peak <= 61.5, "{peak}");
+    let settled_ms = verified_since.unwrap() - handoff_ms.unwrap();
+    assert!(
+        settled_ms <= 10_000,
+        "settled={settled_ms} handoff={handoff} hold={hold:?} peak={peak}",
+    );
+    assert!((58.5..=61.5).contains(&temperature), "{temperature}");
+}
+
+#[test]
+fn complete_heat_model_does_not_double_count_approach_lead_in_warmup() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    let mut advanced = profile;
+    advanced.points[0].as_mut().unwrap().approach_lead_ticks = 7;
+    let mut controllers = [HeaterController::new(), HeaterController::new()];
+    for controller in &mut controllers {
+        controller.heat_response = Some(response);
+    }
+    let mut received_mw = 0.0;
+    for now_ms in (0..20_000).step_by(50) {
+        input.now_ms = now_ms;
+        let outputs: [_; 2] = core::array::from_fn(|index| {
+            controllers[index]
+                .update_production_at(
+                    ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+                    input,
+                    Some([profile, advanced][index]),
+                )
+                .0
+        });
+        assert_eq!(outputs[0].phase, outputs[1].phase);
+        if outputs[0].phase == HeaterControlPhase::Approach {
+            return;
+        }
+        let power = input.max_power_mw * f32::from(outputs[0].duty_percent) / 100.0
+            * f32::from(outputs[0].warmup_soft_start_percent)
+            / 100.0;
+        for controller in &mut controllers {
+            controller.applied_heat.observe(now_ms, power);
+        }
+        let energy = response.step(&mut received_mw, power, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            input.measured_temp_c,
+            input.ambient_temp_c,
+        );
+        input.measured_temp_c += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    panic!("expected a calibrated handoff");
+}
+
+#[test]
+fn calibrated_high_temperature_hold_does_not_wait_for_a_low_side_exit() {
+    for extra_loss_mw in [5_000.0, 10_000.0] {
+        check_calibrated_high_temperature_hold(extra_loss_mw);
+    }
+}
+
+#[test]
+fn calibrated_hold_feedback_can_correct_the_model_endpoint_request() {
+    let (response, mut input, profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.measured_temp_c = 219.0;
+    input.max_power_mw = 78_000.0;
+    input.now_ms = 20_000;
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+        input.model,
+        219.0,
+        input.ambient_temp_c,
+    );
+    let outputs = [1, 21].map(|kp| {
+        let mut profile = profile;
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.hold_kp_permille_per_c = kp;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_power_permille = 641;
+        point.hold_reheat_power_permille = 641;
+        point.hold_blend_ticks = 1;
+        point.hold_off_centi_c = 120;
+        point.overshoot_cutoff_centi_c = 150;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.heat_response = Some(response);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 1_000;
+        controller.filtered_temp_c = Some(219.0);
+        controller.previous_filtered_temp_c = Some(219.0);
+        controller.previous_measured_temp_c = Some(219.0);
+        controller.last_accepted_measurement_at_ms = Some(19_950);
+        controller.profile_last_control_at_ms = Some(19_950);
+        controller.applied_heat.configure(850);
+        controller.applied_heat.configure_response(Some(response));
+        for now_ms in (0..=20_000).step_by(50) {
+            controller.applied_heat.observe(now_ms, loss);
+        }
+        controller
+            .update_production_at(kind, input, Some(profile))
+            .0
+    });
+    assert_eq!(outputs[0].phase, HeaterControlPhase::Hold);
+    assert_eq!(outputs[1].phase, HeaterControlPhase::Hold);
+    assert!(
+        outputs[1].duty_percent > outputs[0].duty_percent,
+        "{outputs:?}"
+    );
+}
+
+#[test]
+fn calibrated_hold_recovers_a_one_degree_deficit_within_the_response_time() {
+    let (response, mut input, mut profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.max_power_mw = 78_000.0;
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = 220;
+    point.hold_power_permille = 641;
+    point.hold_reheat_power_permille = 641;
+    point.hold_kp_permille_per_c = 21;
+    point.hold_ki_permille_per_c_tick = 1;
+    point.hold_blend_ticks = 1;
+    point.hold_off_centi_c = 120;
+    point.overshoot_cutoff_centi_c = 150;
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(kind);
+    controller.heat_response = Some(response);
+    controller.last_target_temp_c = 220;
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.phase_ticks = 1_000;
+    controller.filtered_temp_c = Some(219.0);
+    controller.previous_filtered_temp_c = Some(219.0);
+    controller.previous_measured_temp_c = Some(219.0);
+    controller.last_accepted_measurement_at_ms = Some(19_950);
+    controller.profile_last_control_at_ms = Some(19_950);
+    controller.applied_heat.configure(850);
+    controller.applied_heat.configure_response(Some(response));
+    let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+        input.model,
+        219.0,
+        input.ambient_temp_c,
+    );
+    for now_ms in (0..=20_000).step_by(50) {
+        controller.applied_heat.observe(now_ms, loss);
+    }
+    let mut temperature = 219.0;
+    let mut heat = loss;
+    let mut recovered_at_ms = None;
+    for now_ms in (20_000..80_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Hold);
+        assert!(
+            (218.5..=221.5).contains(&temperature),
+            "{now_ms}: {temperature}"
+        );
+        if temperature >= 219.75 {
+            recovered_at_ms.get_or_insert(now_ms - 20_000);
+        }
+        let power = input.max_power_mw * f32::from(output.duty_percent) / 100.0;
+        controller.applied_heat.observe(now_ms, power);
+        let energy = response.step(&mut heat, power, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        temperature += (energy - loss * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    assert!(
+        recovered_at_ms.is_some_and(|at| at <= u64::from(response.decay_ms) * 3),
+        "{recovered_at_ms:?}"
+    );
+}
+
+fn check_calibrated_high_temperature_hold(fan_loss_mw: f32) {
+    let (response, mut input, mut profile) = calibrated_tail_test_setup();
+    input.target_temp_c = 220;
+    input.max_power_mw = 78_000.0;
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = 220;
+    point.brake_distance_centi_c = (flux_purr_firmware::thermal_response::reference_brake_c(
+        response,
+        input.model,
+        input.ambient_temp_c,
+        input.max_power_mw,
+        220.0,
+    ) * 100.0)
+        .round() as u16;
+    point.hold_power_permille = 641;
+    point.hold_reheat_power_permille = 641;
+    point.hold_kp_permille_per_c = 21;
+    point.hold_off_centi_c = 120;
+    point.overshoot_cutoff_centi_c = 150;
+    let mut controller = HeaterController::new();
+    controller.heat_response = Some(response);
+    let mut temperature = 200.0;
+    let mut received_mw = 0.0;
+    let mut entered_hold = false;
+    let mut minimum_hold_c = f32::MAX;
+    let mut peak_hold_c = f32::MIN;
+    for now_ms in (0..100_000).step_by(50) {
+        input.now_ms = now_ms;
+        input.measured_temp_c = temperature;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        entered_hold |= output.phase == HeaterControlPhase::Hold;
+        if entered_hold {
+            minimum_hold_c = minimum_hold_c.min(temperature);
+            peak_hold_c = peak_hold_c.max(temperature);
+            assert_eq!(
+                output.phase,
+                HeaterControlPhase::Hold,
+                "at {now_ms}: {temperature}"
+            );
+        }
+        let applied_mw = input.max_power_mw * f32::from(output.duty_percent) / 100.0
+            * f32::from(output.warmup_soft_start_percent)
+            / 100.0;
+        controller.applied_heat.observe(now_ms, applied_mw);
+        let energy = response.step(&mut received_mw, applied_mw, 0.05);
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            temperature,
+            input.ambient_temp_c,
+        );
+        // A bounded periodic loss represents the heating fan/environment.
+        // The accepted-temperature observer must recover its missing heat;
+        // a static PI baseline must not cap that recovery indefinitely.
+        let extra_loss_mw = if now_ms % 10_000 < 5_000 {
+            fan_loss_mw
+        } else {
+            0.0
+        };
+        temperature +=
+            (energy - (loss + extra_loss_mw) * 0.05) / input.model.thermal_capacity_mj_per_c;
+    }
+    assert!(entered_hold);
+    assert!(minimum_hold_c >= 218.5, "{minimum_hold_c}");
+    assert!(peak_hold_c <= 221.5, "{peak_hold_c}");
+}
+
+#[test]
+fn production_point_local_zero_leads_survive_profile_materialization() {
+    let mut config: ThermalControlProfileConfig = ThermalControlProfileWire {
+        settings: None,
+        points: saved_thermal_profile_points(),
+    }
+    .into();
+    config.settings.approach_lead_ticks = 7;
+    config.settings.hold_lead_ticks = 6;
+    let point = config.points[0].as_mut().unwrap();
+    point.target_temp_c = 60;
+    point.approach_lead_ticks = 0;
+    point.hold_lead_ticks = 0;
+    config.sanitize();
+    let preview = ThermalControlProfile::from_saved_config(&config).unwrap();
+    let effective = preview.control_target(60);
+    assert_eq!(effective.approach_lead_ticks, 0);
+    assert_eq!(effective.hold_lead_ticks, 0);
+}
+
+#[test]
+fn production_hold_entry_cannot_be_widened_by_candidate_or_timeout() {
+    for target in [60, 160] {
+        for curve_entry in [20, 270, 420] {
+            for phase_ticks in [0, u16::MAX] {
+                let mut profile = production_test_profile(667);
+                profile.settings.temp_filter_alpha = 1.0;
+                let point = profile.points[0].as_mut().unwrap();
+                point.target_temp_c = target;
+                point.hold_entry_centi_c = curve_entry;
+                point.approach_lead_ticks = 0;
+                point.hold_lead_ticks = 0;
+                let measured = f32::from(target) - 2.51;
+                let mut controller = HeaterController::new();
+                controller.last_target_temp_c = target;
+                controller.heater_was_enabled = true;
+                controller.phase = HeaterControlPhase::Approach;
+                controller.phase_ticks = phase_ticks;
+                controller.filtered_temp_c = Some(measured);
+                controller.previous_filtered_temp_c = Some(measured);
+                controller.previous_measured_temp_c = Some(measured);
+                let under = controller.update_at(target, measured, true, Some(profile), 3_000);
+                assert_eq!(under.phase, HeaterControlPhase::Approach);
+
+                // Neither a narrow nor a wide curve entry changes this gate.
+                let admitted_temp = f32::from(target) - 0.5;
+                controller.filtered_temp_c = Some(admitted_temp);
+                controller.previous_filtered_temp_c = Some(admitted_temp);
+                controller.previous_measured_temp_c = Some(admitted_temp);
+                let admitted =
+                    controller.update_at(target, admitted_temp, true, Some(profile), 3_050);
+                assert_eq!(admitted.phase, HeaterControlPhase::Hold);
+            }
+        }
+    }
+}
+
+#[test]
+fn hold_entry_curve_parameter_still_shapes_approach_output() {
+    let mut outputs = [0; 2];
+    for (index, curve_entry) in [100, 420].into_iter().enumerate() {
+        let mut profile = production_test_profile(667);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.hold_entry_centi_c = curve_entry;
+        point.hold_power_permille = 100;
+        point.approach_lead_ticks = 0;
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(54.0);
+        controller.previous_filtered_temp_c = Some(54.0);
+        controller.previous_measured_temp_c = Some(54.0);
+        let output = controller.update_at(60, 54.0, true, Some(profile), 3_000);
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        outputs[index] = output.duty_percent;
+    }
+    assert_ne!(outputs[0], outputs[1]);
+}
+
+#[test]
+fn profile_temperature_filter_preserves_one_second_semantics_at_real_cadence() {
+    let mut profile = production_test_profile(300);
+    profile.settings.temp_filter_alpha = 0.75;
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        let mut now_ms = 0;
+        let mut snapshot = controller.update_at(240, 25.0, true, Some(profile), 0);
+        while now_ms < 1_000 {
+            now_ms = (now_ms + interval_ms).min(1_000);
+            snapshot = controller.update_at(240, 35.0, true, Some(profile), now_ms);
+        }
+        assert!(
+            (snapshot.filtered_temp_c - 32.5).abs() < 0.2,
+            "interval={interval_ms}ms, filtered={}",
+            snapshot.filtered_temp_c,
+        );
+    }
+}
+
+#[test]
+fn profile_slope_uses_elapsed_time_instead_of_assumed_fifty_ms() {
+    let mut profile = production_test_profile(300);
+    profile.settings.temp_filter_alpha = 1.0;
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        controller.update_at(240, 25.0, true, Some(profile), 0);
+        let next_temp_c = 25.0 + interval_ms as f32 / 1_000.0;
+        let snapshot = controller.update_at(240, next_temp_c, true, Some(profile), interval_ms);
+        assert!(
+            (snapshot.filtered_slope_c_per_s - 1.0).abs() < 0.001,
+            "interval={interval_ms}ms, slope={}",
+            snapshot.filtered_slope_c_per_s,
+        );
+    }
+}
+
+#[test]
+fn profile_hold_integral_and_blend_time_follow_elapsed_seconds() {
+    let profile = production_test_profile(300);
+    for interval_ms in [50, 60, 100] {
+        let mut controller = HeaterController::new();
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.reseed_measurement(59.8);
+        controller.update_at(60, 59.8, true, Some(profile), 0);
+        let mut now_ms = 0;
+        while now_ms < 1_000 {
+            now_ms = (now_ms + interval_ms).min(1_000);
+            controller.update_at(60, 59.8, true, Some(profile), now_ms);
+        }
+        assert!(
+            (controller.hold_integral_c - 4.2).abs() < 0.02,
+            "interval={interval_ms}ms, integral={}",
+            controller.hold_integral_c,
+        );
+        assert_eq!(controller.phase_ticks, 21, "interval={interval_ms}ms");
+    }
+}
+
+#[test]
+fn profile_disarm_does_not_integrate_disabled_time_on_rearm() {
+    let mut controller = HeaterController::new();
+    let profile = production_test_profile(300);
+    controller.update_at(240, 25.0, true, Some(profile), 0);
+    controller.update_at(240, 35.0, true, Some(profile), 100);
+    controller.update_at(240, 35.0, false, Some(profile), 150);
+    let snapshot = controller.update_at(240, 36.0, true, Some(profile), 20_000);
+    let nominal_alpha = scaled_filter_alpha_for_control_interval(0.75);
+    assert!((snapshot.filtered_temp_c - (35.0 + nominal_alpha)).abs() < 0.01);
+    assert_eq!(snapshot.warmup_soft_start_percent, 0);
+    assert_eq!(controller.phase_ticks, 1);
+}
+
+#[test]
+fn production_controller_requires_the_selected_bank_current() {
+    let (five_amp, five_amp_pps) = production_power_fixture(5_000);
+    assert_eq!(
+        production_thermal_controller(five_amp, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a)
+    );
+    let (three_amp, three_amp_pps) = production_power_fixture(3_250);
+    assert_eq!(
+        production_thermal_controller(three_amp, ThermalProfileMode::W65, &three_amp_pps),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a)
+    );
+    assert_eq!(
+        production_thermal_controller(three_amp, ThermalProfileMode::W100, &three_amp_pps),
+        ProductionThermalController::Unavailable
+    );
+    assert_eq!(
+        production_thermal_controller(
+            PowerState::unavailable(),
+            ThermalProfileMode::W100,
+            &five_amp_pps
+        ),
+        ProductionThermalController::Unavailable
+    );
+    let negotiating = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        ..five_amp
+    };
+    assert_eq!(
+        production_thermal_controller(negotiating, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Unavailable
+    );
+    let continuous = PowerState {
+        requested: Some(PdContractRequest::pps(20_100, 5_000).unwrap()),
+        ..negotiating
+    };
+    assert_eq!(
+        production_thermal_controller(continuous, ThermalProfileMode::Auto, &five_amp_pps),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a)
+    );
+    assert_eq!(
+        production_thermal_controller(
+            PowerState {
+                requested: Some(PdContractRequest::pps(20_100, 3_000).unwrap()),
+                ..continuous
+            },
+            ThermalProfileMode::Auto,
+            &five_amp_pps
+        ),
+        ProductionThermalController::Unavailable
+    );
+}
+
+#[test]
+fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
+    let mut outputs = [0; 2];
+    for (index, damping) in [1_000, 4_000].into_iter().enumerate() {
+        let mut profile = production_test_profile(900);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.approach_damping_exponent_permille = damping;
+        point.approach_lead_ticks = 0;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(ProductionThermalController::Profile(
+            ThermalProfileBank::Pps5a,
+        ));
+        controller.phase = HeaterControlPhase::Approach;
+        controller.heater_was_enabled = true;
+        controller.last_target_temp_c = 60;
+        controller.filtered_temp_c = Some(52.0);
+        controller.previous_filtered_temp_c = Some(52.0);
+        controller.previous_measured_temp_c = Some(52.0);
+        let mut input = production_test_input(52.0);
+        input.model.transport_delay_ms = 1_950;
+        input.max_power_mw = 100_000.0;
+        controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        input.now_ms += 1_000;
+        outputs[index] = controller
+            .update_production_at(
+                ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+                input,
+                Some(profile),
+            )
+            .0
+            .duty_percent;
+    }
+    assert!(
+        outputs[0] > outputs[1],
+        "damping must shape live Approach: {outputs:?}"
+    );
+    assert!(outputs[1] >= 5);
+}
+
+#[test]
+fn five_amp_braking_approach_entry_immediately_requests_five_percent() {
+    for target in [60, 160, 240] {
+        for interval_ms in [20, 50, 100] {
+            let temperature = f32::from(target) - 8.0;
+            let mut profile = production_test_profile(900);
+            profile.points[0].as_mut().unwrap().target_temp_c = target;
+            let mut controller = HeaterController::new();
+            controller.production_controller = Some(ProductionThermalController::Profile(
+                ThermalProfileBank::Pps5a,
+            ));
+            controller.last_target_temp_c = target;
+            controller.heater_was_enabled = true;
+            controller.filtered_temp_c = Some(temperature);
+            controller.previous_measured_temp_c = Some(temperature);
+            controller.profile_last_control_at_ms = Some(3_000 - interval_ms);
+            let mut input = production_test_input(temperature);
+            input.target_temp_c = target;
+            let (output, disarmed) = controller.update_production_at(
+                ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+                input,
+                Some(profile),
+            );
+            assert!(!disarmed);
+            assert_eq!(output.phase, HeaterControlPhase::Approach);
+            assert_eq!(output.duty_percent, 5, "target={target}, dt={interval_ms}");
+        }
+    }
+}
+
+#[test]
+fn five_amp_braking_approach_can_request_less_than_passive_loss_and_reheat() {
+    let mut outputs = [0; 2];
+    for (index, slope) in [2.0, -0.3].into_iter().enumerate() {
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(ProductionThermalController::Profile(
+            ThermalProfileBank::Pps5a,
+        ));
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(58.0);
+        controller.previous_measured_temp_c = Some(58.0);
+        controller.filtered_slope_c_per_profile_tick = slope;
+        let mut profile = production_test_profile(900);
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(58.0);
+        input.model.convection_mw_per_c = 300.0;
+        input.model.transport_delay_ms = 2_000;
+        let (output, _) = controller.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(profile),
+        );
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        outputs[index] = output.duty_percent;
+    }
+    assert_eq!(outputs[0], 5, "rising plate must brake below passive loss");
+    assert!(
+        outputs[1] > outputs[0],
+        "falling plate must regain heat: {outputs:?}"
+    );
+}
+
+#[test]
+fn trajectory_approach_restores_high_temperature_loss_before_transport_delay() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(219.0);
+        controller.previous_measured_temp_c = Some(219.0);
+        controller.filtered_slope_c_per_profile_tick = 0.4;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.brake_distance_centi_c = 100;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(219.02);
+        input.target_temp_c = 220;
+        input.ambient_temp_c = 30.0;
+        input.max_power_mw = 60_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 21.32596,
+            radiation_mw_per_k4: 9.014564e-7,
+            thermal_capacity_mj_per_c: 31_067.016,
+            transport_delay_ms: 700,
+        };
+        let entry = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(entry.phase, HeaterControlPhase::Approach);
+        assert_eq!(entry.duty_percent, 5);
+        input.now_ms += 100;
+        input.measured_temp_c = 219.06;
+        let tracked = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(tracked.phase, HeaterControlPhase::Approach);
+        assert!(
+            tracked.duty_percent > 5,
+            "{bank:?}: replace impending heat loss before it appears"
+        );
+    }
+}
+
+#[test]
+fn trajectory_approach_keeps_reference_when_temperature_deficit_increases() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
+        let trajectory = controller.approach_trajectory.unwrap();
+        let warmup_started_at_ms = controller.warmup_started_at_ms;
+        controller.reseed_measurement_after_pps_step(232.0);
+        input.measured_temp_c = 232.0;
+        input.now_ms += 100;
+        let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+        assert!(!disarmed);
+        assert_eq!(output.phase, HeaterControlPhase::Approach, "{bank:?}");
+        assert!(
+            controller
+                .approach_trajectory
+                .unwrap()
+                .reference
+                .temperature_c
+                >= trajectory.reference.temperature_c,
+            "{bank:?}: reference must continue from its pre-deficit origin"
+        );
+        assert_eq!(controller.warmup_started_at_ms, warmup_started_at_ms);
+        assert_eq!(output.warmup_soft_start_percent, 100);
+        assert!(output.duty_percent > 5, "{bank:?}: model must recover heat");
+    }
+}
+
+#[test]
+fn trajectory_hold_recovery_does_not_restart_the_warmup_braking_ramp() {
+    // A 9c3882aa 220C trial 2: Hold 219.49C/57% -> Approach
+    // 219.22C/11%, followed by 218.39C. Recovery has no new Warmup energy.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.approach_lead_ticks = 0;
+        point.approach_damping_exponent_permille = 100;
+        point.hold_entry_centi_c = 50;
+        point.hold_exit_centi_c = 70;
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.duty_percent = 57;
+        controller.filtered_temp_c = Some(219.29);
+        controller.previous_filtered_temp_c = Some(219.29);
+        controller.previous_measured_temp_c = Some(219.29);
+        controller.filtered_slope_c_per_profile_tick = -0.5;
+        controller.profile_last_control_at_ms = Some(2_900);
+        let mut input = production_test_input(219.22);
+        input.target_temp_c = 220;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 205.21394,
+            radiation_mw_per_k4: 1.8367949e-7,
+            thermal_capacity_mj_per_c: 25_915.566,
+            transport_delay_ms: 1_950,
+        };
+        controller
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        controller.applied_heat.observe(1_000, 35_000.0);
+        controller.applied_heat.observe(input.now_ms, 35_000.0);
+        let mut high_arrival = controller;
+        let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+        assert!(!disarmed);
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        assert!(controller.recovering_from_hold);
+        assert!(
+            output.duty_percent >= 40,
+            "{bank:?}: falling plate must retain recovery authority, {output:?}"
+        );
+        assert!(!controller.initial_profile_approach());
+
+        high_arrival.applied_heat =
+            flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
+        high_arrival
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        high_arrival.applied_heat.observe(1_000, 90_000.0);
+        high_arrival.applied_heat.observe(input.now_ms, 90_000.0);
+        let reduced = high_arrival
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            reduced.duty_percent < 57,
+            "{bank:?}: recovery origin must not become a hard power floor"
+        );
+    }
+}
+
+#[test]
+fn legacy_approach_can_reenter_warmup_when_temperature_deficit_increases() {
+    let (mut controller, profile, _) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
+    controller.reseed_measurement_after_pps_step(232.0);
+    controller.natural_cooling_input = None;
+    let output = controller.update_at(240, 232.0, true, Some(profile), 3_100);
+    assert_eq!(output.phase, HeaterControlPhase::Warmup);
+    assert!(controller.approach_trajectory.is_none());
+    assert_eq!(controller.warmup_started_at_ms, Some(3_100));
+}
+
+#[test]
+fn trajectory_reference_and_heat_history_survive_pps_origins_but_not_disarm() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let (mut controller, profile, input) = pps_cooling_test_fixture(bank);
+        controller
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        controller.applied_heat.observe(2_000, 60_000.0);
+        controller.applied_heat.observe(input.now_ms, 3_000.0);
+        let trajectory = controller.approach_trajectory;
+        let mut history = controller.applied_heat;
+        assert!(trajectory.is_some());
+        controller.reseed_measurement_after_pps_step(input.measured_temp_c - 0.3);
+        history.reanchor_temperature();
+        assert_eq!(controller.approach_trajectory, trajectory);
+        assert_eq!(controller.applied_heat, history);
+        controller.update_production_at(
+            kind,
+            ThermalPlantRuntimeInput {
+                heater_enabled: false,
+                ..input
+            },
+            Some(profile),
+        );
+        assert!(controller.approach_trajectory.is_none());
+        assert_eq!(
+            controller.applied_heat,
+            flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new()
+        );
+    }
+}
+
+#[test]
+fn held_approach_temperature_does_not_erase_heat_already_arriving() {
+    // PPS settling keeps the last accepted temperature while old Warmup
+    // energy continues arriving. A held reading cannot become a new origin.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        for pps_step in [false, true] {
+            let kind = ProductionThermalController::Profile(bank);
+            let mut controller = HeaterController::new();
+            controller.production_controller = Some(kind);
+            controller.last_target_temp_c = 60;
+            controller.heater_was_enabled = true;
+            controller.phase = HeaterControlPhase::Approach;
+            controller.filtered_temp_c = Some(50.0);
+            controller.previous_measured_temp_c = Some(50.0);
+            controller.profile_last_control_at_ms = Some(4_950);
+            let mut profile = production_test_profile(1_000);
+            profile.settings.temp_filter_alpha = 1.0;
+            profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+            let mut input = production_test_input(50.0);
+            input.now_ms = 5_000;
+            input.ambient_temp_c = 30.0;
+            input.max_power_mw = 100_000.0;
+            input.model.convection_mw_per_c = 200.0;
+            input.model.thermal_capacity_mj_per_c = 25_000.0;
+            input.model.transport_delay_ms = 2_100;
+            controller.applied_heat.configure(2_100);
+            controller.applied_heat.observe(2_000, 100_000.0);
+            controller.applied_heat.observe(5_000, 5_000.0);
+            controller.update_production_at(kind, input, Some(profile));
+            let mut fresh = controller;
+            let mut held = controller;
+            if pps_step {
+                held.reseed_measurement_after_pps_step(50.0);
+            }
+            assert_eq!(held.last_accepted_measurement_at_ms, Some(5_000));
+            // The just-issued braking command has not reached the plate.
+            // Integrate the known full-power input over this blind interval.
+            let mut actual_c = 50.0;
+            for _ in 0..900 {
+                actual_c += (100_000.0 - 200.0 * (actual_c - 30.0)) / 25_000.0 * 0.001;
+            }
+            input.now_ms = 5_900;
+            let fresh_output = fresh
+                .update_production_at(
+                    kind,
+                    ThermalPlantRuntimeInput {
+                        measured_temp_c: actual_c,
+                        ..input
+                    },
+                    Some(profile),
+                )
+                .0;
+            let held_output = held
+                .update_production_at(
+                    kind,
+                    ThermalPlantRuntimeInput {
+                        measurement_accepted: false,
+                        ..input
+                    },
+                    Some(profile),
+                )
+                .0;
+            assert_eq!(held_output.phase, HeaterControlPhase::Approach);
+            assert_eq!(fresh_output.phase, HeaterControlPhase::Approach);
+            assert_eq!(held.last_accepted_measurement_at_ms, Some(5_000));
+            assert_eq!(fresh.last_accepted_measurement_at_ms, Some(5_900));
+            assert!(
+                held_output.duty_percent <= fresh_output.duty_percent + 1,
+                "{bank:?}, pps_step={pps_step}: held={held_output:?}, fresh={fresh_output:?}"
+            );
+            held.update_production_at(
+                kind,
+                ThermalPlantRuntimeInput {
+                    heater_enabled: false,
+                    ..input
+                },
+                Some(profile),
+            );
+            assert_eq!(held.last_accepted_measurement_at_ms, None);
+        }
+    }
+}
+
+#[test]
+fn rejected_approach_measurements_cannot_raise_the_last_braking_request() {
+    // A 60C HIL held 54.18C for 16s while the raw channel was already above
+    // target. Advancing the reference without a new observation must not
+    // manufacture a reason to raise heating during the blind interval.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Warmup;
+        controller.filtered_temp_c = Some(54.18);
+        controller.previous_measured_temp_c = Some(54.18);
+        controller.profile_last_control_at_ms = Some(4_950);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(54.18);
+        input.now_ms = 5_000;
+        input.ambient_temp_c = 28.61;
+        input.max_power_mw = 100_000.0;
+        input.model.convection_mw_per_c = 168.47858;
+        input.model.radiation_mw_per_k4 = 3.3575284e-7;
+        input.model.thermal_capacity_mj_per_c = 25_746.225;
+        input.model.transport_delay_ms = 1_800;
+        controller.applied_heat.configure(1_800);
+        controller.applied_heat.observe(2_000, 100_000.0);
+        controller.applied_heat.observe(input.now_ms, 5_000.0);
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.duty_percent, 5);
+        for step in 1..=160 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            if step % 5 == 0 {
+                controller.reseed_measurement_after_pps_step(input.measured_temp_c);
+            }
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(output.phase, HeaterControlPhase::Approach);
+            assert_eq!(
+                output.duty_percent, 5,
+                "{bank:?}: a rejected reading must not increase braking power at {step}: {output:?}"
+            );
+            controller.applied_heat.observe(input.now_ms, 5_000.0);
+        }
+        input.now_ms += 100;
+        input.measurement_accepted = true;
+        input.measured_temp_c = 55.0;
+        controller.update_production_at(kind, input, Some(profile));
+        for step in 1..=20 {
+            input.now_ms += 100;
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            if step == 20 {
+                assert!(
+                    output.duty_percent > 5,
+                    "fresh low readings must restore recovery authority"
+                );
+            }
+            controller
+                .applied_heat
+                .observe(input.now_ms, f32::from(output.duty_percent) * 1_000.0);
+        }
+    }
+}
+
+#[test]
+fn accepted_approach_deficit_can_apply_the_model_full_power_request() {
+    // At the B high-temperature endpoint the delayed-energy prediction and
+    // trajectory already account for transport delay. A second actuator ramp
+    // must not discard a fresh, model-bounded recovery request.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(218.0);
+        controller.previous_measured_temp_c = Some(218.0);
+        controller.last_accepted_measurement_at_ms = Some(5_000);
+        controller.profile_last_control_at_ms = Some(5_000);
+        controller.duty_percent = 5;
+        controller.approach_last_request_permille = Some(50);
+        controller.approach_trajectory =
+            Some(flux_purr_firmware::thermal_trajectory::TemperatureTrajectory::new(5_000, 219.0));
+        let mut profile = production_test_profile(1_000);
+        profile.points[0].as_mut().unwrap().target_temp_c = 220;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(218.0);
+        input.target_temp_c = 220;
+        input.ambient_temp_c = 29.94;
+        input.max_power_mw = 63_000.0;
+        input.now_ms = 5_100;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 81.21304,
+            radiation_mw_per_k4: 6.7999764e-7,
+            thermal_capacity_mj_per_c: 30_629.809,
+            transport_delay_ms: 1_400,
+        };
+        controller.applied_heat.configure(1_400);
+        controller.applied_heat.observe(2_000, 3_150.0);
+        controller.applied_heat.observe(5_000, 3_150.0);
+        let mut rejected = controller;
+        let held = rejected
+            .update_production_at(
+                kind,
+                ThermalPlantRuntimeInput {
+                    measurement_accepted: false,
+                    ..input
+                },
+                Some(profile),
+            )
+            .0;
+        assert_eq!(held.phase, HeaterControlPhase::Approach);
+        assert_eq!(held.duty_percent, 5);
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Approach);
+        assert_eq!(
+            output.duty_percent, 100,
+            "{bank:?}: fresh low temperature and bounded delayed heat must retain full recovery authority: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn fresh_approach_recovery_matches_across_rejected_callbacks() {
+    // The same physical hold followed by the same fresh reading must not
+    // acquire a slower recovery merely because PPS wait callbacks ran.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut sparse = HeaterController::new();
+        sparse.production_controller = Some(kind);
+        sparse.last_target_temp_c = 60;
+        sparse.heater_was_enabled = true;
+        sparse.phase = HeaterControlPhase::Approach;
+        sparse.filtered_temp_c = Some(54.0);
+        sparse.previous_measured_temp_c = Some(54.0);
+        sparse.last_accepted_measurement_at_ms = Some(5_000);
+        sparse.profile_last_control_at_ms = Some(5_000);
+        sparse.duty_percent = 5;
+        sparse.approach_last_request_permille = Some(50);
+        sparse.approach_trajectory =
+            Some(flux_purr_firmware::thermal_trajectory::TemperatureTrajectory::new(5_000, 54.0));
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        profile.points[0].as_mut().unwrap().approach_lead_ticks = 0;
+        let mut input = production_test_input(54.0);
+        input.model.transport_delay_ms = 1_400;
+        sparse.applied_heat.configure(1_400);
+        sparse.applied_heat.observe(2_000, 5_000.0);
+        sparse.applied_heat.observe(5_000, 5_000.0);
+        let mut callbacks = sparse;
+        for step in 1..=9 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            let held = callbacks.update_production_at(kind, input, Some(profile)).0;
+            assert_eq!(held.phase, HeaterControlPhase::Approach);
+            assert_eq!(held.duty_percent, 5);
+            callbacks.applied_heat.observe(input.now_ms, 5_000.0);
+        }
+        input.now_ms = 6_000;
+        input.measurement_accepted = true;
+        input.measured_temp_c = 53.9;
+        let sparse_output = sparse.update_production_at(kind, input, Some(profile)).0;
+        let callbacks_output = callbacks.update_production_at(kind, input, Some(profile)).0;
+        assert!(sparse_output.duty_percent >= 25);
+        assert!(
+            callbacks_output
+                .duty_percent
+                .abs_diff(sparse_output.duty_percent)
+                <= 1,
+            "{bank:?}: callback cadence cannot change the same fresh recovery: sparse={sparse_output:?}, callbacks={callbacks_output:?}"
+        );
+    }
+}
+
+#[test]
+fn rejected_hold_measurements_do_not_resume_heat_or_wind_up_the_integral() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.filtered_temp_c = Some(59.6);
+        controller.previous_measured_temp_c = Some(59.6);
+        controller.profile_last_control_at_ms = Some(4_950);
+        let mut profile = production_test_profile(1_000);
+        profile.settings.temp_filter_alpha = 1.0;
+        let mut input = production_test_input(59.6);
+        input.now_ms = 5_000;
+        input.model.transport_delay_ms = 1_800;
+        input.max_power_mw = 100_000.0;
+        controller.applied_heat.configure(1_800);
+        controller.applied_heat.observe(2_000, 100_000.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Hold);
+        assert_eq!(first.duty_percent, 0);
+        let integral = controller.hold_integral_c;
+        for step in 1..=160 {
+            input.now_ms = 5_000 + step * 100;
+            input.measurement_accepted = false;
+            let output = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(output.phase, HeaterControlPhase::Hold);
+            assert_eq!(output.duty_percent, 0);
+            assert_eq!(controller.hold_integral_c, integral);
+            controller.applied_heat.observe(input.now_ms, 0.0);
+        }
+        input.now_ms += 100;
+        input.measurement_accepted = true;
+        let resumed = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            resumed.duty_percent > 0,
+            "fresh low Hold readings must restore heat"
+        );
+    }
+}
+
+#[test]
+fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
+    let (mut controller, profile, input) = pps_cooling_test_fixture(ThermalProfileBank::Pps5a);
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps5a);
+    controller.update_production_at(kind, input, Some(profile));
+    controller
+        .applied_heat
+        .configure(input.model.transport_delay_ms);
+    controller.applied_heat.observe(input.now_ms, 3_000.0);
+    let history = controller.applied_heat;
+    controller.update_production_at(
+        kind,
+        ThermalPlantRuntimeInput {
+            now_ms: input.now_ms + 100,
+            measurement_accepted: false,
+            ..input
+        },
+        Some(profile),
+    );
+    assert_eq!(controller.applied_heat, history);
+    let mut recovered = history;
+    recovered.reset_temperature_observation();
+    controller.reseed_measurement(input.measured_temp_c);
+    assert_eq!(controller.applied_heat, recovered);
+}
+
+#[test]
+fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() {
+    for (bank, model, max_power_mw) in [
+        (
+            ThermalProfileBank::Pps5a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 195.67747,
+                radiation_mw_per_k4: 2.1190255e-7,
+                thermal_capacity_mj_per_c: 25_815.854,
+                transport_delay_ms: 1_900,
+            },
+            100_000.0,
+        ),
+        (
+            ThermalProfileBank::Pps3a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 21.32596,
+                radiation_mw_per_k4: 9.014564e-7,
+                thermal_capacity_mj_per_c: 31_067.016,
+                transport_delay_ms: 700,
+            },
+            60_000.0,
+        ),
+        (
+            ThermalProfileBank::Pps3a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 81.21304,
+                radiation_mw_per_k4: 6.7999764e-7,
+                thermal_capacity_mj_per_c: 30_629.809,
+                transport_delay_ms: 1_400,
+            },
+            63_000.0,
+        ),
+    ] {
+        for target in [60, 220] {
+            assert_trajectory_plant_handoff(bank, model, max_power_mw, target);
+        }
+    }
+}
+
+#[test]
+fn calibrated_hold_uses_arriving_energy_instead_of_a_stale_positive_slope() {
+    // Repaired A trial 15 repeatedly cuts Hold at 220.00..220.36C, then
+    // leaves the stable band at 218.31C. A positive filtered derivative is
+    // not evidence that the current command will still arrive above target.
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 220;
+        point.hold_power_permille = 700;
+        point.hold_reheat_power_permille = 1_000;
+        point.hold_kp_permille_per_c = 62;
+        point.hold_ki_permille_per_c_tick = 1;
+        point.hold_on_centi_c = 5;
+        point.hold_off_centi_c = 240;
+        point.hold_blend_ticks = 1;
+        point.hold_lead_ticks = 0;
+        let mut input = production_test_input(220.12);
+        input.target_temp_c = 220;
+        input.ambient_temp_c = 30.0;
+        input.max_power_mw = 100_000.0;
+        input.now_ms = 5_000;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 201.96992,
+            radiation_mw_per_k4: 2.0132205e-7,
+            thermal_capacity_mj_per_c: 26_466.248,
+            transport_delay_ms: 2_000,
+        };
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 220;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 100;
+        controller.hold_coast_active = true;
+        controller.profile_last_control_at_ms = Some(4_950);
+        controller.filtered_temp_c = Some(220.02);
+        controller.previous_measured_temp_c = Some(220.09);
+        controller.filtered_slope_c_per_profile_tick = 0.2;
+        controller.applied_heat.configure(2_000);
+        controller.applied_heat.observe(2_000, 0.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let mut high_arrival = controller;
+        let recovering = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(recovering.phase, HeaterControlPhase::Hold);
+        assert!(recovering.duty_percent > 0, "{bank:?}: {recovering:?}");
+
+        // Identical plate temperature and derivative with actual heat in
+        // flight must still cut power. The forecast, not the raw slope,
+        // distinguishes the two states through the production call site.
+        high_arrival.applied_heat =
+            flux_purr_firmware::thermal_trajectory::AppliedHeatHistory::new();
+        high_arrival.applied_heat.configure(2_000);
+        high_arrival.applied_heat.observe(2_000, 100_000.0);
+        high_arrival.applied_heat.observe(input.now_ms, 100_000.0);
+        let braking = high_arrival
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(braking.duty_percent, 0, "{bank:?}: {braking:?}");
+
+        input.now_ms += 50;
+        input.measured_temp_c = 224.0;
+        let cutoff = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(cutoff.duty_percent, 0, "{bank:?}: actual cutoff survives");
+    }
+}
+
+#[test]
+fn calibrated_hold_does_not_reheat_into_delayed_high_side_energy() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        let mut input = production_test_input(61.03);
+        input.ambient_temp_c = 30.0;
+        input.now_ms = 4_000;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 205.21394,
+            radiation_mw_per_k4: 1.8367949e-7,
+            thermal_capacity_mj_per_c: 25_915.566,
+            transport_delay_ms: 1_950,
+        };
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.hold_power_permille = 60;
+        point.hold_reheat_power_permille = 60;
+        point.hold_kp_permille_per_c = 8;
+        point.hold_ki_permille_per_c_tick = 2;
+        point.hold_off_centi_c = 120;
+        point.overshoot_cutoff_centi_c = 150;
+        point.hold_lead_ticks = 2;
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 100;
+        controller.profile_last_control_at_ms = Some(3_950);
+        controller.filtered_temp_c = Some(input.measured_temp_c);
+        controller.previous_measured_temp_c = Some(input.measured_temp_c);
+        controller.filtered_slope_c_per_profile_tick = -0.01;
+        controller
+            .applied_heat
+            .configure(input.model.transport_delay_ms);
+        controller.applied_heat.observe(2_000, 10_000.0);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(output.phase, HeaterControlPhase::Hold);
+        assert_eq!(
+            output.duty_percent, 0,
+            "{bank:?}: short falling slope is not proof that heat in flight has dissipated"
+        );
+
+        // The final under-target fallback must not bypass the arrival guard.
+        controller.applied_heat.observe(4_000, 90_000.0);
+        controller.applied_heat.observe(4_400, 0.0);
+        input.now_ms = 4_400;
+        input.measured_temp_c = 59.8;
+        controller.filtered_temp_c = Some(59.8);
+        controller.previous_measured_temp_c = Some(59.8);
+        controller.filtered_slope_c_per_profile_tick = 0.0;
+        controller.profile_last_control_at_ms = Some(4_350);
+        let below_target = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(
+            below_target.duty_percent, 0,
+            "{bank:?}: fallback reheating bypasses the delayed-energy limit"
+        );
+
+        // Genuine cooling must still restore heat before undershoot. This is
+        // the same production call site, with known zero-power history.
+        input.now_ms = 8_000;
+        input.measured_temp_c = 59.8;
+        controller.filtered_temp_c = Some(59.8);
+        controller.previous_measured_temp_c = Some(59.82);
+        controller.filtered_slope_c_per_profile_tick = -0.15;
+        controller.profile_last_control_at_ms = Some(7_950);
+        controller.applied_heat.observe(input.now_ms, 0.0);
+        let cooling = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert!(
+            cooling.duty_percent > 0,
+            "{bank:?}: recovery must remain available"
+        );
+    }
+}
+
+fn assert_trajectory_plant_handoff(
+    bank: ThermalProfileBank,
+    model: flux_purr_firmware::memory::ThermalPlantProjection,
+    max_power_mw: f32,
+    target: i16,
+) {
+    let kind = ProductionThermalController::Profile(bank);
+    let mut controller = HeaterController::new();
+    let mut profile = production_test_profile(1_000);
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = target;
+    let loss =
+        flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(model, f32::from(target), 30.0);
+    point.brake_distance_centi_c = (((max_power_mw - loss) / model.thermal_capacity_mj_per_c
+        * model.transport_delay_ms as f32
+        / 1_000.0
+        + 0.5)
+        * 100.0)
+        .max(100.0) as u16;
+    point.approach_lead_ticks = 0;
+    let mut input = production_test_input(if target == 60 { 34.9 } else { 199.9 });
+    input.target_temp_c = target;
+    input.model = model;
+    input.ambient_temp_c = 30.0;
+    input.max_power_mw = max_power_mw;
+    let mut delayed = std::collections::VecDeque::from([(0_u64, 0.0_f32)]);
+    let mut applied = 0.0;
+    let mut entered_approach = false;
+    let mut entered_hold = false;
+    let mut approach_at = 0;
+    let mut handoff_ms = 0;
+    let mut peak = input.measured_temp_c;
+    for now_ms in (0_u64..=100_000).step_by(50) {
+        let source_at = now_ms.saturating_sub(u64::from(model.transport_delay_ms));
+        while delayed.len() > 1 && delayed[1].0 <= source_at {
+            delayed.pop_front();
+        }
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            model,
+            input.measured_temp_c,
+            30.0,
+        );
+        input.measured_temp_c += (delayed[0].1 - loss) / model.thermal_capacity_mj_per_c * 0.05;
+        input.now_ms = now_ms;
+        let output = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        if output.phase == HeaterControlPhase::Approach {
+            if !entered_approach {
+                entered_approach = true;
+                approach_at = now_ms;
+                assert_eq!(output.duty_percent, 5);
+            }
+            assert!((5..=100).contains(&output.duty_percent));
+        }
+        if output.phase == HeaterControlPhase::Hold && !entered_hold {
+            entered_hold = true;
+            handoff_ms = now_ms - approach_at;
+            assert!(input.measured_temp_c >= f32::from(target) - 0.5);
+        }
+        let physical_percent = if output.phase == HeaterControlPhase::Warmup {
+            output.duty_percent.min(output.warmup_soft_start_percent)
+        } else {
+            output.duty_percent
+        };
+        let power = f32::from(physical_percent) * max_power_mw / 100.0;
+        if power != applied {
+            delayed.push_back((now_ms, power));
+            applied = power;
+        }
+        controller.applied_heat.observe(now_ms, power);
+        peak = peak.max(input.measured_temp_c);
+    }
+    assert!(
+        entered_hold,
+        "{bank:?}/{target}: no physical Hold, final={}",
+        input.measured_temp_c
+    );
+    let handoff_limit_ms = if target <= 150 { 10_000 } else { 5_000 };
+    assert!(
+        handoff_ms <= handoff_limit_ms,
+        "{bank:?}/{target}: late handoff {handoff_ms}ms (limit {handoff_limit_ms}ms)"
+    );
+    assert!(
+        peak <= f32::from(target) + 3.0,
+        "{bank:?}/{target}: peak={peak}"
+    );
+}
+
+#[test]
+fn calibrated_brake_feedback_moves_the_shared_high_temperature_handoff() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.filtered_temp_c = Some(237.75);
+        controller.previous_measured_temp_c = Some(237.75);
+        controller.filtered_slope_c_per_profile_tick = 0.9;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 150;
+        point.hold_entry_centi_c = 90;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(237.8);
+        input.target_temp_c = 240;
+        input.ambient_temp_c = 33.9;
+        input.max_power_mw = 73_909.95;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 119.58163,
+            radiation_mw_per_k4: 6.174697e-7,
+            thermal_capacity_mj_per_c: 22_564.195,
+            transport_delay_ms: 3_400,
+        };
+        // The fresh calibrated distance is 2.30C. Same-run feedback reduced
+        // it to 1.50C, but the uncorrected dynamic model masks that change.
+        let mut baseline = controller;
+        let mut initial_profile = profile;
+        initial_profile.points[0]
+            .as_mut()
+            .unwrap()
+            .brake_distance_centi_c = 230;
+        assert_eq!(
+            baseline
+                .update_production_at(kind, input, Some(initial_profile))
+                .0
+                .phase,
+            HeaterControlPhase::Approach,
+            "the fresh calibrated point retains model-guided braking"
+        );
+        let first = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(first.phase, HeaterControlPhase::Warmup, "bank={bank:?}");
+        assert_eq!(first.duty_percent, 100);
+        input.now_ms += 500;
+        input.measured_temp_c = 238.4;
+        controller.update_production_at(kind, input, Some(profile));
+        input.now_ms += 500;
+        input.measured_temp_c = 238.7;
+        let entry = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(entry.phase, HeaterControlPhase::Approach);
+        assert_eq!(entry.duty_percent, 5);
+    }
+}
+
+#[test]
+fn pps_segments_keep_trajectory_recovery_available() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut initial = HeaterController::new();
+        initial.production_controller = Some(kind);
+        initial.last_target_temp_c = 240;
+        initial.heater_was_enabled = true;
+        initial.filtered_temp_c = Some(238.3);
+        initial.previous_measured_temp_c = Some(238.3);
+        initial.filtered_slope_c_per_profile_tick = 0.4;
+        initial.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 197;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(238.3);
+        input.target_temp_c = 240;
+        input.model.transport_delay_ms = 2_650;
+        assert_eq!(
+            initial
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent,
+            5
+        );
+        let mut steady = initial;
+        let mut stepped = initial;
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(238.3, 3_000);
+        let mut control_temp = 238.3;
+        let mut steady_reheat_at = None;
+        let mut stepped_reheat_at = None;
+        for offset in (50..=1_500).step_by(50) {
+            let physical_temp = 238.3 - offset as f32 * 0.0006;
+            input.now_ms = 3_000 + offset;
+            input.measured_temp_c = physical_temp;
+            input.measurement_accepted = true;
+            let steady_output = steady.update_production_at(kind, input, Some(profile)).0;
+            if steady_output.duty_percent > 5 {
+                steady_reheat_at.get_or_insert(offset);
+            }
+            // Only PPS cadence differs: no ADC offset is injected. Both twins
+            // receive the same physical cooling through the real guard chain.
+            let request_mv = 20_500 - ((offset - 50) / 500) as u16 * 500;
+            let accepted = accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut stepped,
+                &mut measurement,
+                control_temp,
+                request_mv,
+                input.now_ms,
+                physical_temp,
+            );
+            if let Some(value) = accepted {
+                control_temp = value;
+            }
+            input.measured_temp_c = control_temp;
+            input.measurement_accepted = accepted.is_some();
+            let stepped_output = stepped.update_production_at(kind, input, Some(profile)).0;
+            if stepped_output.duty_percent > 5 {
+                stepped_reheat_at.get_or_insert(offset);
+            }
+        }
+        assert!(
+            steady_reheat_at.is_some(),
+            "steady request must recover on real cooling"
+        );
+        assert!(
+            stepped_reheat_at.is_some(),
+            "bank={bank:?}: tracking lost at PPS reset: steady={steady_reheat_at:?}, stepped={stepped_reheat_at:?}, request={}%",
+            stepped.duty_percent
+        );
+    }
+}
+
+#[test]
+fn pps_epoch_anchor_does_not_turn_voltage_offset_into_thermal_velocity() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        for offset_c in [-0.3, 0.3] {
+            assert_pps_epoch_anchor(bank, offset_c);
+        }
+    }
+}
+
+fn assert_pps_epoch_anchor(bank: ThermalProfileBank, offset_c: f32) {
+    let kind = ProductionThermalController::Profile(bank);
+    let (mut controller, profile, mut input) = pps_cooling_test_fixture(bank);
+    controller.filtered_slope_c_per_profile_tick = 0.4;
+    let mut transition = RtdPpsTransitionGuard::new(21_000);
+    let mut measurement = RtdControlMeasurementGuard::default();
+    measurement.reseed(238.3, 3_000);
+    let mut control_temp = 238.3;
+    let mut accepted_count = 0;
+    for elapsed in (50..=350).step_by(50) {
+        input.now_ms = 3_000 + elapsed;
+        let accepted = accept_rtd_control_sample_after_pps_transition(
+            &mut transition,
+            &mut controller,
+            &mut measurement,
+            control_temp,
+            20_500,
+            input.now_ms,
+            238.3 + offset_c,
+        );
+        if let Some(temp) = accepted {
+            control_temp = temp;
+        }
+        input.measured_temp_c = control_temp;
+        input.measurement_accepted = accepted.is_some();
+        let snapshot = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        if accepted.is_some() {
+            accepted_count += 1;
+            assert_eq!(elapsed, 350, "the production settling wait must complete");
+            assert!(
+                (snapshot.filtered_slope_c_per_s - 0.4).abs() < 0.001,
+                "bank={bank:?}, offset={offset_c}: new PPS origin fabricated velocity {}",
+                snapshot.filtered_slope_c_per_s
+            );
+            assert_eq!(snapshot.filtered_temp_c, control_temp);
+        }
+    }
+    assert_eq!(accepted_count, 1);
+    // Compare the next local interval with an independently seeded
+    // controller: neither the old origin nor its 300ms blind wait
+    // may affect the derivative in the new voltage epoch.
+    let mut local_reference = controller;
+    local_reference.reseed_measurement(control_temp);
+    local_reference.filtered_slope_c_per_profile_tick = 0.4;
+    input.now_ms = 3_400;
+    let local_temp = control_temp - 0.05;
+    let accepted = accept_rtd_control_sample_after_pps_transition(
+        &mut transition,
+        &mut controller,
+        &mut measurement,
+        control_temp,
+        20_500,
+        input.now_ms,
+        local_temp,
+    );
+    assert_eq!(accepted, Some(local_temp));
+    input.measured_temp_c = local_temp;
+    input.measurement_accepted = true;
+    let actual = controller
+        .update_production_at(kind, input, Some(profile))
+        .0;
+    let expected = local_reference
+        .update_production_at(kind, input, Some(profile))
+        .0;
+    assert_eq!(actual.filtered_temp_c, expected.filtered_temp_c);
+    assert_eq!(
+        actual.filtered_slope_c_per_s,
+        expected.filtered_slope_c_per_s
+    );
+    assert_eq!(actual.duty_percent, expected.duty_percent);
+}
+
+#[test]
+fn pending_pps_measurement_origin_is_cleared_by_controller_resets() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let (mut base, profile, input) = pps_cooling_test_fixture(bank);
+        base.reseed_measurement_after_pps_step(input.measured_temp_c);
+        assert!(base.pps_measurement_anchor_pending);
+        for reason in 0..5 {
+            let mut reset = base;
+            let mut next = input;
+            next.now_ms += 50;
+            let kind = ProductionThermalController::Profile(bank);
+            match reason {
+                0 => reset.reseed_measurement(next.measured_temp_c),
+                1 => {
+                    next.heater_enabled = false;
+                    reset.update_production_at(kind, next, Some(profile));
+                }
+                2 => {
+                    next.target_temp_c = 250;
+                    reset.update_production_at(kind, next, Some(profile));
+                }
+                3 => {
+                    reset.latch_fault(HeaterFaultReason::OverTemp);
+                }
+                _ => reset.clear_fault_latch(),
+            }
+            assert!(
+                !reset.pps_measurement_anchor_pending,
+                "bank={bank:?}, reset={reason}"
+            );
+        }
+    }
+}
+
+fn pps_cooling_test_fixture(
+    bank: ThermalProfileBank,
+) -> (
+    HeaterController,
+    ThermalControlProfile,
+    ThermalPlantRuntimeInput,
+) {
+    let kind = ProductionThermalController::Profile(bank);
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(kind);
+    controller.last_target_temp_c = 240;
+    controller.heater_was_enabled = true;
+    controller.filtered_temp_c = Some(238.3);
+    controller.previous_measured_temp_c = Some(238.3);
+    controller.filtered_slope_c_per_profile_tick = 0.4;
+    controller.profile_last_control_at_ms = Some(2_950);
+    let mut profile = production_test_profile(1_000);
+    let point = profile.points[0].as_mut().unwrap();
+    point.target_temp_c = 240;
+    point.brake_distance_centi_c = 197;
+    point.approach_lead_ticks = 0;
+    let mut input = production_test_input(238.3);
+    input.target_temp_c = 240;
+    input.model.transport_delay_ms = 2_650;
+    assert_eq!(
+        controller
+            .update_production_at(kind, input, Some(profile))
+            .0
+            .duty_percent,
+        5
+    );
+    (controller, profile, input)
+}
+
+#[test]
+fn pps_sample_wait_does_not_invent_approach_deceleration() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 240;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(238.3);
+        controller.previous_measured_temp_c = Some(238.3);
+        controller.filtered_slope_c_per_profile_tick = 0.8;
+        controller.profile_last_control_at_ms = Some(2_950);
+        let mut profile = production_test_profile(1_000);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 240;
+        point.brake_distance_centi_c = 197;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(238.3);
+        input.target_temp_c = 240;
+        input.model.transport_delay_ms = 2_650;
+        controller.update_production_at(kind, input, Some(profile));
+        let trusted_slope = controller.filtered_slope_c_per_profile_tick;
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(238.3, 3_000);
+        for offset in (50..350).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            let accepted = accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                238.3,
+                20_500,
+                input.now_ms,
+                237.8,
+            );
+            assert_eq!(accepted, None);
+            input.measurement_accepted = accepted.is_some();
+            let snapshot = controller
+                .update_production_at(kind, input, Some(profile))
+                .0;
+            assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+            assert!((5..=100).contains(&snapshot.duty_percent));
+            assert_eq!(
+                controller.filtered_slope_c_per_profile_tick, trusted_slope,
+                "bank={bank:?}: a retained temperature is not a new observation"
+            );
+        }
+    }
+}
+
+#[test]
+fn resumed_production_measurement_uses_the_complete_sample_gap() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let profile = production_test_profile(1_000);
+        let mut input = production_test_input(45.0);
+        let mut coarse = HeaterController::new();
+        coarse.update_production_at(kind, input, Some(profile));
+        let mut blocked = coarse;
+        input.measurement_accepted = false;
+        for offset in (50..300).step_by(50) {
+            input.now_ms = 3_000 + offset;
+            blocked.update_production_at(kind, input, Some(profile));
+        }
+        input.now_ms = 3_300;
+        input.measured_temp_c = 45.3;
+        input.measurement_accepted = true;
+        let resumed = blocked.update_production_at(kind, input, Some(profile)).0;
+        let reference = coarse.update_production_at(kind, input, Some(profile)).0;
+        assert!((resumed.filtered_temp_c - reference.filtered_temp_c).abs() < 0.0001);
+        assert!(
+            (resumed.filtered_slope_c_per_s - reference.filtered_slope_c_per_s).abs() < 0.0001,
+            "bank={bank:?}: derivative must use 300ms, not the last 50ms control tick"
+        );
+    }
+}
+
+#[test]
+fn five_amp_model_approach_ignores_profile_floor_and_ceiling() {
+    let mut normal = HeaterController::new();
+    normal.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    normal.phase = HeaterControlPhase::Approach;
+    normal.heater_was_enabled = true;
+    normal.last_target_temp_c = 60;
+    normal.filtered_temp_c = Some(54.0);
+    normal.previous_filtered_temp_c = Some(53.9);
+    normal.previous_measured_temp_c = Some(54.0);
+    let mut tuning = normal;
+    let profile = production_test_profile(300);
+    let input = production_test_input(54.5);
+    let (normal_output, normal_disarmed) = normal.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
+    let (tuning_output, tuning_disarmed) = tuning.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(profile),
+    );
+    assert!(!normal_disarmed && !tuning_disarmed);
+    assert_eq!(normal_output, tuning_output);
+    assert!(normal_output.duty_percent >= 5);
+
+    let mut changed_candidate = HeaterController::new();
+    changed_candidate.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    changed_candidate.phase = HeaterControlPhase::Approach;
+    changed_candidate.heater_was_enabled = true;
+    changed_candidate.last_target_temp_c = 60;
+    changed_candidate.filtered_temp_c = Some(54.0);
+    changed_candidate.previous_filtered_temp_c = Some(53.9);
+    changed_candidate.previous_measured_temp_c = Some(54.0);
+    let mut changed_profile = production_test_profile(900);
+    changed_profile.points[0]
+        .as_mut()
+        .unwrap()
+        .approach_floor_power_permille = 800;
+    let (changed_output, _) = changed_candidate.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        input,
+        Some(changed_profile),
+    );
+    assert_eq!(normal_output.duty_percent, changed_output.duty_percent);
+    let normal_pwm = heater_physical_pwm_percent(normal_output.duty_percent, 21_000, 21_000, 100);
+    let changed_pwm = heater_physical_pwm_percent(changed_output.duty_percent, 21_000, 21_000, 100);
+    assert_eq!(normal_pwm, changed_pwm);
+}
+
+#[test]
+fn production_output_uses_candidate_settings_for_both_power_classes() {
+    let mut profile = production_test_profile(300);
+    profile.settings.auto_adjustable_working_floor_mv = 6_100;
+    profile.settings.heater_current_reserve_ma = 300;
+    for max_ma in [5_000, 3_250] {
+        let (power, manual_pps) = production_power_fixture(max_ma);
+        let kind = production_thermal_controller(power, ThermalProfileMode::Auto, &manual_pps);
+        let output = thermal_output_settings(Some(profile), kind, CalibrationMode::Off);
+        assert_eq!(output, profile.settings, "source current {max_ma}");
+    }
+    assert_eq!(
+        thermal_output_settings(
+            Some(profile),
+            ProductionThermalController::Unavailable,
+            CalibrationMode::ThermalPlant,
+        ),
+        profile.settings,
+    );
+    assert_eq!(
+        thermal_output_settings(
+            None,
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            CalibrationMode::Off
+        ),
+        ThermalControlProfileSettings::default(),
+    );
+}
+
+#[test]
+fn adc_conversion_ready_in_microseconds_does_not_require_a_timer_wakeup() {
+    let polls = core::cell::Cell::new(0_u64);
+    let result = poll_adc_conversion(
+        || {
+            polls.set(polls.get() + 1);
+            if polls.get() >= 6 {
+                Ok(1_234_u16)
+            } else {
+                Err(nb::Error::WouldBlock)
+            }
+        },
+        || polls.get(),
+    );
+    assert_eq!(result, Ok(1_234));
+}
+
+#[test]
+fn adc_conversion_polling_yields_when_slow_and_preserves_errors() {
+    let polls = core::cell::Cell::new(0_u64);
+    let result: nb::Result<u16, ()> = poll_adc_conversion(
+        || {
+            polls.set(polls.get() + 1);
+            Err(nb::Error::WouldBlock)
+        },
+        || polls.get(),
+    );
+    assert_eq!(result, Err(nb::Error::WouldBlock));
+    assert!(polls.get() <= 50);
+    assert_eq!(
+        poll_adc_conversion::<u16>(|| Err(nb::Error::Other(())), || 0),
+        Err(nb::Error::Other(())),
+    );
+}
+
+#[test]
+fn adc_new_conversion_cannot_consume_the_previous_channel_while_busy() {
+    let idle_polls = core::cell::Cell::new(0_u64);
+    let reads = core::cell::Cell::new(0_u64);
+    let idle = wait_for_adc_idle(
+        || {
+            idle_polls.set(idle_polls.get() + 1);
+            idle_polls.get() >= 4
+        },
+        || idle_polls.get(),
+    );
+    let result = idle.then(|| {
+        poll_adc_conversion(
+            || {
+                reads.set(reads.get() + 1);
+                // A premature trigger still exposes the preceding VIN result.
+                Ok(if idle_polls.get() < 4 {
+                    3_980_u16
+                } else {
+                    2_300
+                })
+            },
+            || 0,
+        )
+    });
+    assert_eq!(result, Some(Ok(2_300)));
+    assert_eq!(reads.get(), 1);
+    assert!(idle);
+}
+
+#[test]
+fn adc_idle_reset_boundary_retains_a_conversion_turnaround_interval() {
+    let elapsed = core::cell::Cell::new(0_u64);
+    let ready = wait_for_adc_idle(
+        || true,
+        || {
+            elapsed.set(elapsed.get() + 1);
+            elapsed.get()
+        },
+    );
+    let sample = ready.then(|| {
+        // Idle alone does not provide an interval after the previous reset.
+        if elapsed.get() < 50 { 3_980_u16 } else { 2_300 }
+    });
+    assert_eq!(sample, Some(2_300));
+    assert_eq!(elapsed.get(), 50);
+}
+
+#[test]
+fn adc_idle_gate_times_out_without_triggering_and_preserves_inflight_conversion() {
+    let polls = core::cell::Cell::new(0_u64);
+    let idle = wait_for_adc_idle(
+        || {
+            polls.set(polls.get() + 1);
+            false
+        },
+        || polls.get(),
+    );
+    assert!(!idle);
+    assert_eq!(polls.get(), 1_000);
+    let read = idle.then(|| panic!("busy ADC must not start a new conversion"));
+    assert_eq!(read, None::<u16>);
+    assert_eq!(poll_adc_conversion(|| Ok(2_300_u16), || 0,), Ok(2_300),);
+}
+
+#[test]
+fn production_source_class_change_disarms_before_switching_controller() {
+    let mut controller = HeaterController::new();
+    let (first, disarmed) = controller.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a),
+        production_test_input(30.0),
+        None,
+    );
+    assert!(!disarmed);
+    assert!(first.duty_percent > 0);
+    let (switched, disarmed) = controller.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        production_test_input(31.0),
+        Some(production_test_profile(900)),
+    );
+    assert!(disarmed);
+    assert_eq!(switched.duty_percent, 0);
+    assert!(!controller.heater_was_enabled);
+}
+
+#[test]
+fn both_power_classes_use_the_same_calibrated_profile_control() {
+    let mut direct = HeaterController::new();
+    let mut selected = HeaterController::new();
+    for (index, temperature_c) in [30.0, 40.0, 56.0, 59.7, 60.2].into_iter().enumerate() {
+        let input = ThermalPlantRuntimeInput {
+            now_ms: index as u64 * 50,
+            ..production_test_input(temperature_c)
+        };
+        let (baseline, _) = direct.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+            input,
+            Some(production_test_profile(900)),
+        );
+        let (actual, disarmed) = selected.update_production_at(
+            ProductionThermalController::Profile(ThermalProfileBank::Pps3a),
+            input,
+            Some(production_test_profile(900)),
+        );
+        assert!(!disarmed);
+        assert_eq!(actual, baseline);
+    }
+}
+
 #[test]
 fn heater_adjustable_voltage_clamps_to_requested_ceiling() {
     assert_eq!(
@@ -9183,13 +12642,6 @@ fn adjustable_pps_same_mode_voltage_changes_keep_heater_gate_active() {
     assert!(should_blank_heater_for_adjustable_request(
         14_000, 14_100, true
     ));
-}
-
-#[test]
-fn adjustable_pps_same_mode_request_restores_an_active_gate_before_returning() {
-    assert!(should_restore_gate_after_adjustable_request(false, 100));
-    assert!(!should_restore_gate_after_adjustable_request(false, 0));
-    assert!(!should_restore_gate_after_adjustable_request(true, 100));
 }
 
 #[test]
@@ -9451,6 +12903,93 @@ fn current_limit_fixed_pwm_fallback_uses_hysteresis() {
     assert!(!should_apply_current_limit_fixed_pwm_fallback(
         100, true, false, 10_400, 12_000
     ));
+}
+
+#[test]
+fn current_limit_fallback_waits_for_a_confirmed_pps_contract() {
+    assert!(!current_limit_fallback_requires_confirmed_pps(None));
+
+    let fixed = PdStatusObservation {
+        status_raw: 0,
+        status: Status {
+            pd_active: true,
+            ..Status::default()
+        },
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+    assert!(!current_limit_fallback_requires_confirmed_pps(Some(fixed)));
+
+    let pps = PdStatusObservation {
+        contract: Contract::observed(ContractKind::Pps, 20_000, 3_000),
+        current_ma: 3_000,
+        contract_voltage_mv: Some(20_000),
+        ..fixed
+    };
+    assert!(current_limit_fallback_requires_confirmed_pps(Some(pps)));
+}
+
+#[test]
+fn automatic_pps_start_failure_retries_while_fixed_contract_is_confirmed() {
+    let fixed = PdStatusObservation {
+        status_raw: 0,
+        status: Status {
+            pd_active: true,
+            ..Status::default()
+        },
+        current_raw: 0,
+        current_ma: 1_000,
+        contract_voltage_mv: Some(5_000),
+        contract: Contract::observed(ContractKind::Fixed, 5_000, 1_000),
+    };
+    assert!(retry_pps_startup_after_fixed_contract_failure(Some(fixed)));
+
+    let pps = PdStatusObservation {
+        contract: Contract::observed(ContractKind::Pps, 20_000, 3_000),
+        current_ma: 3_000,
+        contract_voltage_mv: Some(20_000),
+        ..fixed
+    };
+    assert!(!retry_pps_startup_after_fixed_contract_failure(Some(pps)));
+    assert!(!retry_pps_startup_after_fixed_contract_failure(None));
+}
+
+#[test]
+fn automatic_pps_start_preserves_heater_intent_from_fixed_standby() {
+    let backend = HeaterPowerBackend::PpsMos {
+        pps_min_mv: 5_500,
+        idle_request_mv: 5_500,
+        pps_max_mv: 21_000,
+        adjustable_max_mv: 21_000,
+        capability_max_ma: 3_000,
+        current_mode: None,
+        current_request_mv: 5_500,
+        settle_until_ms: None,
+        next_request_at_ms: 0,
+        current_limit_fixed_pwm_active: false,
+        current_limit_fixed_request_confirmed: false,
+        terminal_fixed_pd_disarmed: false,
+    };
+
+    assert!(automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, false, true
+    ));
+    assert!(!automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, true, true
+    ));
+    assert!(!automatic_pps_transition_can_preserve_heater_intent(
+        backend, true, false, false
+    ));
+}
+
+#[test]
+fn tuning_power_preparation_requests_the_source_ceiling_directly() {
+    assert_eq!(
+        automatic_pps_request_mv(0, false, true, 12_000, 12_000, 6_100, 21_000),
+        21_000
+    );
 }
 
 #[test]
@@ -9972,6 +13511,101 @@ fn multi_level_post_heat_cooling_follows_temperature_bands() {
 }
 
 #[test]
+fn tuning_cooldown_forces_full_fan_without_changing_normal_post_heat_policy() {
+    for mode in [
+        PostHeatCoolingMode::Off,
+        PostHeatCoolingMode::Normal,
+        PostHeatCoolingMode::Fast,
+    ] {
+        let ordinary = fan_policy_decision_with_modes(
+            55,
+            1_000,
+            false,
+            true,
+            mode,
+            HeatingFanGuardMode::Medium,
+            (FanPolicyState::Disabled, false),
+        );
+        let cooling = tuning_cooldown_fan_decision(ordinary, true);
+        assert_eq!(cooling.state, FanPolicyState::Full);
+        assert_eq!(
+            cooling.command,
+            FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+        );
+        assert_eq!(cooling.display_state, FanDisplayState::Run);
+        assert_eq!(cooling.output_level, FanOutputLevel::High);
+        assert_eq!(cooling.source, FanPolicySource::PostHeat);
+        assert_eq!(tuning_cooldown_fan_decision(ordinary, false), ordinary);
+    }
+}
+
+#[test]
+fn tuning_cooldown_preserves_safety_fan_provenance() {
+    let safety = FanPolicyDecision {
+        state: FanPolicyState::SafeHalf,
+        command: FanHardwareCommand::from_profile(FanVoltageProfile::SafeHalf),
+        display_state: FanDisplayState::Safe,
+        source: FanPolicySource::Safety,
+        output_level: FanOutputLevel::Medium,
+    };
+    let cooling = tuning_cooldown_fan_decision(safety, true);
+    assert_eq!(
+        cooling.command,
+        FanHardwareCommand::from_profile(FanVoltageProfile::Full)
+    );
+    assert_eq!(cooling.source, FanPolicySource::Safety);
+    assert_eq!(cooling.display_state, FanDisplayState::Safe);
+}
+
+#[test]
+fn tuning_cooling_continues_after_terminal_until_strict_35c_for_every_target() {
+    let terminal_request = |latched, was_armed, heater_enabled, temperature, target| {
+        tuning_cooling_requested(
+            latched,
+            was_armed,
+            false,
+            ThermalTuningPhase::Failed,
+            heater_enabled,
+            temperature,
+            target,
+        )
+    };
+    assert!(terminal_request(false, true, false, Some(55.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(41.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(35.01), Some(60)));
+    assert!(terminal_request(true, false, false, Some(35.0), Some(60)));
+    assert!(!terminal_request(true, false, false, Some(34.99), Some(60)));
+    assert!(terminal_request(true, false, false, None, Some(60)));
+    assert!(!terminal_request(true, false, true, Some(55.0), Some(60)));
+    assert!(!terminal_request(false, false, false, Some(55.0), Some(60)));
+    assert!(terminal_request(true, false, false, Some(40.01), Some(240)));
+    for target in [Some(60), Some(220), Some(240), None] {
+        for temperature in [40.0, 37.25, 35.01, 35.0] {
+            assert!(terminal_request(
+                true,
+                false,
+                false,
+                Some(temperature),
+                target
+            ));
+        }
+        assert!(!terminal_request(true, false, false, Some(34.99), target));
+        assert!(terminal_request(true, false, false, None, target));
+    }
+    for temperature in [55.0, 40.0, 35.01, 35.0, 34.99] {
+        assert!(tuning_cooling_requested(
+            false,
+            false,
+            true,
+            ThermalTuningPhase::Cooldown,
+            false,
+            Some(temperature),
+            Some(60),
+        ));
+    }
+}
+
+#[test]
 fn multi_level_heating_guard_interpolates_pulse_and_output() {
     assert_eq!(guard_pulse_percent(100, HeatingFanGuardMode::Low), 0);
     assert_eq!(guard_pulse_percent(200, HeatingFanGuardMode::Low), 50);
@@ -10094,6 +13728,89 @@ fn overtemp_threshold_uses_unrounded_temperature() {
 }
 
 #[test]
+fn tuning_temperature_retains_live_rtd_when_control_is_guarded() {
+    // The captured run retained 34.54C in control while current RTD was 43.07C.
+    let reading = tuning_temperature_evidence(43.07, false, true, Some(641_814), 641_920);
+    assert_eq!(reading.temperature_centi_c, 4_307);
+    assert!(reading.measurement_valid);
+    assert!(!reading.cooldown_admission_ready);
+
+    let unaccepted_cold = tuning_temperature_evidence(34.54, false, false, Some(641_814), 641_920);
+    assert!(!unaccepted_cold.cooldown_admission_ready);
+    let accepted_cold = tuning_temperature_evidence(34.54, false, false, Some(641_920), 641_920);
+    assert_eq!(accepted_cold.temperature_centi_c, 3_454);
+    assert!(accepted_cold.cooldown_admission_ready);
+}
+
+#[test]
+fn tuning_temperature_uses_retained_control_for_guarded_raw_jump() {
+    let reading =
+        tuning_temperature_evidence_with_control(51.54, 43.13, false, true, Some(278_552), 278_661);
+    assert_eq!(reading.temperature_centi_c, 4_313);
+    assert!(reading.measurement_valid);
+    assert!(!reading.measurement_accepted);
+    assert!(!reading.cooldown_admission_ready);
+    let stale = tuning_temperature_evidence_with_control(
+        43.13,
+        43.13,
+        false,
+        false,
+        Some(278_552),
+        278_661,
+    );
+    assert!(!stale.measurement_accepted);
+    let recovered = tuning_temperature_evidence_with_control(
+        43.14,
+        43.14,
+        false,
+        false,
+        Some(278_661),
+        278_661,
+    );
+    assert!(recovered.measurement_accepted);
+}
+
+#[test]
+fn tuning_temperature_faults_do_not_reuse_the_retained_display_reading() {
+    for (temp_c, fault) in [(34.54, true), (f32::NAN, false), (f32::INFINITY, false)] {
+        let reading = tuning_temperature_evidence(temp_c, fault, false, Some(10), 10);
+        assert!(!reading.measurement_valid);
+        assert!(!reading.cooldown_admission_ready);
+    }
+}
+
+#[test]
+fn tuning_temperature_guard_cannot_release_terminal_cooling() {
+    for (live_temp_c, guarded, accepted_at_ms) in [
+        (43.07, true, Some(641_814)),
+        (34.54, true, Some(641_814)),
+        (34.54, false, Some(641_814)),
+    ] {
+        let reading =
+            tuning_temperature_evidence(live_temp_c, false, guarded, accepted_at_ms, 641_920);
+        assert!(tuning_cooling_requested(
+            true,
+            false,
+            false,
+            ThermalTuningPhase::Canceled,
+            false,
+            reading.cooldown_admission_ready.then_some(live_temp_c),
+            Some(60),
+        ));
+    }
+    let reading = tuning_temperature_evidence(34.54, false, false, Some(641_920), 641_920);
+    assert!(!tuning_cooling_requested(
+        true,
+        false,
+        false,
+        ThermalTuningPhase::Canceled,
+        false,
+        reading.cooldown_admission_ready.then_some(34.54),
+        Some(60),
+    ));
+}
+
+#[test]
 fn raw_rtd_overtemp_bypasses_the_control_slew_guard() {
     let mut measurement_guard = RtdControlMeasurementGuard::default();
     measurement_guard.reseed(140.0, 0);
@@ -10122,6 +13839,30 @@ fn rtd_control_guard_recovers_after_a_stable_persistent_temperature_shift() {
     assert!(measurement_guard.guarded);
     assert_eq!(measurement_guard.observe(145.0, 5_800), Some(145.0));
     assert!(!measurement_guard.guarded);
+}
+
+#[test]
+fn rtd_control_guard_accepts_small_in_band_unpowered_noise() {
+    let mut guard = RtdControlMeasurementGuard::default();
+    // Fixed 13.5V A trial 4 on 86353a39: a roughly 0.5C raw step
+    // inside the stable band was rejected at the 100ms control cadence.
+    guard.reseed(60.86, 690_489);
+    assert_eq!(
+        guard.observe_with_heater_duty(61.36, 690_589, 0),
+        Some(61.36)
+    );
+    assert!(!guard.guarded);
+    assert_eq!(
+        guard.observe_with_heater_duty(60.92, 690_689, 0),
+        Some(60.92)
+    );
+    assert_eq!(guard.observe_with_heater_duty(61.62, 690_789, 0), None);
+    assert!(guard.guarded);
+    assert_eq!(guard.observe_with_heater_duty(64.0, 690_789, 0), None);
+    assert!(guard.guarded);
+    assert_eq!(guard.last_accepted_temp_c, Some(60.92));
+    assert_eq!(guard.observe_with_heater_duty(64.0, 694_789, 0), None);
+    assert!(guard.guarded);
 }
 
 #[test]
@@ -10173,6 +13914,48 @@ fn rtd_pps_transition_guard_accepts_immediately_and_reseeds_on_request_change() 
     assert_eq!(guard.observe(20_000, 520), (false, false));
     assert_eq!(guard.observe(20_000, 540), (true, true));
     assert_eq!(guard.observe(20_000, 580), (true, false));
+}
+
+#[test]
+fn pps_reseed_preserves_the_real_age_of_the_last_temperature_for_slew_checks() {
+    for stable_temperature_c in [54.47, 73.28] {
+        let mut transition = RtdPpsTransitionGuard::new(21_000);
+        let mut controller = HeaterController::new();
+        controller.reseed_measurement(52.30);
+        controller.duty_percent = 5;
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(52.30, 7_321);
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                52.30,
+                20_500,
+                8_797,
+                stable_temperature_c,
+            ),
+            None
+        );
+        assert_eq!(measurement.last_accepted_at_ms, Some(7_321));
+        let accepted = accept_rtd_control_sample_after_pps_transition(
+            &mut transition,
+            &mut controller,
+            &mut measurement,
+            52.30,
+            20_500,
+            9_097,
+            stable_temperature_c,
+        );
+        if stable_temperature_c < 60.0 {
+            assert_eq!(accepted, Some(stable_temperature_c));
+            assert_eq!(measurement.last_accepted_at_ms, Some(9_097));
+        } else {
+            assert_eq!(accepted, None);
+            assert!(measurement.guarded);
+            assert_eq!(measurement.last_accepted_at_ms, Some(7_321));
+        }
+    }
 }
 
 #[test]
@@ -10258,6 +14041,44 @@ fn pps_transition_reseed_keeps_last_trusted_control_temperature() {
 }
 
 #[test]
+fn rtd_guard_accepts_calibration_heating_with_idle_production_controller() {
+    let mut ui = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let mut control_temp = 30.0;
+    let mut control_whole = 30;
+    let mut display_temp = 30.0;
+    let mut display_whole = 30;
+    let mut transition = RtdPpsTransitionGuard::new(21_000);
+    let mut measurement = RtdControlMeasurementGuard::default();
+    measurement.reseed(30.0, 0);
+    let mut guarded = false;
+    let mut controller = HeaterController::new();
+    // Calibration owns the applied 100% MOS output; production remains idle.
+    assert_eq!(controller.duty_percent, 0);
+    apply_valid_rtd_measurement(
+        RuntimeDisplayTemperatureState {
+            ui_state: &mut ui,
+            latest_display_temp_c: &mut display_temp,
+            latest_display_temp_i16: &mut display_whole,
+        },
+        RuntimeControlTemperatureState {
+            latest_control_temp_c: &mut control_temp,
+            latest_control_temp_i16: &mut control_whole,
+            transition_guard: &mut transition,
+            measurement_guard: &mut measurement,
+            control_measurement_guarded: &mut guarded,
+            heater_controller: &mut controller,
+            applied_heater_duty_percent: 100,
+        },
+        21_000,
+        100,
+        32.0,
+    );
+    assert_eq!(control_temp, 32.0);
+    assert!(!guarded);
+    assert_eq!(controller.duty_percent, 0);
+}
+
+#[test]
 fn rtd_control_guard_rejects_impossible_jump_without_hiding_raw_temperature() {
     let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
     let mut latest_control_temp_c = 140.0;
@@ -10283,6 +14104,7 @@ fn rtd_control_guard_rejects_impossible_jump_without_hiding_raw_temperature() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         12_000,
         50,
@@ -10336,31 +14158,93 @@ fn heater_controller_reseed_clears_measurement_slope_without_changing_phase() {
 }
 
 #[test]
-fn thermal_plant_filters_single_sample_slope_before_delay_prediction() {
+fn pps_measurement_reseed_does_not_erase_observed_approach_heat_in_flight() {
+    for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
+        let kind = ProductionThermalController::Profile(bank);
+        let mut controller = HeaterController::new();
+        controller.production_controller = Some(kind);
+        controller.last_target_temp_c = 60;
+        controller.heater_was_enabled = true;
+        controller.phase = HeaterControlPhase::Approach;
+        controller.filtered_temp_c = Some(54.32);
+        controller.previous_measured_temp_c = Some(54.32);
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.profile_last_control_at_ms = Some(3_000);
+        let mut profile = production_test_profile(54);
+        let point = profile.points[0].as_mut().unwrap();
+        point.target_temp_c = 60;
+        point.brake_distance_centi_c = 1_238;
+        point.approach_lead_ticks = 0;
+        let mut input = production_test_input(54.32);
+        input.target_temp_c = 60;
+        input.now_ms = 3_050;
+        input.ambient_temp_c = 33.08;
+        input.max_power_mw = 100_000.0;
+        input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+            convection_mw_per_c: 137.1277,
+            radiation_mw_per_k4: 5.4832304e-7,
+            thermal_capacity_mj_per_c: 22_173.453,
+            transport_delay_ms: 2_650,
+        };
+        controller.natural_cooling_input = Some(input);
+        let mut uninterrupted = controller;
+        assert_eq!(
+            uninterrupted
+                .update_production_at(kind, input, Some(profile))
+                .0
+                .duty_percent,
+            5
+        );
+        let mut transition = RtdPpsTransitionGuard::new(19_000);
+        let mut measurement = RtdControlMeasurementGuard::default();
+        measurement.reseed(54.32, 3_000);
+        assert_eq!(
+            accept_rtd_control_sample_after_pps_transition(
+                &mut transition,
+                &mut controller,
+                &mut measurement,
+                54.32,
+                18_500,
+                3_050,
+                53.0,
+            ),
+            None,
+            "a power-step ADC offset remains rejected"
+        );
+        let snapshot = controller
+            .update_production_at(kind, input, Some(profile))
+            .0;
+        assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+        assert!(snapshot.filtered_slope_c_per_s > 0.0);
+        assert_eq!(
+            snapshot.duty_percent, 5,
+            "bank={bank:?}: a PPS step is not physical deceleration"
+        );
+    }
+}
+
+#[test]
+fn pps_reseed_preserves_only_valid_rising_model_approach_velocity() {
     let mut controller = HeaterController::new();
-    let model = flux_purr_firmware::memory::ThermalPlantProjection {
-        convection_mw_per_c: 0.0,
-        radiation_mw_per_k4: 0.0,
-        thermal_capacity_mj_per_c: 42_000.0,
-        transport_delay_ms: 10_000,
-    };
-    let input = |measured_temp_c, heater_enabled, now_ms| ThermalPlantRuntimeInput {
-        target_temp_c: 60,
-        measured_temp_c,
-        ambient_temp_c: 30.0,
-        heater_enabled,
-        model,
-        max_power_mw: 100_000.0,
-        now_ms,
-    };
-
-    controller.update_thermal_plant_at(input(30.0, true, 0));
-    let snapshot = controller.update_thermal_plant_at(input(31.0, true, 50));
-
-    assert!((snapshot.filtered_slope_c_per_s - 0.375).abs() < 0.001);
-    assert!(snapshot.control_error_c > 0.0);
-    assert!(snapshot.duty_percent >= 70);
-    assert_eq!(snapshot.phase, HeaterControlPhase::Warmup);
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Approach;
+    controller.natural_cooling_input = Some(production_test_input(54.32));
+    for slope in [-1.0, 0.0, f32::NAN, f32::INFINITY] {
+        controller.filtered_slope_c_per_profile_tick = slope;
+        controller.reseed_measurement_after_pps_step(54.32);
+        assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+    }
+    for phase in [HeaterControlPhase::Warmup, HeaterControlPhase::Hold] {
+        controller.phase = phase;
+        controller.filtered_slope_c_per_profile_tick = 2.0;
+        controller.reseed_measurement_after_pps_step(54.32);
+        assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
+    }
+    controller.phase = HeaterControlPhase::Approach;
+    controller.natural_cooling_input = None;
+    controller.filtered_slope_c_per_profile_tick = 2.0;
+    controller.reseed_measurement_after_pps_step(54.32);
+    assert_eq!(controller.filtered_slope_c_per_profile_tick, 0.0);
 }
 
 #[test]
@@ -10378,6 +14262,138 @@ fn rtd_fractional_millivolts_preserve_oversampled_temperature_resolution() {
     assert!(lower_temp < midpoint_temp);
     assert!(midpoint_temp < upper_temp);
     assert!((midpoint_temp - ((lower_temp + upper_temp) * 0.5)).abs() < 0.01);
+}
+
+fn assumed_offset_test_batch(temp_c: f32) -> RtdAdcBatch {
+    let resistance = pt1000_resistance_ohms_at(temp_c);
+    let mv =
+        f32::from(RTD_DIVIDER_SUPPLY_MV) * resistance / (RTD_REFERENCE_RESISTOR_OHMS + resistance);
+    RtdAdcBatch {
+        mean_mv: mv,
+        min_mv: mv.floor() as u16,
+        max_mv: mv.ceil() as u16,
+        mean_raw_code: 2_280,
+        min_raw_code: 2_275,
+        max_raw_code: 2_285,
+    }
+}
+
+#[test]
+fn projected_rtd_temperature_matches_live_adc_assumption() {
+    let memory = MemoryConfig::default();
+    for raw_mv in [1_044, 1_210, 1_420] {
+        let live = rtd_sample_from_batch(
+            &memory,
+            RtdAdcBatch {
+                mean_mv: f32::from(raw_mv),
+                min_mv: raw_mv,
+                max_mv: raw_mv,
+                ..assumed_offset_test_batch(30.0)
+            },
+            RTD_ASSUMED_ADC_OFFSET_UV,
+        );
+        let RtdSample::Valid(live) = live else {
+            panic!("valid RTD voltage required");
+        };
+        let projected = projected_rtd_temperature_c(&memory, raw_mv).unwrap();
+        assert!(
+            (projected - live.temp_c).abs() < 0.001,
+            "raw={raw_mv}: live={} projected={projected}",
+            live.temp_c
+        );
+        let sample = ThermalPlantTransientSample {
+            elapsed_ticks: 1,
+            raw_rtd_adc_mv: raw_mv,
+            heater_voltage_125mv: 168,
+            duty_percent: 100,
+        };
+        let page = thermal_plant_trace_page(&memory, &[sample], 1, 0, 0);
+        assert_eq!(
+            page.points[0].temperature_centi_c,
+            round_to_i16(live.temp_c * 100.0)
+        );
+    }
+}
+
+#[test]
+fn assumed_rtd_offset_is_separate_from_raw_diagnostics_and_user_calibration() {
+    let config = MemoryConfig::default();
+    let original = config.clone();
+    let batch = assumed_offset_test_batch(35.5);
+    let RtdSample::Valid(base) = rtd_sample_from_batch(&config, batch, 0) else {
+        panic!("default sample must be valid");
+    };
+    let RtdSample::Valid(adjusted) = rtd_sample_from_batch(&config, batch, -13_500) else {
+        panic!("assumed-offset sample must be valid");
+    };
+    assert!((base.temp_c - 35.5).abs() < 0.02);
+    assert!((adjusted.temp_c - 30.0).abs() < 0.03);
+    assert_eq!(adjusted.raw_adc_mv, base.raw_adc_mv);
+    assert_eq!(adjusted.raw_adc_min_mv, base.raw_adc_min_mv);
+    assert_eq!(adjusted.raw_adc_max_mv, base.raw_adc_max_mv);
+    assert_eq!(config, original);
+    assert_eq!(
+        correct_adc_mv(&config.adc_calibration, AdcCalibrationChannel::Vin, 1_234),
+        1_234
+    );
+}
+
+#[test]
+fn assumed_rtd_offset_yields_to_user_points_or_an_active_fit() {
+    let mut config = MemoryConfig::default();
+    config.adc_calibration.rtd.slots.a.offset_mv = 2.0;
+    assert_eq!(rtd_assumed_adc_offset_uv(&config, -13_500), 0);
+    let batch = assumed_offset_test_batch(30.0);
+    assert_eq!(
+        rtd_sample_from_batch(&config, batch, -13_500),
+        rtd_sample_from_batch(&config, batch, 0)
+    );
+    config.adc_calibration.rtd.slots.a.offset_mv = 0.0;
+    config.adc_calibration.rtd.samples[0] = Some(AdcCalibrationSample {
+        observed_mv: 1_030,
+        expected_mv: 1_031,
+        reference_temp_deci_c: None,
+        target_adc_mv: None,
+        reference_vin_mv: None,
+    });
+    assert_eq!(rtd_assumed_adc_offset_uv(&config, -13_500), 0);
+}
+
+#[test]
+fn assumed_rtd_offset_cannot_hide_original_sensor_or_overtemp_faults() {
+    let config = MemoryConfig::default();
+    for (mv, reason) in [
+        (
+            f32::from(RTD_SHORT_FAULT_MAX_MV),
+            HeaterFaultReason::SensorShort,
+        ),
+        (
+            f32::from(RTD_OPEN_FAULT_MIN_MV),
+            HeaterFaultReason::SensorOpen,
+        ),
+    ] {
+        let batch = RtdAdcBatch {
+            mean_mv: mv,
+            ..assumed_offset_test_batch(30.0)
+        };
+        for offset in [-20_000, 20_000] {
+            assert_eq!(
+                rtd_sample_from_batch(&config, batch, offset),
+                RtdSample::Fault {
+                    adc_mv: Some(mv.round() as u16),
+                    reason
+                }
+            );
+        }
+    }
+    let batch = assumed_offset_test_batch(421.0);
+    assert_eq!(
+        rtd_sample_from_batch(&config, batch, -20_000),
+        RtdSample::Fault {
+            adc_mv: Some(batch.mean_mv.round() as u16),
+            reason: HeaterFaultReason::OverTemp,
+        }
+    );
 }
 
 #[test]
@@ -10672,6 +14688,7 @@ fn valid_rtd_measurement_promotes_startup_dashboard_to_ready() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         12_000,
         100,
@@ -10762,6 +14779,7 @@ fn valid_rtd_measurement_updates_display_and_control_on_request_change() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         100,
@@ -10813,6 +14831,7 @@ fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         20_000,
         100,
@@ -10825,6 +14844,10 @@ fn five_amp_power_step_retry_continues_through_runtime_sampling_pipeline() {
     assert_eq!(ui_state.current_temp_deci_c, 307);
     assert_eq!(latest_temp_c, 25.37);
     assert_eq!(latest_temp_i16, 25);
+    assert!(
+        control_measurement_guarded,
+        "PPS sample wait must be observable"
+    );
     assert_eq!(controller.fault_latched(), None);
 }
 
@@ -10874,6 +14897,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         100,
@@ -10892,6 +14916,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         700,
@@ -10914,6 +14939,7 @@ fn valid_rtd_measurement_updates_control_after_request_stabilizes() {
             measurement_guard: &mut measurement_guard,
             control_measurement_guarded: &mut control_measurement_guarded,
             heater_controller: &mut controller,
+            applied_heater_duty_percent: 0,
         },
         15_000,
         1_000,
@@ -11147,6 +15173,35 @@ fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
 }
 
 #[test]
+fn complete_idle_clears_failed_pps_adapter_only_with_observed_capability() {
+    for current_ma in [3_000, 5_000] {
+        let (power, _) = production_power_fixture(current_ma);
+        let capabilities = adjustable_capabilities_from_view(power.source_capabilities);
+        let failed = HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+            fixed_request_confirmed: false,
+            fixed_request: ch224q::VoltageRequest::V12,
+            terminal_fixed_pd_disarmed: true,
+        };
+        let mut backend = failed;
+        assert!(!reset_idle_failed_pps_backend(&mut backend, None));
+        assert_eq!(backend, failed);
+        assert!(reset_idle_failed_pps_backend(&mut backend, capabilities));
+        assert!(matches!(
+            backend,
+            HeaterPowerBackend::PpsMos {
+                capability_max_ma,
+                terminal_fixed_pd_disarmed: true,
+                settle_until_ms: None,
+                next_request_at_ms: 0,
+                ..
+            } if capability_max_ma == current_ma
+        ));
+        assert!(!reset_idle_failed_pps_backend(&mut backend, capabilities));
+    }
+}
+
+#[test]
 fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
     let previous = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,
@@ -11222,6 +15277,35 @@ fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
 }
 
 #[test]
+fn fusb302b_accepts_high_voltage_only_three_amp_pps_apdo() {
+    let mut capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_covers_20v: true,
+        pps_min_mv: Some(12_000),
+        pps_max_mv: Some(21_000),
+        pps_max_ma: Some(3_000),
+        ..ch224q::AdjustablePowerCapabilities::default()
+    };
+    capabilities.pps_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 12_000,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+
+    let HeaterPowerBackend::PpsMos {
+        pps_min_mv,
+        pps_max_mv,
+        capability_max_ma,
+        ..
+    } = select_fusb302b_heater_power_backend(Some(capabilities))
+    else {
+        panic!("a 12-21V/3A APDO is a valid automatic heater source");
+    };
+    assert_eq!(pps_min_mv, 12_000);
+    assert_eq!(pps_max_mv, 21_000);
+    assert_eq!(capability_max_ma, 3_000);
+}
+
+#[test]
 fn fusb302b_pending_contract_is_not_reported_as_ready() {
     let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
     let status = usb_runtime_status(
@@ -11290,6 +15374,38 @@ fn pps_keepalive_deadline_requires_a_fresh_expected_control_response() {
         6,
         true
     ));
+}
+
+#[test]
+fn only_a_fresh_reject_or_wait_settles_a_pending_request() {
+    let mut policy = fusb302b::SinkPolicy::new(12_000, 3_000);
+    assert!(
+        policy
+            .on_source_capabilities_with_message_id(
+                &[pps_source_capability(5_500, 21_000, 3_000)],
+                Some(3),
+            )
+            .is_some()
+    );
+    let phase = policy.phase();
+    assert_eq!(phase, SinkPhase::WaitingForAccept);
+
+    for message_type in [4, 12] {
+        assert!(!response_rejects_pending_request(
+            phase,
+            message_type,
+            policy.source_capabilities_message_is_fresh(Some(2)),
+        ));
+        policy.on_control_message_with_message_id(message_type, Some(2), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        assert!(response_rejects_pending_request(
+            phase,
+            message_type,
+            policy.source_capabilities_message_is_fresh(Some(4)),
+        ));
+    }
+    assert!(!response_rejects_pending_request(phase, 3, true));
+    assert!(!response_rejects_pending_request(SinkPhase::Ready, 4, true));
 }
 
 #[test]
@@ -11877,6 +15993,45 @@ fn runtime_heater_reconcile_preserves_dashboard_heater_when_calibration_is_off()
 }
 
 #[test]
+fn pending_automatic_pps_preserves_heater_intent_during_contract_transition() {
+    let mut ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    ui_state.heater_enabled = true;
+    let mut calibration_runtime_state = CalibrationRuntimeState::default();
+    let mut manual_pps_state = ManualPpsState::default();
+    let mut pd_contract_ready = true;
+    let transition_observation = PdStatusObservation {
+        status_raw: 0,
+        status: Status::from_register(0),
+        current_raw: 0,
+        current_ma: 0,
+        contract_voltage_mv: None,
+        contract: Contract::none(),
+    };
+
+    assert!(reconcile_pd_contract_intent_with_pending_automatic_pps(
+        Some(transition_observation),
+        &mut pd_contract_ready,
+        &mut ui_state,
+        &mut calibration_runtime_state,
+        &mut manual_pps_state,
+        false,
+        true,
+    ));
+    assert!(!pd_contract_ready);
+    assert!(ui_state.heater_enabled);
+    assert!(!calibration_runtime_state.heater_enabled);
+    assert!(reconcile_runtime_heater_enabled(
+        ui_state.heater_enabled,
+        calibration_runtime_state,
+        None,
+        false,
+        false,
+        true,
+        true,
+    ));
+}
+
+#[test]
 fn pd_unavailable_startup_enters_dashboard_with_heater_locked() {
     let pd_contract_ready = startup_pd_contract_ready(None);
     let state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
@@ -12180,6 +16335,371 @@ fn pd_contract_loss_relocks_an_armed_heater() {
 }
 
 #[test]
+fn tuning_failure_identifies_the_interlock_that_disarmed_heating() {
+    assert_eq!(
+        tuning_interlock_reason(false, true, false, false, false, false),
+        "pd_contract_lost"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, true, false, false, false),
+        "persistence_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, false, false, false, false, false),
+        "thermal_model_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, true, false, false),
+        "cooling_interlock_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, true, false),
+        "controller_fault_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, false, true),
+        "sensor_fault_disarmed"
+    );
+    assert_eq!(
+        tuning_interlock_reason(true, true, false, false, false, false),
+        "heater_arm_cleared_before_trial"
+    );
+}
+
+#[test]
+fn tuning_pd_failure_context_retains_actual_failure_and_contracts() {
+    let (mut power, _) = production_power_fixture(5_000);
+    power.protocol = PowerProtocol::WaitingForPsRdy;
+    power.failure = Some(PowerFailure::CapabilityInvalidated);
+    power.requested = Some(PdContractRequest::pps(18_500, 5_000).unwrap());
+    let context = tuning_pd_failure_context(power, Some(10), Some(100), 250, "power");
+    assert_eq!(
+        context[0].as_str(),
+        "pd:power p=wait_ps_rdy f=capability_invalidated available=1 age_ms=150"
+    );
+    let active = power.active.unwrap();
+    assert_eq!(
+        context[1].as_str(),
+        format!(
+            "pd:power a={}/5000 r=18500/5000 ticket=1 at_ms=250",
+            active.voltage_mv
+        )
+    );
+
+    let absent = tuning_pd_failure_context(PowerState::unavailable(), None, None, 250, "sample");
+    assert_eq!(
+        absent[0].as_str(),
+        "pd:sample p=unknown f=unavailable available=0"
+    );
+    assert_eq!(
+        absent[1].as_str(),
+        "pd:sample a=none r=none ticket=0 at_ms=250"
+    );
+}
+
+#[test]
+fn tuning_pd_failure_context_preserves_full_width_wait_age() {
+    let power = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        available: true,
+        failure: Some(PowerFailure::CapabilityInvalidated),
+        ..PowerState::unavailable()
+    };
+    let context = tuning_pd_failure_context(power, Some(0), None, u64::MAX, "interlock");
+    assert_eq!(
+        context[0].as_str(),
+        "pd:interlock p=wait_accept f=capability_invalidated available=1 age_ms=18446744073709551615"
+    );
+    assert!(context[0].len() <= flux_purr_firmware::thermal_tuning::THERMAL_TUNING_REASON_MAX_LEN);
+    assert!(context[1].ends_with("at_ms=18446744073709551615"));
+}
+
+#[test]
+fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_snapshot() {
+    let request = PdContractRequest::pps(12_500, 5_000).unwrap();
+    let pending = PowerState {
+        protocol: PowerProtocol::WaitingForAccept,
+        available: true,
+        requested: Some(request),
+        active: None,
+        failure: None,
+        ..PowerState::unavailable()
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(pending, Some(100), 129, Some(100), false),
+        TuningPdWaitDecision::Wait
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(pending, Some(100), 5_601, Some(100), false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+
+    let failed = PowerState {
+        failure: Some(PowerFailure::Detached),
+        ..pending
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(failed, Some(100), 129, Some(100), false),
+        TuningPdWaitDecision::Fail("pd_contract_lost")
+    );
+
+    let (ready, _) = production_power_fixture(5_000);
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, Some(100), false),
+        TuningPdWaitDecision::Wait
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, None, 129, Some(100), false),
+        TuningPdWaitDecision::Wait,
+        "a pending ticket must block the previous ready contract even before the wait marker is set"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, None, false),
+        TuningPdWaitDecision::Ready
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 129, None, true),
+        TuningPdWaitDecision::Fail("pd_request_failed")
+    );
+
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 10_642, Some(9_920), false),
+        TuningPdWaitDecision::Wait,
+        "a newly admitted 500 mV ticket must not inherit the first step's deadline"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 15_421, Some(9_920), false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+}
+
+#[test]
+fn tuning_waits_for_working_pps_after_a_ready_fixed_idle_contract() {
+    let (mut idle, _) = production_power_fixture(5_000);
+    let active = idle.active.as_mut().unwrap();
+    active.mode = PdContractRequestMode::Fixed;
+    active.voltage_mv = 5_000;
+    active.operating_current_ma = 1_000;
+    assert_eq!(
+        tuning_pd_wait_decision(idle, None, 100, None, false),
+        TuningPdWaitDecision::Wait,
+        "Fixed idle power does not qualify a PPS5A trial"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(idle, Some(100), 5_601, None, false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+    let (ready, _) = production_power_fixture(5_000);
+    assert_eq!(
+        tuning_pd_wait_decision(ready, Some(100), 300, None, false),
+        TuningPdWaitDecision::Ready
+    );
+}
+
+#[test]
+fn automatic_pps_progress_requires_current_heating_or_tuning_intent() {
+    for current_ma in [3_000, 5_000] {
+        let (mut power, _) = production_power_fixture(current_ma);
+        let active = power.active.as_mut().unwrap();
+        active.mode = PdContractRequestMode::Fixed;
+        active.voltage_mv = 5_000;
+        active.operating_current_ma = 1_000;
+        for protocol in [
+            PowerProtocol::Ready,
+            PowerProtocol::WaitingForAccept,
+            PowerProtocol::WaitingForPsRdy,
+        ] {
+            power.protocol = protocol;
+            for ticket_pending in [false, true] {
+                assert!(
+                    !automatic_pps_progress_allowed(power, ticket_pending, false, false, false),
+                    "standby must not initiate or preserve a thermal request: {current_ma}mA {protocol:?} ticket={ticket_pending}"
+                );
+                assert!(automatic_pps_progress_allowed(
+                    power,
+                    ticket_pending,
+                    true,
+                    true,
+                    false
+                ));
+                assert!(automatic_pps_progress_allowed(
+                    power,
+                    ticket_pending,
+                    false,
+                    false,
+                    true
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn newly_armed_tuning_reconciles_power_before_its_first_control_sample() {
+    // The start command runs after the loop's initial PD snapshot. This wiring
+    // guard covers the device-only call site that host state fixtures cannot
+    // construct (hardware/watch receivers live inside RuntimeLoopState).
+    let source = include_str!("runtime_loop.rs");
+    let control = source
+        .split("pub(crate) async fn runtime_control_heater")
+        .nth(1)
+        .and_then(|source| source.split("fn runtime_heater_output_settings").next())
+        .unwrap();
+    let readiness = control
+        .find("runtime_apply_pd_snapshot(state, elapsed_ms)")
+        .unwrap();
+    assert!(
+        readiness
+            < control
+                .find("runtime_apply_tuning_cooling_boundary")
+                .unwrap()
+    );
+    assert!(readiness < control.find("runtime_update_heater_controller").unwrap());
+    assert!(
+        readiness
+            < control
+                .find("runtime_record_thermal_tuning_sample")
+                .unwrap()
+    );
+}
+
+#[test]
+fn automatic_pps_ticket_requires_the_exact_confirmed_contract() {
+    let (ready, _) = production_power_fixture(5_000);
+    let active = ready.active.unwrap();
+    assert_eq!(
+        automatic_pps_ticket_decision(None, 100, 129, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Wait
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(
+            Some(TicketOutcome::Confirmed(active)),
+            100,
+            129,
+            20_000,
+            5_000,
+        ),
+        AutomaticPpsTicketDecision::Confirmed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(
+            Some(TicketOutcome::Confirmed(active)),
+            100,
+            129,
+            19_500,
+            5_000,
+        ),
+        AutomaticPpsTicketDecision::Failed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(Some(TicketOutcome::Rejected), 100, 129, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Failed
+    );
+    assert_eq!(
+        automatic_pps_ticket_decision(None, 100, 5_601, 20_000, 5_000),
+        AutomaticPpsTicketDecision::Failed
+    );
+}
+
+#[test]
+fn automatic_pps_transition_never_freezes_or_replays_cached_pwm() {
+    let source = include_str!("tasks.rs");
+    for (start, end) in [
+        (
+            "pub(crate) async fn apply_pps_voltage_transition",
+            "fn finish_pps_voltage_transition",
+        ),
+        (
+            "fn finish_pps_voltage_transition",
+            "async fn complete_pending_automatic_pps",
+        ),
+        (
+            "async fn complete_pending_automatic_pps",
+            "fn pps_request_mv_for_context",
+        ),
+    ] {
+        let body = source
+            .split(start)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap();
+        assert!(
+            body.contains("apply_live_pps_gate("),
+            "{start} must write the current control frame before returning from a ticket boundary"
+        );
+    }
+    assert!(
+        !include_str!("power.rs").contains("gate_duty_percent:"),
+        "a pending voltage ticket must not retain a PWM command for later replay"
+    );
+}
+
+#[test]
+fn automatic_pps_live_gate_tracks_control_during_wait_and_confirmation() {
+    let (ready, _) = production_power_fixture(5_000);
+    let mut confirmed = ready.active.unwrap();
+    confirmed.voltage_mv = 12_500;
+    // Real HIL: the controller requests zero while a 13V -> 12.5V ticket
+    // is pending. Both the waiting and confirmed output must be zero.
+    for (outcome, voltage_bound_mv) in [
+        (None, 13_000),
+        (Some(TicketOutcome::Confirmed(confirmed)), 12_500),
+    ] {
+        assert_ne!(
+            automatic_pps_ticket_decision(outcome, 100, 129, 12_500, 5_000),
+            AutomaticPpsTicketDecision::Failed
+        );
+        assert_eq!(
+            live_pps_gate_duty_percent(0, true, false, 21_000, voltage_bound_mv, 100),
+            0
+        );
+    }
+    assert_eq!(
+        live_pps_gate_duty_percent(12, true, false, 21_000, 21_000, 100),
+        12
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(12, true, false, 21_000, 20_500, 100),
+        12
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(19, true, false, 21_000, 12_500, 100),
+        53
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, true, false, 21_000, 21_000, 50),
+        50
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, false, false, 21_000, 21_000, 100),
+        0
+    );
+    assert_eq!(
+        live_pps_gate_duty_percent(100, true, true, 21_000, 21_000, 100),
+        0
+    );
+}
+
+#[test]
+fn tuning_power_wait_resumes_profile_without_a_false_source_change() {
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(ProductionThermalController::Profile(
+        ThermalProfileBank::Pps5a,
+    ));
+    let paused = pause_tuning_profile_controller(&mut controller, 60, 34.0, 129);
+    assert_eq!(paused.duty_percent, 0);
+    assert_eq!(controller.production_controller, None);
+    let (_, disarm) = controller.update_production_at(
+        ProductionThermalController::Profile(ThermalProfileBank::Pps5a),
+        production_test_input(34.0),
+        Some(production_test_profile(300)),
+    );
+    assert!(!disarm);
+}
+
+#[test]
 fn pd_ready_transition_discards_power_wait_heater_arm_until_rearmed() {
     let mut ui_state = FrontPanelUiState::new_startup(FrontPanelRuntimeMode::App);
     ui_state.set_dashboard_presentation(
@@ -12385,6 +16905,85 @@ fn terminal_disarm_locks_pps_until_fixed_pd_write_completes() {
 }
 
 #[test]
+fn tuning_cooldown_releases_completed_calibration_power_lock_without_heating() {
+    for capability_ma in [3_000, 5_000] {
+        let mut backend = select_heater_power_backend(
+            Some(ch224q::AdjustablePowerCapabilities {
+                pps_covers_20v: true,
+                pps_min_mv: Some(5_000),
+                pps_max_mv: Some(21_000),
+                pps_max_ma: Some(capability_ma),
+                ..Default::default()
+            }),
+            Some(Status::default()),
+        );
+        assert!(latch_terminal_fixed_pd_disarm(
+            &CalibrationRuntimeState {
+                immediate_heater_disarm_pending: true,
+                ..Default::default()
+            },
+            &mut backend,
+        ));
+        assert!(!release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false,
+            false,
+        ));
+        assert!(backend.terminal_fixed_pd_disarmed());
+        assert!(release_terminal_fixed_pd_disarm_for_new_work(
+            &mut backend,
+            false,
+            false,
+            true,
+        ));
+        let HeaterPowerBackend::PpsMos {
+            current_mode,
+            current_request_mv,
+            idle_request_mv,
+            capability_max_ma,
+            terminal_fixed_pd_disarmed,
+            ..
+        } = backend
+        else {
+            panic!("both source classes must retain the shared PPS backend");
+        };
+        assert!(!terminal_fixed_pd_disarmed);
+        assert_eq!(current_mode, None);
+        assert_eq!(capability_max_ma, capability_ma);
+        assert!(!automatic_heater_power_is_idle(false, 0, false, true));
+        let request_mv = automatic_pps_request_mv(
+            0,
+            false,
+            true,
+            current_request_mv,
+            idle_request_mv,
+            5_500,
+            21_000,
+        );
+        assert!(request_mv > idle_request_mv);
+        assert_eq!(
+            live_pps_gate_duty_percent(0, false, true, 21_000, request_mv, 0),
+            0
+        );
+        let (mut fixed, _) = production_power_fixture(capability_ma);
+        let active = fixed.active.as_mut().unwrap();
+        active.mode = PdContractRequestMode::Fixed;
+        active.voltage_mv = 5_000;
+        active.operating_current_ma = 1_000;
+        assert_eq!(
+            tuning_pd_wait_decision(fixed, None, 0, None, false),
+            TuningPdWaitDecision::Wait
+        );
+        let (ready, _) = production_power_fixture(capability_ma);
+        assert_eq!(
+            tuning_pd_wait_decision(ready, Some(0), 100, None, false),
+            TuningPdWaitDecision::Ready
+        );
+    }
+}
+
+#[test]
 fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_000,
@@ -12404,7 +17003,8 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
     assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
         false,
-        true
+        true,
+        false
     ));
     assert!(matches!(
         backend,
@@ -12433,7 +17033,8 @@ fn manual_pps_releases_terminal_disarm_after_fixed_pd_fallback() {
     assert!(release_terminal_fixed_pd_disarm_for_new_work(
         &mut backend,
         false,
-        true
+        true,
+        false
     ));
     assert_eq!(
         backend,

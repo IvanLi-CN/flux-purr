@@ -20,6 +20,7 @@ describe('TanStack route tree', () => {
     '/devices/device-1/calibration/heater-curve?demo=true',
     '/devices/device-1/calibration/rtd-adc?demo=true',
     '/devices/device-1/calibration/vin-adc?demo=true',
+    '/devices/device-1/calibration/firmware-tuning?demo=true',
   ])('directly matches canonical leaf %s', async (entry) => {
     const router = createTestRouter(entry)
     await router.load()

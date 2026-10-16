@@ -178,24 +178,19 @@ pub(crate) async fn monitor_once(
     tail: usize,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let lease = create_lease(client, &resolved).await?;
-    let devices_result =
-        request_json(client, Method::GET, &resolved.devd, "/api/v1/devices", None).await;
+    let result = request_json(
+        client,
+        Method::GET,
+        &resolved.devd,
+        &format!(
+            "/api/v1/devices/{}/events/history?tail={tail}",
+            resolved.device
+        ),
+        None,
+    )
+    .await;
     let _ = release_lease(client, &resolved.devd, &lease.lease_id).await;
-    let devices = devices_result?;
-    let events = devices
-        .get("devices")
-        .and_then(Value::as_array)
-        .and_then(|devices| {
-            devices
-                .iter()
-                .find(|device| device.get("id").and_then(Value::as_str) == Some(&resolved.device))
-        })
-        .and_then(|device| device.get("events"))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let start = events.len().saturating_sub(tail);
-    Ok(json!({"device": resolved.device, "events": &events[start..]}))
+    result
 }
 
 pub(crate) async fn handle_hardware_command(

@@ -5,6 +5,22 @@ use super::*;
 use embedded_hal_async::i2c::I2c as _;
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn adc1_attenuation_db(channel: AdcCalibrationChannel) -> u8 {
+    match channel {
+        AdcCalibrationChannel::Vin => 11,
+        AdcCalibrationChannel::Rtd => 6,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn adc1_attenuation(channel: AdcCalibrationChannel) -> Attenuation {
+    match adc1_attenuation_db(channel) {
+        11 => Attenuation::_11dB,
+        _ => RTD_SAMPLE_ATTENUATION,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn vin_adc_mv_for_input_mv(input_mv: u32) -> u16 {
     let numerator = input_mv.saturating_mul(s3_frontpanel::VIN_DIVIDER_R_LOW_OHMS);
     let denominator =
@@ -158,7 +174,13 @@ pub(crate) type RtdAdcPin = esp_hal::analog::adc::AdcPin<
     AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
 >;
 #[cfg(target_arch = "xtensa")]
-pub(crate) type Adc1Curve = AdcCalCurve<esp_hal::peripherals::ADC1<'static>>;
+pub(crate) type Adc1CalibrationCurve = AdcCalCurve<esp_hal::peripherals::ADC1<'static>>;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) struct Adc1Curve {
+    vin: Adc1CalibrationCurve,
+    rtd: Adc1CalibrationCurve,
+}
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_adc1(
@@ -175,9 +197,16 @@ pub(crate) fn initialize_adc1(
         && init_code.is_some()
         && reference_code.is_some()
         && reference_mv.is_some();
+    let vin_attenuation = adc1_attenuation(AdcCalibrationChannel::Vin);
+    let vin_efuse_ready = efuse_version == 1
+        && Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, vin_attenuation).is_some()
+        && Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, vin_attenuation).is_some();
     #[cfg(feature = "web_serial")]
     {
-        ADC_CALIBRATION_SOURCE.store(if efuse_ready { 0 } else { 1 }, Ordering::Relaxed);
+        ADC_CALIBRATION_SOURCE.store(
+            if efuse_ready && vin_efuse_ready { 0 } else { 1 },
+            Ordering::Relaxed,
+        );
         ADC_EFUSE_VERSION.store(efuse_version, Ordering::Relaxed);
         ADC_INIT_CODE.store(init_code.unwrap_or(u16::MAX), Ordering::Relaxed);
         ADC_REFERENCE_CODE.store(reference_code.unwrap_or(u16::MAX), Ordering::Relaxed);
@@ -185,10 +214,19 @@ pub(crate) fn initialize_adc1(
     }
 
     let mut config = AdcConfig::new();
-    let vin_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(vin_gpio, RTD_SAMPLE_ATTENUATION);
-    let rtd_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(rtd_gpio, RTD_SAMPLE_ATTENUATION);
+    let vin_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(
+        vin_gpio,
+        adc1_attenuation(AdcCalibrationChannel::Vin),
+    );
+    let rtd_pin = config.enable_pin_with_cal::<_, AdcCalBasic<_>>(
+        rtd_gpio,
+        adc1_attenuation(AdcCalibrationChannel::Rtd),
+    );
     let adc = Adc::new(adc, config);
-    let curve = efuse_ready.then(|| Adc1Curve::new_cal(RTD_SAMPLE_ATTENUATION));
+    let curve = (efuse_ready && vin_efuse_ready).then(|| Adc1Curve {
+        vin: Adc1CalibrationCurve::new_cal(vin_attenuation),
+        rtd: Adc1CalibrationCurve::new_cal(RTD_SAMPLE_ATTENUATION),
+    });
     (adc, vin_pin, rtd_pin, curve)
 }
 
@@ -200,13 +238,20 @@ pub(crate) async fn read_adc_sample<PIN>(
         esp_hal::peripherals::ADC1<'static>,
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &Adc1Curve,
+    curve: &Adc1CalibrationCurve,
 ) -> Option<AdcConvertedSample>
 where
     PIN: AdcChannel,
 {
+    if !wait_for_adc1_idle() {
+        return None;
+    }
     loop {
-        match adc.read_oneshot(pin) {
+        let poll_started_us = Instant::now().as_micros();
+        match poll_adc_conversion(
+            || adc.read_oneshot(pin),
+            || Instant::now().as_micros().saturating_sub(poll_started_us),
+        ) {
             Ok(value) => {
                 let raw_code = mask_adc1_raw_code(value);
                 return Some(AdcConvertedSample {
@@ -218,6 +263,63 @@ where
             Err(_) => return None,
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+const ADC_FAST_POLL_BUDGET_US: u64 = 50;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn poll_adc_conversion<T>(
+    mut read: impl FnMut() -> nb::Result<T, ()>,
+    mut elapsed_us: impl FnMut() -> u64,
+) -> nb::Result<T, ()> {
+    loop {
+        match read() {
+            Err(nb::Error::WouldBlock) if elapsed_us() < ADC_FAST_POLL_BUDGET_US => {
+                core::hint::spin_loop();
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[inline(never)]
+pub(crate) fn wait_for_adc_idle(
+    mut is_idle: impl FnMut() -> bool,
+    mut elapsed_us: impl FnMut() -> u64,
+) -> bool {
+    // DONE can precede the end of the SAR state machine. Espressif's ADC1
+    // RTC oneshot start waits for meas_status=0 before raising START again.
+    // Leave a bounded turnaround interval after each reset as well as waiting
+    // for idle. This gate runs before START, never on its own conversion.
+    loop {
+        let idle = is_idle();
+        let elapsed = elapsed_us();
+        if idle && elapsed >= 50 {
+            return true;
+        }
+        if elapsed >= 1_000 {
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn wait_for_adc1_idle() -> bool {
+    let started_us = Instant::now().as_micros();
+    wait_for_adc_idle(
+        || {
+            esp_hal::peripherals::SENS::regs()
+                .sar_slave_addr1()
+                .read()
+                .sar_saradc_meas_status()
+                .bits()
+                == 0
+        },
+        || Instant::now().as_micros().saturating_sub(started_us),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -235,7 +337,7 @@ pub(crate) async fn read_adc_batch<PIN>(
         esp_hal::peripherals::ADC1<'static>,
         AdcCalBasic<esp_hal::peripherals::ADC1<'static>>,
     >,
-    curve: &Adc1Curve,
+    curve: &Adc1CalibrationCurve,
 ) -> Option<RtdAdcBatch>
 where
     PIN: AdcChannel,
@@ -263,23 +365,28 @@ where
     for _ in 0..total_samples {
         let sample = read_adc_sample(adc, pin, curve).await;
 
-        if let Some(sample) = sample {
-            if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
-                discarded_valid_samples = discarded_valid_samples.saturating_add(1);
-            } else {
-                sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
-                sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
-                min_mv = min_mv.min(sample.calibrated_mv);
-                max_mv = max_mv.max(sample.calibrated_mv);
-                min_raw_code = min_raw_code.min(sample.raw_code);
-                max_raw_code = max_raw_code.max(sample.raw_code);
-                valid_samples = valid_samples.saturating_add(1);
-                wait_for_adc_phase_if_needed(
-                    valid_samples.is_multiple_of(samples_per_phase)
-                        && valid_samples < RTD_SAMPLE_COUNT,
-                )
-                .await;
+        let Some(sample) = sample else {
+            continue;
+        };
+        if discarded_valid_samples < RTD_SETTLE_DISCARD_SAMPLE_COUNT {
+            discarded_valid_samples = discarded_valid_samples.saturating_add(1);
+            // Yield between groups of discarded conversions too, so the
+            // fast-ready path cannot monopolize the executor for the prefix.
+            if discarded_valid_samples.is_multiple_of(samples_per_phase) {
+                embassy_futures::yield_now().await;
             }
+        } else {
+            sum_mv = sum_mv.saturating_add(u32::from(sample.calibrated_mv));
+            sum_raw_code = sum_raw_code.saturating_add(u32::from(sample.raw_code));
+            min_mv = min_mv.min(sample.calibrated_mv);
+            max_mv = max_mv.max(sample.calibrated_mv);
+            min_raw_code = min_raw_code.min(sample.raw_code);
+            max_raw_code = max_raw_code.max(sample.raw_code);
+            valid_samples = valid_samples.saturating_add(1);
+            wait_for_adc_phase_if_needed(
+                valid_samples.is_multiple_of(samples_per_phase) && valid_samples < RTD_SAMPLE_COUNT,
+            )
+            .await;
         }
     }
 
@@ -301,7 +408,7 @@ pub(crate) async fn read_calibrated_vin_mv(
     memory_config: &MemoryConfig,
 ) -> Option<(u16, u16, u16, u32)> {
     let curve = curve?;
-    let batch = read_adc_batch(adc, pin, curve).await?;
+    let batch = read_adc_batch(adc, pin, &curve.vin).await?;
     let raw_code = batch.mean_raw_code;
     let raw_adc_mv = batch.mean_mv.round() as u16;
     #[cfg(feature = "web_serial")]
@@ -332,7 +439,7 @@ pub(crate) async fn read_rtd_sample(
             reason: HeaterFaultReason::AdcReadFailed,
         };
     };
-    let Some(batch) = read_adc_batch(adc, pin, curve).await else {
+    let Some(batch) = read_adc_batch(adc, pin, &curve.rtd).await else {
         return RtdSample::Fault {
             adc_mv: None,
             reason: HeaterFaultReason::AdcReadFailed,
@@ -344,6 +451,42 @@ pub(crate) async fn read_rtd_sample(
         RTD_RAW_CODE_MIN.store(batch.min_raw_code, Ordering::Relaxed);
         RTD_RAW_CODE_MAX.store(batch.max_raw_code, Ordering::Relaxed);
     }
+    rtd_sample_from_batch(memory_config, batch, RTD_ASSUMED_ADC_OFFSET_UV)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn rtd_assumed_adc_offset_uv(
+    memory_config: &MemoryConfig,
+    configured_offset_uv: i32,
+) -> i32 {
+    let channel = &memory_config.adc_calibration.rtd;
+    let fit = channel.active_slot_fit();
+    if channel.samples.iter().any(Option::is_some) || fit.gain != 1.0 || fit.offset_mv != 0.0 {
+        0
+    } else {
+        configured_offset_uv.clamp(-20_000, 20_000)
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn corrected_rtd_adc_fractional_mv(
+    memory_config: &MemoryConfig,
+    raw_adc_fractional_mv: f32,
+    configured_offset_uv: i32,
+) -> f32 {
+    correct_adc_fractional_mv(
+        memory_config,
+        AdcCalibrationChannel::Rtd,
+        raw_adc_fractional_mv,
+    ) + rtd_assumed_adc_offset_uv(memory_config, configured_offset_uv) as f32 / 1_000.0
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn rtd_sample_from_batch(
+    memory_config: &MemoryConfig,
+    batch: RtdAdcBatch,
+    configured_offset_uv: i32,
+) -> RtdSample {
     let raw_adc_mv = batch.mean_mv.round() as u16;
     let raw_adc_fractional_mv = batch.mean_mv;
 
@@ -360,11 +503,24 @@ pub(crate) async fn read_rtd_sample(
         };
     }
 
-    let adc_fractional_mv = correct_adc_fractional_mv(
+    let base_adc_fractional_mv = correct_adc_fractional_mv(
         memory_config,
         AdcCalibrationChannel::Rtd,
         raw_adc_fractional_mv,
     );
+    let offset_uv = rtd_assumed_adc_offset_uv(memory_config, configured_offset_uv);
+    // A temporary negative assumption must not hide the original hard cutoff.
+    if offset_uv < 0
+        && rtd_resistance_ohms_from_fractional_mv(base_adc_fractional_mv)
+            .is_ok_and(|r| is_overtemp_sample(pt1000_temperature_c_from_resistance(r)))
+    {
+        return RtdSample::Fault {
+            adc_mv: Some(raw_adc_mv),
+            reason: HeaterFaultReason::OverTemp,
+        };
+    }
+    let adc_fractional_mv =
+        corrected_rtd_adc_fractional_mv(memory_config, raw_adc_fractional_mv, configured_offset_uv);
     let adc_mv = adc_fractional_mv.round() as u16;
 
     match rtd_resistance_ohms_from_fractional_mv(adc_fractional_mv) {
@@ -626,6 +782,8 @@ pub(crate) struct Fusb302bRuntime {
     pub(crate) next_message_id: u8,
     pub(crate) attached_at_ms: Option<u64>,
     pub(crate) last_source_capabilities_request_at_ms: Option<u64>,
+    // Recovery seeds the retry timestamp before a query is actually sent.
+    pub(crate) source_capabilities_query_sent: bool,
     pub(crate) source_capabilities_refresh_pending: bool,
     pub(crate) source_capabilities_refresh_for_contract: bool,
     pub(crate) source_capabilities_refresh_requested_at_ms: Option<u64>,
@@ -680,6 +838,20 @@ pub(crate) fn pps_keepalive_response_is_valid(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn response_rejects_pending_request(
+    phase: SinkPhase,
+    message_type: u8,
+    message_id_is_fresh: bool,
+) -> bool {
+    message_id_is_fresh
+        && matches!(
+            phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
+        )
+        && matches!(message_type, 4 | 12)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn successful_contract_confirmation_clears_timeout(
     was_waiting_for_ps_rdy: bool,
     phase: SinkPhase,
@@ -716,6 +888,7 @@ impl Fusb302bRuntime {
             next_message_id: 0,
             attached_at_ms: None,
             last_source_capabilities_request_at_ms: None,
+            source_capabilities_query_sent: false,
             source_capabilities_refresh_pending: false,
             source_capabilities_refresh_for_contract: false,
             source_capabilities_refresh_requested_at_ms: None,
@@ -748,6 +921,7 @@ impl Fusb302bRuntime {
         self.policy.on_received_protocol_reset();
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_query_sent = false;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -822,6 +996,7 @@ impl Fusb302bRuntime {
         self.next_message_id = 0;
         self.attached_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = None;
+        self.source_capabilities_query_sent = false;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
         self.source_capabilities_refresh_requested_at_ms = None;
@@ -930,6 +1105,7 @@ impl Fusb302bRuntime {
                 // so the polling path consumes that already-handled status
                 // until this bounded re-query is sent.
                 self.last_source_capabilities_request_at_ms = Some(now_ms);
+                self.source_capabilities_query_sent = false;
                 self.source_capabilities_refresh_pending = false;
                 self.source_capabilities_refresh_for_contract = false;
                 self.source_capabilities_refresh_requested_at_ms = None;
@@ -1056,6 +1232,7 @@ impl Fusb302bRuntime {
 
     pub(crate) async fn abort_pending_operation(&mut self, i2c: &mut PdI2c<'_>, now: PdTimestamp) {
         self.policy.cancel_pending_request();
+        self.source_capabilities_query_sent = false;
         self.pps_keepalive_pending_at_ms = None;
         self.source_capabilities_refresh_pending = false;
         self.source_capabilities_refresh_for_contract = false;
@@ -1089,6 +1266,7 @@ impl Fusb302bRuntime {
         self.request_rejected = false;
         self.request_timed_out = false;
         if replace_pending {
+            self.source_capabilities_query_sent = false;
             self.source_capabilities_refresh_pending = false;
             self.source_capabilities_refresh_for_contract = false;
             self.source_capabilities_refresh_requested_at_ms = None;
@@ -1123,6 +1301,7 @@ impl Fusb302bRuntime {
         self.source_capabilities_refresh_for_contract = request_contract;
         self.source_capabilities_refresh_requested_at_ms = Some(now_ms);
         self.last_source_capabilities_request_at_ms = Some(now_ms);
+        self.source_capabilities_query_sent = true;
         FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         PdContractRequestState::Pending
     }
@@ -1542,6 +1721,7 @@ impl Fusb302bRuntime {
             self.source_capabilities_tx_confirmed = false;
             self.source_capabilities_gcrc_seen = false;
             self.last_source_capabilities_request_at_ms = Some(now_ms);
+            self.source_capabilities_query_sent = true;
             FUSB302B_DIAGNOSTIC.store(FUSB302B_DIAG_SOURCE_CAPS_REQUESTED, Ordering::Relaxed);
         } else if self.pps_keepalive_due(now_ms) {
             let Some(rdo) = self.policy.refresh_active_pps() else {
@@ -1580,7 +1760,7 @@ impl Fusb302bRuntime {
             FUSB302B_DIAG_SOURCE_CAPS_GCRC_SEEN
         } else if self.source_capabilities_tx_confirmed {
             FUSB302B_DIAG_SOURCE_CAPS_TX_CONFIRMED
-        } else if self.last_source_capabilities_request_at_ms.is_some() {
+        } else if self.source_capabilities_query_sent {
             FUSB302B_DIAG_SOURCE_CAPS_REQUESTED
         } else {
             FUSB302B_DIAG_WAITING_SOURCE_CAPS
@@ -1641,6 +1821,12 @@ impl Fusb302bRuntime {
         }
         if message.payload().is_empty() {
             self.handle_control_message(message, now_ms);
+        } else {
+            let message_id = Some((message.header() >> 9) as u8 & 0x07);
+            self.policy.on_unhandled_data_message_with_message_id(
+                message_id,
+                self.source_capabilities_query_sent,
+            );
         }
         true
     }
@@ -1704,19 +1890,23 @@ impl Fusb302bRuntime {
         let was_waiting_for_ps_rdy = self.policy.phase() == SinkPhase::WaitingForPsRdy;
         let message_type = (message.header() & 0x1f) as u8;
         let message_id = Some((message.header() >> 9) as u8 & 0x07);
+        let phase = self.policy.phase();
+        let message_id_is_fresh = self.policy.source_capabilities_message_is_fresh(message_id);
         let keepalive_response_is_valid = pps_keepalive_response_is_valid(
-            self.policy.phase(),
+            phase,
             self.pps_keepalive_pending_at_ms.is_some(),
             message_type,
-            self.policy.source_capabilities_message_is_fresh(message_id),
+            message_id_is_fresh,
         );
-        self.request_rejected = matches!(message_type, 4 | 12)
-            && matches!(
-                self.policy.phase(),
-                SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy
-            );
+        self.request_rejected |=
+            response_rejects_pending_request(phase, message_type, message_id_is_fresh);
         self.policy
             .on_control_message_with_message_id(message_type, message_id, now_ms);
+        if phase != SinkPhase::WaitingForSourceCapabilities
+            && self.policy.phase() == SinkPhase::WaitingForSourceCapabilities
+        {
+            self.source_capabilities_query_sent = false;
+        }
         if keepalive_response_is_valid {
             self.pps_keepalive_pending_at_ms = None;
         }
@@ -1803,14 +1993,17 @@ impl Fusb302bRuntime {
         if let Some(result) = self.poll_vbus_restore(i2c, now, now_ms).await {
             return result;
         }
+        if let Some(result) = self.poll_attachment(i2c, now, now_ms).await {
+            return result;
+        }
+        if !self.poll_receive_messages(i2c, now, now_ms).await {
+            return false;
+        }
         if let Some(result) = self.poll_pending_request(i2c, now, now_ms).await {
             return result;
         }
         self.poll_pps_transition_capability_refresh(now_ms);
-        if let Some(result) = self.poll_attachment(i2c, now, now_ms).await {
-            return result;
-        }
-        self.poll_receive_messages(i2c, now, now_ms).await
+        true
     }
 
     async fn poll_receive_messages(
@@ -1819,6 +2012,21 @@ impl Fusb302bRuntime {
         now: PdTimestamp,
         now_ms: u64,
     ) -> bool {
+        for _ in 0..FUSB302B_RX_BURST_LIMIT {
+            let (result, received_message) = self.poll_receive_event(i2c, now, now_ms).await;
+            if !result || !received_message {
+                return result;
+            }
+        }
+        true
+    }
+
+    async fn poll_receive_event(
+        &mut self,
+        i2c: &mut PdI2c<'_>,
+        now: PdTimestamp,
+        now_ms: u64,
+    ) -> (bool, bool) {
         let (event, status0) =
             match fusb302b_receive_event(i2c, self.retry_fail_recovery_pending).await {
                 Ok(observation) => observation,
@@ -1849,12 +2057,13 @@ impl Fusb302bRuntime {
                         )
                         .await;
                     self.record_protocol_fault(protocol_fault);
-                    return recovered;
+                    return (recovered, false);
                 }
             };
         self.vbus_status_raw = status0;
         self.vbus_status_observed = !matches!(event, Fusb302bReceiveEvent::VbusLow { .. });
-        match event {
+        let received_message = matches!(event, Fusb302bReceiveEvent::Message(_));
+        let result = match event {
             Fusb302bReceiveEvent::VbusLow { transition } => {
                 self.handle_vbus_low_event(i2c, now_ms, transition).await
             }
@@ -1875,6 +2084,7 @@ impl Fusb302bRuntime {
             Fusb302bReceiveEvent::RetryFailed => self.handle_retry_failed(i2c, now).await,
             Fusb302bReceiveEvent::Protection => self.handle_protection_event(),
             Fusb302bReceiveEvent::UnsupportedSop => self.handle_unsupported_sop(i2c, now).await,
-        }
+        };
+        (result, received_message)
     }
 }

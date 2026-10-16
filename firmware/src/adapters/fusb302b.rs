@@ -43,7 +43,7 @@ pub const SOURCE_CAPS_RETRY_INTERVAL_MS: u64 = 5_000;
 
 fn source_message_id_is_newer(last: u8, current: u8) -> bool {
     let distance = current.wrapping_sub(last) & 0x07;
-    (1..=4).contains(&distance)
+    (1..=3).contains(&distance)
 }
 
 /// The only recovery actions available after a Source_Capabilities timeout.
@@ -321,9 +321,8 @@ impl SinkPolicy {
         })
     }
 
-    /// Record every received SOP Source message, including messages that do
-    /// not affect the current policy phase. A small forward distance is a
-    /// fresh message; equal and half-range/old values remain duplicates.
+    /// Record a received SOP Source message in the current exchange. A small
+    /// forward distance is fresh; equal and half-range/old values are not.
     pub fn observe_source_message_id(&mut self, source_message_id: Option<u8>) -> bool {
         let Some(source_message_id) = source_message_id.map(|value| value & 0x07) else {
             return true;
@@ -333,6 +332,20 @@ impl SinkPolicy {
         }
         self.source_message_id = Some(source_message_id);
         true
+    }
+
+    pub fn on_unhandled_data_message_with_message_id(
+        &mut self,
+        message_id: Option<u8>,
+        discovery_query_active: bool,
+    ) {
+        if matches!(
+            self.phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
+        ) || (self.phase == SinkPhase::WaitingForSourceCapabilities && discovery_query_active)
+        {
+            let _ = self.observe_source_message_id(message_id);
+        }
     }
 
     fn begin_request(&mut self, capabilities: SourceCapabilities) -> Option<[u8; 4]> {
@@ -534,6 +547,12 @@ impl SinkPolicy {
         const REJECT: u8 = 4;
         const WAIT: u8 = 12;
 
+        if !matches!(
+            self.phase,
+            SinkPhase::WaitingForAccept | SinkPhase::WaitingForPsRdy | SinkPhase::Ready
+        ) {
+            return;
+        }
         // GoodCRC echoes the Sink's message ID and is not a Source sequence
         // entry. Other fresh control messages, including PPS renewal replies
         // while Ready, must advance the Source sequence without changing the
@@ -1318,6 +1337,35 @@ mod tests {
     }
 
     #[test]
+    fn pps_keepalive_responses_do_not_stale_a_later_contract_confirmation() {
+        let mut policy = SinkPolicy::new(12_000, 5_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+        policy.on_control_message_with_message_id(3, Some(1), 0);
+        policy.on_control_message_with_message_id(6, Some(2), 1);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().voltage_mv, 12_000);
+
+        for (accept_id, ps_rdy_id) in [(3, 4), (5, 6)] {
+            policy.on_control_message_with_message_id(3, Some(accept_id), 5_000);
+            policy.on_control_message_with_message_id(6, Some(ps_rdy_id), 5_001);
+            assert_eq!(policy.phase(), SinkPhase::Ready);
+            assert_eq!(policy.active_contract().voltage_mv, 12_000);
+        }
+
+        let request = crate::adapters::pd::PdContractRequest::pps(20_000, 5_000).unwrap();
+        assert!(policy.request_contract(request).is_some());
+        policy.on_control_message_with_message_id(3, Some(7), 10_000);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(0), 10_001);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+        assert_eq!(policy.active_contract().voltage_mv, 20_000);
+    }
+
+    #[test]
     fn source_response_message_ids_accept_wraparound_and_reject_old_ids() {
         let mut policy = SinkPolicy::new(20_000, 5_000);
         let _ = policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7));
@@ -1335,9 +1383,97 @@ mod tests {
     fn source_message_id_accepts_small_forward_sequence_distances() {
         assert!(source_message_id_is_newer(7, 0));
         assert!(source_message_id_is_newer(1, 3));
-        assert!(source_message_id_is_newer(1, 5));
+        assert!(!source_message_id_is_newer(1, 5));
         assert!(!source_message_id_is_newer(1, 6));
         assert!(!source_message_id_is_newer(5, 2));
+    }
+
+    #[test]
+    fn half_range_source_responses_cannot_confirm_a_pending_contract() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+
+        policy.on_control_message_with_message_id(3, Some(4), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+        policy.on_control_message_with_message_id(3, Some(1), 1);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(5), 2);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(2), 3);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+    }
+
+    #[test]
+    fn abandoned_control_response_cannot_poison_capability_rediscovery() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(7))
+                .is_some()
+        );
+        policy.on_received_protocol_reset();
+        policy.on_control_message_with_message_id(6, Some(0), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4))
+                .is_some()
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForAccept);
+    }
+
+    #[test]
+    fn interleaved_source_data_advances_message_id_before_accept() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+        for id in 1..=3 {
+            policy.on_unhandled_data_message_with_message_id(Some(id), false);
+        }
+        policy.on_control_message_with_message_id(3, Some(4), 0);
+        assert_eq!(policy.phase(), SinkPhase::WaitingForPsRdy);
+        policy.on_control_message_with_message_id(6, Some(5), 1);
+        assert_eq!(policy.phase(), SinkPhase::Ready);
+
+        policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0), false);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(4))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn source_data_after_discovery_query_fences_duplicate_capabilities() {
+        let mut policy = SinkPolicy::new(12_000, 3_000);
+        policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0), false);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0))
+                .is_some()
+        );
+
+        policy.on_received_protocol_reset();
+        policy.on_unhandled_data_message_with_message_id(Some(0), true);
+        assert_eq!(
+            policy.on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(0)),
+            None
+        );
+        assert_eq!(policy.phase(), SinkPhase::WaitingForSourceCapabilities);
+        assert!(
+            policy
+                .on_source_capabilities_with_message_id(&[PPS_APDO_5V_TO_21V_5A], Some(1))
+                .is_some()
+        );
     }
 
     #[test]

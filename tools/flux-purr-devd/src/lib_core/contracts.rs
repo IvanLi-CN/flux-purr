@@ -226,6 +226,8 @@ pub struct ThermalPlantActiveResult {
     pub radiation_mw_per_k4: Option<f32>,
     pub thermal_capacity_mj_per_c: Option<f32>,
     pub transport_delay_ms: Option<u32>,
+    #[serde(default)]
+    pub heat_response: Option<flux_purr_firmware::thermal_response::HeatResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -236,6 +238,159 @@ pub struct ThermalPlantRunSnapshot {
     pub trace_page: ThermalPlantTracePage,
     pub provisional_curve: Option<ThermalPlantProvisionalCurve>,
     pub active_result: Option<ThermalPlantActiveResult>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningPowerClass {
+    Pps3a,
+    Pps5a,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningCommandOp {
+    Start,
+    Cancel,
+    Seal,
+    ConfirmSave,
+    Read,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningRequest {
+    pub lease_id: String,
+    pub op: ThermalTuningCommandOp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_class: Option<ThermalTuningPowerClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets_c: Option<Vec<i16>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_profile: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningPhase {
+    Idle,
+    Warmup,
+    Approach,
+    Hold,
+    Cooldown,
+    Sealed,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningTrialPurpose {
+    Scout,
+    BatchCurrent,
+    BatchPredicted,
+    HoldConfirm,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningTerminalDisposition {
+    Running,
+    CandidateReady,
+    Passed,
+    Failed,
+    Canceled,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThermalTuningReviewDisposition {
+    Pending,
+    Complete,
+    ReviewIncomplete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningTrace {
+    pub first_sequence: Option<u32>,
+    pub last_sequence: Option<u32>,
+    pub complete: bool,
+    pub digest: String,
+    pub gap: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningEvent {
+    pub sequence: u32,
+    pub elapsed_ms: u64,
+    pub kind: String,
+    pub phase: ThermalTuningPhase,
+    pub target_c: Option<i16>,
+    pub trial_index: Option<u8>,
+    pub sample: Option<Value>,
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub trial: Option<Value>,
+    #[serde(default)]
+    pub decision: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningEventPage {
+    pub events: Vec<ThermalTuningEvent>,
+    pub next_sequence: Option<u32>,
+    pub trace: ThermalTuningTrace,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningSaveReceipt {
+    pub run_id: String,
+    pub candidate_id: String,
+    pub candidate_hash: String,
+    pub power_class: ThermalTuningPowerClass,
+    pub bank: ThermalTuningPowerClass,
+    pub bank_revision: u32,
+    pub bank_hash: String,
+    pub atomic: bool,
+    pub readback_verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalTuningStatus {
+    pub phase: ThermalTuningPhase,
+    pub trial_purpose: ThermalTuningTrialPurpose,
+    pub terminal_disposition: ThermalTuningTerminalDisposition,
+    pub review_disposition: ThermalTuningReviewDisposition,
+    pub power_class: Option<ThermalTuningPowerClass>,
+    pub run_id: Option<String>,
+    pub candidate_id: Option<String>,
+    pub candidate_hash: Option<String>,
+    pub targets_c: Vec<i16>,
+    pub target_index: usize,
+    pub armed: bool,
+    pub sealed: bool,
+    pub save_confirmed: bool,
+    #[serde(default)]
+    pub candidate_profile: Option<Value>,
+    #[serde(default)]
+    pub preview_receipt: Option<Value>,
+    pub trace: ThermalTuningTrace,
+    pub events: ThermalTuningEventPage,
+    pub save_receipt: Option<ThermalTuningSaveReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -881,6 +1036,29 @@ pub(crate) struct UsbThermalPlantRunWire<'a> {
     pub(crate) frame_type: &'static str,
     pub(crate) request_id: &'a str,
     pub(crate) after_sample: u8,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UsbThermalTuningWire<'a> {
+    #[serde(rename = "type")]
+    pub(crate) frame_type: &'static str,
+    pub(crate) request_id: &'a str,
+    pub(crate) op: ThermalTuningCommandOp,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) candidate_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) candidate_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) power_class: Option<ThermalTuningPowerClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) targets_c: Option<&'a Vec<i16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) after_sequence: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) candidate_profile: Option<&'a Value>,
 }
 
 #[derive(Debug, Serialize)]

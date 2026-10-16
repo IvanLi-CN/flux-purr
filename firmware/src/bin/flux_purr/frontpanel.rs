@@ -479,12 +479,6 @@ impl ThermalControlProfile {
                 .warmup_power_permille
                 .max(sanitized.approach_power_permille)
                 .min(1_000);
-            if sanitized.approach_lead_ticks == 0 {
-                sanitized.approach_lead_ticks = u16::from(self.settings.approach_lead_ticks);
-            }
-            if sanitized.hold_lead_ticks == 0 {
-                sanitized.hold_lead_ticks = u16::from(self.settings.hold_lead_ticks);
-            }
             *point = sanitized.sanitized();
         }
         self

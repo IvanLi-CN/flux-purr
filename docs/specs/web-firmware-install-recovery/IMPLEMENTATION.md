@@ -14,6 +14,7 @@
 
 - `flux-purr-bundle` 生成确定性四文件 bundle v2；Rust 与 Browser 校验器共享 schema、布局和 fixtures，发布清单提供无签名 SHA-256 完整性信任。
 - 固件构建身份与 `commissioningRequired` 已持久化，USB JSONL 提供 `get_install_status` 供写后身份、布局和 setup 状态验收。
+- 首次设置允许缺省 ADC 校正和空用户样本；传感器正常与加热电阻曲线仍为完成条件。仓库 CLI/devd 提供显式 setup status/complete，通过 native USB lease 发出一次完成请求，并回读验证 EEPROM generation 已提交解锁状态。
 - `get_install_status` 的 `setupReason` 在 commissioning 已完成时按合同返回 `null`，devd 以可选字段解码；`GET /api/v1/devices/{deviceId}/install-status` 以 active exact-port lease 代理该只读 USB JSONL 请求。固件维护目标以已授权 native serial candidate 的 devd 能力为准，不因运行时 identity 不声明 `flash` 而在写后丢失目标。
 - devd bundle API uses content-addressed import and per-segment ROM MD5; CLI-to-devd control uses the versioned local CBOR socket. MCU internal configuration is never staged or restored, and release trust comes only from the published SHA-256 integrity catalog.
 - devd 在现有设备 SSE 上以 `firmware_operation` 发布 operation-scoped 的真实阶段事件，preflight 与 execution 使用不同 operation ID 和步骤集合；Web 按 operation ID 与 sequence 去重，并将预检进度和执行进度分别结算。执行只有在最终 outcome 为 `verified` 时达到 100%，写完但运行时未验证保持低于 100%。

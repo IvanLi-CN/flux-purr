@@ -350,6 +350,10 @@ _Avoid_: I2C address, PD Contract
 The maximum current granted by the active USB-C PD contract and used to bound heater power. It is not a measured VBUS load current.
 _Avoid_: Current Reading, hardware over-current protection
 
+**Thermal Power Class**:
+The source-capability category that selects a Device's current limits and independently qualified parameter bank. It does not select a different heating algorithm; every qualified class uses the same production heating and tuning function.
+_Avoid_: Controller type, tuning algorithm, another Device's qualification
+
 **Performance-Guaranteed PD Contract**:
 A ready PD contract of at least `20V` and `3A`. Contracts below this threshold may operate in degraded mode but are not valid for calibration or performance claims.
 _Avoid_: PD Request, nominal source rating

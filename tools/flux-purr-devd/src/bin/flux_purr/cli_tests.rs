@@ -14,26 +14,129 @@ use axum::{
     routing::{delete, get, post, put},
 };
 
+#[test]
+fn setup_cli_exposes_explicit_status_and_completion_targets() {
+    let status =
+        Cli::try_parse_from(["flux-purr", "setup", "status", "--device", "test-device"]).unwrap();
+    assert!(matches!(
+        status.command,
+        Command::Setup {
+            command: SetupCommand::Status(_)
+        }
+    ));
+    let complete =
+        Cli::try_parse_from(["flux-purr", "setup", "complete", "--device", "test-device"]).unwrap();
+    assert!(matches!(
+        complete.command,
+        Command::Setup {
+            command: SetupCommand::Complete(_)
+        }
+    ));
+    assert!(
+        resolve_target(
+            TargetSelector {
+                device: None,
+                hardware: None
+            },
+            DEFAULT_DEVD_ENDPOINT
+        )
+        .is_err()
+    );
+}
+
 struct SnapshotFixtureReader {
     bytes: VecDeque<u8>,
+    would_block_once: bool,
 }
 
 impl SnapshotFixtureReader {
     fn from_bytes(bytes: &[u8]) -> Self {
         Self {
             bytes: bytes.iter().copied().collect(),
+            would_block_once: false,
+        }
+    }
+
+    fn after_would_block(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.iter().copied().collect(),
+            would_block_once: true,
         }
     }
 }
 
 impl Read for SnapshotFixtureReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.would_block_once {
+            self.would_block_once = false;
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         let Some(byte) = self.bytes.pop_front() else {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture timeout"));
         };
         buf[0] = byte;
         Ok(1)
     }
+}
+
+#[derive(Default)]
+struct SnapshotFixtureWriter {
+    bytes: Vec<u8>,
+    would_block_once: bool,
+}
+
+impl Write for SnapshotFixtureWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.would_block_once {
+            self.would_block_once = false;
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn snapshot_port_uses_raw_io_for_macos_usb_serial_jtag() {
+    assert_eq!(
+        snapshot_uses_raw_usb_port("/dev/cu.usbmodem-fixture"),
+        cfg!(target_os = "macos")
+    );
+    assert!(!snapshot_uses_raw_usb_port("/dev/cu.usbserial-1234"));
+}
+
+#[test]
+fn snapshot_request_retries_nonblocking_write() {
+    let mut writer = SnapshotFixtureWriter {
+        would_block_once: true,
+        ..Default::default()
+    };
+
+    write_snapshot_request(&mut writer, &json!({"op":"eeprom_snapshot_open"})).unwrap();
+
+    assert!(writer.bytes.ends_with(b"\n"));
+    let request: Value = serde_json::from_slice(&writer.bytes[..writer.bytes.len() - 1]).unwrap();
+    assert_eq!(request["op"], "eeprom_snapshot_open");
+}
+
+#[test]
+fn snapshot_response_retries_nonblocking_idle_read() {
+    let mut reader = SnapshotFixtureReader::after_would_block(
+        b"{\"ok\":true,\"requestId\":\"snapshot-test\",\"capacity\":8192}\n",
+    );
+
+    let response = read_snapshot_response(
+        &mut reader,
+        "snapshot-test",
+        StdInstant::now() + Duration::from_secs(1),
+    )
+    .unwrap();
+
+    assert_eq!(response["capacity"], 8192);
 }
 
 #[test]
@@ -441,6 +544,25 @@ fn thermal_profile_preview_unwraps_runtime_wrapper() {
 }
 
 #[test]
+fn thermal_candidate_profile_imports_v2_export_without_replacing_seed() {
+    let mut profile = default_thermal_candidate_profile();
+    profile["points"][0]["brakeDistanceCentiC"] = json!(1480);
+    profile["points"][0]["approachFloorPowerPermille"] = json!(100);
+    let imported = json!({
+        "schema": "thermal-tuning-v2",
+        "powerClass": "pps5a",
+        "profile": { "bank": "pps5a", "source": "candidate", "value": profile.clone() }
+    });
+    assert_eq!(
+        thermal_profile_package_from_value(imported.clone()),
+        profile
+    );
+    let parsed = thermal_candidate_profile_from_value(imported);
+    assert_eq!(parsed.points[0].brake_distance_centi_c, 1480);
+    assert_eq!(parsed.points[0].approach_floor_power_permille, 100);
+}
+
+#[test]
 fn thermal_control_readback_rejects_any_effective_parameter_mismatch() {
     let profile = default_thermal_candidate_profile();
     let expected = thermal_heater_parameters_value(60, Some(&profile), "preview");
@@ -636,6 +758,7 @@ fn thermal_validation_rejects_a_partial_target_ladder() {
             stable_window_verified_at_ms: Some(16_000),
             settle_time_ms: Some(5_000),
             failure_reason: None,
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -668,6 +791,7 @@ fn thermal_tuning_scout_validation_reports_failed_stage_limits() {
             stable_window_verified_at_ms: None,
             settle_time_ms: None,
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -714,6 +838,7 @@ fn thermal_hold_confirm_validation_rejects_slow_full_speed_settle() {
             stable_window_verified_at_ms: Some(29_000),
             settle_time_ms: Some(18_000),
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -746,6 +871,7 @@ fn thermal_hold_confirm_validation_uses_five_seconds_above_150c() {
             stable_window_verified_at_ms: Some(17_000),
             settle_time_ms: Some(6_000),
             failure_reason: Some("full_speed_to_stable_timeout"),
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -778,6 +904,7 @@ fn thermal_hold_confirm_validation_allows_ten_seconds_at_or_below_150c() {
             stable_window_verified_at_ms: Some(21_000),
             settle_time_ms: Some(10_000),
             failure_reason: None,
+            stable_window_last_reset_reason: None,
         },
     }];
 
@@ -2996,12 +3123,9 @@ fn parses_thermal_tune_command() {
     assert_eq!(args.per_target_budget_seconds, 600);
     assert_eq!(args.max_tuning_rounds, Some(1));
     assert_eq!(args.runtime_rearm_attempts, 3);
-    assert_eq!(args.anchor_targets_c, "60,80,100,120,140,160,180,220,240");
-    assert_eq!(
-        args.validation_targets_c,
-        "60,80,100,120,140,160,180,220,240"
-    );
-    assert_eq!(args.tune_targets_c, "60,80,100,120,140,160,180,220,240");
+    assert_eq!(args.anchor_targets_c, "60,80,100,120,140,160,180,220");
+    assert_eq!(args.validation_targets_c, "60,80,100,120,140,160,180,220");
+    assert_eq!(args.tune_targets_c, "60,80,100,120,140,160,180,220");
     assert!(args.dry_run);
 }
 
@@ -3100,6 +3224,61 @@ fn parses_thermal_report_rerender_legacy_command() {
         args.output_dir,
         Some(PathBuf::from("/tmp/compliant-bundle"))
     );
+}
+
+#[test]
+fn parses_thermal_report_render_v2_command() {
+    let cli = Cli::try_parse_from([
+        "flux-purr",
+        "thermal",
+        "report",
+        "render-v2",
+        "--input-dir",
+        "/tmp/thermal-v2-input",
+        "--output-dir",
+        "/tmp/thermal-v2-output",
+    ])
+    .expect("parse thermal v2 report command");
+
+    let Command::Thermal {
+        command: ThermalCommand::Report { command },
+    } = cli.command
+    else {
+        panic!("expected thermal report command");
+    };
+    let ThermalReportCommand::RenderV2(args) = command else {
+        panic!("expected v2 report command");
+    };
+
+    assert_eq!(args.input_dir, PathBuf::from("/tmp/thermal-v2-input"));
+    assert_eq!(
+        args.output_dir,
+        Some(PathBuf::from("/tmp/thermal-v2-output"))
+    );
+}
+
+#[tokio::test]
+async fn thermal_report_render_does_not_start_or_validate_a_devd_connection() {
+    for explicit_endpoint in [false, true] {
+        let mut cli = Cli::parse_from([
+            "flux-purr",
+            "--devd",
+            "not-a-control-socket",
+            "thermal",
+            "report",
+            "render-v2",
+            "--input-dir",
+            "unused-input",
+        ]);
+        let managed = prepare_devd(&mut cli, false, explicit_endpoint)
+            .await
+            .unwrap();
+        assert!(
+            managed.is_none(),
+            "offline report rendering must not acquire hardware services"
+        );
+        assert_eq!(cli.devd, "not-a-control-socket");
+    }
 }
 
 #[test]
@@ -3245,6 +3424,25 @@ fn thermal_full_speed_tracker_accepts_hold_entry_within_ten_seconds() {
     assert_eq!(analysis.stable_window_started_at_ms, Some(2_000));
     assert_eq!(analysis.stable_window_verified_at_ms, Some(12_000));
     assert_eq!(analysis.settle_time_ms, Some(1_750));
+}
+
+#[test]
+fn thermal_full_speed_tracker_records_measurement_rejection_reset() {
+    let mut tracker = ThermalFullSpeedStableTracker::new(140);
+    assert_eq!(
+        tracker.observe_with_measurement(139.5, 1_000, Some("approach"), true),
+        ThermalFullSpeedStableObservation::Pending
+    );
+    assert_eq!(
+        tracker.observe_with_measurement(139.6, 2_000, Some("hold"), false),
+        ThermalFullSpeedStableObservation::Pending
+    );
+    let evidence = tracker.finalize();
+    assert_eq!(evidence.stable_window_started_at_ms, None);
+    assert_eq!(
+        evidence.stable_window_last_reset_reason,
+        Some("measurement_rejected")
+    );
 }
 
 #[test]
@@ -3698,6 +3896,32 @@ fn parses_isolapurr_power_show_nested_usb_c_telemetry() {
 }
 
 #[test]
+fn preserves_an_already_ready_isolapurr_pps_contract() {
+    let power_show = json!({
+        "diagnostics": { "active_protocol": "pps" },
+        "ports": {
+            "ports": [{
+                "portId": "port_c",
+                "telemetry": {
+                    "status": "ok",
+                    "voltage_mv": 20_010,
+                    "current_ma": 1_240,
+                    "power_mw": 24_812,
+                    "sample_uptime_ms": 99,
+                }
+            }]
+        }
+    });
+    assert!(isolapurr_live_pps_contract_is_ready(&power_show));
+
+    let fixed = json!({
+        "diagnostics": { "active_protocol": "pd" },
+        "ports": power_show["ports"].clone(),
+    });
+    assert!(!isolapurr_live_pps_contract_is_ready(&fixed));
+}
+
+#[test]
 fn validates_isolapurr_thermal_capability_and_ready_voltage() {
     let config = json!({
         "capability": {
@@ -4051,6 +4275,31 @@ fn isolapurr_configured_thermal_source_class_detects_3a_and_5a_modes() {
 }
 
 #[test]
+fn isolapurr_3a_setup_does_not_retain_a_repeatedly_reapplied_pps_register_limit() {
+    let mut config = json!({
+        "capability": {
+            "power_watts": 65,
+            "protocols": { "pd": true },
+            "pd": { "pps": true, "fixed_voltages_mv": [9000, 12000, 15000, 20000] },
+            "current": { "pps3_limit_ma": 3000, "pd_pps_5a": false }
+        }
+    });
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &config, 65, false
+    ));
+    // The existing setup command selects 5000 for this register and disables
+    // the independent 5A advertisement. The MCU still enforces the 3A bank.
+    config["capability"]["current"]["pps3_limit_ma"] = json!(5000);
+    assert!(isolapurr_power_config_has_thermal_capability(
+        &config, 65, false
+    ));
+    assert_eq!(
+        isolapurr_configured_thermal_source_class(&config),
+        Some("pps3a")
+    );
+}
+
+#[test]
 fn isolapurr_write_response_requires_positive_acknowledgement() {
     assert!(isolapurr_cli_write_succeeded(&json!({"accepted": true})));
     assert!(isolapurr_cli_write_succeeded(&json!({"ok": true})));
@@ -4209,19 +4458,13 @@ fn thermal_profile_modes_preserve_65w_and_define_100w_defaults() {
 }
 
 #[test]
-fn thermal_default_seed_candidates_follow_bank_current_truth() {
-    let (_, pps3a_seed_path) = load_thermal_default_seed_candidate_profile("pps3a").unwrap();
-    let (_, pps5a_seed_path) = load_thermal_default_seed_candidate_profile("pps5a").unwrap();
-
-    assert!(
-        pps3a_seed_path
-            .as_ref()
-            .is_some_and(|path| path.ends_with(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE))
-    );
-    assert!(pps5a_seed_path.as_ref().is_some_and(|path| {
-        path.ends_with(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE)
-            || path.ends_with(THERMAL_PPS5A_TUNING_SEED_RELATIVE)
-    }));
+fn thermal_tuning_cold_start_uses_production_defaults_without_historical_seed() {
+    let expected = thermal_seed_candidate_profile();
+    for bank in ["pps3a", "pps5a"] {
+        let (profile, seed_path) = load_thermal_default_seed_candidate_profile(bank).unwrap();
+        assert_eq!(profile, expected);
+        assert!(seed_path.is_none());
+    }
 }
 
 #[test]
@@ -5090,7 +5333,7 @@ async fn spawn_flaky_thermal_status_server(
 
 #[tokio::test]
 async fn thermal_status_retry_recovers_after_single_timeout() {
-    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 150).await;
+    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(1, 1_500).await;
     let client = Client::new();
     client
         .get(format!("{}/ready", resolved.devd))
@@ -5102,7 +5345,7 @@ async fn thermal_status_retry_recovers_after_single_timeout() {
         &client,
         &resolved,
         "lease-test",
-        Duration::from_millis(50),
+        Duration::from_millis(500),
         2,
     )
     .await
@@ -5116,7 +5359,7 @@ async fn thermal_status_retry_recovers_after_single_timeout() {
 
 #[tokio::test]
 async fn thermal_status_retry_recovers_after_transient_usb_burst() {
-    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 150).await;
+    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(4, 1_500).await;
     let client = Client::new();
     client
         .get(format!("{}/ready", resolved.devd))
@@ -5128,7 +5371,7 @@ async fn thermal_status_retry_recovers_after_transient_usb_burst() {
         &client,
         &resolved,
         "lease-test",
-        Duration::from_millis(50),
+        Duration::from_millis(500),
         5,
     )
     .await
@@ -5913,6 +6156,87 @@ fn direct_flash_archives_before_invoking_espflash() {
     );
     assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 1);
     assert_eq!(result["espflash"]["command"], "flash");
+}
+
+#[test]
+fn direct_flash_reports_missing_snapshot_port_before_any_firmware_write() {
+    fn missing_snapshot(
+        _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        Err(std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    }
+    fn no_rom_mode(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
+        false
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let elf = directory.path().join("firmware.elf");
+    fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+    let error = direct_flash_with_program_inner(
+        FlashArgs {
+            port: "/dev/cu.contract-test".to_string(),
+            elf: Some(elf),
+            skip_backup: false,
+            confirm: None,
+            keep_download_mode: false,
+        },
+        &directory.path().join("espflash-not-invoked"),
+        false,
+        missing_snapshot,
+        no_rom_mode,
+        Some(directory.path()),
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("EEPROM backup preflight failed"));
+    assert!(error.contains("/dev/cu.contract-test"));
+    assert!(error.contains("firmware was not written"));
+    assert!(!directory.path().join("espflash-not-invoked").exists());
+}
+
+#[test]
+fn direct_flash_probes_rom_only_after_application_snapshot_times_out() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SNAPSHOT_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+    fn no_application_response(
+        _port: &str,
+        _expected: Option<&UsbSerialIdentity>,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        SNAPSHOT_ATTEMPTED.store(true, Ordering::SeqCst);
+        Err(io::Error::new(io::ErrorKind::TimedOut, "no USB JSONL response").into())
+    }
+    fn rom_probe(_port: &str, _expected: Option<&UsbSerialIdentity>) -> bool {
+        assert!(SNAPSHOT_ATTEMPTED.load(Ordering::SeqCst));
+        true
+    }
+
+    SNAPSHOT_ATTEMPTED.store(false, Ordering::SeqCst);
+    let directory = tempfile::tempdir().unwrap();
+    let elf = directory.path().join("firmware.elf");
+    fs::write(&elf, b"\x7fELFtest fixture").unwrap();
+
+    let error = direct_flash_with_program_inner(
+        FlashArgs {
+            port: "/dev/cu.contract-test".to_string(),
+            elf: Some(elf),
+            skip_backup: false,
+            confirm: None,
+            keep_download_mode: false,
+        },
+        Path::new("espflash-not-invoked"),
+        false,
+        no_application_response,
+        rom_probe,
+        Some(directory.path()),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("ROM download mode"));
+    assert!(error.to_string().contains("firmware was not written"));
 }
 
 #[cfg(unix)]

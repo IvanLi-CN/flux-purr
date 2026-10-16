@@ -13,7 +13,7 @@
 - 维护两套 sibling PCB 变体：`fan-5v` 与 `fan-12v`。
 - 冻结共享 GPIO / firmware 契约：`GPIO35 = FAN_EN`、`GPIO36 = FAN_VSET_PWM`、`GPIO34 = FAN_TACH`，以及 `fan_enabled` / `fan_pwm_permille` 状态字段不变。
 - 保留当前 `5V` 可调风扇轨方案；新增 `12V` 可调风扇轨方案，不改成 4 线 PWM 拓扑。
-- 冻结 `12V` 版的 `RFBT=124kΩ`、输出电容耐压/封装要求、丝印告警与制造输出命名。
+- 冻结 `12V` 版的物理位号电阻网络：`R19 (RFBB)=13kΩ`、`R20 (RFBT)=150kΩ`、`R18 (RINJ)=47kΩ`、`R15 (RPWM)=10kΩ`，均使用 E24 标称值与 `1%` 精度；同时冻结输出电容耐压/封装要求、丝印告警与制造输出命名。
 - 订正 firmware / API 口径：`fan_pwm_permille` 只表示 normalized actuator，不表示风扇电压，shared firmware 也不区分 `fan-5v` / `fan-12v`。
 
 ### Non-goals
@@ -54,8 +54,8 @@
   - `REN_PD = 100 kΩ`
   - `RSER_EN = 2.2 kΩ`
   - 目标 `FAN_VCC ≈ 3.0 V ~ 5.06 V`
-- `fan-12v` 继续共用上述拓扑，但必须把 `RFBT` 改为 `124 kΩ 1%`，其余控制网络不变。
-- `fan-12v` 的目标输出范围必须约为 `6.6 V ~ 12.0 V`。
+- `fan-12v` 继续共用上述拓扑，并使用 archived netlist 的物理位号：`R19 (RFBB) = 13 kΩ`、`R20 (RFBT) = 150 kΩ`、`R18 (RINJ) = 47 kΩ`、`R15 (RPWM) = 10 kΩ`；这些值均为 E24 标称值，电阻精度为 `1%`。
+- `fan-12v` 的名义输出范围必须约为 `3.45 V ~ 12.14 V`，以覆盖已测试风扇约 `3.3 V ~ 3.5 V` 的低速工作区间。
 - `fan-12v` 的 `FAN_VCC` 输出电容必须升级为 `>=25 V` 额定且 `1206` 或更大，并保持最少 `2 x 22 uF` 主输出电容 + `100 nF` 本地去耦要求。
 - 板丝印必须明确区分：`5V FAN ONLY` 与 `12V FAN ONLY`。
 - 制造输出命名必须分离：`fan-5v` 与 `fan-12v` 不能共享导出文件名。
@@ -79,7 +79,7 @@
 
 - `fan-5v` 与 `fan-12v` 共享 `GPIO35/36/34` 硬件所有权与状态字段语义。
 - archived base netlist 继续保留在 `docs/hardware/netlists/main-controller-board.enet`，并视为 `fan-5v` 基线。
-- `fan-12v` 通过单独 manifest / BOM 覆盖说明：`RFBT` 替换为 `124 kΩ`，`FAN_VCC` 输出电容升级到 `>=25 V / 1206+`。
+- `fan-12v` 通过单独 manifest / BOM 覆盖说明：`R19/R20/R18` 分别替换为 `13 kΩ / 150 kΩ / 47 kΩ`，`R15` 保持 `10 kΩ`，`FAN_VCC` 输出电容升级到 `>=25 V / 1206+`。
 - firmware core 只处理 `fan_enabled` + `fan_pwm_permille` 这组 normalized control contract，不维护 shared 5V / 12V 电压 profile。
 - `fan_pwm_permille` 的含义保持为“归一化设定值 / actuator effort”，而不是“所有板型都等价的固定毫伏数”。
 - 后续若接入温度闭环，闭环输出仍应落在同一组 normalized fan contract 上。
@@ -102,7 +102,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given `fan-5v` 变体，When 检查 hardware docs 与 manifest，Then 风扇轨仍为 `3.0 V ~ 5.06 V`，且 `RFBT = 47 kΩ`。
-- Given `fan-12v` 变体，When 检查 manifest，Then 风扇轨为约 `6.6 V ~ 12.0 V`，且 `RFBT = 124 kΩ 1%`。
+- Given `fan-12v` 变体，When 检查 manifest，Then 风扇轨为约 `3.45 V ~ 12.14 V`，且 `R19/R20/R18/R15 = 13 kΩ / 150 kΩ / 47 kΩ / 10 kΩ`，均为 E24 标称值与 `1%` 精度。
 - Given `fan-12v` 变体，When 检查 BOM 覆盖规则，Then `FAN_VCC` 主输出电容均为 `>=25 V` 且 footprint 为 `1206` 或更大。
 - Given shared firmware core，When 检查公开 fan contract，Then 只存在 `fan_enabled` 与 `fan_pwm_permille` 这组 normalized setpoint 语义，而不存在 shared 5V / 12V 电压估算模型。
 - Given HTTP contract，When 检查 `fanPwmPermille` 字段说明，Then 文档明确该值是 normalized actuator，而不是跨板型固定电压。
@@ -140,7 +140,7 @@
 ## 方案概述（Approach, high-level）
 
 - 把 archived base netlist 继续作为 `fan-5v` 的直接代表，避免无谓复制大文件。
-- 使用 `fan-12v` overlay manifest + BOM 覆盖规则描述最小必要差异：`RFBT`、输出电容、丝印与制造输出命名。
+- 使用 `fan-12v` overlay manifest + BOM 覆盖规则描述最小必要差异：`R19/R20/R18` 电阻值、输出电容、丝印与制造输出命名。
 - 保留硬件层的输出范围与控制曲线说明，但不把这些曲线提升成 shared firmware model。
 - 在硬件 / firmware / API 文档里统一声明：`fan_pwm_permille` 是 normalized setpoint，shared firmware 不根据它推导风扇电压。
 

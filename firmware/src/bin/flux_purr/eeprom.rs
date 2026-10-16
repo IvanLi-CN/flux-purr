@@ -136,6 +136,45 @@ pub(crate) const fn raw_eeprom_operation_mutates(op: EepromMaintenanceOp) -> boo
     matches!(op, EepromMaintenanceOp::Write | EepromMaintenanceOp::Erase)
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const EEPROM_POWER_DISARM_TIMEOUT_MS: u64 = 5_000;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn eeprom_power_disarm_result(
+    confirmation: Option<bool>,
+    elapsed_ms: u64,
+) -> Option<bool> {
+    if elapsed_ms > EEPROM_POWER_DISARM_TIMEOUT_MS {
+        return Some(false);
+    }
+    confirmation.or_else(|| (elapsed_ms >= EEPROM_POWER_DISARM_TIMEOUT_MS).then_some(false))
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) async fn await_eeprom_power_disarm(pd_port: &PdPort) -> bool {
+    let ticket = match pd_port.restore_automatic_idle_contract() {
+        PdRequestState::Confirmed => return true,
+        PdRequestState::Failed => return false,
+        PdRequestState::Pending(ticket) => ticket,
+    };
+    let started_ms = Instant::now().as_millis();
+    loop {
+        let confirmation = pd_port
+            .try_take_ticket(ticket)
+            .map(|outcome| matches!(outcome, TicketOutcome::Confirmed(_)));
+        if let Some(confirmed) = eeprom_power_disarm_result(
+            confirmation,
+            Instant::now().as_millis().saturating_sub(started_ms),
+        ) {
+            if confirmation.is_none() {
+                pd_port.discard_ticket(ticket);
+            }
+            return confirmed;
+        }
+        EmbassyTimer::after_millis(10).await;
+    }
+}
+
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn begin_mutating_eeprom_maintenance(
     ui_state: &mut FrontPanelUiState,
@@ -874,7 +913,7 @@ pub(crate) struct PersistDomainMask(u8);
 #[cfg(target_arch = "xtensa")]
 impl PersistDomainMask {
     pub(crate) const SAFETY: Self = Self(1 << 0);
-    const THERMAL: Self = Self(1 << 1);
+    pub(crate) const THERMAL: Self = Self(1 << 1);
     const PREFERENCES: Self = Self(1 << 2);
     const NETWORK: Self = Self(1 << 3);
     pub(crate) const THERMAL_PLANT: Self = Self(1 << 4);
@@ -2222,14 +2261,6 @@ pub(crate) fn should_blank_heater_for_pps_range_change(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn should_restore_gate_after_adjustable_request(
-    blank_heater: bool,
-    gate_duty_percent: u8,
-) -> bool {
-    !blank_heater && gate_duty_percent > 0
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn pps_request_transition_ms(mode_changed: bool) -> u64 {
     if mode_changed {
         HEATER_PPS_LARGE_TRANSITION_MS
@@ -2275,6 +2306,34 @@ pub(crate) fn heater_adjustable_request_mv(
                 .max(desired_request_mv)
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_request_mv(
+    duty_percent: u8,
+    heater_enabled: bool,
+    tuning_power_stage: bool,
+    current_request_mv: u16,
+    idle_request_mv: u16,
+    control_floor_mv: u16,
+    safe_max_mv: u16,
+) -> u16 {
+    // The tuning power-preparation stage is disarmed and exists only to
+    // establish the validated working contract before Warmup. Request the
+    // source ceiling directly instead of stepping through the idle 12V
+    // request; some sources expose the thermal APDO only at its high-voltage
+    // end and reject that intermediate request.
+    if tuning_power_stage {
+        return safe_max_mv.max(control_floor_mv);
+    }
+    heater_adjustable_request_mv(
+        duty_percent,
+        heater_enabled,
+        current_request_mv,
+        idle_request_mv,
+        control_floor_mv,
+        safe_max_mv,
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2443,11 +2502,12 @@ pub(crate) fn select_fusb302b_heater_power_backend(
 
     constrain_heater_backend_to_controller(
         ControllerKind::Fusb302b,
-        select_heater_power_backend_with_source_limits(
-            capabilities,
-            None,
-            ManualPpsState::from_fusb302b_capabilities(Some(capabilities)).heater_source_limits(),
-        ),
+        select_heater_power_backend_with_source_limits(capabilities, None, {
+            let source = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+            source
+                .thermal_plant_source_limits()
+                .or_else(|| source.heater_source_limits())
+        }),
     )
 }
 
@@ -2461,6 +2521,28 @@ pub(crate) fn refresh_fusb302b_heater_power_backend(
     refreshed
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reset_idle_failed_pps_backend(
+    backend: &mut HeaterPowerBackend,
+    capabilities: Option<ch224q::AdjustablePowerCapabilities>,
+) -> bool {
+    if !matches!(
+        *backend,
+        HeaterPowerBackend::FixedPdPwmFallback {
+            reason: HeaterPowerBackendReason::AdjustableRequestFailed,
+            ..
+        }
+    ) {
+        return false;
+    }
+    let refreshed = refresh_fusb302b_heater_power_backend(*backend, capabilities);
+    if !matches!(refreshed, HeaterPowerBackend::PpsMos { .. }) {
+        return false;
+    }
+    *backend = refreshed;
+    true
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn apply_heater_duty<PWM>(
     heater_pwm: &mut PWM,
@@ -2469,21 +2551,22 @@ pub(crate) fn apply_heater_duty<PWM>(
 ) where
     PWM: SetDutyCycle,
 {
-    let effective_duty_percent = if heater_permit_is_active(Instant::now().as_millis()) {
-        duty_percent
-    } else {
-        0
-    };
-    if effective_duty_percent == *last_duty_percent {
-        return;
-    }
-
-    let _ = heater_pwm.set_duty_cycle_percent(effective_duty_percent);
-    info!(
-        "heater output -> duty={=u8}% prev={=u8}%",
-        effective_duty_percent, *last_duty_percent,
+    let previous_percent = *last_duty_percent;
+    let _ = apply_permitted_heater_duty(
+        heater_pwm,
+        duty_percent,
+        last_duty_percent,
+        heater_permit_is_active(Instant::now().as_millis()),
     );
-    *last_duty_percent = effective_duty_percent;
+    // The gate rechecks the permit under its physical-output lock. Report that
+    // result if authorization changed between the outer check and the write.
+    *last_duty_percent = HeaterPwmGate::applied_duty_percent();
+    if previous_percent != *last_duty_percent {
+        info!(
+            "heater output -> duty={=u8}% prev={=u8}%",
+            *last_duty_percent, previous_percent,
+        );
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2677,8 +2760,9 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_new_work(
     backend: &mut HeaterPowerBackend,
     heater_enabled: bool,
     manual_pps_active: bool,
+    tuning_power_stage: bool,
 ) -> bool {
-    if !heater_enabled && !manual_pps_active {
+    if !heater_enabled && !manual_pps_active && !tuning_power_stage {
         return false;
     }
 
@@ -2694,8 +2778,9 @@ pub(crate) fn release_terminal_fixed_pd_disarm_for_new_work(
             idle_request_mv,
             ..
         } if *terminal_fixed_pd_disarmed => {
-            // A fresh heater or manual PPS intent re-arms negotiation. Clearing
-            // this latch does not confirm working power or enable physical PWM.
+            // Fresh heating, manual PPS or tuning power preparation re-arms
+            // negotiation. Clearing this latch does not confirm working power
+            // or enable physical PWM.
             *terminal_fixed_pd_disarmed = false;
             *current_mode = None;
             *current_request_mv = *idle_request_mv;

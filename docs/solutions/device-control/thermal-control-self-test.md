@@ -188,13 +188,7 @@ Current reusable rule set:
 
 ## Seed and baseline selection
 
-The current bank-aware defaults are:
-
-- `pps3a`: seed from the committed 65W accepted bundle
-- `pps5a`: seed from the committed 100W accepted bundle when it exists
-- `pps5a` fallback before an accepted 100W baseline exists: an explicit repository-maintained 100W seed bundle
-
-Until a committed `pps5a` accepted baseline exists, do not treat a stale saved `pps5a` EEPROM profile as current truth. Focused 100W retuning should start from an explicit preview seed, not from an arbitrary previously saved bank.
+The default tuning path starts both `pps3a` and `pps5a` from production defaults. It never discovers a bank baseline, historical tuning bundle, or saved EEPROM profile. An explicitly supplied seed profile is a diagnostic input only and must be recorded as such; that run cannot prove no-history tuning. Focused retuning therefore uses the current device's fresh calibration/model and same-run feedback unless the operator explicitly requests diagnostic replay.
 
 ## Candidate identification
 
@@ -272,7 +266,7 @@ Do not run default `0% / 25% / 50%` approach-only characterization inside the fl
 For candidate tuning:
 
 - warmup itself remains fixed at `100%`
-- full-speed timeout without valid hold evidence is treated as approach power / early coast / near-target sustain evidence
+- ordinary firmware-owned full-speed timeout without a started stable window ends scout, batch and confirmation stages at the original boundary. The approved conditional timing policy permits a finite exception only after actual allowed-floor output has been observed and the original longest deadline expires; both facts, the original failure and the cap remain bound to the same trial. The exception does not relax the stable band, ten-second stable window, overshoot, qualified Hold or sixty-second confirmation gates. Longer samples from the external runner's `TuningScout` remain external behavior and do not themselves qualify a firmware candidate.
 - if valid hold samples exist and hold p2p is above limit, do not let full-speed timeout hide hold ripple
 - high-temperature low-side deep hold drop must tune hold residency / sustain / lead instead of being classified as residual overshoot
 - source/runtime/sample-rate/measurement faults must not mutate the candidate
@@ -306,9 +300,12 @@ Thermal tuning and source failures must not be conflated.
 Treat the run as a source-side failure, not a thermal-profile result, when any of the following holds:
 
 - source capability readback does not match the intended class
+- source preparation tears down an already valid PPS contract or starts the stage before a valid PPS contract is confirmed
 - Flux Purr requests more than `5V`, but source telemetry remains near `5V`
 - source telemetry stops advancing
 - the source must be power-cycled before PPS negotiation recovers
+
+Source preparation is idempotent with respect to a valid working contract. When IsolaPurr already reports `active_protocol=pps` and healthy USB-C telemetry at or above the working-voltage threshold, the host must preserve that contract and must not issue `power output auto` or USB-C path normalization. When no valid PPS contract is present, preparation must establish and verify the eligible source capability before arming the heater. A fixed or near-5V readback is source evidence, not a thermal tuning result.
 
 Treat the run as a measurement-chain failure, not a tuning result, when any of the following holds:
 

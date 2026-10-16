@@ -9,7 +9,7 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
 - 3.3 V rail: `TPS62933DRLR` (fixed `3.3 V`)
 - Fan rail: `TPS62933DRLR` adjustable sibling variants
   - `fan-5v`: `3.0 V ~ 5.0 V`
-  - `fan-12v`: `6.6 V ~ 12.0 V`
+  - `fan-12v`: nominal `3.45 V ~ 12.14 V` with the E24 feedback network
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
 - Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
@@ -53,9 +53,9 @@ Available headroom remains on other ESP32-S3 GPIOs. This baseline intentionally 
 ## 3) Dual PD-controller baseline
 
 - `CH224Q` keeps its legacy I2C dynamic mode at 7-bit `0x22` (and legacy fallback `0x23`) and its existing high-voltage behavior.
-- `FUSB302BMPX` is a PD sink PHY at 7-bit `0x22`, with its `GPIO7` interrupt net reserved. A dedicated normal-executor task polls the PHY at a bounded cadence and applies the `5V..28V` PD guard before selecting its live PPS APDO; it retains fixed-PDO fallback and publishes a snapshot to the Front Panel task. Source interoperability remains an HIL gate.
+- `FUSB302BMPX` is a PD sink PHY at 7-bit `0x22`, with its `GPIO7` interrupt net reserved. A dedicated priority-3 software-interrupt task polls the PHY at a bounded cadence and applies the `5V..28V` PD guard before selecting its live PPS APDO; it retains fixed-PDO fallback and publishes a snapshot to the Front Panel task. Source interoperability remains an HIL gate.
 - The two variants collide at `0x22`. Startup reads multiple controller-specific registers twice and makes no PD write until exactly one signature matches. A failed, ambiguous, or conflicting read produces `unknown`, holds heater output interlocked, and does not select a controller.
-- I2C transactions are serialized with EEPROM accesses. The Front Panel owns the normal async device and the independent PD task uses a non-blocking device over the same async-arbitrated I2C0 bus. The raw critical section protects only the mutex state transition. PD uses an immediate try-lock at each `5ms` turn; when EEPROM owns the bus, PD skips that turn without waiting or consuming mailbox commands, then retries on the next tick. After acquisition, one bounded command-plus-poll turn owns the bus and releases it before the snapshot is published. EEPROM never holds the bus during its write-cycle delay or an entire multi-chunk operation.
+- I2C transactions are serialized with EEPROM accesses. Both users stay on CPU0 because the HAL async I2C driver is core-affine; the Front Panel owns the normal async device and the independent PD task uses a non-blocking device over the same async-arbitrated I2C0 bus. The raw critical section protects only the mutex state transition. PD uses an immediate try-lock at each turn; when EEPROM owns the bus, PD skips that turn without waiting or consuming mailbox commands, then retries after `1ms`. After acquisition, one bounded command-plus-poll turn owns the bus and releases it before the snapshot is published. EEPROM never holds the bus during its write-cycle delay or an entire multi-chunk operation.
 - The FUSB302BMPX policy module applies the `5V..28V` PD guard before choosing the best PPS APDO covering the requested voltage within the live APDO, emits PPS RDOs, and renews an active PPS contract every five seconds. It uses a fixed PDO only when no suitable APDO is advertised. `Accept` followed by `PS_RDY` is required before the contract authorizes heating; detach, reset, reject, wait, or I2C fault clears that authority. The dedicated PD task owns the selected policy and blocks CH224Q register writes on a FUSB302B board; the product main loop only consumes snapshots and submits bounded requests.
 - A PPS contract at `20V` with at least `3A` is the performance-guaranteed tier. A lower-voltage PPS or fixed contract may heat in degraded mode but is not valid for performance claims, temperature-rise claims, or calibration.
 - `3 A` and `5 A` are contractual limits only: `20 V @ 3 A` limits available electrical power to `60 W`; `20 V @ 5 A` limits it to `100 W`. Firmware clamps PWM-derived heater power to that contract. There is no VBUS shunt, real current measurement, or hardware VBUS over-current cutoff in this revision.
@@ -168,8 +168,8 @@ The supported fixed-PD fallback is not an LED fault. It preserves the selected r
     - `EN` uses a weak pulldown such as `100 kOhm`
     - connector silkscreen must read `5V FAN ONLY`
   - `fan-12v` overlay:
-    - output range `6.6 V ~ 12.0 V`
-    - keep the same network except `RFBT = 124 kOhm 1%`
+    - nominal output range `3.45 V ~ 12.14 V`
+    - physical resistor designators: `R19 (RFBB) = 13 kOhm`, `R20 (RFBT) = 150 kOhm`, `R18 (RINJ) = 47 kOhm`, `R15 (RPWM) = 10 kOhm`; use E24 nominal values with `1%` tolerance
     - every capacitor directly on `FAN_VCC` must be `>=25 V`
     - the two main output capacitors must use `1206` or larger footprints
     - add local `100 nF` decoupling near the fan connector in live CAD

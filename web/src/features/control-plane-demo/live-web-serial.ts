@@ -9,6 +9,8 @@ import type {
   HeaterCurveState,
   NetworkSummary,
   ThermalPlantRunSnapshot,
+  ThermalTuningCommand,
+  ThermalTuningStatus,
   WifiConfigRequest,
 } from './contracts'
 import { rememberKnownWebSerialDevice } from './known-web-serial-devices'
@@ -60,6 +62,7 @@ export interface LiveWebSerialControls {
   getCalibration: () => Promise<CalibrationState>
   getCalibrationJob: () => Promise<CalibrationJobState>
   getThermalPlantRun: (afterSample?: number) => Promise<ThermalPlantRunSnapshot>
+  thermalTuning: (command: Omit<ThermalTuningCommand, 'leaseId'>) => Promise<ThermalTuningStatus>
   configureCalibration: (
     request: Omit<CalibrationConfigRequest, 'leaseId'>
   ) => Promise<CalibrationState>
@@ -780,6 +783,24 @@ export function useLiveWebSerialScenario(
     [appendEvent, requireClient, requireCurrentClient]
   )
 
+  const thermalTuning = useCallback(
+    async (command: Omit<ThermalTuningCommand, 'leaseId'>) => {
+      const client = await requireClient()
+      try {
+        const status = await client.thermalTuning(command)
+        requireCurrentClient(client)
+        return status
+      } catch (error) {
+        if (clientRef.current !== client) throw error
+        setError(error instanceof Error ? error.message : 'Web Serial thermal tuning failed.')
+        setState('error')
+        appendEvent('browser Web Serial thermal tuning failed', 'warning')
+        throw error
+      }
+    },
+    [appendEvent, requireClient, requireCurrentClient]
+  )
+
   const configureCalibrationJob = useCallback(
     async (request: Omit<CalibrationJobRequest, 'leaseId'>) => {
       const client = await requireClient()
@@ -912,6 +933,7 @@ export function useLiveWebSerialScenario(
       getCalibration,
       getCalibrationJob,
       getThermalPlantRun,
+      thermalTuning,
       configureCalibration,
       configureCalibrationJob,
       getHeaterCurve,
@@ -933,6 +955,7 @@ export function useLiveWebSerialScenario(
       getCalibration,
       getCalibrationJob,
       getThermalPlantRun,
+      thermalTuning,
       getHeaterCurve,
       preauthorizedPortsReady,
       previewHeaterCurve,

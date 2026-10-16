@@ -20,6 +20,10 @@ test.describe('device-scoped routing', () => {
     await heaterCurveTab.focus()
     await heaterCurveTab.press('ArrowRight')
     await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/firmware-tuning\\?demo=true$`)
+    )
+    await page.getByRole('tab', { name: '固件热控调优' }).press('ArrowRight')
+    await expect(page).toHaveURL(
       new RegExp(`/devices/${identity}/calibration/rtd-adc\\?demo=true$`)
     )
 
@@ -30,7 +34,15 @@ test.describe('device-scoped routing', () => {
     )
     await page.goBack()
     await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/firmware-tuning\\?demo=true$`)
+    )
+    await page.goBack()
+    await expect(page).toHaveURL(
       new RegExp(`/devices/${identity}/calibration/heater-curve\\?demo=true$`)
+    )
+    await page.goForward()
+    await expect(page).toHaveURL(
+      new RegExp(`/devices/${identity}/calibration/firmware-tuning\\?demo=true$`)
     )
     await page.goForward()
     await expect(page).toHaveURL(

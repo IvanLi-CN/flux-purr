@@ -39,12 +39,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "thermal_firmware.rs"]
+mod thermal_firmware;
 #[path = "thermal_flagship.rs"]
 mod thermal_flagship;
 #[path = "thermal_report.rs"]
 mod thermal_report;
 #[path = "thermal_retune.rs"]
 mod thermal_retune;
+#[path = "thermal_tuning_v2_report.rs"]
+mod thermal_tuning_v2_report;
 
 #[path = "cli/args.rs"]
 pub(crate) mod args;

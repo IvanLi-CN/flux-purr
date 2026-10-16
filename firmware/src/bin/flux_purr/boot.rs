@@ -56,6 +56,7 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) eeprom_i2c: I2c<'static>,
     pub(crate) pd_port: PdPort,
     pub(crate) power_state_subscription: PowerStateSubscription<'static>,
+    pub(crate) display_power_state_subscription: PowerStateSubscription<'static>,
     pub(crate) power_state: PowerState,
     pub(crate) fan_enable: Output<'static>,
     pub(crate) fan_pwm: RuntimePwm0,
@@ -80,7 +81,12 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) manual_pps_state: ManualPpsState,
     pub(crate) calibration_runtime_state: CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
+    pub(crate) calibration_elapsed_clock: CalibrationElapsedClock,
     pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
+    pub(crate) thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
+    pub(crate) tuning_pd_wait_started_ms: Option<u64>,
+    pub(crate) tuning_heater_rearm_pending: bool,
+    pub(crate) pending_automatic_pps: Option<PendingAutomaticPpsTransition>,
     pub(crate) heater_power_backend: HeaterPowerBackend,
     pub(crate) hold_pps_governor: HoldPpsGovernor,
     pub(crate) heater_controller: HeaterController,
@@ -109,6 +115,8 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) cooling_disabled_lock_armed: bool,
     pub(crate) fan_policy_state: FanPolicyState,
     pub(crate) heater_enabled_last_cycle: bool,
+    pub(crate) tuning_cooling_latched: bool,
+    pub(crate) tuning_was_armed_last_cycle: bool,
     pub(crate) last_fan_command: Option<FanHardwareCommand>,
     pub(crate) fan_working_power_ticket: Option<PowerTicket>,
     pub(crate) fan_working_next_attempt_ms: u64,
@@ -137,6 +145,9 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) next_ui_refresh_ms: u64,
     pub(crate) suppress_pairing_input_until_released: bool,
 }
+
+#[cfg(target_arch = "xtensa")]
+const _: () = assert!(core::mem::size_of::<RuntimeLoopState>() <= 48 * 1024);
 
 #[cfg(target_arch = "xtensa")]
 macro_rules! assemble_runtime_loop {
@@ -199,6 +210,7 @@ pub(crate) struct BootSystem {
     pd_runtime_started_ms: u64,
     pd_contract_ready: bool,
     buzzer_realtime_spawner: embassy_executor::SendSpawner,
+    pd_realtime_spawner: embassy_executor::SendSpawner,
     eeprom_i2c: I2c<'static>,
     #[cfg(feature = "net_http")]
     shared_i2c: &'static SharedI2cBus,
@@ -368,6 +380,8 @@ pub(crate) struct BootRuntimeState {
     calibration_runtime_state: CalibrationRuntimeState,
     thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     thermal_control_profile_preview: Option<ThermalControlProfile>,
+    thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
+    pending_automatic_pps: Option<PendingAutomaticPpsTransition>,
     heater_power_backend: HeaterPowerBackend,
     hold_pps_governor: HoldPpsGovernor,
     heater_controller: HeaterController,
@@ -391,6 +405,8 @@ pub(crate) struct BootRuntimeState {
     cooling_disabled_lock_armed: bool,
     fan_policy_state: FanPolicyState,
     heater_enabled_last_cycle: bool,
+    tuning_cooling_latched: bool,
+    tuning_was_armed_last_cycle: bool,
     last_fan_command: Option<FanHardwareCommand>,
     last_raw_state: FrontPanelRawState,
     fan_command: FanHardwareCommand,
@@ -412,6 +428,9 @@ pub(crate) struct BootRuntimeState {
 }
 
 #[cfg(target_arch = "xtensa")]
+const _: () = assert!(core::mem::size_of::<BootRuntimeState>() <= 48 * 1024);
+
+#[cfg(target_arch = "xtensa")]
 static mut THERMAL_PLANT_WORKSPACE_STORAGE: MaybeUninit<CalibrationThermalPlantWorkspace> =
     MaybeUninit::uninit();
 
@@ -423,6 +442,17 @@ fn new_thermal_plant_workspace() -> &'static mut CalibrationThermalPlantWorkspac
             CalibrationThermalPlantWorkspace::default(),
         )
     }
+}
+
+#[cfg(target_arch = "xtensa")]
+#[inline(never)]
+fn new_thermal_tuning_runtime() -> Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime> {
+    // Display initialization registers PSRAM before this large object is allocated.
+    let storage = Box::<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>::new_uninit();
+    Box::write(
+        storage,
+        flux_purr_firmware::thermal_tuning::ThermalTuningRuntime::new(),
+    )
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -565,6 +595,8 @@ impl BootRuntimeState {
                 calibration_runtime_state: CalibrationRuntimeState::default(),
                 thermal_plant_workspace: new_thermal_plant_workspace(),
                 thermal_control_profile_preview: None,
+                thermal_tuning: new_thermal_tuning_runtime(),
+                pending_automatic_pps: None,
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::CapabilityReadFailed,
                     fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
@@ -602,6 +634,8 @@ impl BootRuntimeState {
                 cooling_disabled_lock_armed: true,
                 fan_policy_state: FanPolicyState::Disabled,
                 heater_enabled_last_cycle: false,
+                tuning_cooling_latched: false,
+                tuning_was_armed_last_cycle: false,
                 last_fan_command: None,
                 last_raw_state: FrontPanelRawState::default(),
                 fan_command: FanHardwareCommand::disabled(),
@@ -671,6 +705,7 @@ impl BootRuntimeState {
             pd_port: &self.system.pd_port,
             heater_pwm: &mut self.heater_pwm,
             backend: &mut self.heater_power_backend,
+            pending_automatic_pps: &mut self.pending_automatic_pps,
             hold_pps_governor: &mut self.hold_pps_governor,
             manual_pps: &mut self.manual_pps_state,
             pd_observation: self.last_pd_observation,
@@ -678,7 +713,9 @@ impl BootRuntimeState {
             current_temp_c: 0.0,
             duty_percent: 0,
             heater_enabled: false,
+            tuning_power_stage: false,
             control_phase: HeaterControlPhase::Warmup,
+            initial_profile_approach: false,
             control_error_c: 0.0,
             filtered_slope_c_per_s: 0.0,
             warmup_soft_start_percent: 0,
@@ -1372,6 +1409,19 @@ fn spawn_status_light_task(
 }
 
 #[cfg(target_arch = "xtensa")]
+fn start_pd_realtime_executor(
+    software_interrupt: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
+) -> embassy_executor::SendSpawner {
+    let executor = unsafe {
+        initialize_after_software_reset(
+            core::ptr::addr_of_mut!(PD_REALTIME_EXECUTOR_STORAGE),
+            InterruptExecutor::new(software_interrupt),
+        )
+    };
+    executor.start(Priority::Priority3)
+}
+
+#[cfg(target_arch = "xtensa")]
 #[inline(never)]
 pub(crate) fn initialize_boot_system(
     spawner: Spawner,
@@ -1393,6 +1443,7 @@ pub(crate) fn initialize_boot_system(
         )
     };
     let buzzer_realtime_spawner = buzzer_realtime_executor.start(Priority::Priority2);
+    let pd_realtime_spawner = start_pd_realtime_executor(software_interrupts.software_interrupt2);
     let status_light_started_ms = spawn_status_light_task(
         spawner,
         tokens.status_light_red,
@@ -1454,6 +1505,7 @@ pub(crate) fn initialize_boot_system(
             pd_runtime_started_ms: 0,
             pd_contract_ready: false,
             buzzer_realtime_spawner,
+            pd_realtime_spawner,
             eeprom_i2c,
             #[cfg(feature = "net_http")]
             shared_i2c: i2c_bus,
@@ -1480,7 +1532,7 @@ pub(crate) fn initialize_boot_system(
 
 #[cfg(target_arch = "xtensa")]
 #[inline(never)]
-pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem) {
+pub(crate) async fn initialize_boot_pd(system: &mut BootSystem) {
     rom_boot_stage(b"pd_stage_enter");
     let mut pd_task_i2c = system
         .pd_task_i2c
@@ -1527,7 +1579,7 @@ pub(crate) async fn initialize_boot_pd(spawner: Spawner, system: &mut BootSystem
                     device_id, FUSB302B_INITIAL_PPS_REQUEST_MV, MAX_HEATER_CONTRACT_MA,
                 );
                 let client = PdServiceClient::mark_starting_fusb302b();
-                spawn_pd_service(spawner, pd_task_i2c, Box::new(runtime));
+                spawn_pd_service(system.pd_realtime_spawner, pd_task_i2c, Box::new(runtime));
                 rom_boot_stage(b"pd_service_spawned");
                 client
             }
@@ -2041,6 +2093,8 @@ pub(crate) fn initialize_boot_outputs(
     let _ = fan_pwm.set_duty_cycle_percent(pwm_percent_from_permille(
         FAN_MINIMUM_OUTPUT_VOLTAGE_PWM_PERMILLE,
     ));
+    #[cfg(feature = "fan-observe")]
+    initialize_fan_pad_observation();
     operator1.set_timer(&timer1);
     let mut heater_pwm = operator1.with_pin_a(context.heater_pwm_pin, PwmPinConfig::UP_ACTIVE_HIGH);
     let heater_timer_cfg = pwm_clock_cfg
@@ -2635,7 +2689,6 @@ async fn run_boot_system_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
 async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
     record_boot_heartbeat();
     initialize_boot_pd(
-        spawner,
         pipeline
             .system
             .as_mut()

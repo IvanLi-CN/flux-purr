@@ -371,6 +371,7 @@ fn power_command_admission_decision(
     idle: bool,
     active_owner: Option<PowerIntentOwner>,
     inflight_refresh: bool,
+    inflight_idle: bool,
 ) -> PowerCommandAdmissionDecision {
     if should_join_refresh(refresh, inflight_refresh) {
         return PowerCommandAdmissionDecision::JoinRefresh;
@@ -378,7 +379,10 @@ fn power_command_admission_decision(
     let Some(active_owner) = active_owner else {
         return PowerCommandAdmissionDecision::Dispatch;
     };
-    if idle || owner.is_some_and(|owner| owner.priority() > active_owner.priority()) {
+    if idle
+        || (inflight_idle && owner.is_some() && !refresh)
+        || owner.is_some_and(|owner| owner.priority() > active_owner.priority())
+    {
         PowerCommandAdmissionDecision::SupersedeInflight
     } else {
         PowerCommandAdmissionDecision::SupersedeIncoming
@@ -852,6 +856,7 @@ where
         idle,
         transition.inflight.map(|(active_owner, _)| active_owner),
         *transition.inflight_refresh,
+        *transition.inflight_idle,
     ) {
         PowerCommandAdmissionDecision::JoinRefresh => {
             if transition.joined_refresh.push(ticket).is_err() {
@@ -1142,7 +1147,7 @@ async fn power_coordinator_task() {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn spawn_power_coordinator(spawner: Spawner) {
+pub(crate) fn spawn_power_coordinator(spawner: embassy_executor::SendSpawner) {
     spawner
         .spawn(power_coordinator_task())
         .expect("failed to spawn power coordinator");
@@ -1492,12 +1497,14 @@ mod tests {
         assert!(!release_terminal_fixed_pd_disarm_for_new_work(
             &mut backend,
             false,
+            false,
             false
         ));
         assert!(backend.terminal_fixed_pd_disarmed());
         assert!(release_terminal_fixed_pd_disarm_for_new_work(
             &mut backend,
             true,
+            false,
             false
         ));
         assert!(!backend.terminal_fixed_pd_disarmed());
@@ -1884,11 +1891,11 @@ mod tests {
         let automatic = Some(PowerIntentOwner::AutomaticThermal);
 
         assert_eq!(
-            power_command_admission_decision(None, true, false, calibration, true),
+            power_command_admission_decision(None, true, false, calibration, true, false),
             PowerCommandAdmissionDecision::JoinRefresh,
         );
         assert_eq!(
-            power_command_admission_decision(None, false, true, calibration, false),
+            power_command_admission_decision(None, false, true, calibration, false, true),
             PowerCommandAdmissionDecision::SupersedeInflight,
         );
         assert_eq!(
@@ -1898,6 +1905,18 @@ mod tests {
                 false,
                 automatic,
                 false,
+                false,
+            ),
+            PowerCommandAdmissionDecision::SupersedeInflight,
+        );
+        assert_eq!(
+            power_command_admission_decision(
+                Some(PowerIntentOwner::AutomaticThermal),
+                false,
+                false,
+                automatic,
+                false,
+                true,
             ),
             PowerCommandAdmissionDecision::SupersedeInflight,
         );
@@ -1908,11 +1927,12 @@ mod tests {
                 false,
                 calibration,
                 false,
+                false,
             ),
             PowerCommandAdmissionDecision::SupersedeIncoming,
         );
         assert_eq!(
-            power_command_admission_decision(None, false, false, None, false),
+            power_command_admission_decision(None, false, false, None, false, false),
             PowerCommandAdmissionDecision::Dispatch,
         );
         assert!(deferred_command_is_replaced(
@@ -2263,6 +2283,52 @@ mod tests {
             state,
             PdContractRequest::pps(17_500, 3_000).unwrap(),
         ));
+    }
+
+    #[test]
+    fn manual_pps_restore_retries_idle_until_confirmed() {
+        let mut manual_pps = ManualPpsState {
+            enabled: true,
+            target_mv: Some(20_000),
+            target_ma: Some(3_000),
+            ..ManualPpsState::default()
+        };
+        manual_pps.clear();
+        let ticket = PowerTicket {
+            owner: None,
+            sequence: 1,
+            result_slot: 0,
+        };
+        manual_pps.automatic_restore_ticket = Some(ticket);
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::AwaitIdle(ticket),
+        );
+
+        manual_pps.complete_automatic_restore(TicketOutcome::Rejected);
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::RequestIdle,
+        );
+
+        let capabilities =
+            SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 5_000)]);
+        let contract = capabilities
+            .select_exact_contract(PdContractRequest::pps(12_000, 5_000).unwrap())
+            .unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(contract, capabilities).unwrap();
+        manual_pps.automatic_restore_ticket = Some(ticket);
+        manual_pps.complete_automatic_restore(TicketOutcome::Confirmed(active));
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::ResetBackend,
+        );
+        assert!(manual_pps.consume_automatic_restore_pending());
+        assert_eq!(
+            manual_pps.automatic_restore_phase(),
+            AutomaticRestorePhase::NotRequired,
+        );
     }
 
     fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {

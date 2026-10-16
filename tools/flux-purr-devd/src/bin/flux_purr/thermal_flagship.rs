@@ -22,6 +22,10 @@ use super::{
 };
 
 const DEFAULT_OUTPUT_ROOT: &str = "thermal-self-test-runs";
+
+#[cfg(test)]
+#[path = "thermal_conformance_tests.rs"]
+mod firmware_conformance_tests;
 const SCOUT_STAGE_TIMEOUT_SECONDS: u64 = 180;
 const SCOUT_WARMUP_TIMEOUT_SECONDS: u64 = 180;
 const FLAGSHIP_ENVIRONMENT_RETRY_LIMIT: u8 = 1;
@@ -97,6 +101,9 @@ pub(super) async fn run_flagship_tuning(
     default_devd: &str,
     args: ThermalFlagshipTuneArgs,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if args.source_id.is_empty() || args.source_url.is_empty() {
+        return Err("host-reference engine requires --source-id and --source-url".into());
+    }
     let target_selector = flagship_target_selector(&args);
     let tune_targets_c = parse_thermal_targets(Some(&args.tune_targets_c))?;
     validate_flagship_scope(args.profile_mode, &tune_targets_c)?;
@@ -252,20 +259,19 @@ async fn tune_flagship_intervals(
         }
         let lower_target_c = context.tune_targets_c[lower_index];
         let upper_target_c = context.tune_targets_c[upper_index];
-        if !state.accepted_targets_c.contains(&lower_target_c)
-            || !state.accepted_targets_c.contains(&upper_target_c)
-        {
-            continue;
-        }
         let midpoint_index = interval_midpoint_index(lower_index, upper_index);
         let target_temp_c = context.tune_targets_c[midpoint_index];
-        state.current_profile = reseed_target_from_accepted_bounds(
-            &state.current_profile,
-            target_temp_c,
-            lower_target_c,
-            upper_target_c,
-            context.tune_targets_c,
-        )?;
+        if state.accepted_targets_c.contains(&lower_target_c)
+            && state.accepted_targets_c.contains(&upper_target_c)
+        {
+            state.current_profile = reseed_target_from_accepted_bounds(
+                &state.current_profile,
+                target_temp_c,
+                lower_target_c,
+                upper_target_c,
+                context.tune_targets_c,
+            )?;
+        }
         tune_flagship_target_at(context, state, target_temp_c).await?;
         if state
             .review_entries
@@ -276,7 +282,33 @@ async fn tune_flagship_intervals(
             interval_stack.push((lower_index, midpoint_index));
         }
     }
+
+    // A failed endpoint must not prune the rest of the requested target set. Only
+    // accepted bounds may provide an interpolation seed; every remaining target
+    // gets an independent run from the current same-run profile.
+    let attempted_targets = state
+        .review_entries
+        .iter()
+        .filter_map(|entry| entry.get("target").and_then(Value::as_i64))
+        .filter_map(|target| i16::try_from(target).ok())
+        .collect::<BTreeSet<_>>();
+    for target_temp_c in
+        pending_flagship_targets(context.tuning_execution_order_c, &attempted_targets)
+    {
+        tune_flagship_target_at(context, state, target_temp_c).await?;
+    }
     Ok(())
+}
+
+fn pending_flagship_targets(
+    execution_order_c: &[i16],
+    attempted_targets_c: &BTreeSet<i16>,
+) -> Vec<i16> {
+    execution_order_c
+        .iter()
+        .copied()
+        .filter(|target_temp_c| !attempted_targets_c.contains(target_temp_c))
+        .collect()
 }
 
 fn initial_flagship_intervals(
@@ -1492,11 +1524,7 @@ fn conservative_high_side_candidate(
     if severity_c <= 3.0
         || !matches!(
             evidence.get("failureClass").and_then(Value::as_str),
-            Some(
-                "stable_window_broke_high"
-                    | "missed_upper_band_before_limit"
-                    | "missed_lower_band_before_limit"
-            )
+            Some("stable_window_broke_high" | "missed_upper_band_before_limit")
         )
     {
         return None;
@@ -3353,6 +3381,11 @@ fn validate_flagship_scope(
         )
         .into());
     }
+    if tune_targets_c.iter().any(|target| {
+        !flux_purr_firmware::thermal_tuning::THERMAL_TUNING_TARGETS_C.contains(target)
+    }) {
+        return Err("host-reference targets must belong to the eight-target tuning set".into());
+    }
     Ok(())
 }
 
@@ -3520,22 +3553,38 @@ mod tests {
     #[test]
     fn recursive_execution_order_matches_canonical_full_batch() {
         assert_eq!(
-            build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220, 240]),
-            vec![60, 240, 140, 100, 80, 120, 180, 160, 220]
+            build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]),
+            flux_purr_firmware::thermal_tuning::THERMAL_TUNING_EXECUTION_ORDER_C
+        );
+    }
+
+    #[test]
+    fn pending_targets_keep_unaccepted_interiors_in_the_run() {
+        let order = build_recursive_tuning_execution_order(&[60, 80, 100, 120, 140, 160, 180, 220]);
+        let attempted = BTreeSet::from([60, 220]);
+
+        assert_eq!(
+            pending_flagship_targets(&order, &attempted),
+            vec![120, 80, 100, 160, 140, 180]
         );
     }
 
     #[test]
     fn flagship_scope_rejects_non_100w_profile_modes() {
-        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_ok());
+        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 220]).is_ok());
         for mode in [ThermalProfileMode::W65, ThermalProfileMode::Auto] {
             assert_eq!(
-                validate_flagship_scope(mode, &[60, 240])
+                validate_flagship_scope(mode, &[60, 220])
                     .expect_err("non-100w mode must be rejected")
                     .to_string(),
                 "5A full-batch tuning requires --profile-mode 100w"
             );
         }
+    }
+
+    #[test]
+    fn flagship_scope_rejects_removed_240c_target() {
+        assert!(validate_flagship_scope(ThermalProfileMode::W100, &[60, 240]).is_err());
     }
 
     #[test]
@@ -5048,6 +5097,53 @@ mod tests {
         assert!(tuned.hold_power_permille < current.hold_power_permille);
         assert!(tuned.hold_reheat_power_permille < current.hold_reheat_power_permille);
         assert!(tuned.overshoot_cutoff_centi_c < current.overshoot_cutoff_centi_c);
+    }
+
+    #[test]
+    fn conservative_high_side_candidate_rejects_lower_band_miss() {
+        let current = ThermalCandidatePoint {
+            target_temp_c: 60,
+            brake_distance_centi_c: 1_100,
+            warmup_power_permille: 1_000,
+            approach_power_permille: 450,
+            approach_floor_power_permille: 160,
+            approach_damping_exponent_permille: 4_000,
+            approach_tail_window_centi_c: 375,
+            hold_power_permille: 100,
+            hold_reheat_power_permille: 120,
+            warmup_reenter_centi_c: 1_000,
+            hold_entry_centi_c: 320,
+            hold_exit_centi_c: 300,
+            hold_on_centi_c: 30,
+            hold_off_centi_c: 50,
+            overshoot_cutoff_centi_c: 90,
+            hold_kp_permille_per_c: 8,
+            hold_ki_permille_per_c_tick: 1,
+            hold_blend_ticks: 1,
+            approach_lead_ticks: 6,
+            hold_lead_ticks: 6,
+        };
+        let result = ThermalStageResult {
+            target_temp_c: 60,
+            rise_time_ms: 10_000,
+            max_overshoot_c: 1.05,
+            hold_peak_to_peak_c: 1.50,
+            sample_count: 40,
+            stop_reason: "full_speed_to_stable budget exhausted",
+            terminal_runtime_drop_reason: None,
+            analysis: ThermalStageAnalysis {
+                residual_heat_after_hold_entry_c: Some(3.58),
+                ..ThermalStageAnalysis::default()
+            },
+            guard: ThermalApproachGuardAnalysis::default(),
+            full_speed_to_stable: ThermalFullSpeedStableAnalysis::default(),
+        };
+        let evidence = json!({
+            "failureClass": "missed_lower_band_before_limit",
+            "temperatureGapC": 0.58
+        });
+
+        assert!(conservative_high_side_candidate(current, &result, &evidence, 60).is_none());
     }
 
     #[test]

@@ -130,6 +130,7 @@ pub(crate) fn adc_diagnostics_wire() -> AdcDiagnosticsWire {
         rtd_raw_code_max: raw_max,
         rtd_raw_code_spread: raw_max.saturating_sub(raw_min),
         vin_raw_code_mean: VIN_RAW_CODE_MEAN.load(Ordering::Relaxed),
+        rtd_assumed_offset_uv: 0,
     }
 }
 
@@ -462,6 +463,8 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
+    pub(crate) automatic_restore_ticket: Option<PowerTicket>,
+    pub(crate) automatic_restore_confirmed: bool,
     pub(crate) allow_pending_refresh: bool,
     pub(crate) pending_power_ticket: Option<PowerTicket>,
     pub(crate) pending_power_request_mv: Option<u16>,
@@ -484,11 +487,22 @@ impl Default for ManualPpsState {
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
             error: None,
             automatic_restore_pending: false,
+            automatic_restore_ticket: None,
+            automatic_restore_confirmed: false,
             allow_pending_refresh: false,
             pending_power_ticket: None,
             pending_power_request_mv: None,
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AutomaticRestorePhase {
+    NotRequired,
+    RequestIdle,
+    AwaitIdle(PowerTicket),
+    ResetBackend,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -945,6 +959,7 @@ pub(crate) fn disarm_stale_heater_arm_after_pd_transition(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[allow(dead_code)]
 pub(crate) fn reconcile_pd_contract_intent(
     observation: Option<PdStatusObservation>,
     pd_contract_ready: &mut bool,
@@ -953,12 +968,33 @@ pub(crate) fn reconcile_pd_contract_intent(
     manual_pps_state: &mut ManualPpsState,
     physical_output_active: bool,
 ) -> bool {
+    reconcile_pd_contract_intent_with_pending_automatic_pps(
+        observation,
+        pd_contract_ready,
+        ui_state,
+        calibration_runtime_state,
+        manual_pps_state,
+        physical_output_active,
+        false,
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn reconcile_pd_contract_intent_with_pending_automatic_pps(
+    observation: Option<PdStatusObservation>,
+    pd_contract_ready: &mut bool,
+    ui_state: &mut FrontPanelUiState,
+    calibration_runtime_state: &mut CalibrationRuntimeState,
+    manual_pps_state: &mut ManualPpsState,
+    physical_output_active: bool,
+    automatic_pps_transition_pending: bool,
+) -> bool {
     let current_pd_contract_ready = startup_pd_contract_ready(observation);
     let mut needs_redraw = *pd_contract_ready != current_pd_contract_ready;
     if needs_redraw {
         let pd_was_ready = *pd_contract_ready;
         *pd_contract_ready = current_pd_contract_ready;
-        if current_pd_contract_ready {
+        if current_pd_contract_ready && !automatic_pps_transition_pending {
             needs_redraw |= disarm_stale_heater_arm_after_pd_transition(
                 pd_was_ready,
                 current_pd_contract_ready,
@@ -969,6 +1005,7 @@ pub(crate) fn reconcile_pd_contract_intent(
     }
 
     if !current_pd_contract_ready
+        && !automatic_pps_transition_pending
         && (ui_state.heater_enabled
             || calibration_runtime_state.heater_enabled
             || physical_output_active
@@ -990,25 +1027,27 @@ pub(crate) fn apply_pd_contract_observation<PWM>(
     ui_state: &mut FrontPanelUiState,
     calibration_runtime_state: &mut CalibrationRuntimeState,
     manual_pps_state: &mut ManualPpsState,
-    heater_pwm: &mut PWM,
-    last_heater_duty: &mut u8,
+    heater_output: (&mut PWM, &mut u8),
+    automatic_pps_transition_pending: bool,
 ) -> bool
 where
     PWM: SetDutyCycle,
 {
+    let (heater_pwm, last_heater_duty) = heater_output;
     let previous_pd_ready = *pd_contract_ready;
-    let needs_redraw = reconcile_pd_contract_intent(
+    let needs_redraw = reconcile_pd_contract_intent_with_pending_automatic_pps(
         observation,
         pd_contract_ready,
         ui_state,
         calibration_runtime_state,
         manual_pps_state,
         *last_heater_duty != 0,
+        automatic_pps_transition_pending,
     );
     if previous_pd_ready != *pd_contract_ready {
         info!("PD contract readiness -> {=bool}", *pd_contract_ready);
     }
-    if !*pd_contract_ready {
+    if !*pd_contract_ready && !automatic_pps_transition_pending {
         // Genuine unavailable or stale power still drops both intent and PWM;
         // normal negotiation carries the previous confirmed supply instead.
         apply_heater_duty(heater_pwm, 0, last_heater_duty);
@@ -1170,8 +1209,10 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
     };
     let final_sample = samples.last().copied();
     let final_temp_c = temperatures_c[count - 1];
-    powered_max_temp_c >= THERMAL_PLANT_TARGET_TEMP_C
-        && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
+    thermal_plant_heating_sample_covers_target(
+        memory_config,
+        samples[powered_peak_index].raw_rtd_adc_mv,
+    ) && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
         && powered_peak_index + 1 < count
         && final_sample.is_some_and(|sample| sample.duty_percent == 0)
         && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
@@ -1416,6 +1457,7 @@ impl ManualPpsState {
         self.target_ma = Some(target_ma);
         self.error = None;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         Ok(())
     }
 
@@ -1441,6 +1483,7 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = None;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         Ok(())
     }
 
@@ -1452,13 +1495,15 @@ impl ManualPpsState {
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
         refreshed.pending_power_ticket = previous.pending_power_ticket;
         refreshed.pending_power_request_mv = previous.pending_power_request_mv;
+        refreshed.automatic_restore_ticket = previous.automatic_restore_ticket;
+        refreshed.automatic_restore_confirmed = previous.automatic_restore_confirmed;
+        refreshed.automatic_restore_pending = previous.automatic_restore_pending;
         if previous.enabled {
             refreshed.enabled = true;
             refreshed.owner = previous.owner;
             refreshed.target_mv = previous.target_mv;
             refreshed.target_ma = previous.target_ma;
             refreshed.applied_mv = None;
-            refreshed.automatic_restore_pending = previous.automatic_restore_pending;
         }
         *self = refreshed;
     }
@@ -1475,6 +1520,9 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = None;
         self.automatic_restore_pending |= had_override;
+        if had_override {
+            self.automatic_restore_confirmed = false;
+        }
     }
 
     pub(crate) fn fail(&mut self, error: ManualPpsError) {
@@ -1485,11 +1533,30 @@ impl ManualPpsState {
         self.applied_mv = None;
         self.error = Some(error);
         self.automatic_restore_pending = true;
+        self.automatic_restore_confirmed = false;
+    }
+
+    pub(crate) fn automatic_restore_phase(&self) -> AutomaticRestorePhase {
+        if !self.automatic_restore_pending {
+            AutomaticRestorePhase::NotRequired
+        } else if self.automatic_restore_confirmed {
+            AutomaticRestorePhase::ResetBackend
+        } else if let Some(ticket) = self.automatic_restore_ticket {
+            AutomaticRestorePhase::AwaitIdle(ticket)
+        } else {
+            AutomaticRestorePhase::RequestIdle
+        }
+    }
+
+    pub(crate) fn complete_automatic_restore(&mut self, outcome: TicketOutcome) {
+        self.automatic_restore_ticket = None;
+        self.automatic_restore_confirmed = matches!(outcome, TicketOutcome::Confirmed(_));
     }
 
     pub(crate) fn consume_automatic_restore_pending(&mut self) -> bool {
         let pending = self.automatic_restore_pending;
         self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
         pending
     }
 }
@@ -1558,6 +1625,19 @@ impl HeaterPowerBackend {
             } => *terminal_fixed_pd_disarmed = disarmed,
         }
     }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_transition_can_preserve_heater_intent(
+    backend: HeaterPowerBackend,
+    heater_enabled: bool,
+    manual_pps_enabled: bool,
+    thermal_model_allowed: bool,
+) -> bool {
+    heater_enabled
+        && !manual_pps_enabled
+        && thermal_model_allowed
+        && matches!(backend, HeaterPowerBackend::PpsMos { .. })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1674,14 +1754,32 @@ pub(crate) fn projected_rtd_temperature_c(
     memory_config: &MemoryConfig,
     raw_adc_mv: u16,
 ) -> Option<f32> {
-    let corrected_mv = correct_adc_fractional_mv(
-        memory_config,
-        AdcCalibrationChannel::Rtd,
-        f32::from(raw_adc_mv),
-    );
+    projected_rtd_fractional_temperature_c(memory_config, f32::from(raw_adc_mv))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[inline(never)]
+pub(crate) fn projected_rtd_fractional_temperature_c(
+    memory_config: &MemoryConfig,
+    raw_adc_mv: f32,
+) -> Option<f32> {
+    let corrected_mv =
+        corrected_rtd_adc_fractional_mv(memory_config, raw_adc_mv, RTD_ASSUMED_ADC_OFFSET_UV);
     rtd_resistance_ohms_from_fractional_mv(corrected_mv)
         .ok()
         .map(pt1000_temperature_c_from_resistance)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_plant_heating_sample_covers_target(
+    memory_config: &MemoryConfig,
+    raw_adc_mv: u16,
+) -> bool {
+    // The live fractional sample cuts heat at 220C. Persisted raw millivolts
+    // are rounded, so coverage uses the upper edge of that half-mV bin;
+    // fitting and reporting still use the unchanged sample centre.
+    projected_rtd_fractional_temperature_c(memory_config, f32::from(raw_adc_mv) + 0.5)
+        .is_some_and(|temperature_c| temperature_c >= THERMAL_PLANT_TARGET_TEMP_C)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1860,16 +1958,18 @@ pub(crate) fn thermal_plant_active_result(
     transaction: &ThermalPlantTransientTransaction,
 ) -> Option<ThermalPlantActiveResultWire> {
     let (projection, _) = thermal_plant_projection_for_runtime(memory_config)?;
+    let curve = projected_heater_curve(memory_config)?;
     Some(ThermalPlantActiveResultWire {
         transaction_id: transaction.transaction_id,
         curve: HeaterCurvePackageWire::from_memory(
-            &memory_config.active_heater_curve,
+            &curve,
             Some(&memory_config.heater_curve_raw_observations),
         ),
         convection_mw_per_c: Some(projection.convection_mw_per_c),
         radiation_mw_per_k4: Some(projection.radiation_mw_per_k4),
         thermal_capacity_mj_per_c: Some(projection.thermal_capacity_mj_per_c),
         transport_delay_ms: Some(projection.transport_delay_ms),
+        heat_response: thermal_plant_heat_response(memory_config),
     })
 }
 
@@ -1920,4 +2020,38 @@ pub(crate) fn thermal_plant_projection_for_runtime(
     let ambient_temp_c =
         projected_rtd_temperature_c(memory_config, transaction.ambient_raw_rtd_adc_mv)?;
     Some((projection, ambient_temp_c))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_plant_heat_response(
+    memory_config: &MemoryConfig,
+) -> Option<flux_purr_firmware::thermal_response::HeatResponse> {
+    use flux_purr_firmware::thermal_response::{ResponseSample, fit_shutdown_response};
+    let (model, ambient_c) = thermal_plant_projection_for_runtime(memory_config)?;
+    let transaction = memory_config.thermal_plant_transient_active.as_ref()?;
+    let curve = projected_heater_curve(memory_config)?;
+    let count = usize::from(transaction.sample_count);
+    let mut samples = [ResponseSample::default(); THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut temperatures = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, sample) in transaction.samples[..count].iter().enumerate() {
+        let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
+        temperatures[index] = temperature_c;
+        samples[index] = ResponseSample {
+            at_ms: u32::from(sample.elapsed_ticks) * HEATER_CONTROL_INTERVAL_MS as u32,
+            temperature_c,
+            power_mw: transient_sample_power_mw(
+                *sample,
+                temperature_c,
+                Some(&curve),
+                memory_config,
+            )?,
+            accepted: true,
+        };
+    }
+    let accepted =
+        transient_temperature_acceptance(&transaction.samples[..count], &temperatures[..count]);
+    for index in 0..count {
+        samples[index].accepted = accepted[index];
+    }
+    fit_shutdown_response(&samples[..count], model, ambient_c)
 }

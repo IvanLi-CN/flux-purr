@@ -389,6 +389,7 @@ fn build_self_test_report_entries(
                 "stableWindowVerifiedAtMs": replay_analysis.stable_window_verified_at_ms,
                 "settleTimeMs": replay_analysis.settle_time_ms,
                 "failureReason": replay_analysis.failure_reason,
+                "stableWindowLastResetReason": replay_analysis.stable_window_last_reset_reason,
             });
             Ok(self_test_report_entry(
                 stage_summary,

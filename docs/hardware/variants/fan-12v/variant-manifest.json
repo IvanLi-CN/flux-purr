@@ -24,20 +24,28 @@
       "fan_control_path": "GPIO36 -> RPWM -> VCTRL -> RINJ -> FB"
     },
     "output_range_mv": {
-      "min": 6587,
-      "max": 12043
+      "min": 3450,
+      "max": 12140
     },
     "control_law": {
-      "approximation": "VOUT ~= 12.04 - 5.46 * Duty",
+      "approximation": "VOUT ~= 12.14 - 8.69 * Duty",
       "duty_domain": "0.0..1.0"
     },
     "resistors_ohms": {
-      "rfbb": 10000,
-      "rfbt": 124000,
-      "rinj": 75000,
+      "rfbb": 13000,
+      "rfbt": 150000,
+      "rinj": 47000,
       "rpwm": 10000,
       "ren_pd": 100000,
       "rser_en": 2200
+    },
+    "resistor_series": "E24",
+    "resistor_tolerance": "1%",
+    "physical_designators": {
+      "rfbb": "R19",
+      "rfbt": "R20",
+      "rinj": "R18",
+      "rpwm": "R15"
     },
     "capacitors": {
       "cpwm_uf": 1.0,
@@ -65,9 +73,22 @@
     },
     "designator_overrides": [
       {
-        "designator": "R10",
-        "from": "47kOhm",
-        "to": "124kOhm 1%"
+        "designator": "R19",
+        "function": "RFBB",
+        "from": "10kOhm 1%",
+        "to": "13kOhm E24 1%"
+      },
+      {
+        "designator": "R20",
+        "function": "RFBT",
+        "from": "47kOhm 1%",
+        "to": "150kOhm E24 1%"
+      },
+      {
+        "designator": "R18",
+        "function": "RINJ",
+        "from": "75kOhm 1%",
+        "to": "47kOhm E24 1%"
       },
       {
         "designator": "C138",

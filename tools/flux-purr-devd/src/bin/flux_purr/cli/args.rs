@@ -21,6 +21,10 @@ pub(crate) enum Command {
     },
     Identity(TargetSelector),
     Status(TargetSelector),
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommand,
+    },
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
@@ -197,6 +201,15 @@ impl RamTestKind {
 pub(crate) struct RamExitArgs {
     #[arg(long)]
     pub(crate) port: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SetupCommand {
+    Status(TargetSelector),
+    #[command(
+        about = "Complete first setup and verify EEPROM persistence; user ADC calibration is optional."
+    )]
+    Complete(TargetSelector),
 }
 
 #[derive(Debug, Subcommand)]
@@ -941,6 +954,11 @@ pub(crate) enum ThermalCommand {
         about = "Run the owner-facing 5A full-batch thermal tuning workflow and emit a canonical preliminary review bundle."
     )]
     Tune(ThermalFlagshipTuneArgs),
+    #[command(
+        name = "confirm-firmware-save",
+        about = "Confirm and save a sealed firmware tuning candidate from its recorded run input."
+    )]
+    ConfirmFirmwareSave(ThermalFirmwareSaveArgs),
     Report {
         #[command(subcommand)]
         command: ThermalReportCommand,
@@ -949,6 +967,13 @@ pub(crate) enum ThermalCommand {
         about = "Recompute analysis and tuned candidate from an existing thermal self-test run."
     )]
     Retune(ThermalRetuneArgs),
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub(crate) enum ThermalTuneEngine {
+    #[value(name = "host-reference")]
+    HostReference,
+    Firmware,
 }
 
 #[derive(Debug, Subcommand)]
@@ -969,6 +994,11 @@ pub(crate) enum ThermalReportCommand {
         about = "Rerender a legacy preliminary thermal review bundle into the canonical compliant HTML bundle."
     )]
     RerenderLegacy(ThermalLegacyReportArgs),
+    #[command(
+        name = "render-v2",
+        about = "Generate the canonical five-file thermal-tuning-v2 HTML report from samples and result data."
+    )]
+    RenderV2(ThermalTuningV2ReportArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -1145,6 +1175,8 @@ pub(crate) struct ThermalRetuneArgs {
 pub(crate) struct ThermalFlagshipTuneArgs {
     #[command(flatten)]
     pub(crate) target: TargetSelector,
+    #[arg(long = "engine", value_enum, default_value = "host-reference")]
+    pub(crate) engine: ThermalTuneEngine,
     #[arg(
         long = "source-kind",
         value_enum,
@@ -1155,11 +1187,13 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     #[arg(
         long = "source-id",
         alias = "source-device-id",
+        default_value = "",
         help = "Expected bench source identity returned by the selected source provider."
     )]
     pub(crate) source_id: String,
     #[arg(
         long = "source-url",
+        default_value = "",
         help = "Bench source URL used by the selected source provider."
     )]
     pub(crate) source_url: String,
@@ -1197,25 +1231,25 @@ pub(crate) struct ThermalFlagshipTuneArgs {
     pub(crate) runtime_rearm_attempts: u8,
     #[arg(
         long = "anchor-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
+        default_value = "60,80,100,120,140,160,180,220",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning now uses a single same-grade target set."
     )]
     pub(crate) anchor_targets_c: String,
     #[arg(
         long = "validation-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
+        default_value = "60,80,100,120,140,160,180,220",
         help = "Deprecated legacy flag. Canonical 5A full-batch tuning no longer runs a separate validation tier."
     )]
     pub(crate) validation_targets_c: String,
     #[arg(
         long = "tune-targets-c",
-        default_value = "60,80,100,120,140,160,180,220,240",
-        help = "Comma-separated full-batch tuning target set. Execution order is derived recursively from the physical temperature order."
+        default_value = "60,80,100,120,140,160,180,220",
+        help = "Comma-separated tuning targets. Firmware subsets are diagnostic-only and cannot qualify or be saved."
     )]
     pub(crate) tune_targets_c: String,
     #[arg(
         long = "seed-profile-file",
-        help = "Optional starting sparse/full thermal profile. Defaults to the resolved bank seed path."
+        help = "Optional explicit starting sparse/full thermal profile. Without it, tuning starts from production defaults."
     )]
     pub(crate) seed_profile_file: Option<PathBuf>,
     #[arg(
@@ -1254,6 +1288,33 @@ pub(crate) struct ThermalLegacyReportArgs {
     #[arg(
         long = "output-dir",
         help = "Output directory for the rerendered compliant bundle. Defaults to <legacy-bundle-dir>-rerendered."
+    )]
+    pub(crate) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ThermalTuningV2ReportArgs {
+    #[arg(
+        long = "input-dir",
+        help = "Prepared v2 input directory, or a firmware device journal containing device-statuses.ndjson and captured identity. Interrupted journals render as failed/incomplete without inventing terminal events."
+    )]
+    pub(crate) input_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Output directory for the generated five-file thermal-tuning-v2 bundle. Defaults to <input-dir>/rendered."
+    )]
+    pub(crate) output_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ThermalFirmwareSaveArgs {
+    #[command(flatten)]
+    pub(crate) target: TargetSelector,
+    #[arg(long = "input-dir", help = "Raw firmware tuning run input directory.")]
+    pub(crate) input_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Directory for the updated five-file report."
     )]
     pub(crate) output_dir: Option<PathBuf>,
 }
@@ -1474,6 +1535,8 @@ pub(crate) struct TemperatureCalibrationHeaterArgs {
 pub(crate) struct TemperatureCalibrationCaptureArgs {
     #[command(flatten)]
     pub(crate) target: TargetSelector,
+    #[arg(long = "target-adc-mv")]
+    pub(crate) target_adc_mv: Option<u16>,
     #[arg(long = "reference-temp-c")]
     pub(crate) reference_temp_c: f32,
     #[arg(long = "observed-mv")]

@@ -65,6 +65,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Status(selector) => {
             request_device_read(&client, resolve_target(selector, &cli.devd)?, "/status").await?
         }
+        Command::Setup { command } => match command {
+            SetupCommand::Status(selector) => {
+                request_device_read(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    "/install-status",
+                )
+                .await?
+            }
+            SetupCommand::Complete(selector) => {
+                request_with_lease(
+                    &client,
+                    resolve_target(selector, &cli.devd)?,
+                    Method::POST,
+                    "/setup/complete",
+                    None,
+                )
+                .await?
+            }
+        },
         Command::Runtime { command } => {
             execute_runtime_command(&client, &cli.devd, command).await?
         }
@@ -102,8 +122,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::RamRun { command } => execute_ram_run(command)?,
     };
 
-    let pd_hil_failed = ram_run::pd_hil_requires_nonzero(&payload);
-    let fan_pd_failed = ram_run::fan_pd_requires_nonzero(&payload);
     if cli.json {
         println!(
             "{}",
@@ -113,6 +131,14 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{}", render_human(&payload)?);
     }
     drop(managed_devd);
+    validate_ram_run_result(&payload)
+}
+
+fn validate_ram_run_result(
+    payload: &Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pd_hil_failed = ram_run::pd_hil_requires_nonzero(payload);
+    let fan_pd_failed = ram_run::fan_pd_requires_nonzero(payload);
     if pd_hil_failed {
         let overall = payload
             .get("result")
@@ -137,6 +163,14 @@ pub(crate) async fn prepare_devd(
     direct_flash_command: bool,
     explicit_devd_endpoint: bool,
 ) -> Result<Option<ManagedDevd>, Box<dyn std::error::Error + Send + Sync>> {
+    if matches!(
+        &cli.command,
+        Command::Thermal {
+            command: ThermalCommand::Report { .. }
+        }
+    ) {
+        return Ok(None);
+    }
     if direct_flash_command && explicit_devd_endpoint {
         return Err("flash and recover are direct-serial commands and do not accept --devd".into());
     }
@@ -573,7 +607,13 @@ fn direct_flash_with_program_inner_guarded(
                 }
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                return Err(format!(
+                    "EEPROM backup preflight failed on authorized port {}: {error}; firmware was not written",
+                    args.port
+                )
+                .into());
+            }
         };
         let directory = backup_directory.ok_or("developer backup directory is unavailable")?;
         Some(developer_backup::write_atomic(directory, &snapshot)?)
@@ -1159,8 +1199,9 @@ pub(crate) fn write_snapshot_request<S: Write + ?Sized>(
     serial: &mut S,
     value: &Value,
 ) -> io::Result<()> {
-    serial.write_all(serde_json::to_string(value).unwrap().as_bytes())?;
-    serial.write_all(b"\n")?;
+    let payload = serde_json::to_string(value).unwrap();
+    write_snapshot_bytes(serial, payload.as_bytes())?;
+    write_snapshot_bytes(serial, b"\n")?;
     serial.flush()
 }
 
@@ -1172,7 +1213,7 @@ fn open_snapshot_serial(
     port: &str,
 ) -> Result<Box<dyn SnapshotSerial>, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
-    if port.starts_with("/dev/cu.usbmodem") {
+    if snapshot_uses_raw_usb_port(port) {
         return Ok(Box::new(open_raw_usb_serial_jtag_port(port)?));
     }
 
@@ -1181,6 +1222,34 @@ fn open_snapshot_serial(
             .timeout(Duration::from_secs(2))
             .open()?,
     ))
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn snapshot_uses_raw_usb_port(port: &str) -> bool {
+    cfg!(target_os = "macos") && port.starts_with("/dev/cu.usbmodem")
+}
+
+fn write_snapshot_bytes<W: Write + ?Sized>(serial: &mut W, mut bytes: &[u8]) -> io::Result<()> {
+    let deadline = StdInstant::now() + Duration::from_secs(2);
+    while !bytes.is_empty() {
+        if StdInstant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match serial.write(bytes) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => bytes = &bytes[written..],
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default)]
