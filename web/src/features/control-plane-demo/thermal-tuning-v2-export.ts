@@ -857,7 +857,8 @@ export function verifyHoldSamples(
   }
   evidence.verified =
     !phaseRegressed &&
-    evidence.continuousHoldMs >= 60_000 && (count - 1) * 1_000 >= evidence.continuousHoldMs * 3
+    evidence.continuousHoldMs >= 60_000 &&
+    (count - 1) * 1_000 >= evidence.continuousHoldMs * 3
   if (phaseRegressed) evidence.reasons.push('hold_phase_regressed')
   else if (!evidence.verified) evidence.reasons.push('continuous_hold_not_verified_from_samples')
   return evidence
