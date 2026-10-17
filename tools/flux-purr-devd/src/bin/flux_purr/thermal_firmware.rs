@@ -1230,6 +1230,8 @@ fn verify_hold_samples(
     let mut duration = 0_u64;
     let mut longest = 0_u64;
     let mut ordered = true;
+    let mut saw_hold = false;
+    let mut phase_regressed = false;
     for (sample, measurement) in samples.iter().zip(measurements) {
         let position = sample
             .get("sequence")
@@ -1245,6 +1247,12 @@ fn verify_hold_samples(
         }
         previous = position;
         let in_hold = sample.get("phase").and_then(Value::as_str) == Some("hold");
+        phase_regressed |= saw_hold
+            && matches!(
+                sample.get("phase").and_then(Value::as_str),
+                Some("warmup" | "approach")
+            );
+        saw_hold |= in_hold;
         if !in_hold
             || measurement == QualificationMeasurement::Rejected
             || measurement == QualificationMeasurement::FreshAfterGap
@@ -1288,9 +1296,14 @@ fn verify_hold_samples(
             }
         }
     }
-    let verified = ordered && duration >= 60_000 && count.saturating_sub(1) * 1_000 >= duration * 3;
+    let verified = ordered
+        && !phase_regressed
+        && duration >= 60_000
+        && count.saturating_sub(1) * 1_000 >= duration * 3;
     let reasons = if !ordered {
         vec!["invalid_sample_order"]
+    } else if phase_regressed {
+        vec!["hold_phase_regressed"]
     } else if !verified {
         vec!["continuous_hold_not_verified_from_samples"]
     } else {

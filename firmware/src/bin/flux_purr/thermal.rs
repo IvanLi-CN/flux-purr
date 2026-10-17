@@ -151,8 +151,8 @@ pub(crate) fn heater_phase_pps_request_mv(
     initial_profile_approach: bool,
 ) -> Option<u16> {
     if initial_profile_approach {
-        // Only Hold, or an Approach recovering from Hold, owns the handoff
-        // voltage. A fresh profile Approach must still use the normal down-ramp.
+        // Hold owns the handoff voltage. Profile Approach uses the normal
+        // down-ramp and cannot be re-entered from Hold.
         governor.reset();
         return None;
     }
@@ -687,7 +687,7 @@ pub(crate) fn warmup_handoff_ready(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn hold_effective_base_permille(
     hold_guard_error_c: f32,
-    hold_reenter_error_c: f32,
+    hold_reheat_span_c: f32,
     control_target: ThermalControlTarget,
 ) -> f32 {
     let hold_power_permille = f32::from(control_target.hold_power_permille.min(1_000));
@@ -701,7 +701,7 @@ pub(crate) fn hold_effective_base_permille(
         return hold_power_permille;
     }
 
-    let ratio = (hold_guard_error_c / hold_reenter_error_c.max(0.05)).clamp(0.0, 1.0);
+    let ratio = (hold_guard_error_c / hold_reheat_span_c.max(0.05)).clamp(0.0, 1.0);
     hold_power_permille + ((hold_reheat_permille - hold_power_permille) * ratio)
 }
 
@@ -795,7 +795,6 @@ pub(crate) struct HeaterController {
     pub(crate) profile_last_control_at_ms: Option<u64>,
     pub(crate) profile_measurement_elapsed_ms: u64,
     pub(crate) pps_measurement_anchor_pending: bool,
-    pub(crate) recovering_from_hold: bool,
     pub(crate) duty_percent: u8,
     pub(crate) hold_entry_output_percent: u8,
     pub(crate) hold_integral_c: f32,
@@ -853,9 +852,8 @@ pub(crate) struct ThermalControlFrame {
     hold_state_ready: bool,
     actual_crossed_target_ready: bool,
     hold_guard_error_c: f32,
-    hold_reenter_error_c: f32,
+    hold_reheat_span_c: f32,
     approach_predictive_coast_ready: bool,
-    hold_exit_error_c: f32,
     brake_distance_c: f32,
     warmup_handoff_error_c: f32,
     natural_cooling_rate_c_per_s: Option<f32>,
@@ -886,7 +884,6 @@ impl HeaterController {
         self.production_controller
             .is_some_and(ProductionThermalController::is_profile)
             && self.phase == HeaterControlPhase::Approach
-            && !self.recovering_from_hold
     }
 
     pub(crate) const fn new() -> Self {
@@ -904,7 +901,6 @@ impl HeaterController {
             profile_last_control_at_ms: None,
             profile_measurement_elapsed_ms: 0,
             pps_measurement_anchor_pending: false,
-            recovering_from_hold: false,
             duty_percent: 0,
             hold_entry_output_percent: 0,
             hold_integral_c: 0.0,
@@ -943,7 +939,6 @@ impl HeaterController {
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
         self.pps_measurement_anchor_pending = false;
-        self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;
@@ -1043,7 +1038,6 @@ impl HeaterController {
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
         self.pps_measurement_anchor_pending = false;
-        self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;
@@ -1242,7 +1236,6 @@ impl HeaterController {
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
-        self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;
@@ -1435,14 +1428,8 @@ impl HeaterController {
                 input.now_ms,
                 predicted.temperature_c,
             ));
-            // A Hold recovery has no new full-power Warmup to brake. Retain
-            // its current request during rejected observations; the model
-            // still owns any reduction or fresh-measurement recovery.
-            self.approach_last_request_permille = Some(if self.recovering_from_hold {
-                u16::from(self.duty_percent) * 10
-            } else {
-                flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE
-            });
+            self.approach_last_request_permille =
+                Some(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
         if entered_approach {
             return Some(percent_from_permille(
@@ -1568,7 +1555,7 @@ impl HeaterController {
             || {
                 hold_effective_base_permille(
                     frame.hold_guard_error_c,
-                    frame.hold_reenter_error_c,
+                    frame.hold_reheat_span_c,
                     target,
                 )
             },
@@ -1703,22 +1690,15 @@ impl HeaterController {
                     next_phase = HeaterControlPhase::Hold;
                 }
             }
-            HeaterControlPhase::Hold => {
-                if frame.hold_exit_error_c >= frame.hold_reenter_error_c
-                    && frame.previous_error_c >= frame.hold_reenter_error_c
-                {
-                    next_phase = HeaterControlPhase::Approach;
-                }
-            }
+            // A constant-target Hold owns its own recovery. Temperature,
+            // profile thresholds and PPS pauses cannot restart Approach.
+            HeaterControlPhase::Hold => {}
         }
 
         if next_phase != self.phase {
-            let previous_phase = self.phase;
             self.phase = next_phase;
             self.phase_ticks = 0;
             self.phase_tick_remainder_ms = 0;
-            self.recovering_from_hold = previous_phase == HeaterControlPhase::Hold
-                && self.phase == HeaterControlPhase::Approach;
             if self.phase == HeaterControlPhase::Warmup {
                 self.warmup_started_at_ms = Some(now_ms);
             }
@@ -1731,9 +1711,6 @@ impl HeaterController {
             self.phase_ticks = self
                 .phase_ticks
                 .saturating_add(elapsed_cycles.min(u64::from(u16::MAX)) as u16);
-            if self.phase != HeaterControlPhase::Approach {
-                self.recovering_from_hold = false;
-            }
         }
     }
 
@@ -1774,7 +1751,7 @@ impl HeaterController {
             frame.error_c
         };
         let base_permille =
-            hold_effective_base_permille(guard_error_c, frame.hold_reenter_error_c, target);
+            hold_effective_base_permille(guard_error_c, frame.hold_reheat_span_c, target);
         let integral_limit = if frame.hold_ki > 0.0 {
             ((1_000.0 - base_permille) / frame.hold_ki).clamp(0.0, 255.0)
         } else {
@@ -2048,14 +2025,13 @@ impl HeaterController {
             error_c <= 0.0 && previous_error_c <= 0.0 && approach_control_error_c <= 0.0;
         let hold_guard_error_c =
             Self::hold_guard_error(error_c, hold_control_error_c, control_target);
-        let hold_reenter_error_c = control_target
+        let hold_reheat_span_c = control_target
             .hold_exit_error_c
             .max(control_target.hold_on_error_c)
             .max(hold_entry_gate_c + HEATER_HOLD_PHASE_HYSTERESIS_C);
         let approach_predictive_coast_ready = approach_control_error_c <= 0.0
             && error_c <= control_target.hold_exit_error_c
             && control_error_c <= control_target.hold_exit_error_c;
-        let hold_exit_error_c = error_c;
         let warmup_handoff_error_c = if self.heat_response.is_some() {
             brake_distance_c
         } else {
@@ -2087,9 +2063,8 @@ impl HeaterController {
             hold_state_ready,
             actual_crossed_target_ready,
             hold_guard_error_c,
-            hold_reenter_error_c,
+            hold_reheat_span_c,
             approach_predictive_coast_ready,
-            hold_exit_error_c,
             brake_distance_c,
             warmup_handoff_error_c,
             natural_cooling_rate_c_per_s,
@@ -2107,7 +2082,6 @@ impl HeaterController {
         self.phase_tick_remainder_ms = 0;
         self.profile_last_control_at_ms = None;
         self.profile_measurement_elapsed_ms = 0;
-        self.recovering_from_hold = false;
         self.duty_percent = 0;
         self.hold_entry_output_percent = 0;
         self.hold_integral_c = 0.0;

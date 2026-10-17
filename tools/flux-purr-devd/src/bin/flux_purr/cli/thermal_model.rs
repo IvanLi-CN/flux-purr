@@ -491,6 +491,7 @@ pub(crate) enum ThermalHoldObservation {
     Warmup,
     Hold,
     Completed,
+    PhaseRegressed,
 }
 
 pub(crate) struct ThermalHoldTracker {
@@ -499,6 +500,8 @@ pub(crate) struct ThermalHoldTracker {
     pub(crate) entered_threshold_c: f64,
     pub(crate) stable_band_c: f64,
     pub(crate) first_hold_started_at: Option<tokio::time::Instant>,
+    saw_controller_hold: bool,
+    phase_regressed: bool,
     pub(crate) rise_time_ms: Option<u64>,
     pub(crate) min_c: f64,
     pub(crate) max_c: f64,
@@ -909,6 +912,8 @@ impl ThermalHoldTracker {
             entered_threshold_c: 0.5,
             stable_band_c: 3.0,
             first_hold_started_at: None,
+            saw_controller_hold: false,
+            phase_regressed: false,
             rise_time_ms: None,
             min_c: f64::INFINITY,
             max_c: f64::NEG_INFINITY,
@@ -923,11 +928,16 @@ impl ThermalHoldTracker {
         control_phase_in_hold: bool,
     ) -> ThermalHoldObservation {
         let target_temp_c = f64::from(self.target_temp_c);
-        // Keep every observation after the first qualified entry, even while
-        // recovery is waiting to start a new qualification clock.
+        // Retain extrema even for an invalid phase trace.
         if self.rise_time_ms.is_some() {
             self.min_c = self.min_c.min(current_temp_c);
             self.max_c = self.max_c.max(current_temp_c);
+        }
+        self.phase_regressed |= self.saw_controller_hold && !control_phase_in_hold;
+        self.saw_controller_hold |= control_phase_in_hold;
+        if self.phase_regressed {
+            self.first_hold_started_at = None;
+            return ThermalHoldObservation::PhaseRegressed;
         }
         if !control_phase_in_hold {
             self.first_hold_started_at = None;

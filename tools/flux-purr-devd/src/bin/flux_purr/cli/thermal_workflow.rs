@@ -5317,6 +5317,10 @@ pub(crate) fn measure_thermal_stage(
     let observation = hold_tracker.observe(current_temp_c, elapsed_ms, now, control_phase_in_hold);
     let mut phase = match observation {
         ThermalHoldObservation::Warmup => "warmup",
+        ThermalHoldObservation::PhaseRegressed => {
+            *stop_reason = "hold_phase_regressed";
+            "hold"
+        }
         ThermalHoldObservation::Hold | ThermalHoldObservation::Completed => {
             if observation == ThermalHoldObservation::Completed {
                 *stop_reason = "completed";

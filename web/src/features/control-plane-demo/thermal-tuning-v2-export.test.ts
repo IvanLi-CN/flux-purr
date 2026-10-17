@@ -55,7 +55,9 @@ describe('continuous Hold evidence', () => {
     })
     for (let time = 99_334; time <= 118_084; time += 250)
       samples.push(observation(time, samples.length))
-    expect(verifyHoldSamples(timing, 220, samples).verified).toBe(true)
+    const recovered = verifyHoldSamples(timing, 220, samples)
+    expect(recovered.verified).toBe(false)
+    expect(recovered.reasons).toContain('hold_phase_regressed')
   })
 
   it('keeps a bounded PPS pause but rejects a phase exit, bad observation, missing interval or disorder', () => {
@@ -100,6 +102,21 @@ describe('continuous Hold evidence', () => {
         samples[120].measurementAccepted = false
         expect(verifyHoldSamples(timing, 220, samples).verified).toBe(false)
       }
+    }
+  })
+
+  it('rejects both backward phases even after another complete 60-second Hold', () => {
+    for (const phase of ['approach', 'warmup']) {
+      const samples = Array.from({ length: 245 }, (_, index) =>
+        observation(index * 250, index, index === 1 ? phase : 'hold')
+      )
+      expect(verifyHoldSamples(timing, 220, samples)).toMatchObject({
+        verified: false,
+        continuousHoldMs: 60_500,
+        reasons: ['hold_phase_regressed'],
+      })
+      samples[0].phase = 'warmup'
+      expect(verifyHoldSamples(timing, 220, samples).verified).toBe(true)
     }
   })
 })

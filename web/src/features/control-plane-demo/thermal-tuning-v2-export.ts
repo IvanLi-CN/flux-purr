@@ -805,6 +805,8 @@ export function verifyHoldSamples(
   let lastFresh: number | null = null
   let previous: { sequence: number; time: number } | null = null
   let count = 0
+  let sawHold = false
+  let phaseRegressed = false
   for (const sample of samples) {
     const time = numeric(sample.elapsedMs)
     const sequence = numeric(sample.sequence)
@@ -821,6 +823,8 @@ export function verifyHoldSamples(
       return evidence
     }
     previous = { sequence, time }
+    phaseRegressed ||= sawHold && (sample.phase === 'approach' || sample.phase === 'warmup')
+    sawHold ||= sample.phase === 'hold'
     const temperature = numeric(sample.temperatureCentiC)
     const fresh =
       sample.measurementValid === true &&
@@ -852,8 +856,10 @@ export function verifyHoldSamples(
     }
   }
   evidence.verified =
+    !phaseRegressed &&
     evidence.continuousHoldMs >= 60_000 && (count - 1) * 1_000 >= evidence.continuousHoldMs * 3
-  if (!evidence.verified) evidence.reasons.push('continuous_hold_not_verified_from_samples')
+  if (phaseRegressed) evidence.reasons.push('hold_phase_regressed')
+  else if (!evidence.verified) evidence.reasons.push('continuous_hold_not_verified_from_samples')
   return evidence
 }
 

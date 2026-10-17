@@ -1680,6 +1680,36 @@ fn continuous_hold_verification_preserves_only_bounded_pps_pauses() {
 }
 
 #[test]
+fn hold_phase_regression_cannot_be_cured_by_a_later_complete_hold() {
+    let timing: super::ThermalTuningTimingEvidence = serde_json::from_value(json!({
+        "policyVersion": 5, "originalLimitMs": 5000, "extensionLimitMs": 15000,
+        "allowedApproachFloorPermille": 50, "effectiveApproachFloorPermille": 50,
+        "modelApproachFloorPermille": 50, "configuredApproachFloorPermille": 50
+    }))
+    .unwrap();
+    for phase in ["approach", "warmup"] {
+        let mut samples: Vec<Value> = (0..=244)
+            .map(|index| {
+                json!({"sequence": index, "elapsedMs": index * 250,
+                "phase": if index == 1 { phase } else { "hold" },
+                "temperatureCentiC": 22000, "measurementValid": true})
+            })
+            .collect();
+        let refs = samples.iter().collect::<Vec<_>>();
+        let evidence = super::verify_hold_samples(Some(&timing), 220, &refs);
+        assert_eq!(evidence["continuousHoldMs"], 60_500);
+        assert_eq!(evidence["verified"], false);
+        assert_eq!(evidence["reasons"][0], "hold_phase_regressed");
+        samples[0]["phase"] = json!("warmup");
+        let refs = samples.iter().collect::<Vec<_>>();
+        assert_eq!(
+            super::verify_hold_samples(Some(&timing), 220, &refs)["verified"],
+            true
+        );
+    }
+}
+
+#[test]
 fn trial_report_excludes_cooldown_and_other_phase_warmup_requests() {
     let trial = json!({
         "targetC": 60, "trialIndex": 1,

@@ -8512,7 +8512,7 @@ fn heater_approach_projection_cannot_coast_outside_hold_exit_gate() {
 }
 
 #[test]
-fn heater_hold_on_error_delays_reentry_to_approach() {
+fn heater_hold_reheats_without_reentering_approach() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 220;
     controller.phase = HeaterControlPhase::Hold;
@@ -8571,11 +8571,12 @@ fn heater_hold_on_error_delays_reentry_to_approach() {
     assert!(follow_up.control_error_c > 2.0);
 
     let confirmed_drop = controller.update(220, 217.5, true, Some(profile));
-    assert_eq!(confirmed_drop.phase, HeaterControlPhase::Approach);
+    assert_eq!(confirmed_drop.phase, HeaterControlPhase::Hold);
+    assert!(confirmed_drop.duty_percent >= snapshot.duty_percent);
 }
 
 #[test]
-fn heater_hold_reentry_uses_actual_under_target_error_when_filter_lags() {
+fn heater_hold_keeps_phase_when_actual_under_target_error_outpaces_filter() {
     let mut controller = HeaterController::new();
     controller.last_target_temp_c = 220;
     controller.phase = HeaterControlPhase::Hold;
@@ -8629,7 +8630,7 @@ fn heater_hold_reentry_uses_actual_under_target_error_when_filter_lags() {
     let snapshot = controller.update(220, 217.6, true, Some(profile));
     assert!(snapshot.error_c > 2.0);
     assert!(snapshot.control_error_c < 2.0);
-    assert_eq!(snapshot.phase, HeaterControlPhase::Approach);
+    assert_eq!(snapshot.phase, HeaterControlPhase::Hold);
 }
 
 #[test]
@@ -9807,16 +9808,16 @@ fn hold_pps_governor_keeps_the_approach_voltage_when_headroom_is_sufficient() {
 }
 
 #[test]
-fn profile_first_approach_downramps_pps_but_hold_recovery_keeps_the_handoff() {
+fn profile_approach_downramps_pps_but_hold_keeps_the_handoff() {
     let mut controller = HeaterController::new();
     controller.production_controller = Some(ProductionThermalController::Profile(
         ThermalProfileBank::Pps5a,
     ));
     controller.phase = HeaterControlPhase::Approach;
     assert!(controller.initial_profile_approach());
-    controller.recovering_from_hold = true;
+    controller.phase = HeaterControlPhase::Hold;
     assert!(!controller.initial_profile_approach());
-    controller.recovering_from_hold = false;
+    controller.phase = HeaterControlPhase::Approach;
     controller.production_controller = Some(ProductionThermalController::Unavailable);
     assert!(!controller.initial_profile_approach());
     let mut governor = HoldPpsGovernor::new();
@@ -11266,7 +11267,7 @@ fn trajectory_approach_keeps_reference_when_temperature_deficit_increases() {
 }
 
 #[test]
-fn trajectory_hold_recovery_does_not_restart_the_warmup_braking_ramp() {
+fn trajectory_hold_recovers_and_limits_arriving_heat_without_phase_regression() {
     // A 9c3882aa 220C trial 2: Hold 219.49C/57% -> Approach
     // 219.22C/11%, followed by 218.39C. Recovery has no new Warmup energy.
     for bank in [ThermalProfileBank::Pps3a, ThermalProfileBank::Pps5a] {
@@ -11284,7 +11285,9 @@ fn trajectory_hold_recovery_does_not_restart_the_warmup_braking_ramp() {
         controller.last_target_temp_c = 220;
         controller.heater_was_enabled = true;
         controller.phase = HeaterControlPhase::Hold;
+        controller.phase_ticks = 40;
         controller.duty_percent = 57;
+        controller.hold_entry_output_percent = 57;
         controller.filtered_temp_c = Some(219.29);
         controller.previous_filtered_temp_c = Some(219.29);
         controller.previous_measured_temp_c = Some(219.29);
@@ -11307,8 +11310,8 @@ fn trajectory_hold_recovery_does_not_restart_the_warmup_braking_ramp() {
         let mut high_arrival = controller;
         let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
         assert!(!disarmed);
-        assert_eq!(output.phase, HeaterControlPhase::Approach);
-        assert!(controller.recovering_from_hold);
+        assert_eq!(output.phase, HeaterControlPhase::Hold);
+        assert!(controller.approach_trajectory.is_none());
         assert!(
             output.duty_percent >= 40,
             "{bank:?}: falling plate must retain recovery authority, {output:?}"

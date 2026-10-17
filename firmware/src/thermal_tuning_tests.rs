@@ -5341,49 +5341,49 @@ fn rejected_temperature_keeps_wall_deadline_and_sensor_fault_gate() {
 }
 
 #[test]
-fn hold_confirmation_restarts_after_approach_recovery_without_losing_extrema() {
-    let mut runtime = started_single_target_runtime();
-    runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
-    record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_000);
-    record_current_trial_sample(&mut runtime, 300, ThermalTuningPhase::Approach, 5_500);
-    record_dense_hold(&mut runtime, 600, 14_400, 6_120);
-    let stable_witness = runtime.stable_window_verified_at_ms;
-    assert!(stable_witness.is_some());
-    // A 220C confirmation's 14.133s + recovery + 41.117s shape, translated
-    // to this single-target harness. Neither Hold segment qualifies as 60s.
-    record_current_trial_sample(&mut runtime, 14_733, ThermalTuningPhase::Approach, 5_832);
-    assert_eq!(runtime.first_hold_elapsed_ms, None);
-    assert_eq!(runtime.min_hold_temperature_centi_c, Some(5_832));
-    record_dense_hold(&mut runtime, 19_489, 60_589, 6_000);
-    record_current_trial_sample(&mut runtime, 60_606, ThermalTuningPhase::Hold, 6_000);
-    assert_eq!(runtime.accepted_target_mask, 0);
-    assert!(runtime.armed);
-    assert_eq!(runtime.first_hold_elapsed_ms, Some(19_489));
-    assert_eq!(runtime.stable_window_verified_at_ms, stable_witness);
-    assert_eq!(runtime.max_hold_temperature_centi_c, Some(6_120));
-    record_dense_hold(&mut runtime, 60_889, 79_189, 6_000);
-    record_current_trial_sample(&mut runtime, 79_489, ThermalTuningPhase::Hold, 6_000);
-    assert_eq!(runtime.accepted_target_mask, target_bit(60));
-}
-
-#[test]
-fn rejected_approach_sample_still_ends_the_hold_segment_during_pps_pause() {
-    let mut runtime = started_single_target_runtime();
-    runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
-    record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_000);
-    record_current_trial_sample(&mut runtime, 300, ThermalTuningPhase::Approach, 5_500);
-    record_dense_hold(&mut runtime, 600, 12_600, 6_000);
-    let verified = runtime.stable_window_verified_at_ms;
-    let mut recovering = sample(12_800, ThermalTuningPhase::Approach, 6_000);
-    recovering.requested_mv = 20_500;
-    recovering.pps_contract.voltage_mv = 20_500;
-    recovering.measurement_accepted = Some(false);
-    recovering.raw_temperature_centi_c = Some(6_010);
-    runtime.record_live_sample(recovering).unwrap();
-    assert_eq!(runtime.first_hold_elapsed_ms, None);
-    assert_eq!(runtime.stable_window_verified_at_ms, verified);
-    record_current_trial_sample(&mut runtime, 13_000, ThermalTuningPhase::Hold, 6_000);
-    assert_eq!(runtime.first_hold_elapsed_ms, Some(13_000));
+fn hold_phase_regression_fails_immediately_and_retains_the_observation() {
+    for phase in [ThermalTuningPhase::Approach, ThermalTuningPhase::Warmup] {
+        for accepted in [true, false] {
+            let mut runtime = started_single_target_runtime();
+            runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
+            record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_000);
+            record_current_trial_sample(&mut runtime, 300, ThermalTuningPhase::Approach, 5_500);
+            record_dense_hold(&mut runtime, 600, 12_400, 6_000);
+            let mut last_hold = sample(12_600, ThermalTuningPhase::Hold, 6_000);
+            last_hold.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            runtime.record_live_sample(last_hold).unwrap();
+            assert_eq!(runtime.last_live_sample_elapsed_ms, Some(12_600));
+            let stable_witness = runtime.stable_window_verified_at_ms;
+            let mut regressed = sample(12_650, phase, 6_000);
+            regressed.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            regressed.measurement_accepted = Some(accepted);
+            regressed.requested_mv = 20_500;
+            regressed.pps_contract.voltage_mv = 20_500;
+            regressed.raw_temperature_centi_c = Some(6_010);
+            assert_eq!(
+                runtime.record_live_sample(regressed),
+                Err(ThermalTuningError::InvalidTransition)
+            );
+            assert!(!runtime.armed);
+            assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+            assert_eq!(runtime.accepted_target_mask, 0);
+            assert_eq!(runtime.first_hold_elapsed_ms, None);
+            assert_eq!(runtime.stable_window_verified_at_ms, stable_witness);
+            assert!(
+                runtime
+                    .events
+                    .iter()
+                    .any(|event| { event.reason.as_deref() == Some("hold_phase_regressed") })
+            );
+            assert!(
+                runtime.events.iter().any(|event| event
+                    .sample
+                    .as_ref()
+                    .is_some_and(|sample| sample.phase == phase
+                        && sample.measurement_accepted == Some(accepted)))
+            );
+        }
+    }
 }
 
 #[test]

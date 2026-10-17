@@ -2259,6 +2259,11 @@ impl ThermalTuningRuntime {
         if self.phase == ThermalTuningPhase::Cooldown {
             return self.record_cooldown_sample(sample, expected_target, cooldown_admission_ready);
         }
+        let hold_regressed = self.saw_hold
+            && matches!(
+                sample.phase,
+                ThermalTuningPhase::Warmup | ThermalTuningPhase::Approach
+            );
         self.update_trial_metrics(&sample, expected_target);
         let mut sample = sample;
         let previous_phase = self.phase;
@@ -2281,6 +2286,10 @@ impl ThermalTuningRuntime {
             Some(sample),
             None,
         );
+        if hold_regressed {
+            self.fail("hold_phase_regressed");
+            return Err(ThermalTuningError::InvalidTransition);
+        }
         if self
             .current_elapsed_ms
             .saturating_sub(self.target_started_elapsed_ms)
@@ -2692,9 +2701,8 @@ impl ThermalTuningRuntime {
     }
 
     fn record_trial_phase(&mut self, sample: &ThermalTuningSample, expected_target: i16) {
-        // A recovery into Approach ends this Hold segment even when its
-        // temperature is retained during a PPS pause. A later fresh physical
-        // Hold entry starts a new qualification clock, never a sum of segments.
+        // Phase regression cannot retain a qualification clock, including
+        // rejected PPS observations. The caller retains the sample and fails.
         if sample.phase != ThermalTuningPhase::Hold {
             self.first_hold_elapsed_ms = None;
         }

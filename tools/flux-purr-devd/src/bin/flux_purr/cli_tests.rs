@@ -3310,7 +3310,7 @@ fn parses_thermal_report_render_self_test_command() {
 }
 
 #[test]
-fn thermal_hold_tracker_restarts_after_leaving_hold_and_retains_extrema() {
+fn thermal_hold_tracker_rejects_phase_regression_and_retains_extrema() {
     let start = tokio::time::Instant::now();
     let mut tracker = ThermalHoldTracker::new(120, Duration::from_secs(10));
 
@@ -3328,33 +3328,33 @@ fn thermal_hold_tracker_restarts_after_leaving_hold_and_retains_extrema() {
     );
     assert_eq!(
         tracker.observe(119.2, 6_000, start + Duration::from_secs(6), false),
-        ThermalHoldObservation::Warmup
+        ThermalHoldObservation::PhaseRegressed
     );
     assert_eq!(tracker.rise_time_ms(), Some(1_500));
     assert_eq!(
         tracker.observe(119.7, 11_500, start + Duration::from_millis(11_500), false),
-        ThermalHoldObservation::Warmup
+        ThermalHoldObservation::PhaseRegressed
     );
     assert_eq!(
         tracker.observe(119.0, 11_750, start + Duration::from_millis(11_750), true),
-        ThermalHoldObservation::Warmup
+        ThermalHoldObservation::PhaseRegressed
     );
     assert!((tracker.peak_to_peak_c() - 0.8).abs() < 0.001);
     assert_eq!(
         tracker.observe(123.1, 11_775, start + Duration::from_millis(11_775), true),
-        ThermalHoldObservation::Warmup
+        ThermalHoldObservation::PhaseRegressed
     );
     assert_eq!(
         tracker.observe(119.8, 12_000, start + Duration::from_secs(12), true),
-        ThermalHoldObservation::Hold
+        ThermalHoldObservation::PhaseRegressed
     );
     assert_eq!(
         tracker.observe(119.8, 21_999, start + Duration::from_millis(21_999), true),
-        ThermalHoldObservation::Hold
+        ThermalHoldObservation::PhaseRegressed
     );
     assert_eq!(
         tracker.observe(119.8, 22_000, start + Duration::from_secs(22), true),
-        ThermalHoldObservation::Completed
+        ThermalHoldObservation::PhaseRegressed
     );
     assert!((tracker.peak_to_peak_c() - 4.1).abs() < 0.001);
 }
