@@ -7178,6 +7178,68 @@ fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualP
 }
 
 #[test]
+fn supply_scan_equilibrium_preserves_fractional_adc_temperature_precision() {
+    use flux_purr_firmware::heater_supply::scan::ScanPhase;
+
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut config = MemoryConfig::default();
+    let mut manual = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut config,
+        &mut manual,
+        &mut workspace,
+    )
+    .unwrap();
+    let job = workspace.job.as_mut().unwrap();
+    job.phase = ThermalPlantAutoPhase::Heating;
+    job.supply_scan.as_mut().unwrap().phase = ScanPhase::TemperatureSettle;
+    let temperature = |mv| projected_rtd_fractional_temperature_c(&config, mv).unwrap();
+    assert!(temperature(1_101.55) - temperature(1_099.45) < 1.0);
+    assert!(temperature(1_102.0) - temperature(1_099.0) > 1.0);
+
+    for tick in 0..=240 {
+        let fractional_mv = if tick % 4 < 2 { 1_099.45 } else { 1_101.55 };
+        let live_temp = projected_rtd_fractional_temperature_c(&config, fractional_mv).unwrap();
+        update_calibration_job_state_with_workspace(
+            &mut calibration,
+            &mut config,
+            &mut manual,
+            &mut workspace,
+            CalibrationJobUpdateInput {
+                now_ms: tick * 50,
+                latest_rtd_raw_code: (fractional_mv * 2.0) as u16,
+                latest_vin_raw_code: 800,
+                wifi_started: Some(false),
+                pd_confirmed: true,
+                latest_rtd_raw_adc_mv: fractional_mv.round() as u16,
+                latest_vin_raw_adc_mv: 400,
+                latest_temp_c: live_temp,
+                confirmed_voltage_mv: Some(5_500),
+                latest_vin_mv: 5_500,
+                heater_duty_percent: 100,
+            },
+        );
+        let phase = workspace
+            .job
+            .as_ref()
+            .unwrap()
+            .supply_scan
+            .as_ref()
+            .unwrap()
+            .phase;
+        if phase == ScanPhase::Sweep {
+            assert!(tick >= 220, "a full ten-second window is still required");
+            return;
+        }
+        assert_eq!(phase, ScanPhase::TemperatureSettle);
+    }
+    panic!("rounding raw mV must not reset a valid fractional-temperature window");
+}
+
+#[test]
 fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() {
     let mut calibration = CalibrationRuntimeState::default();
     let mut config = MemoryConfig::default();

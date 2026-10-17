@@ -2200,7 +2200,9 @@ pub(crate) fn update_thermal_heating_phase(
         now_ms: job
             .elapsed_ticks
             .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
-        temperature_centi_c: round_to_i16(recorded_temp_c * 100.0),
+        // Live RTD conversion retains the fractional ADC batch mean. Rounded
+        // persisted millivolts are for replay, not the equilibrium decision.
+        temperature_centi_c: round_to_i16(input.latest_temp_c * 100.0),
         wifi_started,
         confirmed: input.pd_confirmed,
         physical_percent: input.heater_duty_percent,

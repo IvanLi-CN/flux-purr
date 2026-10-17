@@ -34,6 +34,8 @@ The FUSB302B capability bridge retains each APDO's original advertised minimum, 
 
 During the starting-current preflight, a single 100mA downward step can cross the source's current-loop knee and the baseline voltage floor together. When a settled loaded point already exists, unload first and restore that known tracking current at the usable voltage floor; resume only after the matching contract and settling. Check this recovery before declaring an unrecoverable baseline-floor failure. Initial-load collapse without a proven tracking point and unsuccessful unloaded recovery still fail closed. Captured raw ADC values are sufficient to reproduce the decision without assuming calibrated VIN or deriving heater resistance.
 
+Keep live equilibrium and cutoff decisions on the unfiltered temperature converted from the fractional ADC batch mean. Reconstructing live temperature from rounded persisted millivolts can widen a valid sub-degree signal beyond the 1°C window or add a quantized step larger than its 0.2°C drift bound. Persisted raw observations still retain their documented representation for replay; this does not justify rounding the independent live measurement. A regression must exercise the runtime calibration update seam, preserve the ten-second window, and reject genuine temperature drift.
+
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:
