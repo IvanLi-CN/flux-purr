@@ -1,5 +1,7 @@
 # Firmware Runtime Module Boundaries Implementation
 
+自动供电仅持有一份带完整请求、起始时间和停热标记的 pending ticket；每次非零输出都重新核对最新安全合同。普通安全换压使用已确认电压计算 PWM，安全降压先关输出，确认及稳定后重新软启动。USB/LAN、调优导出及 PD 中断的嵌套栈检查覆盖实际运行时路径，启动系统在 EEPROM 初始化期间保持装箱；运行时回归和严格主机 Clippy 已通过。
+
 ## Current Status
 
 - Implementation: source-backed individual module documents are maintained in `modules/`; `contracts/module-control-matrix.md` is the cross-module index and ownership map.

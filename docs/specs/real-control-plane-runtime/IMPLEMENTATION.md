@@ -1,5 +1,7 @@
 # Flux Purr 真实控制平面运行时实现状态
 
+USB 与 LAN 的正常加热入口共用自动供电合同检查；控制请求 future 和大响应在堆中持有，LAN mailbox 仅在真实命令到达后分配 handler，并在 dispatch 返回后展开 HTTP body。lease、revision、串行变更所有权和安全失败路径保留。当前候选已通过控制链栈预算与主机运行时回归，真机 identity/status、重新校准和 3A 加热验收仍须由当前产物建立。
+
 > 当前有效规范仍以 `./SPEC.md` 为准；这里记录实现覆盖、当前真相与剩余缺口，不保留会话级流水账。
 
 ## Current Status
