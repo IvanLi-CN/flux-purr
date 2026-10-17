@@ -153,6 +153,83 @@ fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::Scan
 }
 
 #[test]
+fn preflight_recovers_the_last_tracking_current_after_the_measured_cc_drop() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    for now_ms in (0..30_000).step_by(50) {
+        let output = job.output();
+        let mut input = sample(now_ms, output, 3_200);
+        input.vin_mv = if !output.heater_enabled {
+            456
+        } else if output.request_ma >= 1_400 {
+            438
+        } else {
+            402
+        };
+        let recovered = job.update(input);
+        if output.request_ma == 1_300 {
+            assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+            if recovered.request_ma == 1_400 {
+                assert!(!recovered.heater_enabled);
+                let mut waiting = sample(now_ms + 1_000, recovered, 3_200);
+                waiting.vin_mv = 456;
+                waiting.confirmed = false;
+                assert!(!job.update(waiting).heater_enabled);
+                waiting.confirmed = true;
+                waiting.now_ms += 999;
+                assert!(!job.update(waiting).heater_enabled);
+                waiting.now_ms += 1;
+                assert!(job.update(waiting).heater_enabled);
+                assert_eq!(job.phase, scan::ScanPhase::Sweep);
+                return;
+            }
+        }
+    }
+    panic!("preflight did not recover the last confirmed tracking current");
+}
+
+#[test]
+fn preflight_recovery_rejects_collapsed_unloaded_vin_or_remaining_conduction() {
+    for (vin_mv, physical_percent) in [(402, 0), (456, 100), (0, 0)] {
+        let mut job = scan::SupplyScan::new(boundary()).unwrap();
+        let mut recovered = false;
+        for now_ms in (0..30_000).step_by(50) {
+            let output = job.output();
+            let mut input = sample(now_ms, output, 3_200);
+            input.vin_mv = if !output.heater_enabled {
+                456
+            } else if output.request_ma >= 1_400 {
+                438
+            } else {
+                402
+            };
+            let next = job.update(input);
+            if output.request_ma == 1_300 && next.request_ma == 1_400 {
+                let mut recovery = sample(now_ms + 1_000, next, 3_200);
+                recovery.vin_mv = vin_mv;
+                recovery.physical_percent = physical_percent;
+                assert!(!job.update(recovery).heater_enabled);
+                assert_eq!(job.phase, scan::ScanPhase::Failed);
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "the captured current-loop knee was not reached");
+    }
+}
+
+#[test]
+fn preflight_initial_load_collapse_still_fails_closed() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    let mut baseline = sample(1_000, job.output(), 3_000);
+    baseline.vin_mv = 456;
+    assert!(job.update(baseline).heater_enabled);
+    let mut loaded = sample(2_000, job.output(), 3_000);
+    loaded.vin_mv = 402;
+    assert!(!job.update(loaded).heater_enabled);
+    assert_eq!(job.failure, Some(scan::ScanFailure::SupplyUnstable));
+}
+
+#[test]
 fn scan_discovers_the_sustainable_start_current_and_never_forces_one_amp() {
     let mut value = boundary();
     value.point_count = 0;

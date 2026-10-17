@@ -32,6 +32,8 @@ The usable scan floor and advertised APDO minimum are different facts: a source 
 
 The FUSB302B capability bridge retains each APDO's original advertised minimum, maximum and current. Clipping that identity to product request bounds makes exact raw-PDO selection fail, even when the requested voltage and current are legal. Apply product bounds to requests separately. A regression must start from raw source PDOs, traverse the production bridge and calibration request builder, and obtain the intended RDO from the sink policy; hand-built clipped capabilities cannot verify this path.
 
+During the starting-current preflight, a single 100mA downward step can cross the source's current-loop knee and the baseline voltage floor together. When a settled loaded point already exists, unload first and restore that known tracking current at the usable voltage floor; resume only after the matching contract and settling. Check this recovery before declaring an unrecoverable baseline-floor failure. Initial-load collapse without a proven tracking point and unsuccessful unloaded recovery still fail closed. Captured raw ADC values are sufficient to reproduce the decision without assuming calibrated VIN or deriving heater resistance.
+
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:

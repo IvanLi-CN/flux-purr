@@ -7,6 +7,7 @@ const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
 pub enum ScanPhase {
     Baseline,
     Preflight,
+    PreflightRecovery,
     Sweep,
     TemperatureSettle,
     Equilibrium,
@@ -173,7 +174,11 @@ impl SupplyScan {
     }
 
     fn advance(&mut self, input: ScanInput) {
-        if self.phase != ScanPhase::Baseline && input.physical_percent != 100 {
+        if !matches!(
+            self.phase,
+            ScanPhase::Baseline | ScanPhase::PreflightRecovery
+        ) && input.physical_percent != 100
+        {
             self.changed_at_ms = input.now_ms;
             return;
         }
@@ -188,6 +193,16 @@ impl SupplyScan {
                 self.changed_at_ms = input.now_ms;
             }
             ScanPhase::Preflight => self.preflight(input),
+            ScanPhase::PreflightRecovery => {
+                if input.physical_percent != 0
+                    || u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90
+                {
+                    self.fail(ScanFailure::SupplyUnstable);
+                } else {
+                    self.phase = ScanPhase::Sweep;
+                    self.changed_at_ms = input.now_ms;
+                }
+            }
             ScanPhase::Sweep => self.sweep(input),
             ScanPhase::TemperatureSettle => {
                 if self
@@ -204,19 +219,21 @@ impl SupplyScan {
     }
 
     fn preflight(&mut self, input: ScanInput) {
-        // Relative ADC response only: no conversion into a fictitious true VIN.
-        if u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90 {
-            self.fail(ScanFailure::SupplyUnstable);
-            return;
-        }
         if let Some(previous) = self.previous
             && u32::from(input.vin_mv) * 100 < u32::from(previous.vin_mv) * 99
         {
-            // Return to the last tracking current. Never force the 1 A stage.
+            // A current-loop knee can cross the baseline floor in one step.
+            // Unload before restoring the last proven tracking current.
             self.change(input, self.boundary.source_min_mv, self.request_ma + 100);
-            self.phase = ScanPhase::Sweep;
+            self.phase = ScanPhase::PreflightRecovery;
             self.previous = None;
             self.stage_started_ms = input.now_ms;
+            return;
+        }
+        // Without a proven tracking current there is no safe recovery target.
+        // Relative ADC response only: no conversion into a fictitious true VIN.
+        if u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90 {
+            self.fail(ScanFailure::SupplyUnstable);
             return;
         }
         if self.request_ma == 1_000 {
