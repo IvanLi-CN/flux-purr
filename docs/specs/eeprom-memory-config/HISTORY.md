@@ -1,5 +1,7 @@
 # EEPROM 记忆配置演进记录
 
+Whole-device supply-boundary calibration replaces contract-current resistance calibration. The unchanged ThermalPlant slot now stores a versioned boundary and its format-3 fitted trace together; legacy heater calibration is deliberately absent, while unrelated EEPROM configuration keeps its existing compatibility.
+
 ## Legacy identity
 
 - Former legacy ID: `35bta`.

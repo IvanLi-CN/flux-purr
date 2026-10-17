@@ -1,6 +1,6 @@
 # Flux Purr EEPROM 记忆配置
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - 前面板已支持目标温度、`M1-M10` 记忆温度和主动降温策略，但这些值此前只存在于运行态，重启后回到默认值。
 - S3 硬件基线已经冻结 `GPIO8/9` 共享 I2C 总线，并包含 `CH224Q` 与 `M24C64` EEPROM。
@@ -15,7 +15,7 @@
 - 保存并恢复 ADC calibration 的共享样本、A/B 槽位与当前激活槽位，供 ADC 校准控制面跨重启保留。
 - 使用 FPR2 分类 record、TLV payload 和 CRC；只有安全校准、温控策略与布局标记使用 A/B，偏好、网络和 `ThermalPlant` 域使用单槽。
 - 运行时对用户接受的记忆字段变更做防抖写回，减少 EEPROM 写入频率。
-- 保存安全校准所需的 raw heater observations 与 transaction identity，并保存自动热模型成功运行的完整 transient active transaction；已废弃稳态 thermal-plant snapshot 不迁移、不再写入。
+- 保存整机供电边界的原始观测、运行身份和同次热模型 transient transaction；旧电阻曲线及其关联热模型视为不存在，不恢复或迁移。
 
 ### Non-goals
 
@@ -42,9 +42,12 @@
 - HTTP Wi-Fi 服务端实现
 - 面向普通用户的 EEPROM 恢复流程、迁移包或 Web/LAN 维护入口
 
-## 需求（Requirements）
+## Requirements
 
 ### MUST
+
+- REQ-EEPROM-ONLY: Configuration MUST persist only in the external EEPROM; MCU Flash fallback and restoring an armed heater are forbidden.
+- REQ-EEPROM-SUPPLY: The new versioned whole-device boundary and its fitted model MUST commit together within the existing 768-byte ThermalPlant slot. Legacy resistance calibration MUST remain absent. Raw metadata and at most 48 compacted fit samples MUST survive decoding without timestamp wrap.
 
 - EEPROM 设备为 `M24C64`，7-bit I2C 地址固定为硬件基线 `0x50`；启动和高级维护不得扫描其它 I2C 地址。容量 `8 KiB`，页写大小 `32 bytes`，16-bit word address。启动读取使用固定大小的域缓冲和不超过 `16 bytes` 的有界分块访问，不得把完整 `2 KiB` v5 快照放入启动栈或堆。
 - FPR2 header 固定为 `20 bytes`：`FPR2 magic`、format version、domain、flags、header length、`sequence`、payload length、reserved 和 CRC32。分区固定为：`SafetyCalibration` A/B=`0x0000/0x0200`（512 B）；`ThermalPolicy` A/B=`0x0400/0x0700`（768 B）；`UserPreferences` single=`0x0a00`（128 B）；`NetworkAndPairing` single=`0x0a80`（256 B）；`LayoutMarker` A/B=`0x0c00/0x0c80`（128 B）；`ThermalPlant` single=`0x0d00`（768 B）；旧 v1-v5 FPM1 只在迁移时流式读取，位于 `0x1000..0x1fff`，迁移后两个 magic 均失效。Layout marker payload carries `status` (`PREPARED|ACTIVE`), `generation`, and `kind` (`COMMIT|LEGACY_MIGRATION`). 启动先选择 CRC 合法的最新 `ACTIVE` marker，再为每个域选择不晚于其 `generation` 的最新 CRC 合法 record；`PREPARED` 代永远不会覆盖较旧的 active snapshot。单槽损坏只回退该域默认值，安全域或热模型域不可恢复或 transaction identity 不一致时保持 heater/PPS/calibration 锁定。
@@ -60,7 +63,7 @@
 - M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，不得同步 mirror 到任何 MCU 存储。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
-- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、恢复 PD 模块定义的自动空闲供电合同并等待确认，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
+- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、恢复 PD 模块定义的自动空闲供电合同并取得确认，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
 
 ### SHOULD
 
@@ -114,14 +117,15 @@
   - `0x32`: `pps3a` saved thermal control profile
   - `0x33`: `pps5a` saved thermal control profile
   - `0x34`: `thermal_profile_mode` (`auto|65w|100w`)
-  - `0x35`: `heater_curve_raw_observations`
-  - `0x36`: legacy steady-state thermal-plant candidate record (decode-only)
-  - `0x37`: legacy steady-state thermal-plant active record (decode-only)
+  - `0x35`: legacy heater resistance observations; ignored for active calibration
+  - `0x36` / `0x37`: legacy steady-state thermal records; ignored
   - `0x38`: LAN pairing token
   - `0x39`: static IPv4 configuration
-  - `0x3a`: `ThermalPlant` active transient transaction，legacy FPM1 中按完整 6-byte sample 解码；FPR2 持久化使用 5-byte sample（`elapsed_ticks` 低 15 位加 duty 标志、raw RTD、heater voltage），以保留 128 点上限并可恢复零 duty 冷却样本
-  - `0x3b`: `heater_curve_transaction_id`
-- FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把完整的 `0x3a` transient active transaction 写入 `ThermalPlant` 单槽域，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 仍只保留为历史稳态 thermal-plant 数据的 decode-only 标签，不得迁移、写入或解锁加热；`0x3a` 只有通过结构和物理完整性校验的结果才能成为 active，提交失败保持安全锁。
+  - `0x3a`: supply-boundary thermal transient transaction, format 3; each five-byte sample packs 19-bit elapsed 50ms ticks, 12-bit raw RTD mV, eight-bit voltage in 125mV units and the full/off duty flag
+  - `0x3b`: legacy heater curve identity; absent from active calibration
+  - `0x3c`: commissioning-required state
+  - `0x3d`: versioned whole-device supply boundary with raw ADC and conversion metadata
+- FPR2 stores the two saved profile banks and mode in ThermalPolicy, commissioning/ADC in SafetyCalibration, and `0x3d` plus new-format `0x3a` together in the unchanged ThermalPlant single slot. At most 21 equilibrium points, 20 transient temperature bins and 48 fit samples occupy at most 765 bytes including the record header. Fit and persistence consume the same compacted trace. Old resistance observations, curve identity and old-format thermal transactions are not restored, projected or migrated; unrelated preferences, ADC settings and network configuration retain their existing compatibility.
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
@@ -130,7 +134,10 @@
 - `pps5a` 固件调优候选先在 RAM preview 应用，设备确认实际生效的 canonical hash 与 `runId + candidateId + candidateHash + powerClass` 一致后才签发 preview receipt。seal 后的第二次 `confirm-save` 仅保存同一候选，不重新执行调优。
 - save receipt 必须由 FPR2 原子事务的 ACTIVE generation、已读回验证的 `pps5a` bank hash 和相同候选身份构成。写入、读回、hash 或身份不匹配不得报告为 `passed` 或 `saved`，并须保持 heater disarmed 与可复核故障。`thermal_plant_auto` 的独立 ThermalPlant 原子事务和外部 runner 的已有 preview/save 语义不因此改变。
 
-## 验收标准（Acceptance Criteria）
+## Verification
+
+- VER-EEPROM-ONLY covers: REQ-EEPROM-ONLY. Host codec and runtime tests verify EEPROM-only persistence, protected failures and heater-off restoration.
+- VER-EEPROM-SUPPLY covers: REQ-EEPROM-SUPPLY. Host tests round-trip the maximum 765-byte combined record, preserve seven-hour timestamps and raw metadata, reject malformed new records, and prove old calibration remains absent.
 
 - Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。
 - Given EEPROM 缺失，或安全校准/温控策略记录不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且 heater/PPS/calibration 保持锁定；Given 偏好/网络域失败，Then 只标记该域未保存并允许 heater/fan 保护继续运行。
@@ -189,6 +196,7 @@
 
 - [`../../adr/0008-eeprom-only-configuration-persistence.md`](../../adr/0008-eeprom-only-configuration-persistence.md)
 - [`../../adr/0009-eeprom-record-class-persistence.md`](../../adr/0009-eeprom-record-class-persistence.md)
+- [Whole-device heater supply boundary](../../adr/0019-heater-supply-boundary-calibration.md)
 
 ## 参考（References）
 
