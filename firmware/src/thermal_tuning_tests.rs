@@ -5341,6 +5341,52 @@ fn rejected_temperature_keeps_wall_deadline_and_sensor_fault_gate() {
 }
 
 #[test]
+fn hold_phase_regression_fails_immediately_and_retains_the_observation() {
+    for phase in [ThermalTuningPhase::Approach, ThermalTuningPhase::Warmup] {
+        for accepted in [true, false] {
+            let mut runtime = started_single_target_runtime();
+            runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;
+            record_current_trial_sample(&mut runtime, 0, ThermalTuningPhase::Warmup, 3_000);
+            record_current_trial_sample(&mut runtime, 300, ThermalTuningPhase::Approach, 5_500);
+            record_dense_hold(&mut runtime, 600, 12_400, 6_000);
+            let mut last_hold = sample(12_600, ThermalTuningPhase::Hold, 6_000);
+            last_hold.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            runtime.record_live_sample(last_hold).unwrap();
+            assert_eq!(runtime.last_live_sample_elapsed_ms, Some(12_600));
+            let stable_witness = runtime.stable_window_verified_at_ms;
+            let mut regressed = sample(12_650, phase, 6_000);
+            regressed.candidate_hash = runtime.candidate_hash.clone().unwrap();
+            regressed.measurement_accepted = Some(accepted);
+            regressed.requested_mv = 20_500;
+            regressed.pps_contract.voltage_mv = 20_500;
+            regressed.raw_temperature_centi_c = Some(6_010);
+            assert_eq!(
+                runtime.record_live_sample(regressed),
+                Err(ThermalTuningError::InvalidTransition)
+            );
+            assert!(!runtime.armed);
+            assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+            assert_eq!(runtime.accepted_target_mask, 0);
+            assert_eq!(runtime.first_hold_elapsed_ms, None);
+            assert_eq!(runtime.stable_window_verified_at_ms, stable_witness);
+            assert!(
+                runtime
+                    .events
+                    .iter()
+                    .any(|event| { event.reason.as_deref() == Some("hold_phase_regressed") })
+            );
+            assert!(
+                runtime.events.iter().any(|event| event
+                    .sample
+                    .as_ref()
+                    .is_some_and(|sample| sample.phase == phase
+                        && sample.measurement_accepted == Some(accepted)))
+            );
+        }
+    }
+}
+
+#[test]
 fn rejected_temperature_restarts_independent_confirmation() {
     let mut runtime = started_single_target_runtime();
     runtime.trial_purpose = ThermalTuningTrialPurpose::HoldConfirm;

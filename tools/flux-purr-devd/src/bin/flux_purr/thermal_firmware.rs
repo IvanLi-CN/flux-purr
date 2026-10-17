@@ -1081,8 +1081,12 @@ fn adopted_trial_passes_gates(trial: &Value) -> bool {
             .is_some_and(|value| value <= 3.0)
         && trial
             .pointer("/metrics/holdConfirmSeconds")
-            .and_then(Value::as_u64)
-            .is_some_and(|value| value >= 60)
+            .and_then(Value::as_f64)
+            .is_some_and(|value| value >= 60.0)
+        && trial
+            .pointer("/holdEvidenceVerification/verified")
+            .and_then(Value::as_bool)
+            == Some(true)
         && matches!((settle, limit), (Some(settle), Some(limit)) if settle <= limit)
         && trial
             .pointer("/metrics/phasePath")
@@ -1206,6 +1210,107 @@ fn qualification_measurements(
             })
         })
         .collect()
+}
+
+fn verify_hold_samples(
+    timing: Option<&ThermalTuningTimingEvidence>,
+    target: i16,
+    samples: &[&Value],
+) -> Value {
+    let Some(timing) = timing.filter(|timing| timing.supported_policy()) else {
+        return json!({"verified": false, "source": "trial_samples",
+            "continuousHoldMs": 0, "longestHoldMs": 0,
+            "reasons": ["unsupported_timing_policy"]});
+    };
+    let measurements = qualification_measurements(timing, target, samples);
+    let mut start = None;
+    let mut last_fresh = None;
+    let mut previous = None;
+    let mut count = 0_u64;
+    let mut duration = 0_u64;
+    let mut longest = 0_u64;
+    let mut ordered = true;
+    let mut saw_hold = false;
+    let mut phase_regressed = false;
+    for (sample, measurement) in samples.iter().zip(measurements) {
+        let position = sample
+            .get("sequence")
+            .and_then(Value::as_u64)
+            .zip(sample.get("elapsedMs").and_then(Value::as_u64));
+        let Some((sequence, time)) = position else {
+            ordered = false;
+            break;
+        };
+        if previous.is_some_and(|(seq, at)| sequence <= seq || time <= at) {
+            ordered = false;
+            break;
+        }
+        previous = position;
+        let in_hold = sample.get("phase").and_then(Value::as_str) == Some("hold");
+        phase_regressed |= saw_hold
+            && matches!(
+                sample.get("phase").and_then(Value::as_str),
+                Some("warmup" | "approach")
+            );
+        saw_hold |= in_hold;
+        if !in_hold
+            || measurement == QualificationMeasurement::Rejected
+            || measurement == QualificationMeasurement::FreshAfterGap
+            || last_fresh.is_some_and(|at| time.saturating_sub(at) > 1_000)
+        {
+            start = None;
+            last_fresh = None;
+            count = 0;
+            duration = 0;
+        }
+        if !in_hold
+            || measurement == QualificationMeasurement::Rejected
+            || measurement == QualificationMeasurement::PpsPause
+        {
+            continue;
+        }
+        let Some(temperature) = sample
+            .get("temperatureCentiC")
+            .and_then(Value::as_i64)
+            .and_then(|value| i16::try_from(value).ok())
+        else {
+            start = None;
+            last_fresh = None;
+            count = 0;
+            duration = 0;
+            continue;
+        };
+        if start.is_none()
+            && flux_purr_firmware::heater_phase::hold_entry_ready(
+                (i32::from(target) * 100 - i32::from(temperature)) as f32 / 100.0,
+            )
+        {
+            start = Some(time);
+        }
+        if let Some(started) = start {
+            last_fresh = Some(time);
+            count += 1;
+            duration = time - started;
+            if count.saturating_sub(1) * 1_000 >= duration * 3 {
+                longest = longest.max(duration);
+            }
+        }
+    }
+    let verified = ordered
+        && !phase_regressed
+        && duration >= 60_000
+        && count.saturating_sub(1) * 1_000 >= duration * 3;
+    let reasons = if !ordered {
+        vec!["invalid_sample_order"]
+    } else if phase_regressed {
+        vec!["hold_phase_regressed"]
+    } else if !verified {
+        vec!["continuous_hold_not_verified_from_samples"]
+    } else {
+        vec![]
+    };
+    json!({"verified": verified, "source": "trial_samples",
+        "continuousHoldMs": duration, "longestHoldMs": longest, "reasons": reasons})
 }
 
 fn verify_timing_samples(
@@ -2612,6 +2717,39 @@ fn trial_events_for_target(ledger: &[Value], target: i16) -> Vec<&Value> {
     by_trial.into_values().collect()
 }
 
+fn trial_hold_evidence(
+    target: i16,
+    trial_record: &Value,
+    decision_record: &Value,
+    samples: &[&Value],
+) -> (bool, Value, Option<f64>) {
+    let independent_confirmation = trial_record.get("purpose").and_then(Value::as_str)
+        == Some("hold_confirm")
+        && decision_record.get("purpose").and_then(Value::as_str) == Some("hold_confirm");
+    let timing = decision_record.get("timing").and_then(|value| {
+        serde_json::from_value::<ThermalTuningTimingEvidence>(value.clone()).ok()
+    });
+    let hold_evidence = verify_hold_samples(timing.as_ref(), target, samples);
+    let device_hold_confirm =
+        decision_record.get("holdConfirm").and_then(Value::as_bool) == Some(true);
+    let seconds =
+        (independent_confirmation && device_hold_confirm && hold_evidence["verified"] == true)
+            .then(|| hold_evidence["continuousHoldMs"].as_u64().unwrap_or(0) as f64 / 1_000.0);
+    (device_hold_confirm, hold_evidence, seconds)
+}
+
+fn trial_warmup_request(samples: &[&Value]) -> Option<u64> {
+    samples
+        .iter()
+        .filter(|sample| sample.get("phase").and_then(Value::as_str) == Some("warmup"))
+        .filter_map(|sample| {
+            sample
+                .get("heaterRequestedOutputPermille")
+                .and_then(Value::as_u64)
+        })
+        .max()
+}
+
 fn build_report_trial(
     target: i16,
     event: &Value,
@@ -2646,15 +2784,7 @@ fn build_report_trial(
     let sample_values = trial_samples(samples, target, trial_index, sample_start, sample_end);
     let bounds = sample_bounds_for_trial(&sample_values);
     let phases = phase_path(&sample_values);
-    let warmup_request = sample_values
-        .iter()
-        .filter(|sample| sample.get("phase").and_then(Value::as_str) == Some("warmup"))
-        .filter_map(|sample| {
-            sample
-                .get("heaterRequestedOutputPermille")
-                .and_then(Value::as_u64)
-        })
-        .max();
+    let warmup_request = trial_warmup_request(&sample_values);
     let settle_time = decision_record
         .get("settleTimeMs")
         .cloned()
@@ -2663,15 +2793,14 @@ fn build_report_trial(
         .get("hardGateFullSpeedToStableMs")
         .cloned()
         .unwrap_or(Value::Null);
-    let independent_confirmation = trial_record.get("purpose").and_then(Value::as_str)
-        == Some("hold_confirm")
-        && decision_record.get("purpose").and_then(Value::as_str) == Some("hold_confirm");
+    let (device_hold_confirm, hold_evidence, hold_confirm_seconds) =
+        trial_hold_evidence(target, &trial_record, &decision_record, &sample_values);
     let metrics = json!({
         "warmupRequestedOutputPermille": warmup_request,
         "phasePath": phases,
         "maxOvershootC": decision_record.get("maxOvershootCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
         "holdPeakToPeakC": decision_record.get("holdPeakToPeakCentiC").and_then(Value::as_f64).map(|value| value / 100.0),
-        "holdConfirmSeconds": if independent_confirmation && decision_record.get("holdConfirm").and_then(Value::as_bool) == Some(true) { json!(60) } else { Value::Null },
+        "holdConfirmSeconds": hold_confirm_seconds,
         "fullSpeedToStable": {"settleTimeMs": settle_time, "limitMs": limit_ms}
     });
     let mut result = json!({
@@ -2682,6 +2811,8 @@ fn build_report_trial(
         "candidateHash": candidate.get("candidateHash").cloned().unwrap_or_else(|| json!(fallback_candidate_hash)),
         "disposition": disposition,
         "reviewOutcome": "failed",
+        "deviceHoldConfirm": device_hold_confirm,
+        "holdEvidenceVerification": hold_evidence,
         "metrics": metrics,
         "warmupRequestedOutputPermille": warmup_request,
         "maxOvershootC": decision_record.get("maxOvershootCentiC").and_then(Value::as_f64).map(|value| value / 100.0),

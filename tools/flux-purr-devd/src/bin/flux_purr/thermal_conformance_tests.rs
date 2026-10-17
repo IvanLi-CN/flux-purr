@@ -5,9 +5,9 @@ use super::*;
 use flux_purr_firmware::{
     control_plane::ThermalControlProfileWire,
     thermal_tuning::{
-        ThermalTuningDecisionRecord, ThermalTuningPhase, ThermalTuningPowerClass,
-        ThermalTuningPpsContract, ThermalTuningRuntime, ThermalTuningSample, ThermalTuningStart,
-        ThermalTuningTrialPurpose, TuningId, hash_profile,
+        ThermalTuningDecisionRecord, ThermalTuningError, ThermalTuningPhase,
+        ThermalTuningPowerClass, ThermalTuningPpsContract, ThermalTuningRuntime,
+        ThermalTuningSample, ThermalTuningStart, ThermalTuningTrialPurpose, TuningId, hash_profile,
     },
 };
 
@@ -149,17 +149,51 @@ fn policy2_60c_overshoot_replay_selects_the_frozen_reduced_energy_candidate() {
 }
 
 #[test]
-fn firmware_candidate_matches_external_late_window_hil_replays() {
+fn firmware_late_window_replays_reject_regression_and_compare_valid_candidates() {
     let fixtures: Vec<Value> = serde_json::from_str(include_str!(
         "../../../tests/fixtures/thermal-60c-late-window-replays.json"
     ))
     .unwrap();
     let mut differences = Vec::new();
+    let mut rejected_regressions = Vec::new();
     for fixture in fixtures {
         let profile_value = json!({
             "settings": fixture["settings"], "points": [fixture["point"]]
         });
         let rows = fixture["samples"].as_array().unwrap();
+        let (runtime, count) = replay_firmware_trials_and_capture(
+            profile_value.clone(),
+            rows,
+            ThermalTuningTrialPurpose::Scout,
+            1,
+        );
+        if runtime.phase == ThermalTuningPhase::Failed {
+            assert!(!runtime.armed);
+            assert!(!runtime.save_confirmed);
+            assert_eq!(runtime.accepted_target_mask, 0);
+            assert_eq!(runtime.trial_index, 0);
+            assert_eq!(rows[count - 2][4], "hold");
+            assert_eq!(rows[count - 1][4], "approach");
+            assert!(
+                runtime
+                    .events
+                    .iter()
+                    .any(|event| { event.reason.as_deref() == Some("hold_phase_regressed") })
+            );
+            assert!(
+                runtime
+                    .events
+                    .iter()
+                    .filter_map(|event| event.sample.as_ref())
+                    .any(|sample| {
+                        sample.phase == ThermalTuningPhase::Approach
+                            && sample.temperature_centi_c
+                                == rows[count - 1][1].as_i64().unwrap() as i16
+                    })
+            );
+            rejected_regressions.push(fixture["sourceTrialIndex"].as_u64().unwrap());
+            continue;
+        }
         if conditional_replay_continues(&profile_value, rows, ThermalTuningTrialPurpose::Scout) {
             continue;
         }
@@ -172,6 +206,9 @@ fn firmware_candidate_matches_external_late_window_hil_replays() {
             ));
         }
     }
+    // Trial 6 reaches today's deadline before its historical regression;
+    // trial 8 regresses inside the still-active trial and must fail immediately.
+    assert_eq!(rejected_regressions, [8]);
     assert!(differences.is_empty(), "{}", differences.join("\n"));
 }
 
@@ -934,8 +971,13 @@ fn replay_firmware_trials_and_capture_decisions(
             cooling.heater_requested_output_permille = row[2].as_u64().unwrap() as u16;
             cooling.heater_output_permille = row[3].as_u64().unwrap() as u16;
             cooling.phase = serde_json::from_value(row[4].clone()).unwrap();
-            runtime.record_sample(cooling.clone()).unwrap();
+            let result = runtime.record_sample(cooling.clone());
             captured_rows = row_index + 1;
+            if result.is_err() {
+                assert_eq!(result, Err(ThermalTuningError::InvalidTransition));
+                assert_eq!(runtime.phase, ThermalTuningPhase::Failed);
+                break;
+            }
             cursor = drain_replay_decisions(&mut runtime, cursor, &mut decisions);
             if runtime.trial_index != trial_index {
                 break;

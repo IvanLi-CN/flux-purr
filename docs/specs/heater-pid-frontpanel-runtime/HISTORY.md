@@ -1,5 +1,9 @@
 # Heater PID frontpanel runtime history
 
+The owner separates preservation from the continuous-Hold repair: [PR #124](https://github.com/IvanLi-CN/flux-purr/pull/124) preserves the controller and original evidence. The A220°C confirmation exposes a qualification clock shared across recovery segments and a host projection that trusts the device flag. The first repair reset the qualification clock on Hold exit but retained the old production recovery transition. The owner rejected that boundary: Hold must recover against its constant target without borrowing Approach. Production now keeps Hold, and firmware/CLI/Web reject any observed Hold-to-Approach/Warmup regression even if a later segment reaches 60 seconds. Search feedback retains a separate longest observed scout segment. CLI and Web independently verify raw-sample continuity before confirmation or save admission. Regression and historical-sample audit do not establish new-artifact hardware qualification.
+
+A组d33daa68的两次启动调优重启定位为嵌套事件导出栈溢出，而非热控参数失败。提交1a691894将状态逐字段写入独占堆目标，分页直接填入最终存储，并把完整嵌套调用链纳入栈检查。该精确产物以有效物理标定初始化独立运行firmware-pps5a-1792222845647，不导入历史调优候选；八目标均在原期限内建立稳定窗口，并分别完成连续60秒Hold。pps5a revision74原子保存及读回验证完成，历史违规轨迹仍拒绝；实测与身份凭据见[HIL-CONTINUOUS-HOLD-A.md](HIL-CONTINUOUS-HOLD-A.md)。
+
 A组最新精确产物重跑仍保留完整原始RTD与控制温度证据；多次样本出现原始值与控制值大幅分离并被测量门禁拒绝，因而该轮不能用于调优或保存。与此同时，回放发现迟到稳定窗口分支曾生成低至0.5°C的Hold重入滞回，轻微低侧变化即可反复退回Approach；该分支现在保持目标±1.5°C下沿，生产初始配置、缺失Hold反馈和全部资格门禁不变。硬件重新锁紧后必须以新的稳定原始读数重新验证，旧异常记录不改写。
 
 A组重新锁紧NTC后，60°C试验5在9.659s进入物理Hold，过冲0、Hold峰峰值0.18°C，但稳定窗口因PPS切换后的拒绝样本在10.075s才开始；旧失败分类落入Other，搜索没有新候选便提前结束。新增同轮回归将该证据分类为Approach时序反馈，只减小40 centi°C制动距离以提高交接温度，并保留原10s门槛、Hold参数和独立确认；该修正仍须精确产物HIL验证，原失败报告不改写。

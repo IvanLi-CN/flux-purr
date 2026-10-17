@@ -1093,9 +1093,7 @@ pub(crate) async fn process_thermal_tuning_frame(
             let response = match result {
                 Ok(()) => usb_response(
                     request_id,
-                    UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
-                        context, None, false,
-                    ))),
+                    UsbResponsePayload::ThermalTuning(thermal_tuning_status(context, None, false)),
                 ),
                 Err(error) => usb_error_response(
                     request_id,
@@ -1111,9 +1109,9 @@ pub(crate) async fn process_thermal_tuning_frame(
                     context.ui_state.heater_enabled = false;
                     usb_response(
                         request_id,
-                        UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
+                        UsbResponsePayload::ThermalTuning(thermal_tuning_status(
                             context, None, false,
-                        ))),
+                        )),
                     )
                 }
                 Err(error) => usb_error_response(
@@ -1247,9 +1245,7 @@ fn thermal_tuning_start_response(
             context.ui_state.heater_enabled = false;
             usb_response(
                 request_id,
-                UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
-                    context, None, true,
-                ))),
+                UsbResponsePayload::ThermalTuning(thermal_tuning_status(context, None, true)),
             )
         }
         Err(error) => {
@@ -1431,9 +1427,7 @@ async fn persist_thermal_tuning_candidate(
     match completed {
         Ok(_) => usb_response(
             request_id,
-            UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
-                context, None, false,
-            ))),
+            UsbResponsePayload::ThermalTuning(thermal_tuning_status(context, None, false)),
         ),
         Err(error) => {
             context.thermal_tuning.fail("save_receipt_missing");
@@ -1470,21 +1464,54 @@ fn process_thermal_tuning_read(
         false,
         usb_response(
             request_id,
-            UsbResponsePayload::ThermalTuning(Box::new(thermal_tuning_status(
+            UsbResponsePayload::ThermalTuning(thermal_tuning_status(
                 context,
                 after_sequence,
                 false,
-            ))),
+            )),
         ),
     )
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[inline(never)]
 fn thermal_tuning_status(
     context: &mut ControlLineContext<'_, '_, '_>,
     after_sequence: Option<u32>,
     include_profile_with_events: bool,
-) -> flux_purr_firmware::control_plane::ThermalTuningStatusWire {
+) -> Box<flux_purr_firmware::control_plane::ThermalTuningStatusWire> {
+    let mut result = Box::new_uninit();
+    // Keep the complete event page out of callers' nested response temporaries.
+    // The ABI boundary preserves the heap destination through Xtensa lowering.
+    unsafe {
+        flux_purr_write_thermal_tuning_status(
+            result.as_mut_ptr(),
+            context,
+            after_sequence.is_some(),
+            after_sequence.unwrap_or_default(),
+            include_profile_with_events,
+        );
+        result.assume_init()
+    }
+}
+
+/// Initialize a tuning response directly in its owned allocation.
+///
+/// # Safety
+/// `out` must be an exclusive, aligned destination for one uninitialized status;
+/// `context` must remain valid and must not alias that destination.
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[unsafe(no_mangle)]
+unsafe extern "C" fn flux_purr_write_thermal_tuning_status(
+    out: *mut flux_purr_firmware::control_plane::ThermalTuningStatusWire,
+    context: *mut ControlLineContext<'_, '_, '_>,
+    has_after_sequence: bool,
+    after_sequence: u32,
+    include_profile_with_events: bool,
+) {
+    // SAFETY: the boxed constructor supplies a live exclusive context.
+    let context = unsafe { &mut *context };
+    let after_sequence = has_after_sequence.then_some(after_sequence);
     let mut pps_control_policy_version = heapless::String::<32>::new();
     let _ = pps_control_policy_version.push_str("hold-pps-governor-v2");
     let (apdo_min_mv, apdo_max_mv) = match *context.heater_power_backend {
@@ -1496,20 +1523,31 @@ fn thermal_tuning_status(
         HeaterPowerBackend::FixedPdPwmFallback { .. } => (None, None),
     };
     let runtime = &mut *context.thermal_tuning;
-    let events = runtime.events_after(after_sequence);
-    let candidate_profile = if include_profile_with_events || events.events.is_empty() {
-        runtime.candidate_profile.map(Into::into)
-    } else {
-        None
-    };
-    flux_purr_firmware::control_plane::ThermalTuningStatusWire {
-        phase: runtime.phase,
-        trial_purpose: runtime.trial_purpose,
-        terminal_disposition: runtime.terminal_disposition,
-        review_disposition: runtime.review_disposition,
-        power_class: runtime.power_class,
-        pps_control_policy_version: Some(pps_control_policy_version),
-        pps_voltage_bounds: Some(
+    // SAFETY: initialize the page field by field before lending it to the
+    // runtime. Returning a page by value would retain another large stack copy.
+    unsafe {
+        core::ptr::addr_of_mut!((*out).events.events).write(heapless::Vec::new());
+        core::ptr::addr_of_mut!((*out).events.next_sequence).write(None);
+        core::ptr::addr_of_mut!((*out).events.trace).write(runtime.trace());
+    }
+    // SAFETY: all fields of this page are initialized above and exclusively owned.
+    let events = unsafe { &mut *core::ptr::addr_of_mut!((*out).events) };
+    runtime.events_after_into(after_sequence, events);
+    macro_rules! write_field {
+        ($field:ident, $value:expr) => {
+            // SAFETY: each remaining field is written once to exclusive storage.
+            unsafe { core::ptr::addr_of_mut!((*out).$field).write($value) };
+        };
+    }
+    write_field!(phase, runtime.phase);
+    write_field!(trial_purpose, runtime.trial_purpose);
+    write_field!(terminal_disposition, runtime.terminal_disposition);
+    write_field!(review_disposition, runtime.review_disposition);
+    write_field!(power_class, runtime.power_class);
+    write_field!(pps_control_policy_version, Some(pps_control_policy_version));
+    write_field!(
+        pps_voltage_bounds,
+        Some(
             flux_purr_firmware::control_plane::ThermalTuningPpsVoltageBoundsWire {
                 absolute_min_mv: flux_purr_firmware::adapters::pd::FUSB302B_PD_ABSOLUTE_MIN_MV,
                 absolute_max_mv: flux_purr_firmware::adapters::pd::FUSB302B_PD_ABSOLUTE_MAX_MV,
@@ -1517,21 +1555,27 @@ fn thermal_tuning_status(
                 apdo_min_mv,
                 apdo_max_mv,
             },
-        ),
-        run_id: runtime.run_id.clone(),
-        candidate_id: runtime.candidate_id.clone(),
-        candidate_hash: runtime.candidate_hash.clone(),
-        targets_c: runtime.targets_c.clone(),
-        target_index: runtime.target_index,
-        armed: runtime.armed,
-        sealed: runtime.sealed,
-        save_confirmed: runtime.save_confirmed,
+        )
+    );
+    write_field!(run_id, runtime.run_id.clone());
+    write_field!(candidate_id, runtime.candidate_id.clone());
+    write_field!(candidate_hash, runtime.candidate_hash.clone());
+    write_field!(targets_c, runtime.targets_c.clone());
+    write_field!(target_index, runtime.target_index);
+    write_field!(armed, runtime.armed);
+    write_field!(sealed, runtime.sealed);
+    write_field!(save_confirmed, runtime.save_confirmed);
+    write_field!(
         candidate_profile,
-        preview_receipt: runtime.preview_receipt.clone(),
-        trace: events.trace.clone(),
-        events,
-        save_receipt: runtime.save_receipt.clone(),
-    }
+        if include_profile_with_events || events.events.is_empty() {
+            runtime.candidate_profile.map(Into::into)
+        } else {
+            None
+        }
+    );
+    write_field!(preview_receipt, runtime.preview_receipt.clone());
+    write_field!(trace, events.trace.clone());
+    write_field!(save_receipt, runtime.save_receipt.clone());
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]

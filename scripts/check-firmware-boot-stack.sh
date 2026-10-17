@@ -138,5 +138,40 @@ if (( pd_interrupt_headroom_bytes < min_pd_interrupt_headroom_bytes )); then
   exit 1
 fi
 
+# Event reads nest below the runtime poll, unlike boot-stage task handoffs.
+# A task-only check misses the response temporaries retained by this chain.
+control_chain_bytes=0
+control_chain_required=0
+while read -r address label; do
+  frame_bytes="$(frame_bytes_for_symbol "$address")"
+  control_chain_bytes=$((control_chain_bytes + frame_bytes))
+  printf 'control chain frame=%dB function=%s\n' "$frame_bytes" "$label"
+  if [[ "$label" == *'dispatch_control_frame::{'* ||
+        "$label" == 'flux_purr_write_thermal_tuning_status' ||
+        "$label" == *'ThermalTuningRuntime>::events_after_into' ]]; then
+    control_chain_required=$((control_chain_required + 1))
+  fi
+done < <(
+  "$nm_bin" -Sn --demangle "$elf_path" | awk '
+    /flux_purr::runtime::lan::dispatch_control_frame::\{closure#0\}$/ ||
+    /flux_purr::runtime::lan::process_thermal_tuning_read$/ ||
+    /flux_purr::runtime::lan::thermal_tuning_status$/ ||
+    /flux_purr_write_thermal_tuning_status$/ ||
+    /ThermalTuningRuntime>::events_after_into$/ {
+      print $1 " " substr($0, index($0, $4))
+    }
+  '
+)
+if (( control_chain_required != 3 )); then
+  echo "failed to resolve the tuning dispatch/status/page stack chain" >&2
+  exit 1
+fi
+control_chain_headroom_bytes=$((stack_capacity_bytes - max_frame_bytes - max_pd_interrupt_frame_bytes - control_chain_bytes))
+if (( control_chain_headroom_bytes < min_boot_stack_headroom_bytes )); then
+  echo "tuning event-read call chain headroom is below budget: ${control_chain_headroom_bytes}B < ${min_boot_stack_headroom_bytes}B" >&2
+  exit 1
+fi
+
 echo "CPU0 stack capacity=${stack_capacity_bytes}B largest_frame=${max_frame_bytes}B task=${max_frame_label} headroom=$((stack_capacity_bytes - max_frame_bytes))B minimum=${min_boot_stack_headroom_bytes}B"
 echo "nested PD interrupt headroom=${pd_interrupt_headroom_bytes}B minimum=${min_pd_interrupt_headroom_bytes}B"
+echo "tuning event-read call chain headroom=${control_chain_headroom_bytes}B minimum=${min_boot_stack_headroom_bytes}B"
