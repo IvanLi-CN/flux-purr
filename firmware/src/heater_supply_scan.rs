@@ -348,10 +348,12 @@ impl SupplyScan {
                 self.change(input, self.request_mv, 3_000);
             }
         } else if self.previous.is_some_and(|previous| {
-            i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c) > 20
+            i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c) > 100
         }) {
             // Warming can release more current headroom. Rescan instead of
             // holding the obsolete cold-stage voltage until apparent balance.
+            // Movement inside the accepted 1 C band must not preempt the
+            // ten-second window or its independent end-to-end drift check.
             self.phase = ScanPhase::Sweep;
             self.previous = Some(input);
             self.flat_count = 0;

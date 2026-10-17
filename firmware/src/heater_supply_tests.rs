@@ -136,6 +136,51 @@ fn noise_outside_the_full_band_restarts_the_equilibrium_window() {
     assert!(window.observe(19_000, 10_101));
 }
 
+#[test]
+fn in_band_temperature_response_to_safe_voltage_does_not_starve_equilibrium() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    let mut equilibrium_started_ms = None;
+    for now_ms in (0..120_000).step_by(50) {
+        let output = job.output();
+        // The measured temperature changes by only 0.3 C when returning
+        // from a boundary probe to the safe voltage. Every observation
+        // remains inside the required 1 C equilibrium band.
+        let temperature = if output.request_mv <= 5_600 {
+            10_030
+        } else {
+            10_000
+        };
+        job.update(sample(now_ms, output, temperature));
+        if job.phase == scan::ScanPhase::Equilibrium {
+            equilibrium_started_ms.get_or_insert(now_ms);
+        }
+        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        if job.boundary.point_count > 0 {
+            assert!(now_ms - equilibrium_started_ms.unwrap() >= 10_000);
+            return;
+        }
+    }
+    panic!("an in-band response must not cause endless boundary rescans");
+}
+
+#[test]
+fn warming_beyond_the_equilibrium_band_still_rescans_the_boundary() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    for now_ms in (0..60_000).step_by(50) {
+        let output = job.output();
+        job.update(sample(now_ms, output, 10_000));
+        if job.phase == scan::ScanPhase::Equilibrium {
+            let safe = job.output();
+            let warmed = job.update(sample(now_ms + 1_000, safe, 10_101));
+            assert_eq!(job.phase, scan::ScanPhase::Sweep);
+            assert!(warmed.request_mv > safe.request_mv);
+            assert_eq!(job.boundary.point_count, 0);
+            return;
+        }
+    }
+    panic!("the simulated current-loop boundary was not reached");
+}
+
 fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::ScanInput {
     // Fake PPS source with an explicit current loop, no actual-current input.
     let delivered_mv = output.request_mv.min(output.request_ma * 4);

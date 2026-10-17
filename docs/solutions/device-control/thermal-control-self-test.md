@@ -36,6 +36,9 @@ During the starting-current preflight, a single 100mA downward step can cross th
 
 Keep live equilibrium and cutoff decisions on the unfiltered temperature converted from the fractional ADC batch mean. Reconstructing live temperature from rounded persisted millivolts can widen a valid sub-degree signal beyond the 1°C window or add a quantized step larger than its 0.2°C drift bound. Persisted raw observations still retain their documented representation for replay; this does not justify rounding the independent live measurement. A regression must exercise the runtime calibration update seam, preserve the ten-second window, and reject genuine temperature drift.
 
+Do not use the ten-second 0.2°C end-to-end drift limit as an instantaneous rescan trigger. A 0.3°C response when returning from a boundary probe to its safe voltage fits inside the accepted 1°C band, but a single-sample 0.2°C comparison can repeatedly abandon the window before it completes. Thermal rescans require more than 1°C of warming from the probe observation; the full ten-second window independently rejects slow ramps and out-of-band movement.
+
+
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:
