@@ -60,7 +60,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。
-- 产品运行及真机 HIL 必须使用保留全部默认功能的固件，包括 Wi-Fi、HTTP、USB 控制和蜂鸣器。固件 crate 的 release 编译优化由 workspace 的 `opt-level = "s"` 固定；镜像必须满足既有 2 MiB factory-app 分区与启动栈预算。镜像超限必须通过构建或代码优化解决，不得裁剪必备功能，也不得把 no-network 编译检查产物替代为真机测试固件。
+- 产品运行及真机 HIL 必须使用保留全部默认功能的固件，包括 Wi-Fi、HTTP、USB 控制和蜂鸣器。固件 crate 的 release 编译优化由 workspace 的 `opt-level = "s"` 与 `codegen-units = 1` 固定；单个代码生成单元用于缩小完整功能镜像，不改变其他 package 的代码生成单元配置。镜像必须满足既有 2 MiB factory-app 分区与启动栈预算；编译成功不能替代实际 app image 的分区大小检查。镜像超限必须通过构建或代码优化解决，不得裁剪必备功能，也不得把 no-network 编译检查产物替代为真机测试固件。
 - Rust 风格合同由 `cargo fmt --all -- --check`、`bun run check:rust:style`、
   firmware/devd 的严格 Clippy 以及产品固件的 `cargo +esp clippy`
   共同执行。入口文件只负责装配，测试和领域实现必须位于命名模块中。

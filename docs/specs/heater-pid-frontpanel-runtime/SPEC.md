@@ -57,6 +57,7 @@
 
 ### MUST
 
+- 正常运行和真机调优固件必须保留全部默认功能，包括Wi-Fi、HTTP、USB控制和蜂鸣器。固件package的release配置固定为`opt-level="s"`、`codegen-units=1`；实际ESP-IDF factory app image不得超过既有2MiB分区，并须通过启动栈预算检查。编译成功、ELF文件大小或无网络配置编译通过均不能替代完整功能app image的检查。
 - Production heating MUST remain locked until a physically valid thermal plant model is active. A
   protected model-calibration job MAY heat with the bounded bootstrap controller on a PPS APDO
   covering `20V` at `>=3A`; no ordinary runtime request may bypass this lock. `pps3a` / 65 W

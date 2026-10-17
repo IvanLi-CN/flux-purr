@@ -12,3 +12,4 @@ members = [
 
 [profile.release.package.flux-purr-firmware]
 opt-level = "s"
+codegen-units = 1
