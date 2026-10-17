@@ -356,6 +356,10 @@ None
 
 ## Visual Evidence
 
+- 自动模式找不到安全供电档位时，Dashboard 状态行显示 `POWER LIMIT`，物理加热输出为零。预览复用固件渲染入口，逻辑尺寸为 `160×50`、RGB565 little-endian；[场景源码](./assets/dashboard-power-limit.preview.rs) 与[原始 framebuffer](./assets/dashboard-power-limit.framebuffer.bin) 保留可复现输入，画面已经 owner 确认。
+
+![No safe heater supply](./assets/dashboard-power-limit.png)
+
 - 标准 HIL 报告的桌面与移动视图展示吸顶目标／试验选择器、按 Warmup／Approach／Hold 分组的实际控制参数，以及阶段边界。来源为 `firmware/target/hil-preservation-review-bundle/index.html`；桌面截图为 `2320×1369`，移动视口为 `393×852`，两张截图均经 owner 确认。截图中的 `adopted` 与 `60s` 保留设备历史判定，不构成连续 Hold 合格证明；相关判定缺陷与资格撤回见 [HIL-CALIBRATED-AFTERHEAT.md](./HIL-CALIBRATED-AFTERHEAT.md)。
 
 ![Grouped trial parameters desktop](./assets/pps-trial-parameters-desktop.png)

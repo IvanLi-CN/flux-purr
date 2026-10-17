@@ -53,4 +53,4 @@
 
 - Storybook 已覆盖结果卡的完成、运行、失败和固件不兼容状态；旧 `active/draft/apply` 场景不再作为自动热模型入口。
 - 桌面 `ui_demo` 视觉证据已归档，结果卡在 `1440x900` 下保留无页面或卡片滚动的 C 版证据布局。
-- 获授权 VM 内的 firmware host 测试、host/Xtensa 严格 Clippy、Rust 结构检查、devd 测试与 mock smoke、Web 类型检查和 44 项传输契约测试均通过；3A 真机验收仍待完成。
+- 获授权 VM 内的 firmware host 测试、host/Xtensa 严格 Clippy、Rust 结构检查、devd 测试与 mock smoke、Web 类型检查和 44 项传输契约测试均通过；3A 真机验收由同一候选 SHA 的重新校准、连续运行和外部电流证据独立判定，不沿用旧校准或历史台架资格。
