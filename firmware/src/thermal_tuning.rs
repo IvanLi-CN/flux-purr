@@ -3519,6 +3519,22 @@ impl ThermalTuningRuntime {
     }
 
     pub fn events_after(&mut self, after_sequence: Option<u32>) -> ThermalTuningEventPage {
+        let mut page = ThermalTuningEventPage {
+            events: Vec::new(),
+            next_sequence: None,
+            trace: self.trace(),
+        };
+        self.events_after_into(after_sequence, &mut page);
+        page
+    }
+
+    /// Fill caller-owned storage so device responses need no event-page temporary.
+    #[inline(never)]
+    pub fn events_after_into(
+        &mut self,
+        after_sequence: Option<u32>,
+        page: &mut ThermalTuningEventPage,
+    ) {
         let invalid_ack = after_sequence.is_some_and(|after| {
             self.last_delivered_sequence
                 .is_none_or(|delivered| after > delivered)
@@ -3553,26 +3569,23 @@ impl ThermalTuningRuntime {
                     chained_event_digest(&self.retained_trace_digest, &event);
             }
         }
-        let mut events = Vec::new();
+        page.events.clear();
         for event in self.events.iter() {
             if after_sequence.is_none_or(|after| event.sequence > after)
-                && events.push(event.clone()).is_err()
+                && page.events.push(event.clone()).is_err()
             {
                 break;
             }
         }
-        let next_sequence = events.last().map(|event| event.sequence);
+        let next_sequence = page.events.last().map(|event| event.sequence);
         if let Some(sequence) = next_sequence {
             self.last_delivered_sequence = Some(
                 self.last_delivered_sequence
                     .map_or(sequence, |delivered| delivered.max(sequence)),
             );
         }
-        ThermalTuningEventPage {
-            events,
-            next_sequence,
-            trace: self.trace(),
-        }
+        page.next_sequence = next_sequence;
+        page.trace = self.trace();
     }
 
     pub fn trace(&self) -> ThermalTuningTrace {
