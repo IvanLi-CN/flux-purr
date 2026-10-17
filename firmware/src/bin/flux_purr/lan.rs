@@ -48,17 +48,28 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e> {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_control_line(
-    line: &str,
-    mut context: ControlLineContext<'_, '_, '_>,
-) -> (bool, UsbFrame) {
-    let active_profile = active_thermal_control_profile(
-        context.memory_config,
-        *context.thermal_control_profile_preview,
-        context.manual_pps,
-    );
-    let (needs_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
-    (needs_redraw, response)
+type ControlLineFuture<'a> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = (bool, Box<UsbFrame>)> + 'a>>;
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[inline(never)]
+pub(crate) fn process_control_line<'a, 'i: 'a, 'e: 'a>(
+    line: &'a str,
+    mut context: ControlLineContext<'a, 'i, 'e>,
+) -> ControlLineFuture<'a> {
+    // Keep the request state machine out of the caller's input future. The
+    // calibration payload makes embedding both futures exhaust CPU0's stack,
+    // even for a small read-only request such as get_identity.
+    Box::pin(async move {
+        let active_profile = active_thermal_control_profile(
+            context.memory_config,
+            *context.thermal_control_profile_preview,
+            context.manual_pps,
+        );
+        let (needs_redraw, response) =
+            dispatch_control_frame(&mut context, line, active_profile).await;
+        (needs_redraw, Box::new(response))
+    })
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1228,9 +1239,10 @@ pub(crate) fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode 
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[inline(never)]
 pub(crate) fn lan_command_to_control_line(
     command: &ControlMailboxCommand,
-) -> Result<heapless::String<USB_CONTROL_LINE_CAPACITY>, &'static str> {
+) -> Result<Box<heapless::String<USB_CONTROL_LINE_CAPACITY>>, &'static str> {
     let request_op = match (command.endpoint, command.method) {
         (LanEndpoint::Identity, HttpMethod::Get) => Some("get_identity"),
         (LanEndpoint::Network, HttpMethod::Get) => Some("get_network"),
@@ -1247,7 +1259,7 @@ pub(crate) fn lan_command_to_control_line(
             r#"{{"type":"request","requestId":"lan","op":"{op}"}}"#
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     if command.endpoint == LanEndpoint::ThermalPlantRun && command.method == HttpMethod::Get {
@@ -1257,7 +1269,7 @@ pub(crate) fn lan_command_to_control_line(
             command.after_sample.unwrap_or(0)
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     // Saving the current heater-curve preview has no payload in the shared
@@ -1265,7 +1277,7 @@ pub(crate) fn lan_command_to_control_line(
     if command.endpoint == LanEndpoint::HeaterCurveSave {
         write!(line, r#"{{"type":"heater_curve_save","requestId":"lan"}}"#)
             .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     // The LAN API keeps a thermal-profile payload focused on the profile
@@ -1281,7 +1293,7 @@ pub(crate) fn lan_command_to_control_line(
             r#"{{"type":"runtime_config","requestId":"lan","thermalControlProfile":{body}}}"#
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     let frame_type = match command.endpoint {
@@ -1307,7 +1319,7 @@ pub(crate) fn lan_command_to_control_line(
             .map_err(|_| "LAN request is too large")?;
     }
     line.push('}').map_err(|_| "LAN request is too large")?;
-    Ok(line)
+    Ok(Box::new(line))
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

@@ -41,6 +41,8 @@ control cycle, project UI state, and decide when to redraw the front panel.
    state.
 6. Flush the display when redraw is pending.
 
+Control-line dispatch owns its future and response on the heap. LAN command execution and its control adapter use separate heap-owned futures; command-line buffers and responses remain heap-owned across awaits, and an empty mailbox does not allocate. These boundaries keep large calibration payloads out of the shared input stack while preserving serialized execution and lease/revision revalidation. The product ELF stack check budgets the emitted nested USB and LAN control frames against the linked CPU0 stack, including the runtime task frame and a `32768`-byte margin for deeper calls.
+
 USB transport recovery pauses request intake until its framing marker is
 complete. A missing host does not terminate recovery: the marker retains its
 offset across deadlines and resumes in bounded non-blocking packet steps when

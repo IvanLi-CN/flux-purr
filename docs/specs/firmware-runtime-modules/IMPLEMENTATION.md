@@ -10,6 +10,7 @@
 
 - `REQ-FRM-001` and `REQ-FRM-002`: each file in `modules/` records responsibility, read inputs, command inputs, published state, communication mechanism, authority, physical writer, safety behavior, and source references; the matrix links the complete module set and retains cross-boundary tables.
 - `REQ-FRM-003`: the runtime-loop section records the actual `run_runtime_loop` order and the mailbox/USB execution boundary.
+- USB and LAN control execution retain their serialized owner while heap-owning large dispatch futures and responses. The LAN executor is allocated only for an actual mailbox command. The product stack gate includes nested control frames instead of relying only on task-local frame size.
 - `REQ-FRM-004`: the LAN/HTTP sections cover `NetHttpState`, `HttpGate`, `CONTROL_MAILBOX`, `CONTROL_RESPONSES`, lease and revision revalidation, and snapshot reads.
 - `REQ-FRM-005`: the Power Coordinator and PD sections cover typed
   `PowerCoordinatorClient` requests, `POWER_COMMANDS` capacity `6`, private

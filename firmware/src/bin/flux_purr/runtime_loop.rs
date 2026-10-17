@@ -411,95 +411,119 @@ pub(crate) async fn runtime_process_usb_input(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+type LanResponse = (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>);
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 pub(crate) async fn runtime_lan_direct_response(
     _state: &mut RuntimeLoopState,
     command: &flux_purr_firmware::net_http::ControlMailboxCommand,
-) -> Option<(u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>)> {
+) -> Option<Box<LanResponse>> {
     match (command.endpoint, command.method) {
         (LanEndpoint::Identity, HttpMethod::Get) => {
             let identity = flux_purr_firmware::net::lan_identity().await;
-            Some(lan_json_response(&identity))
+            Some(Box::new(lan_json_response(&identity)))
         }
         (LanEndpoint::Network, HttpMethod::Get) => {
             let network = flux_purr_firmware::net::lan_network_summary().await;
-            Some(lan_json_response(&network))
+            Some(Box::new(lan_json_response(&network)))
         }
         _ => None,
     }
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
-pub(crate) async fn runtime_process_lan_control(
-    state: &mut RuntimeLoopState,
-    line: &str,
+type LanControlResult = (bool, Box<LanResponse>);
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+type LanControlFuture<'a> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = LanControlResult> + 'a>>;
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[inline(never)]
+fn runtime_box_lan_response(
+    frame: &UsbFrame,
+    network: flux_purr_firmware::control_plane::NetworkSummary,
+) -> Box<LanResponse> {
+    // Construct the large wire body after dispatch returns, on a separate
+    // frame; boxing it inside the async poll still reserves a stack copy.
+    Box::new(lan_frame_response(frame, network))
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[inline(never)]
+pub(crate) fn runtime_process_lan_control<'a>(
+    state: &'a mut RuntimeLoopState,
+    line: &'a str,
     elapsed_ms: u64,
-) -> (bool, (u16, heapless::String<LAN_HTTP_BODY_MAX_LEN>)) {
-    let pd_observation_for_control = state.last_pd_observation;
-    let heater_duty_for_control = state.last_heater_duty;
-    let result = process_control_line(
-        line,
-        ControlLineContext {
-            controller: &mut state.controller,
-            ui_state: &mut state.ui_state,
-            memory_config: &mut state.memory_config,
-            last_persisted_memory_config: &mut state.last_persisted_memory_config,
-            preview_heater_curve: &mut state.preview_heater_curve,
-            memory_commit_due_ms: &mut state.memory_commit_due_ms,
-            memory_sequence: &mut state.memory_sequence,
-            persistence_source: state.persistence_source,
-            persistence_record_state: state.persistence_record_state,
-            eeprom_i2c: &mut state.eeprom_i2c,
-            pd_controller: state.pd_port.controller_kind(),
-            pd_port: &state.pd_port,
+) -> LanControlFuture<'a> {
+    Box::pin(async move {
+        let pd_observation_for_control = state.last_pd_observation;
+        let heater_duty_for_control = state.last_heater_duty;
+        let result = process_control_line(
+            line,
+            ControlLineContext {
+                controller: &mut state.controller,
+                ui_state: &mut state.ui_state,
+                memory_config: &mut state.memory_config,
+                last_persisted_memory_config: &mut state.last_persisted_memory_config,
+                preview_heater_curve: &mut state.preview_heater_curve,
+                memory_commit_due_ms: &mut state.memory_commit_due_ms,
+                memory_sequence: &mut state.memory_sequence,
+                persistence_source: state.persistence_source,
+                persistence_record_state: state.persistence_record_state,
+                eeprom_i2c: &mut state.eeprom_i2c,
+                pd_controller: state.pd_port.controller_kind(),
+                pd_port: &state.pd_port,
+                calibration_runtime_state: &mut state.calibration_runtime_state,
+                thermal_plant_workspace: state.thermal_plant_workspace,
+                elapsed_ms,
+                last_pd_observation: pd_observation_for_control,
+                heater_power_backend: &mut state.heater_power_backend,
+                heater_controller: &mut state.heater_controller,
+                pid_snapshot: state.last_pid_snapshot,
+                manual_pps: &mut state.manual_pps_state,
+                fan_command: state.fan_command,
+                fan_working_power_pending: state.fan_working_power_ticket.is_some(),
+                current_rtd_fault: state.current_rtd_fault,
+                overtemp_attention_acknowledged: &mut state.overtemp_attention_acknowledged,
+                attention_pending_after_fault_clear: &mut state.attention_pending_after_fault_clear,
+                overtemp_forced_fan_active: &mut state.overtemp_forced_fan_active,
+                next_attention_reminder_ms: &mut state.next_attention_reminder_ms,
+                buzzer: &mut state.buzzer,
+                thermal_control_profile_preview: &mut state.thermal_control_profile_preview,
+                last_raw_state: state.last_raw_state,
+                latest_status_temp_c: state.latest_display_temp_c,
+                latest_control_temp_c: state.latest_temp_c,
+                control_measurement_guarded: state.control_measurement_guarded,
+                latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
+                latest_rtd_raw_adc_min_mv: state.latest_rtd_raw_adc_min_mv,
+                latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
+                latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
+                latest_vin_mv: state.latest_vin_mv,
+                last_heater_duty: heater_duty_for_control,
+                heater_control_timing: state.heater_control_timing,
+                persistence_log_sink: &mut state.transport.persistence_log_sink,
+                record_staging: state.eeprom_record_staging,
+            },
+        )
+        .await;
+        disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
             calibration_runtime_state: &mut state.calibration_runtime_state,
-            thermal_plant_workspace: state.thermal_plant_workspace,
-            elapsed_ms,
-            last_pd_observation: pd_observation_for_control,
-            heater_power_backend: &mut state.heater_power_backend,
-            heater_controller: &mut state.heater_controller,
-            pid_snapshot: state.last_pid_snapshot,
+            backend: &mut state.heater_power_backend,
             manual_pps: &mut state.manual_pps_state,
-            fan_command: state.fan_command,
-            fan_working_power_pending: state.fan_working_power_ticket.is_some(),
-            current_rtd_fault: state.current_rtd_fault,
-            overtemp_attention_acknowledged: &mut state.overtemp_attention_acknowledged,
-            attention_pending_after_fault_clear: &mut state.attention_pending_after_fault_clear,
-            overtemp_forced_fan_active: &mut state.overtemp_forced_fan_active,
-            next_attention_reminder_ms: &mut state.next_attention_reminder_ms,
-            buzzer: &mut state.buzzer,
-            thermal_control_profile_preview: &mut state.thermal_control_profile_preview,
-            last_raw_state: state.last_raw_state,
-            latest_status_temp_c: state.latest_display_temp_c,
-            latest_control_temp_c: state.latest_temp_c,
-            control_measurement_guarded: state.control_measurement_guarded,
-            latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
-            latest_rtd_raw_adc_min_mv: state.latest_rtd_raw_adc_min_mv,
-            latest_rtd_raw_adc_max_mv: state.latest_rtd_raw_adc_max_mv,
-            latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
-            latest_vin_mv: state.latest_vin_mv,
-            last_heater_duty: heater_duty_for_control,
-            heater_control_timing: state.heater_control_timing,
-            persistence_log_sink: &mut state.transport.persistence_log_sink,
-            record_staging: state.eeprom_record_staging,
-        },
-    )
-    .await;
-    disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
-        calibration_runtime_state: &mut state.calibration_runtime_state,
-        backend: &mut state.heater_power_backend,
-        manual_pps: &mut state.manual_pps_state,
-        pd_port: &state.pd_port,
-        heater_pwm: &mut state.heater_pwm,
-        hold_pps_governor: &mut state.hold_pps_governor,
-        ui_state: &mut state.ui_state,
-        last_heater_duty: &mut state.last_heater_duty,
-    });
-    let network_summary = flux_purr_firmware::net::lan_network_summary().await;
-    let (control_needs_redraw, response) = result;
-    (
-        control_needs_redraw,
-        lan_frame_response(&response, network_summary),
-    )
+            pd_port: &state.pd_port,
+            heater_pwm: &mut state.heater_pwm,
+            hold_pps_governor: &mut state.hold_pps_governor,
+            ui_state: &mut state.ui_state,
+            last_heater_duty: &mut state.last_heater_duty,
+        });
+        let network_summary = flux_purr_firmware::net::lan_network_summary().await;
+        let (control_needs_redraw, response) = result;
+        (
+            control_needs_redraw,
+            runtime_box_lan_response(&response, network_summary),
+        )
+    })
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -576,11 +600,29 @@ pub(crate) async fn runtime_process_lan(
     elapsed_ms: u64,
     _control_command_processed: bool,
 ) -> RuntimeLanInputOutcome {
-    let mut needs_redraw = false;
     #[cfg(feature = "net_http")]
     if !_control_command_processed
         && let Some(command) = flux_purr_firmware::net::try_receive_command()
     {
+        return runtime_execute_lan_command(state, elapsed_ms, command).await;
+    }
+    RuntimeLanInputOutcome {
+        needs_redraw: false,
+        command_processed: false,
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[inline(never)]
+fn runtime_execute_lan_command(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+    command: ControlMailboxCommand,
+) -> core::pin::Pin<Box<dyn core::future::Future<Output = RuntimeLanInputOutcome> + '_>> {
+    // An idle LAN mailbox must not reserve the full command handler's stack
+    // while USB runs. Allocate the handler only after receiving a command.
+    Box::pin(async move {
+        let mut needs_redraw = false;
         let request_id = command.request_id;
         let response_slot = command.response_slot;
         let is_mutation = matches!(
@@ -611,7 +653,8 @@ pub(crate) async fn runtime_process_lan(
             );
         }
         let direct_response = runtime_lan_direct_response(state, &command).await;
-        if let Some((status, body)) = direct_response {
+        if let Some(response) = direct_response {
+            let (status, body) = *response;
             flux_purr_firmware::net::respond_to_command(
                 response_slot,
                 request_id,
@@ -634,8 +677,9 @@ pub(crate) async fn runtime_process_lan(
                 return RuntimeLanInputOutcome::processed(needs_redraw);
             }
         };
-        let (control_needs_redraw, (status, body)) =
+        let (control_needs_redraw, response) =
             runtime_process_lan_control(state, line.as_str(), elapsed_ms).await;
+        let (status, body) = *response;
         needs_redraw |= control_needs_redraw;
         flux_purr_firmware::net::respond_to_command(
             response_slot,
@@ -644,12 +688,11 @@ pub(crate) async fn runtime_process_lan(
             body,
             is_mutation,
         );
-    }
-
-    RuntimeLanInputOutcome {
-        needs_redraw,
-        command_processed: false,
-    }
+        RuntimeLanInputOutcome {
+            needs_redraw,
+            command_processed: false,
+        }
+    })
 }
 
 #[cfg(target_arch = "xtensa")]

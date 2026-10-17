@@ -337,16 +337,22 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 4. Poll `isolapurr power show --url <source-url> --json` until all of the following are true again:
    - `runtime.output_enabled=true`
    - `tps_mode=auto_follow`
-   - `power_watts=100`
+   - saved power and advertised limits match the owner-authorized source and cable class
    - PD and PPS both enabled
-   - `pd_pps_5a=true`
-   - `pps3_limit_ma >= 5000`
+   - a `60W / 3A` bench retains `power_watts=60`, `pps3_limit_ma=3000`, and `pd_pps_5a=false`; a `5A` class requires its own source, cable, and owner authorization
+   - source capability readback matches the saved limits
    - USB-C sample uptime keeps advancing
 5. Confirm the exact owner-authorized Flux Purr serial path still exists. If it disappeared or re-enumerated, stop; do not switch ports.
 6. Retry only the same failed sub-step, and only once. A second environment failure for the same target becomes `environment_blocked`.
 7. Count the recovery time inside the same per-target `20min` budget.
 
 Use this procedure only when source telemetry proves the source is stuck or stale. Do not use it to mask a controller, sensor, or runtime defect.
+
+### Diagnosing periodic source interruptions
+
+Correlate device uptime, host USB disconnect timestamps, and source-side VBUS telemetry before attributing a reset. A low idle voltage or a USB ownership warning alone does not identify the cause. A controlled USB-C data disconnect with power retained can test whether the host data path is necessary for the interruption; preserve the authorized port boundary when restoring data.
+
+An unapplied source profile can trigger repeated configuration attempts. Check that every saved capability field is actually written before its readback is compared: an omitted PPS3 current-limit write leaves `pps3_limit_ma=3000` unmatched against a `5000` readback, so a source retry loop can repeatedly disturb VBUS. Fix the missing register write and verify sustained source continuity; do not raise the saved limit to `5000` merely to make the comparison pass. Source-firmware changes and source-MCU flashing require their own authorization and exact target port, independently of the Flux Purr port.
 
 ### Recovering a transient measurement fault
 

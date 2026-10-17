@@ -12723,11 +12723,13 @@ fn network_awaits_do_not_own_or_wrap_pd_service() {
 
 #[test]
 fn lan_runtime_helpers_are_excluded_without_net_http() {
-    let runtime_loop = include_str!("runtime_loop.rs");
+    let runtime_loop = include_str!("runtime_loop.rs").replace("#[inline(never)]\n", "");
     for helper in [
         "impl RuntimeLanInputOutcome",
         "async fn runtime_lan_direct_response",
-        "async fn runtime_process_lan_control",
+        "fn runtime_process_lan_control",
+        "fn runtime_box_lan_response",
+        "fn runtime_execute_lan_command",
         "fn runtime_reject_lan_command",
     ] {
         let feature_gate = format!(
