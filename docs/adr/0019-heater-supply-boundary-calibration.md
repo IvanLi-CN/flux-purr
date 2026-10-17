@@ -6,7 +6,7 @@ Accepted
 
 ## Decision
 
-This decision supersedes the calibration and auxiliary-load clauses of ADR 0018 and the resistance/measurement/raw-observation projection clauses of ADR 0001; the unaffected contract-ordering and snapshot lifecycle rules remain applicable.
+This decision supersedes the calibration and auxiliary-load clauses of [the automatic-heater boundary decision](0018-automatic-heater-voltage-current-boundary.md) and the resistance/measurement/raw-observation projection clauses of ADR 0001; the unaffected contract-ordering and snapshot lifecycle rules remain applicable.
 
 Heater calibration records an operating boundary for the complete powered device. It does not claim an independently measured plate resistance or MCU power. A PPS contract current is a current-limit setting, and a PPS voltage request is a setpoint; neither is a live measurement. Uncalibrated VIN ADC values may establish relative voltage response, but are not an absolute voltage reference. OvO and its telemetry are developer validation tools, never inputs to the product calibration algorithm.
 

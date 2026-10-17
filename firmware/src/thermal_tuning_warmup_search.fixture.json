@@ -1,0 +1,893 @@
+{
+  "sourceSha": "9485eb63c77a471adf527bf6cdf183a993a00ae2",
+  "runId": "firmware-pps5a-1791530428252",
+  "sourcePath": "firmware/target/hil-dual-source/a/tuning-eight-residual-9485eb63/firmware-pps5a-1791530428252",
+  "trials": [
+    {
+      "trialIndex": 2,
+      "point": {
+        "approachDampingExponentPermille": 1000,
+        "approachFloorPowerPermille": 50,
+        "approachLeadTicks": 0,
+        "approachPowerPermille": 1000,
+        "approachTailWindowCentiC": 0,
+        "brakeDistanceCentiC": 2452,
+        "holdBlendTicks": 2,
+        "holdEntryCentiC": 90,
+        "holdExitCentiC": 200,
+        "holdKiPermillePerCTick": 1,
+        "holdKpPermillePerC": 43,
+        "holdLeadTicks": 2,
+        "holdOffCentiC": 5,
+        "holdOnCentiC": 30,
+        "holdPowerPermille": 56,
+        "holdReheatPowerPermille": 56,
+        "overshootCutoffCentiC": 25,
+        "targetC": 60,
+        "warmupPowerPermille": 1000,
+        "warmupReenterCentiC": 400
+      },
+      "decision": {
+        "approachToHold": true,
+        "disposition": "rejected",
+        "freeze": false,
+        "hardGateFullSpeedToStableMs": 10000,
+        "hardGateHoldPeakToPeakCentiC": 300,
+        "hardGateOvershootCentiC": 300,
+        "holdConfirm": false,
+        "holdPeakToPeakCentiC": 161,
+        "maxOvershootCentiC": 158,
+        "prune": true,
+        "purpose": "scout",
+        "score": [
+          0,
+          1,
+          3,
+          0,
+          0.08,
+          0.8200000000000001,
+          1.58,
+          1.61,
+          1000000000000,
+          50,
+          3.7199884592892
+        ],
+        "settleTimeMs": null,
+        "stopReason": "full-speed-to-stable budget exhausted",
+        "timing": {
+          "allowedApproachFloorPermille": 50,
+          "configuredApproachFloorPermille": 50,
+          "effectiveApproachFloorPermille": 50,
+          "extendedAtMs": null,
+          "extensionLimitMs": 30000,
+          "floorObservedAtMs": null,
+          "modelApproachFloorPermille": 50,
+          "originalDeadlineObservedAtMs": 354523,
+          "originalDeadlinePhase": "hold",
+          "originalLimitMs": 10000,
+          "policyVersion": 4,
+          "stableWindowStartedAtMs": null,
+          "stableWindowVerifiedAtMs": null,
+          "warmupExitedAtMs": 344482
+        },
+        "warmupFull": true
+      },
+      "samples": [
+        [
+          343784,
+          3501,
+          "warmup",
+          1000,
+          0
+        ],
+        [
+          343845,
+          3514,
+          "warmup",
+          1000,
+          610
+        ],
+        [
+          343908,
+          3516,
+          "warmup",
+          1000,
+          1000
+        ],
+        [
+          344161,
+          3517,
+          "warmup",
+          1000,
+          1000
+        ],
+        [
+          344366,
+          3530,
+          "warmup",
+          1000,
+          1000
+        ],
+        [
+          344482,
+          3562,
+          "approach",
+          50,
+          50
+        ],
+        [
+          344546,
+          3557,
+          "approach",
+          520,
+          540
+        ],
+        [
+          344824,
+          3606,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          345059,
+          3671,
+          "approach",
+          910,
+          950
+        ],
+        [
+          345300,
+          3722,
+          "approach",
+          870,
+          950
+        ],
+        [
+          345559,
+          3782,
+          "approach",
+          810,
+          890
+        ],
+        [
+          345788,
+          3793,
+          "approach",
+          840,
+          970
+        ],
+        [
+          346048,
+          3880,
+          "approach",
+          970,
+          1000
+        ],
+        [
+          346286,
+          3961,
+          "approach",
+          880,
+          1000
+        ],
+        [
+          346548,
+          3979,
+          "approach",
+          960,
+          1000
+        ],
+        [
+          346781,
+          4050,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          347033,
+          4119,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          347284,
+          4184,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          347529,
+          4286,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          347745,
+          4308,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          347976,
+          4406,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          348238,
+          4447,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          348471,
+          4527,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          348720,
+          4632,
+          "approach",
+          950,
+          950
+        ],
+        [
+          348965,
+          4668,
+          "approach",
+          910,
+          950
+        ],
+        [
+          349172,
+          4765,
+          "approach",
+          890,
+          930
+        ],
+        [
+          349377,
+          4789,
+          "approach",
+          780,
+          850
+        ],
+        [
+          349613,
+          4866,
+          "approach",
+          750,
+          820
+        ],
+        [
+          349877,
+          4947,
+          "approach",
+          530,
+          580
+        ],
+        [
+          350127,
+          5019,
+          "approach",
+          580,
+          670
+        ],
+        [
+          350373,
+          5112,
+          "approach",
+          590,
+          680
+        ],
+        [
+          350608,
+          5230,
+          "approach",
+          350,
+          420
+        ],
+        [
+          350825,
+          5285,
+          "approach",
+          410,
+          500
+        ],
+        [
+          351039,
+          5367,
+          "approach",
+          430,
+          520
+        ],
+        [
+          351298,
+          5448,
+          "approach",
+          320,
+          410
+        ],
+        [
+          351536,
+          5497,
+          "approach",
+          330,
+          420
+        ],
+        [
+          351783,
+          5557,
+          "approach",
+          240,
+          300
+        ],
+        [
+          352065,
+          5599,
+          "approach",
+          250,
+          340
+        ],
+        [
+          352311,
+          5644,
+          "approach",
+          170,
+          230
+        ],
+        [
+          352541,
+          5714,
+          "approach",
+          180,
+          250
+        ],
+        [
+          352802,
+          5781,
+          "approach",
+          190,
+          270
+        ],
+        [
+          353039,
+          5818,
+          "approach",
+          130,
+          180
+        ],
+        [
+          353305,
+          5858,
+          "approach",
+          110,
+          160
+        ],
+        [
+          353537,
+          5893,
+          "approach",
+          50,
+          70
+        ],
+        [
+          353784,
+          5952,
+          "approach",
+          70,
+          110
+        ],
+        [
+          354033,
+          5964,
+          "approach",
+          90,
+          140
+        ],
+        [
+          354153,
+          6003,
+          "hold",
+          50,
+          80
+        ],
+        [
+          354215,
+          5997,
+          "hold",
+          50,
+          80
+        ],
+        [
+          354431,
+          6044,
+          "hold",
+          0,
+          0
+        ],
+        [
+          354523,
+          6059,
+          "hold",
+          0,
+          0
+        ],
+        [
+          354754,
+          6096,
+          "hold",
+          0,
+          0
+        ],
+        [
+          354966,
+          6134,
+          "hold",
+          0,
+          0
+        ],
+        [
+          355175,
+          6120,
+          "hold",
+          0,
+          0
+        ],
+        [
+          355362,
+          6158,
+          "hold",
+          0,
+          0
+        ]
+      ]
+    },
+    {
+      "trialIndex": 3,
+      "point": {
+        "approachDampingExponentPermille": 1050,
+        "approachFloorPowerPermille": 100,
+        "approachLeadTicks": 1,
+        "approachPowerPermille": 920,
+        "approachTailWindowCentiC": 0,
+        "brakeDistanceCentiC": 2532,
+        "holdBlendTicks": 2,
+        "holdEntryCentiC": 90,
+        "holdExitCentiC": 200,
+        "holdKiPermillePerCTick": 1,
+        "holdKpPermillePerC": 39,
+        "holdLeadTicks": 2,
+        "holdOffCentiC": 5,
+        "holdOnCentiC": 30,
+        "holdPowerPermille": 56,
+        "holdReheatPowerPermille": 56,
+        "overshootCutoffCentiC": 80,
+        "targetC": 60,
+        "warmupPowerPermille": 1000,
+        "warmupReenterCentiC": 400
+      },
+      "decision": {
+        "approachToHold": true,
+        "disposition": "rejected",
+        "freeze": false,
+        "hardGateFullSpeedToStableMs": 10000,
+        "hardGateHoldPeakToPeakCentiC": 300,
+        "hardGateOvershootCentiC": 300,
+        "holdConfirm": false,
+        "holdPeakToPeakCentiC": 179,
+        "maxOvershootCentiC": 157,
+        "prune": true,
+        "purpose": "batch_predicted",
+        "score": [
+          0,
+          1,
+          3,
+          0,
+          0.07,
+          0.84,
+          1.57,
+          1.79,
+          1000000000000,
+          0,
+          4.496306075702222
+        ],
+        "settleTimeMs": null,
+        "stopReason": "warmup logical full-output hard gate failed",
+        "timing": {
+          "allowedApproachFloorPermille": 50,
+          "configuredApproachFloorPermille": 100,
+          "effectiveApproachFloorPermille": 50,
+          "extendedAtMs": null,
+          "extensionLimitMs": 30000,
+          "floorObservedAtMs": 537359,
+          "modelApproachFloorPermille": 50,
+          "originalDeadlineObservedAtMs": 537359,
+          "originalDeadlinePhase": "approach",
+          "originalLimitMs": 10000,
+          "policyVersion": 4,
+          "stableWindowStartedAtMs": null,
+          "stableWindowVerifiedAtMs": null,
+          "warmupExitedAtMs": 527291
+        },
+        "warmupFull": false
+      },
+      "samples": [
+        [
+          527291,
+          3526,
+          "approach",
+          50,
+          50
+        ],
+        [
+          527357,
+          3523,
+          "approach",
+          610,
+          640
+        ],
+        [
+          527562,
+          3516,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          527794,
+          3541,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          528030,
+          3576,
+          "approach",
+          950,
+          990
+        ],
+        [
+          528235,
+          3647,
+          "approach",
+          820,
+          900
+        ],
+        [
+          528474,
+          3684,
+          "approach",
+          870,
+          950
+        ],
+        [
+          528722,
+          3710,
+          "approach",
+          880,
+          970
+        ],
+        [
+          528957,
+          3887,
+          "approach",
+          820,
+          950
+        ],
+        [
+          529225,
+          3956,
+          "approach",
+          840,
+          970
+        ],
+        [
+          529463,
+          3892,
+          "approach",
+          900,
+          1000
+        ],
+        [
+          529734,
+          3934,
+          "approach",
+          940,
+          1000
+        ],
+        [
+          529966,
+          4014,
+          "approach",
+          910,
+          1000
+        ],
+        [
+          530231,
+          4099,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          530460,
+          4118,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          530700,
+          4216,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          530952,
+          4265,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          531199,
+          4334,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          531457,
+          4392,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          531702,
+          4526,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          531932,
+          4580,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          532197,
+          4635,
+          "approach",
+          1000,
+          1000
+        ],
+        [
+          532432,
+          4693,
+          "approach",
+          880,
+          880
+        ],
+        [
+          532698,
+          4750,
+          "approach",
+          830,
+          870
+        ],
+        [
+          532951,
+          4841,
+          "approach",
+          640,
+          670
+        ],
+        [
+          533165,
+          4894,
+          "approach",
+          670,
+          730
+        ],
+        [
+          533390,
+          4945,
+          "approach",
+          660,
+          720
+        ],
+        [
+          533652,
+          5025,
+          "approach",
+          540,
+          590
+        ],
+        [
+          533913,
+          5151,
+          "approach",
+          560,
+          640
+        ],
+        [
+          534157,
+          5228,
+          "approach",
+          580,
+          670
+        ],
+        [
+          534371,
+          5303,
+          "approach",
+          340,
+          410
+        ],
+        [
+          534595,
+          5355,
+          "approach",
+          400,
+          480
+        ],
+        [
+          534798,
+          5413,
+          "approach",
+          240,
+          290
+        ],
+        [
+          535025,
+          5475,
+          "approach",
+          270,
+          340
+        ],
+        [
+          535233,
+          5522,
+          "approach",
+          290,
+          370
+        ],
+        [
+          535465,
+          5575,
+          "approach",
+          240,
+          300
+        ],
+        [
+          535729,
+          5644,
+          "approach",
+          240,
+          320
+        ],
+        [
+          535959,
+          5692,
+          "approach",
+          250,
+          340
+        ],
+        [
+          536209,
+          5768,
+          "approach",
+          150,
+          210
+        ],
+        [
+          536460,
+          5814,
+          "approach",
+          150,
+          210
+        ],
+        [
+          536708,
+          5835,
+          "approach",
+          130,
+          180
+        ],
+        [
+          536945,
+          5878,
+          "approach",
+          90,
+          130
+        ],
+        [
+          537211,
+          5924,
+          "approach",
+          110,
+          160
+        ],
+        [
+          537359,
+          5944,
+          "approach",
+          50,
+          70
+        ],
+        [
+          537457,
+          5978,
+          "hold",
+          0,
+          0
+        ],
+        [
+          537520,
+          5990,
+          "hold",
+          0,
+          0
+        ],
+        [
+          537725,
+          6007,
+          "hold",
+          0,
+          0
+        ],
+        [
+          537977,
+          6081,
+          "hold",
+          0,
+          0
+        ],
+        [
+          538218,
+          6095,
+          "hold",
+          0,
+          0
+        ],
+        [
+          538470,
+          6117,
+          "hold",
+          0,
+          0
+        ],
+        [
+          538683,
+          6148,
+          "hold",
+          0,
+          0
+        ],
+        [
+          538779,
+          6157,
+          "hold",
+          0,
+          0
+        ]
+      ]
+    }
+  ]
+}

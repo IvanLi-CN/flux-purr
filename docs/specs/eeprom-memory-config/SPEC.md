@@ -60,7 +60,7 @@
 - M24C64 与 FUSB302B 共用 `GPIO8/9` 时，record 写入和成功后的 EEPROM 验证必须以不超过 `16 bytes` 的 bounded chunk 执行；每个 EEPROM write-cycle delay 或验证 chunk 后必须先释放 EEPROM adapter 并服务 PD，再开始下一段。EEPROM 成功即完成本次持久化，不得同步 mirror 到任何 MCU 存储。
 - 日志不得输出 Wi-Fi 密码明文。
 - EEPROM 含有非 `0xFF` 数据但所有受支持槽都无法解码、CRC/结构无效或格式版本高于当前固件时，固件必须锁定 heater、PPS 与 calibration，并在前面板固定显示 `EEPROM DATA`、`INCOMPATIBLE`、`HEATER LOCKED`。全 `0xFF` EEPROM 视为空白，不显示该场景。
-- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、请求 fixed PD，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
+- USB JSONL 与仓库 devd CLI 必须提供高级原始维护操作：按 offset/length 有界读取、按 offset 原样写入和全片擦除。导出和导入必须逐字节覆盖完整 `8 KiB`，不得解析、迁移、过滤或绑定设备身份；原始字节不得写入 transport event 日志。原始写入或擦除开始前必须清除 debug/calibration PPS、锁定 heater/calibration、恢复 PD 模块定义的自动空闲供电合同并等待确认，并清除所有普通 record 写回 deadline；传输或验证失败后保持该锁，避免部分镜像重新供热或被普通持久化覆盖。擦除必须写入并回读验证全片 `0xFF`，且不得自动创建默认 record。
 
 ### SHOULD
 
@@ -87,7 +87,7 @@
 
 - `MemoryConfig` 是固件内部持久化模型。
 - `M24c64` 是固件内部 EEPROM adapter，提供 bounded read 与 page-bounded write。
-- EEPROM 原始维护仅通过 USB/devd lease 暴露，不进入设备 LAN API 或 Web 控制台；它是避免 EEPROM 数据丢失的高级兜底工具，不属于普通用户工作流。物理 heater 输出非零时固件必须拒绝维护操作。
+- EEPROM 原始维护仅通过 USB/devd lease 暴露，不进入设备 LAN API 或 Web 控制台；它是避免 EEPROM 数据丢失的高级兜底工具，不属于普通用户工作流。物理 heater 输出非零时固件必须拒绝维护操作。维护调用方在停热并清除 PPS override 后等待自动空闲供电请求的异步确认，等待上限为5秒；pending 不代表失败。只有确认成功才允许开始 EEPROM 写入或擦除，明确失败或超时均保持维护锁并拒绝写入。等待通过异步让出执行器完成，不持有 EEPROM 总线事务，也不改变 PD 模块的协商或 ticket 语义。
 - MCU Flash、NVS、raw sector、`flux_cfg` 与它们的 layout migration 不属于 `MemoryConfig` 合同。仓库根 `espflash.toml` 与支持的镜像布局不得安装配置 fallback 分区；历史内部 Flash record 不得读取、解码或迁移。EEPROM 在 MCU Flash 写入、擦除和恢复操作外，独立保持其物理内容。
 - ADC calibration payload 固定编码 RTD/VIN 两个 channel，各 `8` 个共享 sample slot，并额外编码 `slots.a` / `slots.b` 的 `gain + offset` 以及 `activeSlot`。owner-facing physical reference 继续与 ADC-domain points 分离保存，保证刷新后仍可按原值显示。
 - TLV 字段：
@@ -124,6 +124,11 @@
 - FPR2 只把 `0x32/0x33/0x34` 的两个 saved thermal profile 与 mode 写入 `ThermalPolicy`，把 `0x35`、`0x3b` 与 commissioning/ADC 字段写入 `SafetyCalibration`，把完整的 `0x3a` transient active transaction 写入 `ThermalPlant` 单槽域，把偏好和网络字段分别写入对应单槽域。`0x36`、`0x37` 仍只保留为历史稳态 thermal-plant 数据的 decode-only 标签，不得迁移、写入或解锁加热；`0x3a` 只有通过结构和物理完整性校验的结果才能成为 active，提交失败保持安全锁。
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
+
+### 固件调优候选保存回执
+
+- `pps5a` 固件调优候选先在 RAM preview 应用，设备确认实际生效的 canonical hash 与 `runId + candidateId + candidateHash + powerClass` 一致后才签发 preview receipt。seal 后的第二次 `confirm-save` 仅保存同一候选，不重新执行调优。
+- save receipt 必须由 FPR2 原子事务的 ACTIVE generation、已读回验证的 `pps5a` bank hash 和相同候选身份构成。写入、读回、hash 或身份不匹配不得报告为 `passed` 或 `saved`，并须保持 heater disarmed 与可复核故障。`thermal_plant_auto` 的独立 ThermalPlant 原子事务和外部 runner 的已有 preview/save 语义不因此改变。
 
 ## 验收标准（Acceptance Criteria）
 

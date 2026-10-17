@@ -593,6 +593,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
             radiation_mw_per_k4: Some(0.0002),
             thermal_capacity_mj_per_c: Some(42_000.0),
             transport_delay_ms: Some(500),
+            heat_response: None,
         }),
     }
 }
@@ -604,6 +605,7 @@ pub(crate) fn mock_identity(id: &str) -> Identity {
         firmware_version: "fw/v0.4.0-dev".to_string(),
         build_id: "devd-mock".to_string(),
         git_sha: "unknown".to_string(),
+        reset_reason: None,
         board: "esp32-s3".to_string(),
         api_version: "2026-05-29".to_string(),
         protocol_version: "flux-purr.usb.v1".to_string(),
@@ -672,10 +674,12 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         fan_display_state: "AUTO".to_string(),
         fan_enabled: true,
         fan_pwm_permille: 500,
+        fan_pad_observation: None,
         voltage_mv: 20_010,
         current_ma: 840,
         board_temp_centi: 3_840,
         rtd_raw_adc_mv: Some(1_123),
+        rtd_divider_supply_mv: None,
         rtd_raw_adc_min_mv: Some(1_122),
         rtd_raw_adc_max_mv: Some(1_124),
         rtd_raw_adc_spread_mv: Some(2),
@@ -763,10 +767,12 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         fan_display_state: "OFF".to_string(),
         fan_enabled: false,
         fan_pwm_permille: 0,
+        fan_pad_observation: None,
         voltage_mv: 0,
         current_ma: 0,
         board_temp_centi: -100,
         rtd_raw_adc_mv: None,
+        rtd_divider_supply_mv: None,
         rtd_raw_adc_min_mv: None,
         rtd_raw_adc_max_mv: None,
         rtd_raw_adc_spread_mv: None,
@@ -826,6 +832,7 @@ pub(crate) fn native_placeholder_identity() -> Identity {
         firmware_version: "unknown".to_string(),
         build_id: "native-serial-placeholder".to_string(),
         git_sha: "unknown".to_string(),
+        reset_reason: None,
         board: "unknown".to_string(),
         api_version: "2026-05-29".to_string(),
         protocol_version: "flux-purr.usb.v1".to_string(),
@@ -965,6 +972,8 @@ pub struct Identity {
     pub firmware_version: String,
     pub build_id: String,
     pub git_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_reason: Option<String>,
     pub board: String,
     pub api_version: String,
     pub protocol_version: String,
@@ -1068,6 +1077,13 @@ pub(crate) struct UsbWifiConfigReceipt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FanPadObservation {
+    pub enable_pad_high: bool,
+    pub pwm_pad_high: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ControlPlaneStatus {
     pub mode: String,
     pub uptime_seconds: u32,
@@ -1093,11 +1109,15 @@ pub struct ControlPlaneStatus {
     pub fan_display_state: String,
     pub fan_enabled: bool,
     pub fan_pwm_permille: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fan_pad_observation: Option<FanPadObservation>,
     pub voltage_mv: u32,
     pub current_ma: u32,
     pub board_temp_centi: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtd_divider_supply_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtd_raw_adc_min_mv: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1207,6 +1227,8 @@ pub struct AdcDiagnostics {
     pub rtd_raw_code_max: u16,
     pub rtd_raw_code_spread: u16,
     pub vin_raw_code_mean: u16,
+    #[serde(default)]
+    pub rtd_assumed_offset_uv: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]

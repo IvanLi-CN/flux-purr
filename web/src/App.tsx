@@ -264,6 +264,16 @@ function App() {
         return
       }
       const tab = next.calibrationTab ?? 'heater_curve'
+      if (tab === 'firmware_tuning') {
+        await navigate({
+          to: '/devices/$deviceId/calibration/firmware-tuning',
+          params,
+          search,
+          replace: options?.replace,
+          ignoreBlocker: options?.ignoreBlocker,
+        })
+        return
+      }
       if (tab === 'rtd_adc') {
         await navigate({
           to: '/devices/$deviceId/calibration/rtd-adc',

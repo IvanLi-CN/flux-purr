@@ -156,6 +156,7 @@ struct ParsedHttpHeader {
     lease_id: Option<String<32>>,
     expected_revision: Option<u32>,
     after_sample: Option<u8>,
+    after_sequence: Option<u32>,
     private_network: bool,
     content_length: usize,
 }
@@ -170,6 +171,7 @@ impl ParsedHttpHeader {
             lease_id: self.lease_id.as_ref().map(String::as_str),
             expected_revision: self.expected_revision,
             after_sample: self.after_sample,
+            after_sequence: self.after_sequence,
             request_private_network: self.private_network,
             body,
             entropy: random_entropy(),
@@ -1166,6 +1168,7 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
         lease_id: None,
         expected_revision: None,
         after_sample: None,
+        after_sequence: None,
         private_network: false,
         content_length: 0,
     };
@@ -1183,10 +1186,19 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
     let target = request_line.next().unwrap_or("");
     let mut target_parts = target.splitn(2, '?');
     let _ = parsed.path.push_str(target_parts.next().unwrap_or(""));
-    parsed.after_sample = target_parts.next().and_then(|query| {
+    let query = target_parts.next().unwrap_or("");
+    parsed.after_sample = Some(query).and_then(|query| {
         query.split('&').find_map(|pair| {
             let (key, value) = pair.split_once('=')?;
             (key == "after_sample")
+                .then(|| value.parse().ok())
+                .flatten()
+        })
+    });
+    parsed.after_sequence = Some(query).and_then(|query| {
+        query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=')?;
+            matches!(key, "after_sequence" | "afterSequence")
                 .then(|| value.parse().ok())
                 .flatten()
         })

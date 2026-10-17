@@ -73,6 +73,7 @@
   - `slots.b`
   - `activeSlot`
 - `0` 个样本时拟合建议固定为 `gain=1`、`offset=0`。
+- 用户 ADC 校准是可选项；未提供样本时首次设置和热模型/参数调优不得要求人工两点校准，也不得生成 identity sample 冒充用户输入。运行时使用缺省激活槽位校正；用户显式保存的槽位继续按原契约生效，芯片 eFuse ADC 校准及传感器故障保护保持独立。
 - `1` 个样本时拟合建议必须固定 `gain=1`，只计算 `offset = expected - observed`。
 - `>=2` 个样本时拟合建议使用共享样本做线性拟合。
 - 样本不足时不得混入默认 identity point。
@@ -255,6 +256,7 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - Given `thermal_plant_auto` starts, When each current stage reaches equilibrium, Then firmware records a classified raw boundary point, performs the bounded 3A coverage probe, and advances by 100mA; a 220°C sample disables the MOS immediately and records cutoff. Completion fits and atomically persists the current-format boundary/model pair after cooling.
 - Given `thermal_plant_auto` completes with a physically valid result, When EEPROM commit and readback succeed, Then a firmware restart restores the active result and its transaction identity; if the commit fails, the result is not admitted for heating.
 - Given a legacy heater curve or resistance-derived thermal model, When boot/preview/save/normal heating reads it, Then it is absent or rejected and cannot restore heating. Independent ADC calibration and user/network preferences remain available.
+- The bounded trace retains electrical edges and 500ms opportunities during the first 10s after cutoff. Sample times derive from the job’s monotonic start on the 50ms storage grid; delayed control frames cannot distort model units or create duplicate cells. Legacy resistance anchors are not used.
 - Given any calibration mode switch is still on, When the operator attempts a page-internal view/device/calibration-tab change, Then Web blocks that navigation and shows an inline prompt near the switch to close calibration mode first before continuing.
 
 ## 非功能性验收 / 质量门槛

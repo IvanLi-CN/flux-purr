@@ -39,6 +39,8 @@ pub(crate) fn usb_runtime_status_with_calibration(
         frontpanel_key,
     );
     populate_status_measurements(&mut status, ui_state, &context);
+    status.adc_diagnostics.rtd_assumed_offset_uv =
+        rtd_assumed_adc_offset_uv(memory_config, RTD_ASSUMED_ADC_OFFSET_UV);
     populate_status_contract(&mut status, &context, pd_contract_mv, pd_state);
     populate_status_control_and_faults(&mut status, ui_state, &context);
     populate_status_calibration(&mut status, ui_state, memory_config, calibration, &context);
@@ -57,6 +59,7 @@ pub(crate) fn populate_status_measurements(
     status.fan_policy_source = ui_state.fan_policy_source;
     status.fan_output_level = ui_state.fan_output_level;
     status.rtd_raw_adc_mv = context.latest_rtd_raw_adc_mv;
+    status.rtd_divider_supply_mv = Some(RTD_DIVIDER_SUPPLY_MV);
     status.rtd_raw_adc_min_mv = context.latest_rtd_raw_adc_min_mv;
     status.rtd_raw_adc_max_mv = context.latest_rtd_raw_adc_max_mv;
     status.rtd_raw_adc_spread_mv = context
@@ -166,6 +169,7 @@ pub(crate) fn populate_status_control_and_faults(
         let _ = value.push_str(reason.label());
         value
     });
+    status.heater_power_backend = error_code_string(context.heater_power_backend.label());
     status.fault_attention_pending = context.attention_pending_after_fault_clear;
     status.persistence_fault = ui_state.persistence_fault.clone();
     status.persistence_fault_attention_pending = ui_state.persistence_fault_attention_pending;
@@ -182,6 +186,10 @@ pub(crate) fn populate_status_control_and_faults(
     status.heater_coast_active = context.pid_snapshot.coast_active;
     status.heater_control_interval_ms = context.heater_control_timing.interval_ms;
     status.heater_control_cycle_ms = context.heater_control_timing.cycle_ms;
+    #[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+    {
+        status.fan_pad_observation = Some(observe_fan_pads());
+    }
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
@@ -1153,6 +1161,15 @@ pub(crate) fn record_thermal_plant_transient_sample(
     if elapsed_ticks > flux_purr_firmware::memory::THERMAL_PLANT_SUPPLY_MAX_TICKS {
         return false;
     }
+    // Persisted time cells must be unique even when the control loop catches up.
+    if job.sample_count > 0 && elapsed_ticks <= job.last_saved_tick {
+        return true;
+    }
+    let cutoff_time_sample = job.phase == ThermalPlantAutoPhase::Cooling
+        && job.elapsed_ticks.saturating_sub(job.phase_started_tick) <= 200
+        && elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10;
+    let temperature_step_sample = elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10
+        && (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
     let electrical_change = job.sample_count > 0 && {
         let previous = job.samples[usize::from(job.sample_count) - 1];
         previous.duty_percent != duty_percent
@@ -1161,8 +1178,9 @@ pub(crate) fn record_thermal_plant_transient_sample(
     };
     let should_record = force
         || electrical_change
-        || job.sample_count < 24
-        || (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
+        || job.sample_count < 16
+        || cutoff_time_sample
+        || temperature_step_sample;
     if !should_record {
         return true;
     }
@@ -1285,48 +1303,147 @@ pub(crate) fn transient_fit_row(
     delay_ticks: u16,
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
-    const MIN_DERIVATIVE_WINDOW_TICKS: u32 = 10;
-    let previous_index = (0..index).rev().find(|candidate| {
-        samples[index]
-            .elapsed_ticks
-            .saturating_sub(samples[*candidate].elapsed_ticks)
-            >= MIN_DERIVATIVE_WINDOW_TICKS
-    })?;
-    let dt_ticks = samples[index]
-        .elapsed_ticks
-        .saturating_sub(samples[previous_index].elapsed_ticks);
-    // A sparse trace cannot reconstruct power changes across long discarded
-    // sweep/equilibrium intervals. Do not fit a derivative to that gap.
-    if dt_ticks > 200 {
+    let previous_index = transient_fit_previous_index(samples, index)?;
+    if samples[previous_index.saturating_sub(1)..=index]
+        .windows(2)
+        .any(|pair| pair[1].elapsed_ticks.saturating_sub(pair[0].elapsed_ticks) > 200)
+    {
         return None;
     }
-    let delayed_tick = samples[index]
-        .elapsed_ticks
-        .saturating_sub(u32::from(delay_ticks));
-    let delayed_index = (0..index)
-        .rev()
-        .find(|candidate| samples[*candidate].elapsed_ticks <= delayed_tick)?;
-    let mid_temp_c = (temperatures_c[index] + temperatures_c[previous_index]) * 0.5;
     let ambient_kelvin = ambient_temp_c + 273.15;
-    let kelvin = mid_temp_c + 273.15;
-    Some((
-        [
-            (temperatures_c[index] - temperatures_c[previous_index])
-                / (dt_ticks as f32 * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0),
-            (mid_temp_c - ambient_temp_c).max(0.0),
-            kelvin.powi(4) - ambient_kelvin.powi(4),
-        ],
-        powers_mw[delayed_index],
-    ))
+    let mut values = [0.0; 3];
+    let mut energy_mj = 0.0;
+    // Average two complete energy balances, never interpolate energy at the
+    // temperature endpoints' time centroid: the centroid can straddle cutoff.
+    // Delta-T, passive losses and delayed input must share the same windows.
+    for offset in 0..=1 {
+        let first = previous_index.saturating_sub(offset);
+        let last = index.saturating_sub(offset);
+        let start = samples[first].elapsed_ticks as f32;
+        let end = samples[last].elapsed_ticks as f32;
+        let power_mw =
+            transient_mean_delayed_power_mw(samples, powers_mw, start, end, delay_ticks)?;
+        energy_mj += power_mw * (end - start) * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0;
+        values[0] += temperatures_c[last] - temperatures_c[first];
+        for at in first + 1..=last {
+            let dt_s = (samples[at].elapsed_ticks - samples[at - 1].elapsed_ticks) as f32
+                * HEATER_CONTROL_INTERVAL_MS as f32
+                / 1_000.0;
+            let left = temperatures_c[at - 1];
+            let right = temperatures_c[at];
+            values[1] +=
+                ((left - ambient_temp_c).max(0.0) + (right - ambient_temp_c).max(0.0)) * 0.5 * dt_s;
+            values[2] += ((left + 273.15).powi(4) + (right + 273.15).powi(4)
+                - 2.0 * ambient_kelvin.powi(4))
+                * 0.5
+                * dt_s;
+        }
+    }
+    Some((values.map(|value| value * 0.5), energy_mj * 0.5))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn transient_fit_previous_index(
+    samples: &[ThermalPlantTransientSample],
+    index: usize,
+) -> Option<usize> {
+    const MIN_DERIVATIVE_WINDOW_TICKS: f32 = 10.0;
+    let endpoint_ticks = |at: usize| {
+        let before = at.saturating_sub(1);
+        ((samples[at].elapsed_ticks as f32) + (samples[before].elapsed_ticks as f32)) * 0.5
+    };
+    let end_ticks = endpoint_ticks(index);
+    (0..index)
+        .rev()
+        .find(|candidate| end_ticks - endpoint_ticks(*candidate) >= MIN_DERIVATIVE_WINDOW_TICKS)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn transient_mean_delayed_power_mw(
+    samples: &[ThermalPlantTransientSample],
+    powers_mw: &[f32],
+    start_ticks: f32,
+    end_ticks: f32,
+    delay_ticks: u16,
+) -> Option<f32> {
+    if end_ticks <= start_ticks || samples.len() != powers_mw.len() {
+        return None;
+    }
+    let start = start_ticks - f32::from(delay_ticks);
+    let end = end_ticks - f32::from(delay_ticks);
+    let mut energy_mw_ticks = 0.0;
+    for index in 1..samples.len() {
+        let left = samples[index - 1].elapsed_ticks as f32;
+        let right = samples[index].elapsed_ticks as f32;
+        if right <= left {
+            return None;
+        }
+        let overlap_start = start.max(left);
+        let overlap_end = end.min(right);
+        if overlap_end <= overlap_start {
+            continue;
+        }
+        let before = samples[index - 1];
+        let after = samples[index];
+        // VIN changes continuously under the calibration's fixed PPS request,
+        // including current limiting. Only a duty change is a command edge.
+        let power = if before.duty_percent == after.duty_percent {
+            let mean_fraction = ((overlap_start + overlap_end) * 0.5 - left) / (right - left);
+            powers_mw[index - 1] + (powers_mw[index] - powers_mw[index - 1]) * mean_fraction
+        } else {
+            powers_mw[index - 1]
+        };
+        energy_mw_ticks += power * (overlap_end - overlap_start);
+    }
+    Some(energy_mw_ticks / (end_ticks - start_ticks))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) struct TransientFitData {
     samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     count: usize,
-    ambient_temp_c: f32,
-    temperatures_c: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     powers_mw: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    input_energy_mw_ticks: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    rows: [Option<([f32; 3], u8)>; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+impl TransientFitData {
+    fn input_energy_at(&self, elapsed_ticks: f32) -> f32 {
+        let samples = &self.samples[..self.count];
+        if elapsed_ticks <= (samples[0].elapsed_ticks as f32) {
+            return 0.0;
+        }
+        let index =
+            samples.partition_point(|sample| (sample.elapsed_ticks as f32) <= elapsed_ticks) - 1;
+        let mut energy = self.input_energy_mw_ticks[index];
+        if index + 1 < self.count {
+            let width = (samples[index + 1].elapsed_ticks - samples[index].elapsed_ticks) as f32;
+            let overlap = elapsed_ticks - (samples[index].elapsed_ticks as f32);
+            let mut mean_power = self.powers_mw[index];
+            if samples[index].duty_percent == samples[index + 1].duty_percent {
+                mean_power += (self.powers_mw[index + 1] - mean_power) * overlap / width * 0.5;
+            }
+            energy += mean_power * overlap;
+        }
+        energy
+    }
+
+    pub(crate) fn row(&self, index: usize, delay_ticks: u16) -> Option<([f32; 3], f32)> {
+        let (values, previous_index) = self.rows[index]?;
+        let mut energy = 0.0;
+        for offset in 0..=1 {
+            let first = usize::from(previous_index).saturating_sub(offset);
+            let last = index.saturating_sub(offset);
+            let shift = f32::from(delay_ticks);
+            energy += self.input_energy_at((self.samples[last].elapsed_ticks as f32) - shift)
+                - self.input_energy_at((self.samples[first].elapsed_ticks as f32) - shift);
+        }
+        Some((
+            values,
+            energy * 0.5 * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
+        ))
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1344,8 +1461,8 @@ pub(crate) fn prepare_transient_fit(
     let ambient_temp_c = projected_rtd_temperature_c(memory_config, ambient_raw_rtd_adc_mv)?;
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-    let mut powered_max_temp_c = f32::MIN;
-    let mut powered_peak_index = None;
+    let mut input_energy_mw_ticks = [0.0; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut rows = [None; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..count].iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
         let power_mw =
@@ -1353,18 +1470,36 @@ pub(crate) fn prepare_transient_fit(
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
             return None;
         }
-        if sample.duty_percent == 100 && temperature_c > powered_max_temp_c {
-            powered_max_temp_c = temperature_c;
-            powered_peak_index = Some(index);
-        }
         temperatures_c[index] = temperature_c;
         powers_mw[index] = power_mw;
+        if index > 0 {
+            let ticks = sample
+                .elapsed_ticks
+                .checked_sub(samples[index - 1].elapsed_ticks)?;
+            if ticks == 0 {
+                return None;
+            }
+            let mean_power = if samples[index - 1].duty_percent == sample.duty_percent {
+                (powers_mw[index - 1] + power_mw) * 0.5
+            } else {
+                powers_mw[index - 1]
+            };
+            input_energy_mw_ticks[index] =
+                input_energy_mw_ticks[index - 1] + mean_power * ticks as f32;
+        }
     }
-    let powered_peak_index = powered_peak_index?;
+    let accepted = transient_temperature_acceptance(&samples[..count], &temperatures_c[..count]);
+    let powered_peak_index = (0..count)
+        .filter(|index| accepted[*index] && samples[*index].duty_percent == 100)
+        .max_by(|left, right| temperatures_c[*left].total_cmp(&temperatures_c[*right]))?;
     let last_sample_is_cooling = samples[..count]
         .last()
         .is_some_and(|sample| sample.duty_percent == 0);
-    if powered_max_temp_c < 100.0
+    if !thermal_plant_heating_sample_covers_minimum(
+        memory_config,
+        samples[powered_peak_index].raw_rtd_adc_mv,
+    ) || !accepted[0]
+        || !accepted[count - 1]
         || (temperatures_c[0] - ambient_temp_c).abs() > 8.0
         || powered_peak_index + 1 >= count
         || !last_sample_is_cooling
@@ -1372,13 +1507,90 @@ pub(crate) fn prepare_transient_fit(
     {
         return None;
     }
+    for (index, row) in rows[..count].iter_mut().enumerate().skip(1) {
+        let Some(previous_index) = transient_fit_previous_index(&samples[..count], index) else {
+            continue;
+        };
+        if accepted[previous_index.saturating_sub(1)..=index].contains(&false) {
+            continue;
+        }
+        if let Some((values, _)) = transient_fit_row(
+            &samples[..count],
+            &temperatures_c[..count],
+            &powers_mw[..count],
+            index,
+            0,
+            ambient_temp_c,
+        ) {
+            *row = Some((values, previous_index as u8));
+        }
+    }
     Some(TransientFitData {
         samples: *samples,
         count,
-        ambient_temp_c,
-        temperatures_c,
         powers_mw,
+        input_energy_mw_ticks,
+        rows,
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn transient_temperature_acceptance(
+    samples: &[ThermalPlantTransientSample],
+    temperatures_c: &[f32],
+) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {
+    const COOLING_RISE_GRACE_TICKS: u32 = 200; // 10s on the persisted 50ms grid.
+    const COOLING_RISE_TOLERANCE_C: f32 = 1.0;
+    const HEATING_CONTACT_EXCURSION_TOLERANCE_C: f32 = 3.0;
+    let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut previous_accepted_index = 0;
+    let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
+        index > 0
+            && sample.duty_percent == 0
+            && samples[..index]
+                .iter()
+                .any(|previous| previous.duty_percent > 0)
+    });
+    for index in 1..samples.len() {
+        let elapsed_s = (samples[index].elapsed_ticks
+            - samples[previous_accepted_index].elapsed_ticks) as f32
+            * HEATER_CONTROL_INTERVAL_MS as f32
+            / 1_000.0;
+        let slew_violation = (temperatures_c[index] - temperatures_c[previous_accepted_index])
+            .abs()
+            > RTD_CONTROL_MAX_SLEW_C_PER_S * elapsed_s;
+        let late_cooling_rise = cooling_start_index.is_some_and(|start| {
+            samples[index].duty_percent == 0
+                && samples[index]
+                    .elapsed_ticks
+                    .saturating_sub(samples[start].elapsed_ticks)
+                    >= COOLING_RISE_GRACE_TICKS
+                && temperatures_c[index] - temperatures_c[previous_accepted_index]
+                    > COOLING_RISE_TOLERANCE_C
+        });
+        let heating_contact_excursion = index + 1 < samples.len()
+            && samples[index - 1].duty_percent > 0
+            && samples[index].duty_percent > 0
+            && samples[index + 1].duty_percent > 0
+            && ((temperatures_c[index] - temperatures_c[index - 1]
+                > HEATING_CONTACT_EXCURSION_TOLERANCE_C
+                && temperatures_c[index] - temperatures_c[index + 1]
+                    > HEATING_CONTACT_EXCURSION_TOLERANCE_C)
+                || (temperatures_c[index - 1] - temperatures_c[index]
+                    > HEATING_CONTACT_EXCURSION_TOLERANCE_C
+                    && temperatures_c[index + 1] - temperatures_c[index]
+                        > HEATING_CONTACT_EXCURSION_TOLERANCE_C));
+        if slew_violation || late_cooling_rise || heating_contact_excursion {
+            // A rejected reading cannot move the origin for the next sample.
+            // Preserve every raw sample and applied-power interval for audit. The
+            // local heating excursion guard catches contact peaks/valleys whose
+            // individual slew stays below the absolute-rate threshold.
+            accepted[index] = false;
+        } else {
+            previous_accepted_index = index;
+        }
+    }
+    accepted
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1389,14 +1601,7 @@ pub(crate) fn transient_fit_scales(
     let mut scale_sums = [0.0_f32; 3];
     let mut row_count = 0usize;
     for index in 1..data.count {
-        if let Some((values, _)) = transient_fit_row(
-            &data.samples[..data.count],
-            &data.temperatures_c[..data.count],
-            &data.powers_mw[..data.count],
-            index,
-            delay_ticks,
-            data.ambient_temp_c,
-        ) {
+        if let Some((values, _)) = data.row(index, delay_ticks) {
             for column in 0..3 {
                 scale_sums[column] += values[column] * values[column];
             }
@@ -1427,14 +1632,7 @@ pub(crate) fn transient_fit_normal_matrix(
     let mut power_sum_sq = 0.0_f32;
     let mut row_count = 0usize;
     for index in 1..data.count {
-        let Some((values, target)) = transient_fit_row(
-            &data.samples[..data.count],
-            &data.temperatures_c[..data.count],
-            &data.powers_mw[..data.count],
-            index,
-            delay_ticks,
-            data.ambient_temp_c,
-        ) else {
+        let Some((values, target)) = data.row(index, delay_ticks) else {
             continue;
         };
         let normalized = [
@@ -1499,14 +1697,7 @@ pub(crate) fn transient_projection_for_delay(
         ];
         let mut residual_sum_sq = 0.0_f32;
         for index in 1..data.count {
-            let Some((values, target)) = transient_fit_row(
-                &data.samples[..data.count],
-                &data.temperatures_c[..data.count],
-                &data.powers_mw[..data.count],
-                index,
-                delay_ticks,
-                data.ambient_temp_c,
-            ) else {
+            let Some((values, target)) = data.row(index, delay_ticks) else {
                 continue;
             };
             let predicted = coefficients[0] * values[0]
@@ -1636,6 +1827,33 @@ pub(crate) struct CalibrationJobUpdateInput {
     pub(crate) confirmed_voltage_mv: Option<u16>,
     pub(crate) latest_vin_mv: u32,
     pub(crate) heater_duty_percent: u8,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CalibrationElapsedClock {
+    remainder_ms: u64,
+    run_id: Option<u32>,
+}
+
+#[cfg(test)]
+impl CalibrationElapsedClock {
+    pub(crate) fn advance_for_run(&mut self, run_id: Option<u32>, elapsed_ms: u64) -> u32 {
+        if run_id != self.run_id {
+            self.remainder_ms = 0;
+            self.run_id = run_id;
+        }
+        if run_id.is_none() {
+            return 0;
+        }
+        self.advance(elapsed_ms)
+    }
+
+    pub(crate) fn advance(&mut self, elapsed_ms: u64) -> u32 {
+        let elapsed_ms = elapsed_ms.saturating_add(self.remainder_ms);
+        self.remainder_ms = elapsed_ms % HEATER_CONTROL_INTERVAL_MS;
+        (elapsed_ms / HEATER_CONTROL_INTERVAL_MS).min(u64::from(u32::MAX)) as u32
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2593,6 +2811,7 @@ fn usb_frame_request_id(
         UsbFrame::Request { request_id, .. }
         | UsbFrame::WifiConfig { request_id, .. }
         | UsbFrame::RuntimeConfig { request_id, .. }
+        | UsbFrame::ThermalTuning { request_id, .. }
         | UsbFrame::CalibrationConfig { request_id, .. }
         | UsbFrame::CalibrationJob { request_id, .. }
         | UsbFrame::ThermalPlantRun { request_id, .. }
@@ -3051,7 +3270,13 @@ pub(crate) fn usb_response(
 pub(crate) fn hardware_identity() -> Identity {
     #[cfg(target_arch = "xtensa")]
     {
-        Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address())
+        let mut identity = Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address());
+        let reason = reset_reason_log_line(esp_hal::system::reset_reason())
+            .trim()
+            .strip_prefix("reset_reason=")
+            .unwrap_or("unknown");
+        identity.reset_reason = Some(reason.try_into().expect("hardware reset reason fits"));
+        identity
     }
     #[cfg(not(target_arch = "xtensa"))]
     {
@@ -3212,6 +3437,7 @@ pub(crate) fn usb_early_response(line: &str, memory_config: &MemoryConfig) -> Us
         }
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::ThermalTuning { request_id, .. })
         | Ok(UsbFrame::CalibrationJob { request_id, .. })
         | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
@@ -3297,6 +3523,12 @@ pub(crate) fn usb_early_request_response(
         UsbRequestOp::GetHeaterCurve => usb_response(
             request_id,
             UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::GetThermalTuning => usb_error_response_with_retryable(
+            request_id,
+            "startup_busy",
+            "Thermal tuning is not available until hardware initialization completes.",
+            true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
@@ -3538,6 +3770,7 @@ pub(crate) fn usb_recovery_response(
         }
         Ok(UsbFrame::WifiConfig { request_id, .. })
         | Ok(UsbFrame::RuntimeConfig { request_id, .. })
+        | Ok(UsbFrame::ThermalTuning { request_id, .. })
         | Ok(UsbFrame::CalibrationConfig { request_id, .. }) => usb_error_response_with_retryable(
             request_id,
             "hardware_bringup_failed",
@@ -3626,6 +3859,12 @@ pub(crate) fn usb_recovery_request_response(
         UsbRequestOp::GetHeaterCurve => usb_response(
             request_id,
             UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(memory_config, None)),
+        ),
+        UsbRequestOp::GetThermalTuning => usb_error_response_with_retryable(
+            request_id,
+            "hardware_bringup_failed",
+            "Thermal tuning is unavailable because hardware bring-up did not complete.",
+            true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
         UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(

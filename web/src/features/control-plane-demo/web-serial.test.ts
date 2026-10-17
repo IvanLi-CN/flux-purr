@@ -418,6 +418,27 @@ describe('web serial control-plane client', () => {
 
     await client.disconnect()
   })
+
+  it('reads firmware thermal tuning events through the same device command frame', async () => {
+    const fake = new FakeSerial()
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+    await client.connect()
+
+    const status = await client.thermalTuning({
+      op: 'read',
+      runId: 'run-5a',
+      afterSequence: 3,
+    })
+
+    expect(fake.requests.at(-1)).toMatchObject({
+      type: 'thermal_tuning',
+      op: 'read',
+      runId: 'run-5a',
+      afterSequence: 3,
+    })
+    expect(status).toMatchObject({ runId: 'run-5a', phase: 'hold' })
+    await client.disconnect()
+  })
 })
 
 class FakeSerial implements BrowserSerial {
@@ -786,6 +807,20 @@ class RetriableCloseSerialPort implements BrowserSerialPort {
 
 function responseFor(request: Record<string, unknown>) {
   const requestId = request.requestId
+  if (request.type === 'thermal_tuning') {
+    return {
+      type: 'response',
+      requestId,
+      ok: true,
+      result: {
+        thermal_tuning: {
+          runId: request.runId ?? null,
+          phase: 'hold',
+          events: { events: [], nextSequence: null, trace: { complete: false, gap: false } },
+        },
+      },
+    }
+  }
   if (request.type === 'request' && request.op === 'get_identity') {
     return { type: 'response', requestId, ok: true, result: { identity } }
   }

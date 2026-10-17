@@ -1,8 +1,24 @@
 #[allow(unused_imports)]
 use super::*;
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const PD_SERVICE_TICK_MS: u64 = 5;
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const PD_SERVICE_BUSY_RETRY_MS: u64 = 1;
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static mut PD_REALTIME_EXECUTOR_STORAGE: MaybeUninit<InterruptExecutor<2>> =
+    MaybeUninit::uninit();
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pd_service_delay_ms(elapsed_ms: u64, acquired_bus: bool) -> u64 {
+    if acquired_bus {
+        PD_SERVICE_TICK_MS.saturating_sub(elapsed_ms).max(1)
+    } else {
+        PD_SERVICE_BUSY_RETRY_MS
+    }
+}
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[allow(dead_code)]
@@ -750,33 +766,45 @@ async fn publish_busy_pd_service_turn(
 
 /// The sole owner of FUSB302B policy state and physical PD I2C transactions.
 /// Every loop turn does bounded work, releases the shared bus, and then yields
-/// to its own cadence timer. This task deliberately stays out of interrupt
-/// context because FUSB302B protocol recovery has a deep call stack.
+/// to its own cadence timer. The priority-3 executor preempts lower-priority
+/// application work while the shared I2C bus remains non-blocking.
 #[cfg(target_arch = "xtensa")]
 #[embassy_executor::task]
-async fn pd_service_task(mut i2c: PdI2c<'static>, mut runtime: Box<Fusb302bRuntime>) {
+async fn pd_service_task(bus_address: usize, mut runtime: Box<Fusb302bRuntime>) {
+    assert!(matches!(
+        esp_hal::system::Cpu::current(),
+        esp_hal::system::Cpu::ProCpu
+    ));
+    // The bus is initialized once on CPU0 and never moved. Both executors run
+    // on CPU0; the async mutex serializes access across interrupt preemption.
+    let bus = unsafe { &*(bus_address as *const SharedI2cBus) };
+    let mut i2c = PdI2c::new(bus);
     let mut pending: Option<(PowerTicket, PendingPdOperation)> = None;
     loop {
-        if i2c.try_acquire() {
+        let turn_started_ms = Instant::now().as_millis();
+        let acquired_bus = i2c.try_acquire();
+        if acquired_bus {
             run_pd_service_turn(&mut i2c, &mut runtime, &mut pending).await;
         } else {
             // Clear authorization immediately, but do not count this skipped
             // turn as PD progress for the watchdog.
             publish_busy_pd_service_turn(&runtime, &mut pending).await;
         }
-        EmbassyTimer::after_millis(PD_SERVICE_TICK_MS).await;
+        let elapsed_ms = Instant::now().as_millis().saturating_sub(turn_started_ms);
+        let delay_ms = pd_service_delay_ms(elapsed_ms, acquired_bus);
+        EmbassyTimer::after_millis(delay_ms).await;
     }
 }
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn spawn_pd_service(
-    spawner: Spawner,
-    mut i2c: PdI2c<'static>,
+    spawner: embassy_executor::SendSpawner,
+    i2c: PdI2c<'static>,
     runtime: Box<Fusb302bRuntime>,
 ) {
-    i2c.release();
+    let bus_address = i2c.into_bus_address();
     spawn_power_coordinator(spawner);
     spawner
-        .spawn(pd_service_task(i2c, runtime))
+        .spawn(pd_service_task(bus_address, runtime))
         .expect("failed to spawn PD service task");
 }

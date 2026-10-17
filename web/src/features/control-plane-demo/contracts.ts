@@ -31,6 +31,7 @@ export interface Identity {
   firmwareVersion: string
   buildId: string
   gitSha: string
+  resetReason?: string
   board: string
   apiVersion: string
   protocolVersion: string
@@ -206,6 +207,124 @@ export interface ThermalPlantRunSnapshot {
   tracePage: ThermalPlantTracePage
   provisionalCurve?: ThermalPlantProvisionalCurve | null
   activeResult?: ThermalPlantActiveResult | null
+}
+
+export type ThermalTuningPowerClass = 'pps3a' | 'pps5a'
+export type ThermalTuningCommandOp = 'start' | 'cancel' | 'seal' | 'confirm_save' | 'read'
+export type ThermalTuningPhase =
+  | 'idle'
+  | 'warmup'
+  | 'approach'
+  | 'hold'
+  | 'cooldown'
+  | 'sealed'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+export type ThermalTuningTrialPurpose =
+  | 'scout'
+  | 'batch_current'
+  | 'batch_predicted'
+  | 'hold_confirm'
+
+export interface ThermalTuningCommand {
+  leaseId: string
+  op: ThermalTuningCommandOp
+  runId?: string
+  candidateId?: string
+  candidateHash?: string
+  powerClass?: ThermalTuningPowerClass
+  targetsC?: number[]
+  afterSequence?: number
+  candidateProfile?: Record<string, unknown>
+}
+
+export interface ThermalTuningTrace {
+  firstSequence: number | null
+  lastSequence: number | null
+  complete: boolean
+  digest: string
+  gap: boolean
+}
+
+export interface ThermalTuningSample {
+  sequence: number
+  elapsedMs: number
+  targetC: number
+  trialIndex: number
+  candidateId: string
+  candidateHash: string
+  temperatureCentiC: number
+  rawTemperatureCentiC?: number
+  vinMv: number
+  ppsContract: {
+    voltageMv: number
+    currentMa: number
+    kind: ThermalTuningPowerClass
+    confirmed: boolean
+  }
+  requestedMv: number
+  ppsPowerCeilingMv: number
+  heaterRequestedOutputPermille: number
+  heaterOutputPermille: number
+  measurementValid: boolean
+  measurementAccepted?: boolean
+  phase: ThermalTuningPhase
+  fan?: { enabled: boolean; pwmPermille: number; outputLevel: FanOutputLevel }
+}
+
+export interface ThermalTuningEvent {
+  sequence: number
+  elapsedMs: number
+  kind: 'sample' | 'phase_transition' | 'candidate_trial' | 'decision' | 'safety'
+  phase: ThermalTuningPhase
+  targetC: number | null
+  trialIndex: number | null
+  sample: ThermalTuningSample | null
+  reason: string | null
+  trial: Record<string, unknown> | null
+  decision: Record<string, unknown> | null
+}
+
+export interface ThermalTuningReceipt {
+  runId: string
+  candidateId: string
+  candidateHash: string
+  powerClass: ThermalTuningPowerClass
+  bank: ThermalTuningPowerClass
+  bankRevision: number
+  bankHash: string
+  atomic: boolean
+  readbackVerified: boolean
+}
+
+export interface ThermalTuningStatus {
+  phase: ThermalTuningPhase
+  trialPurpose: ThermalTuningTrialPurpose
+  terminalDisposition: 'running' | 'candidate_ready' | 'passed' | 'failed' | 'canceled'
+  reviewDisposition: 'pending' | 'complete' | 'review_incomplete'
+  powerClass: ThermalTuningPowerClass | null
+  ppsControlPolicyVersion?: string | null
+  ppsVoltageBounds?: {
+    absoluteMinMv: number
+    absoluteMaxMv: number
+    policyFloorMv: number
+    apdoMinMv: number | null
+    apdoMaxMv: number | null
+  } | null
+  runId: string | null
+  candidateId: string | null
+  candidateHash: string | null
+  targetsC: number[]
+  targetIndex: number
+  armed: boolean
+  sealed: boolean
+  saveConfirmed: boolean
+  candidateProfile: Record<string, unknown> | null
+  previewReceipt: Record<string, unknown> | null
+  trace: ThermalTuningTrace
+  events: { events: ThermalTuningEvent[]; nextSequence: number | null; trace: ThermalTuningTrace }
+  saveReceipt: ThermalTuningReceipt | null
 }
 
 export interface ApiErrorEnvelope {
@@ -541,6 +660,11 @@ export interface UsbThermalPlantRunFrame {
   type: 'thermal_plant_run'
   requestId: string
   afterSample?: number
+}
+
+export interface UsbThermalTuningFrame extends Omit<ThermalTuningCommand, 'leaseId'> {
+  type: 'thermal_tuning'
+  requestId: string
 }
 
 export interface UsbCalibrationConfigFrame {

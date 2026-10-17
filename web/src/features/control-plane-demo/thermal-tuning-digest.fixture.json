@@ -1,0 +1,54 @@
+[
+  {
+    "sequence": 0,
+    "elapsedMs": 0,
+    "kind": "safety",
+    "phase": "failed",
+    "targetC": null,
+    "trialIndex": null,
+    "sample": null,
+    "reason": "pps3a_not_supported",
+    "trial": null,
+    "decision": null
+  },
+  {
+    "sequence": 1,
+    "elapsedMs": 74000,
+    "kind": "decision",
+    "phase": "hold",
+    "targetC": 60,
+    "trialIndex": 1,
+    "sample": null,
+    "reason": "candidate_adopted",
+    "trial": null,
+    "decision": {
+      "disposition": "adopted",
+      "purpose": "hold_confirm",
+      "maxOvershootCentiC": 125,
+      "holdPeakToPeakCentiC": 155,
+      "settleTimeMs": 12000,
+      "score": [0, 1, 1.25, 2, 3.5, 4, 5.25, 6, 7.5, 8, 9.25],
+      "warmupFull": true,
+      "approachToHold": true,
+      "holdConfirm": true,
+      "hardGateOvershootCentiC": 300,
+      "hardGateHoldPeakToPeakCentiC": 300,
+      "hardGateFullSpeedToStableMs": 30000,
+      "freeze": true,
+      "prune": false,
+      "stopReason": "accepted",
+      "timing": {
+        "policyVersion": 1,
+        "originalLimitMs": 10000,
+        "extensionLimitMs": 30000,
+        "allowedApproachFloorPermille": 100,
+        "effectiveApproachFloorPermille": 100,
+        "floorObservedAtMs": 2000,
+        "extendedAtMs": 11000,
+        "warmupExitedAtMs": 1000,
+        "stableWindowStartedAtMs": 13000,
+        "stableWindowVerifiedAtMs": 23000
+      }
+    }
+  }
+]

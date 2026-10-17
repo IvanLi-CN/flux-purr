@@ -99,7 +99,10 @@ pub(crate) fn scan_serial_devices_from_available(
         return available_ports
             .iter()
             .filter(|port| is_flux_purr_usb_candidate(port))
-            .map(|port| serial_device_record(&port.port_name, Some(port)))
+            .map(|port| {
+                let port_name = preferred_flux_purr_port_path(&port.port_name);
+                serial_device_record(&port_name, Some(port))
+            })
             .collect();
     };
     let port_name = serial_port.to_string_lossy().into_owned();
@@ -119,6 +122,18 @@ pub(crate) fn scan_serial_devices_from_available(
         .iter()
         .find(|port| serial_port_paths_match(&port_name, &port.port_name));
     vec![serial_device_record(&port_name, port_info)]
+}
+
+fn preferred_flux_purr_port_path(port_name: &str) -> String {
+    #[cfg(target_os = "macos")]
+    if let Some(suffix) = port_name.strip_prefix("/dev/tty.usbmodem") {
+        let callout = format!("/dev/cu.usbmodem{suffix}");
+        if Path::new(&callout).exists() {
+            return callout;
+        }
+    }
+
+    port_name.to_string()
 }
 
 pub(crate) fn is_flux_purr_usb_candidate(port: &serialport::SerialPortInfo) -> bool {

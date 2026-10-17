@@ -53,6 +53,9 @@ pub const THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV: u8 = 40;
 pub const THERMAL_PLANT_TRANSIENT_MAX_CONVECTION_MW_PER_C: f32 = 2_000.0;
 pub const THERMAL_PLANT_TRANSIENT_MAX_RADIATION_MW_PER_K4: f32 = 0.000_01;
 pub const THERMAL_CONTROL_PROFILE_MAX_POINTS: usize = FRONTPANEL_PRESET_COUNT;
+// The physical Hold entrance remains target - 0.5 C. Leave a 0.1 C
+// Approach margin without imposing the legacy one-degree search floor.
+pub const THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C: u16 = 60;
 pub const THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS: usize = THERMAL_CONTROL_PROFILE_MAX_POINTS;
 pub const THERMAL_CONTROL_PROFILE_TEMP_FILTER_ALPHA_PERMILLE_DEFAULT: u16 = 750;
 pub const THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT: u16 = 400;
@@ -545,6 +548,12 @@ impl Default for ThermalControlProfileConfig {
     }
 }
 
+impl ThermalControlProfileConfig {
+    pub fn sanitize(&mut self) {
+        sanitize_thermal_control_profile(self);
+    }
+}
+
 impl Default for ThermalControlProfileSettingsConfig {
     fn default() -> Self {
         Self {
@@ -680,15 +689,11 @@ impl Default for MemoryConfig {
 }
 
 impl MemoryConfig {
-    pub fn complete_setup(
-        &mut self,
-        sensor_ready: bool,
-        calibration_ready: bool,
-    ) -> Result<(), SetupCompletionError> {
+    pub fn complete_setup(&mut self, sensor_ready: bool) -> Result<(), SetupCompletionError> {
         if !sensor_ready {
             return Err(SetupCompletionError::SensorNotReady);
         }
-        if !calibration_ready {
+        if self.active_heater_curve.points.iter().flatten().count() < 2 {
             return Err(SetupCompletionError::CalibrationRequired);
         }
         self.commissioning_required = false;
@@ -1091,7 +1096,9 @@ fn sanitize_thermal_profile_point(
 ) -> ThermalControlProfilePointConfig {
     ThermalControlProfilePointConfig {
         target_temp_c: clamp_temp_c(point.target_temp_c),
-        brake_distance_centi_c: point.brake_distance_centi_c.clamp(100, 5_000),
+        brake_distance_centi_c: point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000),
         warmup_power_permille: point.warmup_power_permille.min(1_000),
         warmup_reenter_centi_c: if point.warmup_reenter_centi_c == 0 {
             settings.warmup_reenter_centi_c
@@ -1149,16 +1156,12 @@ fn sanitize_thermal_profile_point(
             settings.hold_blend_ticks,
             THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
         ),
-        approach_lead_ticks: default_or_min(
-            point.approach_lead_ticks,
-            settings.approach_lead_ticks,
-            THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
-        ),
-        hold_lead_ticks: default_or_min(
-            point.hold_lead_ticks,
-            settings.hold_lead_ticks,
-            THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX,
-        ),
+        approach_lead_ticks: point
+            .approach_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
+        hold_lead_ticks: point
+            .hold_lead_ticks
+            .min(THERMAL_CONTROL_PROFILE_APPROACH_MAX_TICKS_MAX),
     }
 }
 
@@ -1684,8 +1687,8 @@ impl ThermalPlantPersistence {
 impl ThermalPolicy {
     pub fn from_config(config: &MemoryConfig) -> Self {
         Self {
-            pps3a_profile: config.active_thermal_control_profile,
-            pps5a_profile: config.thermal_control_profile_pps5a,
+            pps3a_profile: canonical_profile_for_persistence(config.active_thermal_control_profile),
+            pps5a_profile: canonical_profile_for_persistence(config.thermal_control_profile_pps5a),
             mode: config.thermal_profile_mode,
         }
     }
@@ -1695,6 +1698,35 @@ impl ThermalPolicy {
         config.thermal_control_profile_pps5a = self.pps5a_profile;
         config.thermal_profile_mode = self.mode;
     }
+}
+
+fn canonical_profile_for_persistence(
+    mut profile: ThermalControlProfileConfig,
+) -> ThermalControlProfileConfig {
+    profile.sanitize();
+    if profile.points.iter().any(Option::is_some) {
+        // TCP3 stores these inherited values on each configured point. Keep
+        // the global fields only for the five values that are truly global;
+        // otherwise a verified readback cannot equal its canonical payload.
+        profile.settings.warmup_reenter_centi_c =
+            THERMAL_CONTROL_PROFILE_WARMUP_REENTER_CENTI_C_DEFAULT;
+        profile.settings.hold_entry_centi_c = THERMAL_CONTROL_PROFILE_HOLD_ENTRY_CENTI_C_DEFAULT;
+        profile.settings.hold_exit_centi_c = THERMAL_CONTROL_PROFILE_HOLD_EXIT_CENTI_C_DEFAULT;
+        profile.settings.hold_on_centi_c = THERMAL_CONTROL_PROFILE_HOLD_ON_CENTI_C_DEFAULT;
+        profile.settings.hold_off_centi_c = THERMAL_CONTROL_PROFILE_HOLD_OFF_CENTI_C_DEFAULT;
+        profile.settings.overshoot_cutoff_centi_c =
+            THERMAL_CONTROL_PROFILE_OVERSHOOT_CUTOFF_CENTI_C_DEFAULT;
+        profile.settings.hold_kp_permille_per_c =
+            THERMAL_CONTROL_PROFILE_HOLD_KP_PERMILLE_PER_C_DEFAULT;
+        profile.settings.hold_ki_permille_per_c_tick =
+            THERMAL_CONTROL_PROFILE_HOLD_KI_PERMILLE_PER_C_TICK_DEFAULT;
+        profile.settings.hold_blend_ticks = THERMAL_CONTROL_PROFILE_HOLD_BLEND_TICKS_DEFAULT;
+        profile.settings.hold_reheat_power_permille =
+            THERMAL_CONTROL_PROFILE_HOLD_REHEAT_POWER_PERMILLE_DEFAULT;
+        profile.settings.approach_lead_ticks = THERMAL_CONTROL_PROFILE_APPROACH_LEAD_TICKS_DEFAULT;
+        profile.settings.hold_lead_ticks = THERMAL_CONTROL_PROFILE_HOLD_LEAD_TICKS_DEFAULT;
+    }
+    profile
 }
 
 impl UserPreferences {
@@ -3798,7 +3830,9 @@ fn encode_thermal_control_profile(config: &ThermalControlProfileConfig, out: &mu
         .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
     {
         let target = clamp_temp_c(point.target_temp_c) as u16;
-        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let brake_distance = point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000);
         let warmup_power = point.warmup_power_permille.min(1_000);
         let approach_power = point.approach_power_permille.min(1_000);
         let approach_floor_power = point.approach_floor_power_permille.min(1_000);
@@ -3873,7 +3907,9 @@ fn encode_thermal_control_profile_tcp2(
         .take(THERMAL_CONTROL_PROFILE_PERSISTED_MAX_POINTS)
     {
         let target = clamp_temp_c(point.target_temp_c);
-        let brake_distance = point.brake_distance_centi_c.clamp(100, 5_000);
+        let brake_distance = point
+            .brake_distance_centi_c
+            .clamp(THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C, 5_000);
         let approach_power = point.approach_power_permille.min(1_000);
         let warmup_power = point.warmup_power_permille.min(1_000);
         let warmup_reenter = point.warmup_reenter_centi_c.clamp(50, 5_000);
@@ -5269,6 +5305,22 @@ mod tests {
     }
 
     #[test]
+    fn thermal_profile_physical_braking_margin_survives_persistence() {
+        let mut profile = sample_config().active_thermal_control_profile;
+        profile.points[0].as_mut().unwrap().brake_distance_centi_c = 60;
+        profile.sanitize();
+        assert_eq!(profile.points[0].unwrap().brake_distance_centi_c, 60);
+        let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_PAYLOAD_LEN];
+        let len = encode_thermal_control_profile(&profile, &mut bytes);
+        assert_eq!(decode_thermal_control_profile(&bytes[..len]), profile);
+        let len = encode_thermal_control_profile_tcp2(&profile, &mut bytes);
+        assert_eq!(decode_thermal_control_profile(&bytes[..len]), profile);
+        profile.points[0].as_mut().unwrap().brake_distance_centi_c = 0;
+        profile.sanitize();
+        assert_eq!(profile.points[0].unwrap().brake_distance_centi_c, 60);
+    }
+
+    #[test]
     fn thermal_profile_previous_layout_keeps_floor_and_reserve() {
         let mut bytes = [0u8; THERMAL_CONTROL_PROFILE_SETTINGS_PAYLOAD_LEN_PREVIOUS];
         bytes[16 * 2..17 * 2].copy_from_slice(&7_200u16.to_le_bytes());
@@ -5560,6 +5612,25 @@ mod tests {
         );
         assert_eq!(expected.hold_ki_permille_per_c_tick, 1);
         assert_eq!(expected.hold_reheat_power_permille, 390);
+        assert_eq!(expected.approach_lead_ticks, 0);
+        assert_eq!(expected.hold_lead_ticks, 0);
+    }
+
+    #[test]
+    fn legacy_point_without_lead_fields_inherits_settings_once() {
+        let settings = ThermalControlProfileSettingsConfig {
+            approach_lead_ticks: 7,
+            hold_lead_ticks: 6,
+            ..ThermalControlProfileSettingsConfig::default()
+        };
+        let values = decode_profile_hold(
+            &[0; THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY],
+            0,
+            THERMAL_CONTROL_PROFILE_POINT_PAYLOAD_LEN_LEGACY,
+            &settings,
+        );
+        assert_eq!(values.approach_lead_ticks, 7);
+        assert_eq!(values.hold_lead_ticks, 6);
     }
 
     #[test]
@@ -5618,14 +5689,22 @@ mod tests {
         assert!(MemoryConfig::default().commissioning_required);
         let mut setup = MemoryConfig::default();
         assert_eq!(
-            setup.complete_setup(false, true),
+            setup.complete_setup(false),
             Err(SetupCompletionError::SensorNotReady)
         );
         assert_eq!(
-            setup.complete_setup(true, false),
+            setup.complete_setup(true),
             Err(SetupCompletionError::CalibrationRequired)
         );
-        setup.complete_setup(true, true).unwrap();
+        setup.active_heater_curve.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 0,
+            resistance_milliohms: 3_000,
+        });
+        setup.active_heater_curve.points[1] = Some(HeaterCurvePoint {
+            temp_centi_c: 10_000,
+            resistance_milliohms: 4_000,
+        });
+        setup.complete_setup(true).unwrap();
         assert!(!setup.commissioning_required);
         setup.reset_for_commissioning();
         assert!(setup.commissioning_required);
@@ -5671,6 +5750,45 @@ mod tests {
 
         let legacy = decode_memory_record(&bytes[..payload_start + output]).unwrap();
         assert!(!legacy.config.commissioning_required);
+    }
+
+    #[test]
+    fn setup_completion_preserves_absent_user_adc_calibration_and_defaults() {
+        let mut config = MemoryConfig::default();
+        let original_adc = config.adc_calibration;
+        config.active_heater_curve.points[0] = Some(HeaterCurvePoint {
+            temp_centi_c: 0,
+            resistance_milliohms: 3_000,
+        });
+        assert_eq!(
+            config.complete_setup(true),
+            Err(SetupCompletionError::CalibrationRequired)
+        );
+        assert!(config.commissioning_required);
+        config.active_heater_curve.points[1] = Some(HeaterCurvePoint {
+            temp_centi_c: 10_000,
+            resistance_milliohms: 4_000,
+        });
+        config.complete_setup(true).unwrap();
+        assert_eq!(config.adc_calibration, original_adc);
+        assert!(!config.commissioning_required);
+        let record = MemoryRecord {
+            sequence: 1,
+            config,
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let len = encode_memory_record(&record, &mut bytes).unwrap();
+        let restored = decode_memory_record(&bytes[..len]).unwrap().config;
+        assert!(!restored.commissioning_required);
+        assert_eq!(restored.adc_calibration, original_adc);
+        assert_eq!(
+            adc_calibration_fit(&restored.adc_calibration, AdcCalibrationChannel::Rtd).sample_count,
+            0
+        );
+        assert_eq!(
+            adc_calibration_fit(&restored.adc_calibration, AdcCalibrationChannel::Vin).sample_count,
+            0
+        );
     }
 
     #[test]
@@ -6399,6 +6517,35 @@ mod tests {
             assert_eq!(decoded.sequence, index as u32 + 1);
             assert_eq!(&decoded.data, data);
         }
+    }
+
+    #[test]
+    fn fpr2_migration_preserves_nondefault_legacy_thermal_settings() {
+        let mut config = sample_config();
+        let settings = &mut config.active_thermal_control_profile.settings;
+        settings.temp_filter_alpha_permille = 700;
+        settings.warmup_reenter_centi_c = 1_000;
+        settings.hold_entry_centi_c = 12;
+        settings.hold_exit_centi_c = 60;
+        settings.hold_off_centi_c = 180;
+        settings.overshoot_cutoff_centi_c = 230;
+        settings.approach_max_ticks = 250;
+        settings.approach_min_power_ratio_permille = 500;
+        settings.hold_kp_permille_per_c = 20;
+        settings.hold_ki_permille_per_c_tick = 1;
+        settings.hold_blend_ticks = 3;
+        settings.hold_reheat_power_permille = 300;
+        settings.approach_lead_ticks = 5;
+        config.sanitize();
+        let data = PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(&config));
+        let mut bytes = [0xffu8; FPR2_MAX_RECORD_SIZE];
+        let length = encode_persist_record(669, &data, &mut bytes).expect("migration fits");
+        let verified = decode_persist_record(&bytes[..length]).expect("migration decodes");
+        assert_eq!(verified.sequence, 669);
+        assert_eq!(
+            verified.data, data,
+            "the EEPROM writer requires exact readback equality"
+        );
     }
 
     #[test]

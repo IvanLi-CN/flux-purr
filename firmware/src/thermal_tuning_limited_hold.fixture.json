@@ -1,0 +1,499 @@
+{
+  "runId": "firmware-pps5a-1791475666308",
+  "firmware": "474e14d3061aac44e217bc8ac1879a36a61a5373",
+  "point": {
+    "approachDampingExponentPermille": 1000,
+    "approachFloorPowerPermille": 50,
+    "approachLeadTicks": 0,
+    "approachPowerPermille": 1000,
+    "approachTailWindowCentiC": 0,
+    "brakeDistanceCentiC": 1243,
+    "holdBlendTicks": 2,
+    "holdEntryCentiC": 90,
+    "holdExitCentiC": 200,
+    "holdKiPermillePerCTick": 1,
+    "holdKpPermillePerC": 43,
+    "holdLeadTicks": 2,
+    "holdOffCentiC": 5,
+    "holdOnCentiC": 30,
+    "holdPowerPermille": 56,
+    "holdReheatPowerPermille": 56,
+    "overshootCutoffCentiC": 25,
+    "targetC": 60,
+    "warmupPowerPermille": 1000,
+    "warmupReenterCentiC": 400
+  },
+  "decision": {
+    "approachToHold": true,
+    "disposition": "rejected",
+    "freeze": false,
+    "hardGateFullSpeedToStableMs": 10000,
+    "hardGateHoldPeakToPeakCentiC": 300,
+    "hardGateOvershootCentiC": 300,
+    "holdConfirm": false,
+    "holdPeakToPeakCentiC": 311,
+    "maxOvershootCentiC": 262,
+    "prune": true,
+    "purpose": "batch_predicted",
+    "score": [
+      0,
+      1,
+      3.11,
+      0,
+      1.12,
+      0.72,
+      2.62,
+      3.11,
+      1000000000000,
+      0,
+      1.34637258352081
+    ],
+    "settleTimeMs": null,
+    "stopReason": "full-speed-to-stable budget exhausted",
+    "timing": {
+      "allowedApproachFloorPermille": 50,
+      "configuredApproachFloorPermille": 50,
+      "effectiveApproachFloorPermille": 50,
+      "extendedAtMs": null,
+      "extensionLimitMs": 30000,
+      "floorObservedAtMs": 329610,
+      "modelApproachFloorPermille": 50,
+      "originalDeadlineObservedAtMs": 334866,
+      "originalDeadlinePhase": "hold",
+      "originalLimitMs": 10000,
+      "policyVersion": 4,
+      "stableWindowStartedAtMs": null,
+      "stableWindowVerifiedAtMs": null,
+      "warmupExitedAtMs": 324836
+    },
+    "warmupFull": true
+  },
+  "samples": [
+    [
+      319567,
+      3519,
+      "warmup",
+      1000
+    ],
+    [
+      319625,
+      3502,
+      "warmup",
+      1000
+    ],
+    [
+      319686,
+      3522,
+      "warmup",
+      1000
+    ],
+    [
+      319910,
+      3527,
+      "warmup",
+      1000
+    ],
+    [
+      320153,
+      3547,
+      "warmup",
+      1000
+    ],
+    [
+      320377,
+      3554,
+      "warmup",
+      1000
+    ],
+    [
+      320593,
+      3591,
+      "warmup",
+      1000
+    ],
+    [
+      320805,
+      3660,
+      "warmup",
+      1000
+    ],
+    [
+      321013,
+      3692,
+      "warmup",
+      1000
+    ],
+    [
+      321254,
+      3752,
+      "warmup",
+      1000
+    ],
+    [
+      321488,
+      3829,
+      "warmup",
+      1000
+    ],
+    [
+      321729,
+      3876,
+      "warmup",
+      1000
+    ],
+    [
+      321961,
+      3962,
+      "warmup",
+      1000
+    ],
+    [
+      322202,
+      4026,
+      "warmup",
+      1000
+    ],
+    [
+      322417,
+      4053,
+      "warmup",
+      1000
+    ],
+    [
+      322658,
+      4081,
+      "warmup",
+      1000
+    ],
+    [
+      322888,
+      4182,
+      "warmup",
+      1000
+    ],
+    [
+      323126,
+      4250,
+      "warmup",
+      1000
+    ],
+    [
+      323358,
+      4347,
+      "warmup",
+      1000
+    ],
+    [
+      323601,
+      4387,
+      "warmup",
+      1000
+    ],
+    [
+      323837,
+      4489,
+      "warmup",
+      1000
+    ],
+    [
+      324078,
+      4573,
+      "warmup",
+      1000
+    ],
+    [
+      324308,
+      4625,
+      "warmup",
+      1000
+    ],
+    [
+      324547,
+      4693,
+      "warmup",
+      1000
+    ],
+    [
+      324778,
+      4752,
+      "warmup",
+      1000
+    ],
+    [
+      324836,
+      4778,
+      "approach",
+      50
+    ],
+    [
+      324902,
+      4793,
+      "approach",
+      50
+    ],
+    [
+      325117,
+      4874,
+      "approach",
+      50
+    ],
+    [
+      325334,
+      4909,
+      "approach",
+      50
+    ],
+    [
+      325573,
+      4994,
+      "approach",
+      50
+    ],
+    [
+      325814,
+      5054,
+      "approach",
+      50
+    ],
+    [
+      326060,
+      5136,
+      "approach",
+      50
+    ],
+    [
+      326316,
+      5220,
+      "approach",
+      50
+    ],
+    [
+      326521,
+      5261,
+      "approach",
+      50
+    ],
+    [
+      326735,
+      5293,
+      "approach",
+      50
+    ],
+    [
+      326995,
+      5359,
+      "approach",
+      940
+    ],
+    [
+      327228,
+      5408,
+      "approach",
+      640
+    ],
+    [
+      327486,
+      5469,
+      "approach",
+      470
+    ],
+    [
+      327704,
+      5499,
+      "approach",
+      350
+    ],
+    [
+      327960,
+      5553,
+      "approach",
+      120
+    ],
+    [
+      328196,
+      5585,
+      "approach",
+      120
+    ],
+    [
+      328451,
+      5662,
+      "approach",
+      50
+    ],
+    [
+      328675,
+      5731,
+      "approach",
+      50
+    ],
+    [
+      328882,
+      5754,
+      "approach",
+      50
+    ],
+    [
+      329114,
+      5786,
+      "approach",
+      110
+    ],
+    [
+      329376,
+      5816,
+      "approach",
+      70
+    ],
+    [
+      329610,
+      5853,
+      "approach",
+      50
+    ],
+    [
+      329857,
+      5889,
+      "approach",
+      50
+    ],
+    [
+      330086,
+      5916,
+      "approach",
+      50
+    ],
+    [
+      330328,
+      5951,
+      "hold",
+      60
+    ],
+    [
+      330405,
+      5969,
+      "hold",
+      0
+    ],
+    [
+      330625,
+      5965,
+      "hold",
+      0
+    ],
+    [
+      330867,
+      5995,
+      "hold",
+      60
+    ],
+    [
+      331085,
+      6055,
+      "hold",
+      0
+    ],
+    [
+      331297,
+      6052,
+      "hold",
+      0
+    ],
+    [
+      331566,
+      6085,
+      "hold",
+      0
+    ],
+    [
+      331773,
+      6096,
+      "hold",
+      0
+    ],
+    [
+      331974,
+      6108,
+      "hold",
+      0
+    ],
+    [
+      332191,
+      6121,
+      "hold",
+      0
+    ],
+    [
+      332459,
+      6129,
+      "hold",
+      0
+    ],
+    [
+      332703,
+      6154,
+      "hold",
+      0
+    ],
+    [
+      332934,
+      6161,
+      "hold",
+      0
+    ],
+    [
+      333175,
+      6180,
+      "hold",
+      0
+    ],
+    [
+      333408,
+      6174,
+      "hold",
+      0
+    ],
+    [
+      333647,
+      6199,
+      "hold",
+      0
+    ],
+    [
+      333880,
+      6208,
+      "hold",
+      0
+    ],
+    [
+      334124,
+      6212,
+      "hold",
+      0
+    ],
+    [
+      334340,
+      6245,
+      "hold",
+      0
+    ],
+    [
+      334585,
+      6239,
+      "hold",
+      0
+    ],
+    [
+      334801,
+      6262,
+      "hold",
+      0
+    ],
+    [
+      334866,
+      6246,
+      "hold",
+      0
+    ]
+  ]
+}

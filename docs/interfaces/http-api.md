@@ -8,9 +8,15 @@ Source of truth for this implementation scope:
 
 ## Shared Models
 
+### First setup
+
+`GET /api/v1/devices/{deviceId}/install-status` returns the USB install-status contract. `POST /api/v1/devices/{deviceId}/setup/complete?lease_id=<lease-id>` is available only through an active native serial lease and sends the existing `complete_setup` USB request once. It returns `InstallStatus` only after a healthy persisted EEPROM generation confirms commissioning completion, with a six-second readback deadline. Missing user ADC samples are valid and remain empty; factory/default correction applies without creating artificial calibration points. Repository CLI exposes `setup status` and `setup complete` with an explicit `--device` or `--hardware` target.
+
 All transports expose the same domain model. Field names use `camelCase` on HTTP/JSON.
 
 ### `Identity`
+
+Product firmware includes optional `resetReason`, the hardware-recorded cause of the current boot (for example `chip_power_on`, `core_software`, `core_mwdt0`, `system_brownout`, or `core_usb_jtag`). It remains readable for the lifetime of that boot independently of early boot log capture. Older firmware and mocks may omit it; unavailable hardware reasons are `unknown`, not inferred from connection or PD state.
 
 ```json
 {
@@ -117,6 +123,8 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
 `voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. The measured voltage does not determine Fixed/PPS contract validity; a PPS source may deliver a lower voltage during normal current limiting without canceling that contract. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot establish the performance guarantee. Protected calibration requires an advertised APDO covering `20V / >=3A`; its individual scan requests may use lower voltage and `1–3A` current limits. FUSB302BMPX applies the `5V..28V` PD guard before selecting its live APDO (currently `5V..21V`) and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
 Fixed standby selection and the explicit USB `flash_preparation` operations use protocol-confirmed contract and applied-output facts. They do not use `voltageMv`, `vinRawAdcMv`, ADC calibration, VIN freshness, or a VIN tolerance/dwell check. Source-side VBUS measurements used in HIL are independent evidence and do not add a host flash gate.
 `rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
+
+Optional `rtdDividerSupplyMv` reports the firmware's RTD-divider excitation assumption: 3328mV in the default board image or 3208mV with `rtd-supply-3208mv`. It is a board electrical input, not an ADC reference measurement or a manual calibration sample. Missing user RTD/VIN calibration continues to use the default mapping with no fabricated user points. Older firmware may omit the field.
 `faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
 `manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. Normal automatic heating uses an applicable whole-device supply boundary, or a labelled preset electrical model fallback for uncovered conditions. It subtracts no fixed auxiliary current. The persisted current-reserve field remains available only for historical profile contracts and legacy fixed-PD control.
 
@@ -202,6 +210,18 @@ The `thermal_plant_run` snapshot is version 2 and carries the same optional `sup
 `state` is `missing`, `active`, or `invalid`. Activation requires a new-format whole-device boundary and its complete, physically valid thermal trace committed together. Legacy resistance-derived calibrations are absent. `thermal_plant_auto` obtains an unpowered baseline, preflights the sustainable current floor, scans `1–3A` in `100mA` stages and voltage in `100mV` steps, and adds bounded 3A transient probes after sub-3A equilibria. A `1°C` band held for `10s` with at most `0.2°C` end drift qualifies an equilibrium. At `220°C`, it disables PWM immediately and records passive cooling to `80°C`. The device fits and activates the pair locally; no candidate promotion or user acceptance operation exists. The compact trace retains at most 48 points with `50ms` timestamps, RTD ADC, confirmed requested voltage quantized to `125mV`, and physical duty. Voltage-derived watts use the explicitly estimated preset model, not an uncalibrated voltage measurement. Normal heating uses applicable observed boundaries and a labelled preset fallback for uncovered conditions; no fixed current reserve or inferred MCU power is applied.
 
 The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the passive-cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty and physical PWM are cleared in that control cycle. The selected calibration-owned PPS contract remains unchanged through passive cooling so PD renegotiation cannot disturb the RTD trace, and is cleared only after the model transaction completes, is canceled, or fails. General sensor and absolute-overtemperature protections remain authoritative.
+
+### Firmware thermal tuning sample fan evidence
+
+The optional `sample.fan` object in firmware tuning events contains `enabled`,
+`pwmPermille`, and `outputLevel` (`off|low|medium|high|limited`). It records the
+applied production command, not measured RPM. With enable asserted, the inverse
+fan regulator PWM at `0‰` requests full speed; disabled enable requests stop.
+The device event digest includes these fields in that order. Historical events
+without the object retain their digest and export as unavailable fan evidence.
+CLI and Web preserve the object in `samples.ndjson` and use the shared HTML
+renderer for the linked fan chart. See the
+[control contract](../specs/heater-pid-frontpanel-runtime/NATURAL-COOLING-CONTROL.md).
 
 ### `FirmwareArtifact`
 

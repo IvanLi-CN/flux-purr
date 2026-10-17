@@ -655,6 +655,25 @@ pub(crate) async fn device_network(
     Ok(Json(target.network))
 }
 
+pub(crate) async fn complete_device_setup(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<InstallStatus>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport != DeviceTransport::NativeSerial {
+        return Err(HttpError::bad_request(
+            "native_serial_required",
+            "Setup completion requires an active USB/devd lease.",
+        ));
+    }
+    serial_complete_setup(&state, &target).await.map(Json)
+}
+
 pub(crate) async fn device_status(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -702,6 +721,80 @@ pub(crate) async fn device_status(
         return Ok(Json(status));
     }
     Ok(Json(target.status))
+}
+
+pub(crate) async fn device_thermal_tuning(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<ThermalTuningStatus>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let payload = ThermalTuningRequest {
+            lease_id: query.lease_id.unwrap_or_default(),
+            op: ThermalTuningCommandOp::Read,
+            run_id: None,
+            candidate_id: None,
+            candidate_hash: None,
+            power_class: None,
+            targets_c: None,
+            after_sequence: None,
+            candidate_profile: None,
+        };
+        return Ok(Json(
+            serial_thermal_tuning(&state, &target, &payload).await?,
+        ));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        return Ok(Json(
+            lan_bridge_read::<ThermalTuningStatus>(&configured, "thermal-tuning").await?,
+        ));
+    }
+    Err(HttpError::bad_request(
+        "thermal_tuning_unavailable",
+        "Firmware thermal tuning requires a connected device transport.",
+    ))
+}
+
+pub(crate) async fn configure_thermal_tuning(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Json(payload): Json<ThermalTuningRequest>,
+) -> Result<Json<ThermalTuningStatus>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        return Ok(Json(
+            serial_thermal_tuning(&state, &target, &payload).await?,
+        ));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let path = "thermal-tuning";
+        return Ok(Json(
+            lan_bridge_write::<ThermalTuningStatus>(
+                &configured,
+                path,
+                Method::POST,
+                Some(lan_bridge_payload(&payload)?),
+            )
+            .await?,
+        ));
+    }
+    Err(HttpError::bad_request(
+        "thermal_tuning_unavailable",
+        "Firmware thermal tuning requires a connected device transport.",
+    ))
 }
 
 pub(crate) async fn device_calibration(
@@ -1299,6 +1392,23 @@ pub(crate) async fn save_heater_curve(
     Err(HttpError::bad_request(
         "heater_curve_format_obsolete",
         "Legacy resistance calibration cannot be saved. Run thermal_plant_auto.",
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeviceEventHistoryQuery {
+    pub tail: Option<usize>,
+}
+
+pub(crate) async fn device_event_history(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<DeviceEventHistoryQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let events = device_event_backlog(&state, &device_id)?;
+    let start = events.len().saturating_sub(query.tail.unwrap_or(20));
+    Ok(Json(
+        json!({"device": device_id, "events": &events[start..]}),
     ))
 }
 

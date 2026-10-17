@@ -10,7 +10,7 @@ The archived controller-board netlist in this repository remains the `fan-5v` re
 - MCU rail: fixed `3.3 V`, nominal load up to `1 A`
 - Fan rail: adjustable sibling PCB variants built on the same `TPS62933DRLR` topology
   - `fan-5v`: `3.0 V ~ 5.0 V`
-  - `fan-12v`: `6.6 V ~ 12.0 V`
+  - `fan-12v`: nominal `3.45 V ~ 12.14 V` with the E24 feedback network
 - Both rails use `TPS62933DRLR`
 
 ## 2) Frozen architecture
@@ -50,7 +50,7 @@ Using `fSW = 1.2 MHz`:
 - `3.0 V` fan-min output gives `VIN_MAX ~= 35.7 V`
 - `3.3 V` MCU output gives `VIN_MAX ~= 39.3 V`
 - `5.0 V` fan-5v max output gives `VIN_MAX ~= 59.5 V`
-- `12.0 V` fan-12v max output gives `VIN_MAX ~= 142.9 V`
+- `12.14 V` fan-12v nominal max output gives `VIN_MAX ~= 144.5 V`
 
 With a real input ceiling of `28 V`, both fan variants and the fixed MCU rail stay clear of the minimum-on-time foldback boundary while still using a smaller inductor than the `500 kHz` option.
 
@@ -141,11 +141,13 @@ This matches the board intent of treating anything below about `4.5 V` as underv
 
 ### 7.2 Shared control network
 
-Both PCB variants keep the same control topology:
+Both PCB variants keep the same control topology. The archived netlist uses these
+physical resistor designators:
 
-- `RFBB = 10 kOhm` from `FB` to `GND`
-- `RINJ = 75 kOhm` from `VCTRL` to `FB`
-- `RPWM = 10 kOhm` from MCU PWM to `VCTRL`
+- `R19 = RFBB`, from `FB` to `GND`
+- `R20 = RFBT`, from `FAN_VCC` to `FB`
+- `R18 = RINJ`, from `VCTRL` to `FB`
+- `R15 = RPWM`, from MCU PWM to `VCTRL`
 - `CPWM = 1 uF` from `VCTRL` to `GND`
 - `REN_PD = 100 kOhm` from `EN` to `GND`
 - `RSER_EN = 2.2 kOhm` from `FAN_EN_RAW` to `FAN_EN`
@@ -155,7 +157,10 @@ This is intentionally a single, slow RC stage. The design goal is to make `FB` s
 
 ### 7.3 `fan-5v` frozen variant
 
-- `RFBT = 47 kOhm`
+- `R19 (RFBB) = 10 kOhm`
+- `R20 (RFBT) = 47 kOhm`
+- `R18 (RINJ) = 75 kOhm`
+- `R15 (RPWM) = 10 kOhm`
 - `Duty = 0%` gives approximately `5.06 V`
 - `Duty = 100%` gives approximately `2.99 V`
 - practical approximation:
@@ -165,18 +170,26 @@ This is intentionally a single, slow RC stage. The design goal is to make `FB` s
 
 ### 7.4 `fan-12v` frozen variant
 
-- `RFBT = 124 kOhm 1%`
-- `Duty = 0%` gives approximately `12.04 V`
-- `Duty = 100%` gives approximately `6.59 V`
+- `R19 (RFBB) = 13 kOhm E24, 1%`
+- `R20 (RFBT) = 150 kOhm E24, 1%`
+- `R18 (RINJ) = 47 kOhm E24, 1%`
+- `R15 (RPWM) = 10 kOhm E24, 1%`
+- `Duty = 0%` gives approximately `12.14 V`
+- `Duty = 100%` gives approximately `3.45 V`
 - practical approximation:
-  - `VOUT ~= 12.04 - 5.46 * Duty`
+  - `VOUT ~= 12.14 - 8.69 * Duty`
   - where `Duty` is `0.0 ~ 1.0`
 - all capacitors directly tied to `FAN_VCC` must be `>=25 V`
 - the two main output capacitors must each be `22 uF` and use `1206` or larger footprints
 - add `100 nF` local decoupling close to the fan connector in the live CAD source
 - silkscreen requirement: `12V FAN ONLY`
 
-The `fan-12v` minimum steady-state point is intentionally about `6.6 V`. Reliable startup below that point is out of scope for this rail profile. This voltage curve remains a hardware characterization only; shared firmware and API stay voltage-agnostic.
+The `fan-12v` network is selected for the tested fan's approximately `3.3 V ~
+3.5 V` low-speed operating region while retaining a nominal `12 V` maximum.
+These endpoints are resistor-network calculations with `R15` loading included;
+assembled-board tolerance and startup behavior still require bench validation.
+The voltage curve remains a hardware characterization only; shared firmware and
+API stay voltage-agnostic.
 
 ### 7.5 PWM guidance
 

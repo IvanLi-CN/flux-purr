@@ -1,6 +1,28 @@
 #[allow(unused_imports)]
 use super::*;
 
+#[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+pub(crate) fn initialize_fan_pad_observation() {
+    // SAFETY: output initialization has completed and retains sole ownership
+    // of GPIO35/36. Enable only their input buffers; do not change the output
+    // enable, GPIO matrix, pulls, mux function, or MCPWM configuration.
+    let io_mux = unsafe { &*esp_hal::peripherals::IO_MUX::PTR };
+    for pin in [35, 36] {
+        io_mux.gpio(pin).modify(|_, w| w.fun_ie().set_bit());
+    }
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "fan-observe"))]
+pub(crate) fn observe_fan_pads() -> flux_purr_firmware::control_plane::FanPadObservationWire {
+    // SAFETY: read the GPIO input bank only. The fan driver remains the sole
+    // output owner; this snapshot neither writes outputs nor waits in the loop.
+    let levels = unsafe { (&*esp_hal::peripherals::GPIO::PTR).in1().read().bits() };
+    flux_purr_firmware::control_plane::FanPadObservationWire {
+        enable_pad_high: levels & (1 << (35 - 32)) != 0,
+        pwm_pad_high: levels & (1 << (36 - 32)) != 0,
+    }
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FAN_WORKING_CONTRACT_MV: u16 = 12_000;
 
@@ -527,6 +549,56 @@ pub(crate) fn fan_policy_decision_with_modes(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_cooldown_fan_decision(
+    ordinary: FanPolicyDecision,
+    tuning_cooldown: bool,
+) -> FanPolicyDecision {
+    if !tuning_cooldown {
+        return ordinary;
+    }
+    let safety = ordinary.source == FanPolicySource::Safety;
+    FanPolicyDecision {
+        state: FanPolicyState::Full,
+        command: FanHardwareCommand::from_profile(FanVoltageProfile::Full),
+        display_state: if safety {
+            FanDisplayState::Safe
+        } else {
+            FanDisplayState::Run
+        },
+        source: if safety {
+            FanPolicySource::Safety
+        } else {
+            FanPolicySource::PostHeat
+        },
+        output_level: FanOutputLevel::High,
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_cooling_requested(
+    cooling_latched: bool,
+    tuning_was_armed: bool,
+    tuning_armed: bool,
+    tuning_phase: flux_purr_firmware::thermal_tuning::ThermalTuningPhase,
+    heater_enabled: bool,
+    temperature_c: Option<f32>,
+    _target_c: Option<i16>,
+) -> bool {
+    if tuning_armed
+        && tuning_phase == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+    {
+        return true;
+    }
+    // Terminal cooling belongs to the whole run. A pruned final target must
+    // not select ordinary post-heat's warmer release temperature.
+    let temperature_released = temperature_c.is_some_and(|temp| temp < 35.0);
+    if heater_enabled || temperature_released {
+        return false;
+    }
+    cooling_latched || (tuning_was_armed && !tuning_armed)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn heating_guard_pulse_state(
     current_temp_c: i16,
     guard_mode: HeatingFanGuardMode,
@@ -827,6 +899,7 @@ pub(crate) struct RuntimeControlTemperatureState<'a> {
     pub(crate) measurement_guard: &'a mut RtdControlMeasurementGuard,
     pub(crate) control_measurement_guarded: &'a mut bool,
     pub(crate) heater_controller: &'a mut HeaterController,
+    pub(crate) applied_heater_duty_percent: u8,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -843,19 +916,23 @@ pub(crate) fn apply_valid_rtd_measurement(
         display.latest_display_temp_i16,
         measurement_temp_c,
     );
-    if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition(
+    if let Some(control_temp_c) = accept_rtd_control_sample_after_pps_transition_with_output(
         control.transition_guard,
         control.heater_controller,
         control.measurement_guard,
         *control.latest_control_temp_c,
         request_mv,
         now_ms,
-        measurement_temp_c,
+        RtdControlObservation {
+            temperature_c: measurement_temp_c,
+            applied_heater_duty_percent: control.applied_heater_duty_percent,
+        },
     ) {
         *control.latest_control_temp_c = control_temp_c;
         *control.latest_control_temp_i16 = temp_c_to_whole_c(control_temp_c);
     }
-    *control.control_measurement_guarded = control.measurement_guard.guarded;
+    *control.control_measurement_guarded =
+        control.measurement_guard.guarded || control.transition_guard.blocked_until_ms.is_some();
     needs_redraw
 }
 
@@ -979,9 +1056,15 @@ impl RtdControlMeasurementGuard {
             (self.last_accepted_temp_c, self.last_accepted_at_ms)
         {
             let elapsed_ms = now_ms.saturating_sub(last_at_ms).max(25);
-            let max_unpowered_rise_c = (RTD_CONTROL_MAX_UNPOWERED_RISE_C_PER_S
-                * (elapsed_ms as f32 / 1_000.0))
-                .min(RTD_CONTROL_MAX_UNPOWERED_RISE_STEP_C);
+            // A time-scaled limit alone shrinks below ordinary RTD batch
+            // noise at the 100ms cadence. Count small observations as real
+            // thermal evidence; do not turn a stable-band fluctuation into
+            // a held sample. Large unpowered steps retain the original cap.
+            let max_unpowered_rise_c =
+                (RTD_CONTROL_MAX_UNPOWERED_RISE_C_PER_S * (elapsed_ms as f32 / 1_000.0)).clamp(
+                    RTD_CONTROL_MIN_UNPOWERED_RISE_STEP_C,
+                    RTD_CONTROL_MAX_UNPOWERED_RISE_STEP_C,
+                );
             if heater_duty_percent == 0
                 && measurement_temp_c > last_temp_c
                 && measurement_temp_c - last_temp_c > max_unpowered_rise_c
@@ -1012,7 +1095,7 @@ pub(crate) fn preserve_rtd_control_guard_when_heater_disabled(
     }
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     transition_guard: &mut RtdPpsTransitionGuard,
     heater_controller: &mut HeaterController,
@@ -1022,23 +1105,58 @@ pub(crate) fn accept_rtd_control_sample_after_pps_transition(
     now_ms: u64,
     measurement_temp_c: f32,
 ) -> Option<f32> {
+    let applied_heater_duty_percent = heater_controller.duty_percent;
+    accept_rtd_control_sample_after_pps_transition_with_output(
+        transition_guard,
+        heater_controller,
+        measurement_guard,
+        last_control_temp_c,
+        request_mv,
+        now_ms,
+        RtdControlObservation {
+            temperature_c: measurement_temp_c,
+            applied_heater_duty_percent,
+        },
+    )
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+struct RtdControlObservation {
+    temperature_c: f32,
+    applied_heater_duty_percent: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn accept_rtd_control_sample_after_pps_transition_with_output(
+    transition_guard: &mut RtdPpsTransitionGuard,
+    heater_controller: &mut HeaterController,
+    measurement_guard: &mut RtdControlMeasurementGuard,
+    last_control_temp_c: f32,
+    request_mv: u16,
+    now_ms: u64,
+    observation: RtdControlObservation,
+) -> Option<f32> {
     let (accept_control_sample, reseed_filter) = transition_guard.observe(request_mv, now_ms);
     if reseed_filter {
-        heater_controller.reseed_measurement(last_control_temp_c);
-        measurement_guard.reseed(last_control_temp_c, now_ms);
+        heater_controller.reseed_measurement_after_pps_step(last_control_temp_c);
+        // Reset voltage-epoch recovery without pretending the retained
+        // temperature was measured again. Slew checks need its real age,
+        // including the 300 ms PPS wait, to admit physical heating normally.
+        let last_measured_at_ms = measurement_guard.last_accepted_at_ms.unwrap_or(now_ms);
+        measurement_guard.reseed(last_control_temp_c, last_measured_at_ms);
     }
     let was_guarded = measurement_guard.guarded;
     let accepted = accept_control_sample
         .then(|| {
             measurement_guard.observe_with_heater_duty(
-                measurement_temp_c,
+                observation.temperature_c,
                 now_ms,
-                heater_controller.duty_percent,
+                observation.applied_heater_duty_percent,
             )
         })
         .flatten();
     if was_guarded && accepted.is_some() {
-        heater_controller.reseed_measurement(measurement_temp_c);
+        heater_controller.reseed_measurement(observation.temperature_c);
     }
     accepted
 }
@@ -1516,6 +1634,8 @@ pub(crate) const FUSB302B_IDENTITY_DIAG_STATUS_INVALID: u8 = 4;
 #[cfg(any(target_arch = "xtensa", test))]
 #[cfg(target_arch = "xtensa")]
 pub(crate) const FUSB302B_PARTIAL_RX_TIMEOUT_MS: u64 = 250;
+#[cfg(target_arch = "xtensa")]
+pub(crate) const FUSB302B_RX_BURST_LIMIT: usize = 3;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS: u64 = 5_000;
 #[cfg(any(target_arch = "xtensa", test))]

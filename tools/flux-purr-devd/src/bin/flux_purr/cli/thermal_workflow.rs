@@ -1756,11 +1756,6 @@ pub(crate) fn default_thermal_candidate_profile() -> Value {
     thermal_candidate_profile_to_value(&thermal_seed_candidate_profile())
 }
 
-pub(crate) const THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd63w-pps3a/accepted-full-range-20hz/thermal-profile.accepted.json";
-pub(crate) const THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE: &str = "thermal-self-test-runs/baselines/56x56mm-3p2ohm-pd100w-pps5a/accepted-full-range-20hz/thermal-profile.accepted.json";
-pub(crate) const THERMAL_PPS5A_TUNING_SEED_RELATIVE: &str =
-    "thermal-self-test-runs/variants_100c_v6_hold220_cutoff90.json";
-
 pub(crate) fn flux_purr_repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1769,27 +1764,12 @@ pub(crate) fn flux_purr_repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-pub(crate) fn thermal_default_seed_candidates_for_bank(bank: &str) -> Vec<PathBuf> {
-    let repo_root = flux_purr_repo_root();
-    match bank {
-        "pps5a" => vec![
-            repo_root.join(THERMAL_PPS5A_ACCEPTED_SEED_RELATIVE),
-            repo_root.join(THERMAL_PPS5A_TUNING_SEED_RELATIVE),
-        ],
-        "pps3a" => vec![repo_root.join(THERMAL_PPS3A_ACCEPTED_SEED_RELATIVE)],
-        _ => Vec::new(),
-    }
-}
-
 pub(crate) fn load_thermal_default_seed_candidate_profile(
-    bank: &str,
+    _bank: &str,
 ) -> Result<(ThermalCandidateProfile, Option<PathBuf>), Box<dyn std::error::Error + Send + Sync>> {
-    for path in thermal_default_seed_candidates_for_bank(bank) {
-        if path.exists() {
-            let imported = serde_json::from_slice::<Value>(&fs::read(&path)?)?;
-            return Ok((thermal_candidate_profile_from_value(imported), Some(path)));
-        }
-    }
+    // Static defaults for the host-reference/legacy workflow. The firmware
+    // runner derives its cold seed from the device's active calibration.
+    // Historical profile files are never discovered implicitly here.
     Ok((thermal_seed_candidate_profile(), None))
 }
 
@@ -4070,6 +4050,7 @@ pub(crate) fn dry_thermal_replay_sample(
         },
         current_temp_c,
         heater_output_percent,
+        measurement_accepted: true,
         control_phase: Some(if phase == "warmup" {
             "approach".to_string()
         } else {
@@ -4102,6 +4083,7 @@ pub(crate) fn dry_thermal_full_speed_analysis(rise_time_ms: u64) -> ThermalFullS
         stable_window_verified_at_ms: Some(rise_time_ms),
         settle_time_ms: Some(7_500),
         failure_reason: None,
+        stable_window_last_reset_reason: None,
     }
 }
 
@@ -5335,6 +5317,10 @@ pub(crate) fn measure_thermal_stage(
     let observation = hold_tracker.observe(current_temp_c, elapsed_ms, now, control_phase_in_hold);
     let mut phase = match observation {
         ThermalHoldObservation::Warmup => "warmup",
+        ThermalHoldObservation::PhaseRegressed => {
+            *stop_reason = "hold_phase_regressed";
+            "hold"
+        }
         ThermalHoldObservation::Hold | ThermalHoldObservation::Completed => {
             if observation == ThermalHoldObservation::Completed {
                 *stop_reason = "completed";
@@ -5348,6 +5334,7 @@ pub(crate) fn measure_thermal_stage(
     update_thermal_stage_stop_reason(ThermalStageStopInput {
         stop_reason,
         sample_rate_violation: sample_rate.violation,
+        control_measurement_guarded,
         measurement_guard_violation,
         heater_output_seen: *heater_output_seen,
         elapsed_ms,
@@ -5454,6 +5441,7 @@ pub(crate) fn record_thermal_stage_observation(
         elapsed_ms,
         current_temp_c,
         heater_output_percent,
+        measurement_accepted: !control_measurement_guarded && !measurement_guard_violation,
         control_phase: control_phase.map(ToOwned::to_owned),
         control_phase_in_hold,
         source_voltage_mv: Some(source_telemetry.voltage_mv),
@@ -5490,6 +5478,7 @@ pub(crate) fn append_thermal_stage_sample(
 pub(crate) struct ThermalStageStopInput<'a> {
     pub(crate) stop_reason: &'a mut &'static str,
     pub(crate) sample_rate_violation: bool,
+    pub(crate) control_measurement_guarded: bool,
     pub(crate) measurement_guard_violation: bool,
     pub(crate) heater_output_seen: bool,
     pub(crate) elapsed_ms: u64,
@@ -5507,6 +5496,7 @@ pub(crate) fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>)
     let ThermalStageStopInput {
         stop_reason,
         sample_rate_violation,
+        control_measurement_guarded,
         measurement_guard_violation,
         heater_output_seen,
         elapsed_ms,
@@ -5536,7 +5526,12 @@ pub(crate) fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>)
         approach_guard.observe(current_temp_c, elapsed_ms, control_phase);
     }
     let full_speed_stop_reason = if *stop_reason == "timeout" {
-        match full_speed_tracker.observe(current_temp_c, elapsed_ms, control_phase) {
+        match full_speed_tracker.observe_with_measurement(
+            current_temp_c,
+            elapsed_ms,
+            control_phase,
+            !control_measurement_guarded && !measurement_guard_violation,
+        ) {
             ThermalFullSpeedStableObservation::Failed(reason) => Some(reason),
             _ => None,
         }
@@ -5948,12 +5943,31 @@ pub(crate) fn parse_isolapurr_live_telemetry(
     })
 }
 
+pub(crate) fn isolapurr_live_pps_contract_is_ready(power: &Value) -> bool {
+    let protocol = power
+        .pointer("/diagnostics/active_protocol")
+        .or_else(|| power.pointer("/diagnostics/activeProtocol"))
+        .and_then(Value::as_str);
+    protocol == Some("pps")
+        && parse_isolapurr_live_telemetry(power)
+            .map(|telemetry| {
+                telemetry.status == "ok"
+                    && telemetry.voltage_mv >= THERMAL_SOURCE_MIN_READY_VOLTAGE_MV
+            })
+            .unwrap_or(false)
+}
+
 pub(crate) async fn set_isolapurr_output_auto(
     _client: &Client,
     source_url: &str,
     device_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_isolapurr_device_identity(source_url, device_id)?;
+    if let Ok(power) = isolapurr_cli_json_read(source_url, &["power", "show"])
+        && isolapurr_live_pps_contract_is_ready(&power)
+    {
+        return Ok(());
+    }
     let mut config = read_isolapurr_power_config(source_url)?;
     if !isolapurr_power_config_usb_c_path_is_default(&config) {
         let response = isolapurr_cli_json(
@@ -6209,11 +6223,24 @@ pub(crate) fn isolapurr_configured_thermal_source_class(config: &Value) -> Optio
             .and_then(Value::as_u64)
     })
     .unwrap_or(0);
-    Some(if pps_max_ma >= 5_000 {
-        "pps5a"
-    } else {
-        "pps3a"
-    })
+    Some(
+        if pps_max_ma >= 5_000 && isolapurr_pd_pps_5a(capability) != Some(false) {
+            "pps5a"
+        } else {
+            "pps3a"
+        },
+    )
+}
+
+fn isolapurr_pd_pps_5a(capability: &Value) -> Option<bool> {
+    capability
+        .pointer("/current/pd_pps_5a")
+        .or_else(|| capability.pointer("/current/pdPps5a"))
+        .or_else(|| capability.pointer("/pd/pd_pps_5a"))
+        .or_else(|| capability.pointer("/pd/pdPps5a"))
+        .or_else(|| capability.get("pd_pps_5a"))
+        .or_else(|| capability.get("pdPps5a"))
+        .and_then(Value::as_bool)
 }
 
 pub(crate) fn isolapurr_power_config_has_thermal_capability(
@@ -6234,14 +6261,7 @@ pub(crate) fn isolapurr_power_config_has_thermal_capability(
             .or_else(|| capability.pointer("/pd/pps3LimitMa"))
             .and_then(Value::as_u64)
     });
-    let pd_pps_5a = capability
-        .pointer("/current/pd_pps_5a")
-        .or_else(|| capability.pointer("/current/pdPps5a"))
-        .or_else(|| capability.pointer("/pd/pd_pps_5a"))
-        .or_else(|| capability.pointer("/pd/pdPps5a"))
-        .or_else(|| capability.get("pd_pps_5a"))
-        .or_else(|| capability.get("pdPps5a"))
-        .and_then(Value::as_bool);
+    let pd_pps_5a = isolapurr_pd_pps_5a(capability);
     json_u64_any(
         capability.as_object().unwrap_or(&serde_json::Map::new()),
         &["power_watts", "powerWatts"],
@@ -6253,7 +6273,15 @@ pub(crate) fn isolapurr_power_config_has_thermal_capability(
             .or_else(|| capability.pointer("/pd/fixedVoltagesMv"))
             .and_then(Value::as_array)
             .is_some_and(|voltages| !voltages.is_empty())
-        && (!requires_pps_5a || (pps3_limit_ma >= Some(5_000) && pd_pps_5a == Some(true)))
+        // Match the existing source setup command in both classes. Retaining
+        // a 3000 register setting in auto PPS can leave the source repeatedly
+        // reapplying its profile; 3A advertisement has its own enable flag.
+        && pps3_limit_ma.is_none_or(|limit| limit >= 5_000)
+        && if requires_pps_5a {
+            pps3_limit_ma.is_some() && pd_pps_5a == Some(true)
+        } else {
+            pd_pps_5a != Some(true)
+        }
 }
 
 pub(crate) fn validate_isolapurr_ready_voltage(

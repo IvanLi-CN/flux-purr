@@ -345,13 +345,25 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/devices/{device_id}/install-status",
             get(device_install_status),
         )
+        .route(
+            "/api/v1/devices/{device_id}/setup/complete",
+            post(complete_device_setup),
+        )
         .route("/api/v1/devices/{device_id}/network", get(device_network))
         .route("/api/v1/devices/{device_id}/status", get(device_status))
         .route("/api/v1/devices/{device_id}/events", get(device_events))
+        .route(
+            "/api/v1/devices/{device_id}/events/history",
+            get(device_event_history),
+        )
         .route("/api/v1/devices/{device_id}/wifi", put(configure_wifi))
         .route(
             "/api/v1/devices/{device_id}/runtime",
             put(configure_runtime),
+        )
+        .route(
+            "/api/v1/devices/{device_id}/thermal-tuning",
+            get(device_thermal_tuning).post(configure_thermal_tuning),
         )
         .route(
             "/api/v1/devices/{device_id}/buzzer-test",
@@ -395,7 +407,12 @@ pub fn app(state: AppState) -> Router {
         )
         .with_state(state.clone());
 
-    if state.config.allow_dev_cors {
+    router = apply_dev_cors(router, state.config.allow_dev_cors);
+    router
+}
+
+fn apply_dev_cors(mut router: Router, allow_dev_cors: bool) -> Router {
+    if allow_dev_cors {
         router = router.layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|origin, _| {

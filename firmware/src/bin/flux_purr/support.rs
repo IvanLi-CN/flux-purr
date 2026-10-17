@@ -250,10 +250,6 @@ pub(crate) use flux_purr_firmware::status_light::{
     RgbChannels, StatusLightInputs, StatusLightState, select_status_light_state,
     status_light_output,
 };
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) use flux_purr_firmware::thermal_plant::{
-    ThermalPlantControlInput, ThermalPlantController,
-};
 #[cfg(target_arch = "xtensa")]
 pub(crate) use flux_purr_firmware::{
     DEFAULT_PD_VOLTAGE_REQUEST, FAN_PWM_FREQUENCY_HZ, pwm_percent_from_permille,
@@ -342,6 +338,11 @@ impl<'a> PdI2c<'a> {
         self.guard = None;
     }
 
+    pub(crate) fn into_bus_address(mut self) -> usize {
+        self.release();
+        self.bus as *const SharedI2cBus as usize
+    }
+
     fn bus_mut(&mut self) -> Result<&mut HalI2c<'static, Async>, PdI2cError> {
         self.guard.as_deref_mut().ok_or(PdI2cError::BusBusy)
     }
@@ -404,6 +405,9 @@ pub(crate) static PD_HEATER_PERMIT: AtomicU8 = AtomicU8::new(0);
 pub(crate) static PD_HEATER_PERMIT_EXPIRES_AT_MS: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_arch = "xtensa")]
+static APPLIED_HEATER_DUTY_PERCENT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(target_arch = "xtensa")]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct HeaterPwmGate;
 
@@ -411,6 +415,10 @@ pub(crate) struct HeaterPwmGate;
 impl HeaterPwmGate {
     pub(crate) const fn new() -> Self {
         Self
+    }
+
+    pub(crate) fn applied_duty_percent() -> u8 {
+        APPLIED_HEATER_DUTY_PERCENT.load(Ordering::Acquire)
     }
 
     pub(crate) fn attach(pwm: RawHeaterPwm) {
@@ -451,9 +459,17 @@ impl SetDutyCycle for HeaterPwmGate {
                 PD_HEATER_PERMIT.store(0, Ordering::Release);
                 0
             };
-            if let Some(pwm) = slot.borrow_mut().as_mut() {
-                let _ = pwm.set_duty_cycle(effective_duty);
+            let mut storage = slot.borrow_mut();
+            let Some(pwm) = storage.as_mut() else {
+                APPLIED_HEATER_DUTY_PERCENT.store(0, Ordering::Release);
+                return;
+            };
+            if pwm.set_duty_cycle(effective_duty).is_err() {
+                return;
             }
+            let maximum = u32::from(pwm.max_duty_cycle()).max(1);
+            let percent = (u32::from(effective_duty) * 100 + maximum / 2) / maximum;
+            APPLIED_HEATER_DUTY_PERCENT.store(percent.min(100) as u8, Ordering::Release);
         });
         Ok(())
     }
@@ -942,10 +958,6 @@ impl PdTimestamp {
     }
 }
 
-// The plant delay is calibrated in seconds, so its predictor must not amplify
-// sub-second RTD quantisation into a multi-degree correction.
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_SLOPE_FILTER_ALPHA: f32 = 0.025;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_HOLD_PHASE_HYSTERESIS_C: f32 = 0.10;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -964,7 +976,9 @@ pub(crate) const HEATER_PPS_REQUEST_HYSTERESIS_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PPS_REQUEST_STEP_MV: u16 = 500;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 10_000;
+// Recover observed voltage headroom before the short qualification deadline;
+// a ten-second first dwell interrupts the first complete stability witness.
+pub(crate) const HEATER_HOLD_PPS_INITIAL_SETTLE_MS: u64 = 1_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_HOLD_PPS_STEADY_DWELL_MS: u64 = 2_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -999,7 +1013,7 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
 #[cfg(target_arch = "xtensa")]
-pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 128;
+pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 256;
 #[cfg(any(target_arch = "xtensa", test))]
 // Runtime responses are emitted cooperatively, one USB packet per loop turn.
 // Keep the deadline bounded, but long enough for the largest response buffer
@@ -1035,7 +1049,7 @@ pub(crate) const FAN_PWM_PERIOD_TICKS: u16 = 99;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const HEATER_PWM_PERIOD_TICKS: u16 = 1_599;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const HEATER_WARMUP_SOFT_START_MS: u64 = 1_000;
+pub(crate) const HEATER_WARMUP_SOFT_START_MS: u64 = 100;
 // Timer2 keeps one clock divider for its lifetime. Cue pitch is selected with
 // the period register because ESP32-S3 can report a new timer prescaler in
 // CFG0 while the GPIO matrix continues emitting the previous carrier.
@@ -1084,6 +1098,8 @@ pub(crate) const RTD_CONTROL_MAX_ACCEPTED_STEP_C: f32 = 6.0;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_CONTROL_MAX_UNPOWERED_RISE_C_PER_S: f32 = 4.0;
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const RTD_CONTROL_MIN_UNPOWERED_RISE_STEP_C: f32 = 0.6;
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_CONTROL_MAX_UNPOWERED_RISE_STEP_C: f32 = 3.0;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_CONTROL_GUARD_RECOVERY_WINDOW_MS: u64 = 750;
@@ -1105,7 +1121,20 @@ pub(crate) const RTD_REFERENCE_RESISTOR_OHMS: f32 = 2_490.0;
 // R17 = 31.6 kOhm and R16 = 10 kOhm set the TPS62933 3V3 rail to
 // 0.8 V * (1 + 31.6 / 10) = 3.328 V nominal. This is the divider's circuit
 // model, not a measured rail value or an ADC calibration parameter.
+#[cfg(all(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv"))]
+compile_error!("Select only one board RTD divider supply");
+#[cfg(not(any(feature = "rtd-supply-3208mv", feature = "rtd-supply-3340mv")))]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_328;
+#[cfg(feature = "rtd-supply-3208mv")]
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_208;
+#[cfg(all(feature = "rtd-supply-3340mv", not(feature = "rtd-supply-3208mv")))]
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const RTD_DIVIDER_SUPPLY_MV: u16 = 3_340;
+
+#[cfg(any(target_arch = "xtensa", test))]
+include!(concat!(env!("OUT_DIR"), "/rtd_adc_assumption.rs"));
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const RTD_SHORT_FAULT_MAX_MV: u16 = 150;
 #[cfg(any(target_arch = "xtensa", test))]

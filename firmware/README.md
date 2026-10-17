@@ -2,6 +2,7 @@
 
 ## Target profile
 
+- RTD-divider excitation is a board electrical input: default builds use `3328mV`; `--features rtd-supply-3340mv` uses `3340mV`, and `rtd-supply-3208mv` retains the `3208mV` board option. Runtime status reports `rtdDividerSupplyMv` for artifact/board verification. This does not replace ADC eFuse calibration or invent user calibration points. Both board images run the same heating and tuning controller; source current and the per-device model remain independent inputs.
 - Default architecture intent: `ESP32-S3FH4R2`
 - Current bring-up board profile: `S3 frontpanel GC9D01 display baseline`
 - Runtime style:
@@ -101,6 +102,7 @@
   - measurement fault-latch requires the fault condition to clear before a later explicit re-arm; clearing a fault never restores heater output automatically
 - Fan control:
   - heater falling edge starts POST cooling: `Normal` uses medium output above `40°C`, then low output for `30s`; `Fast` uses high output above `60°C`, medium output through `40°C`, then medium output for `30s`
+  - firmware-owned thermal tuning overrides the ordinary POST mode during every heater-off cooldown: MOS PWM stays at zero and the fan uses full output; after the run terminates above `40°C`, full output continues until a valid temperature reaches `40°C` or normal heating resumes
   - while `heater_enabled`, HEAT guard supports `Off/Low/Medium/High`; Low/Medium use ten-second minimum-output pulses with temperature interpolation, and High uses continuous low output above `80°C`
   - `>350°C` heater lock with at least medium output, `>360°C` high output, sensor faults, and `>=420°C` hard cutoff override both user policies
   - unacknowledged thermal runaway forces the existing active-cooling envelope regardless of the owner policy: `>60°C` full speed and `40~60°C` at `50%`; the forced state ends at `<40°C` or on acknowledgement, whichever comes first
@@ -108,6 +110,7 @@
   - the `FAN CTRL` page edits only POST/HEAT modes and never displays PD, voltage, PWM, tach, or hardcoded thermal rules
   - on the current board, full-speed fan output is `GPIO35=high` plus `GPIO36 duty=0%`
   - on the current board, the minimum-output-voltage fan profile is `GPIO35=high` plus `GPIO36 duty=100%` (`1000‰`); the fan rail control law is inverted
+  - the optional `fan-observe` diagnostic build enables GPIO35/36 input buffers without changing their output routing or PWM. USB/devd status includes `fanPadObservation.enablePadHigh` and `pwmPadHigh`, sampled from the digital input bank. At constant 0%/100% PWM these observations can distinguish endpoint output from the requested duty; an instantaneous sample at intermediate duty cannot measure duty or frequency. Neither field measures fan rail voltage or mechanical RPM. Standard builds omit the observation
 - Buzzer control:
   - `GPIO48` is driven by `MCPWM0 timer2/operator2`, separate from the heater and fan PWM channels
   - boot and idle are silent
@@ -124,7 +127,7 @@
   - the production artifact targets `FUSB302BMPX`; it performs two stable Device ID reads plus a readable status-bank check before selecting the controller
   - accepted FUSB302 Device ID forms (`0x8x`, including the observed `0x81`, and `0x9x`) use one shared PPS/PD 3.0 policy path; the identity check only rejects invalid or colliding I2C responders
   - an unreadable, conflicting, or unsupported identity becomes `unknown`; no CH224Q probe, guessed PD write, or startup wait is performed
-  - PD negotiation runs in a dedicated normal-executor Embassy task. The task owns its `5ms` cadence timer, FUSB302B policy, and physical PD I2C transactions; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
+  - PD negotiation runs in a priority-3 software-interrupt executor, above the priority-2 buzzer and ordinary Front Panel work. Its Embassy task compensates for bounded turn duration to target a `5ms` start-to-start cadence and retries a busy I2C bus after `1ms`; it processes at most one mailbox request before each poll and publishes snapshots. The Front Panel task never polls or mutates PD state. `Accept + PS_RDY` is required before a contract is usable, and it never arms heating automatically
   - until the contract is ready, the Dashboard shows `POWER/WAIT` with real sensor data while GPIO47 remains at `0%`
 - Historical `fan-cycle` smoke-test behavior remains documented in `s3-fan-cycle-bringup`; it is no longer the active runtime contract for the default `flux-purr` artifact.
 
@@ -135,6 +138,9 @@ documentation for traceability only. They are not selected, probed, packaged,
 or supported by the production `flux-purr` firmware artifact.
 
 ## Build commands
+
+- Product and hardware-validation images use the complete default feature set: `esp32s3`, `web_serial`, `net_http`, and `buzzer-test`. Wi-Fi and HTTP are required product functions; a no-network compilation check does not provide a substitute image for normal hardware operation or thermal HIL.
+- The workspace release profile optimizes the `flux-purr-firmware` crate for size with `opt-level = "s"`, while dependencies retain their release defaults. The complete image must fit the existing `2 MiB` factory-app partition and pass the boot-stack check. Image-size failures require build or code optimization without removing required functions or changing the partition contract.
 
 - Before any Xtensa build in a fresh terminal:
   - `source /Users/ivan/export-esp.sh`

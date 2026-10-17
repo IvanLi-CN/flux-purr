@@ -164,6 +164,68 @@ pub(crate) async fn serial_clear_lan_pairing(
     Ok(())
 }
 
+pub(crate) fn setup_completion_is_persisted(before: &InstallStatus, after: &InstallStatus) -> bool {
+    !after.commissioning_required
+        && !after.heater_locked
+        && !after.persistence_fault_attention_pending
+        && after.persistence_source == "eeprom"
+        && after.record_state == "valid"
+        && (!before.commissioning_required || after.record_sequence > before.record_sequence)
+}
+
+pub(crate) async fn serial_complete_setup(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<InstallStatus, HttpError> {
+    let before = serial_request_payload::<InstallStatus>(
+        state,
+        target,
+        "get_install_status",
+        "install_status",
+    )
+    .await?;
+    let request_id = format!("devd-{}-complete-setup", now_millis());
+    let request = serde_json::to_string(&UsbRequestWire {
+        frame_type: "request",
+        request_id: &request_id,
+        op: "complete_setup",
+    })
+    .map_err(|_| HttpError::internal("failed to encode USB setup request"))?;
+    serial_exchange(
+        state,
+        &target.id,
+        native_port_path(target)?,
+        request_id,
+        request,
+        SerialRetryPolicy::SingleShot,
+    )
+    .await?;
+    tokio::time::timeout(Duration::from_secs(6), async {
+        loop {
+            let after = serial_request_payload::<InstallStatus>(
+                state,
+                target,
+                "get_install_status",
+                "install_status",
+            )
+            .await?;
+            if setup_completion_is_persisted(&before, &after) {
+                return Ok(after);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        HttpError::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "setup_persistence_unverified",
+            "Setup completion was not confirmed in a healthy EEPROM record.",
+            false,
+        )
+    })?
+}
+
 pub(crate) async fn serial_lan_pairing_code(
     state: &AppState,
     target: &DeviceRecord,
@@ -464,6 +526,42 @@ pub(crate) async fn serial_thermal_plant_run_get(
     )
     .await?;
     extract_usb_payload(result, "thermal_plant_run")
+}
+
+pub(crate) async fn serial_thermal_tuning(
+    state: &AppState,
+    target: &DeviceRecord,
+    payload: &ThermalTuningRequest,
+) -> Result<ThermalTuningStatus, HttpError> {
+    let port_path = native_port_path(target)?;
+    let request_id = format!("devd-{}-thermal-tuning", now_millis());
+    let request = serde_json::to_string(&UsbThermalTuningWire {
+        frame_type: "thermal_tuning",
+        request_id: &request_id,
+        op: payload.op,
+        run_id: payload.run_id.as_deref(),
+        candidate_id: payload.candidate_id.as_deref(),
+        candidate_hash: payload.candidate_hash.as_deref(),
+        power_class: payload.power_class,
+        targets_c: payload.targets_c.as_ref(),
+        after_sequence: payload.after_sequence,
+        candidate_profile: payload.candidate_profile.as_ref(),
+    })
+    .map_err(|_| HttpError::internal("failed to encode thermal tuning request"))?;
+    let result = serial_exchange(
+        state,
+        &target.id,
+        port_path,
+        request_id,
+        request,
+        if matches!(payload.op, ThermalTuningCommandOp::Read) {
+            SerialRetryPolicy::ReadOnly
+        } else {
+            SerialRetryPolicy::SingleShot
+        },
+    )
+    .await?;
+    extract_usb_payload(result, "thermal_tuning")
 }
 
 pub(crate) async fn serial_calibration_job_config(
@@ -953,15 +1051,9 @@ pub(crate) fn serial_exchange_blocking(
         expected_usb_identity,
     } = context;
     let mut serial_sessions = lock_serial_sessions(serial_sessions)?;
-    let deadline = Instant::now() + serial_rpc_timeout(retry_policy);
-    let mut session = take_or_open_serial_session_with_identity(
+    let deadline = Instant::now() + serial_request_timeout(retry_policy, request.len());
+    let mut session = open_and_write_serial_request(
         &mut serial_sessions,
-        port_path,
-        deadline,
-        expected_usb_identity.as_ref(),
-    )?;
-    session = write_serial_request_with_reopen_with_identity(
-        session,
         port_path,
         request,
         deadline,
@@ -977,11 +1069,24 @@ pub(crate) fn serial_exchange_blocking(
     let mut read_buf = [0_u8; 256];
     let mut line = Vec::new();
     let mut discarding_overlong_line = false;
+    let mut read_retry = ReadOnlyResponseRetry::new(retry_policy, Instant::now());
 
     while Instant::now() < deadline {
+        let retry_now = Instant::now();
+        if read_retry.ready_to_retry(retry_now, deadline, retry_after_runtime_ready) {
+            require_usb_serial_identity(port_path, expected_usb_identity.as_ref())?;
+            read_retry.resend_if_stalled(
+                &mut *session.port,
+                request,
+                retry_now,
+                deadline,
+                retry_after_runtime_ready,
+            )?;
+        }
         match session.port.read(&mut read_buf) {
             Ok(0) => std::thread::sleep(SERIAL_READ_TIMEOUT),
             Ok(read) => {
+                read_retry.observe_progress(Instant::now());
                 let result = process_serial_read_chunk(
                     SerialResponseLineContext {
                         state,
@@ -1037,16 +1142,96 @@ pub(crate) fn serial_exchange_blocking(
         }
     }
 
+    serial_exchange_timeout(&mut serial_sessions, port_path, session)
+}
+
+fn open_and_write_serial_request(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    request: &str,
+    deadline: Instant,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+) -> Result<SerialSession, HttpError> {
+    let session = take_or_open_serial_session_with_identity(
+        serial_sessions,
+        port_path,
+        deadline,
+        expected_usb_identity,
+    )?;
+    write_serial_request_with_reopen_with_identity(
+        session,
+        port_path,
+        request,
+        deadline,
+        expected_usb_identity,
+    )
+}
+
+fn serial_exchange_timeout(
+    serial_sessions: &mut SerialSessionMap,
+    port_path: &str,
+    session: SerialSession,
+) -> Result<Value, HttpError> {
     // Keep the USB-JTAG session open after a timeout. Reopening this class of
     // port can reset the MCU; JSONL newline framing and request-id matching let
     // the next RPC discard any stale partial response without reopening it.
-    store_serial_session(&mut serial_sessions, port_path, session);
+    store_serial_session(serial_sessions, port_path, session);
     Err(HttpError::new(
         StatusCode::GATEWAY_TIMEOUT,
         "usb_response_timeout",
         "Timed out waiting for a matching USB JSONL response.",
         true,
     ))
+}
+
+// A lost read response must not spend the entire 45s RPC budget without
+// acknowledging the 200ms tuning stream. Retry only idempotent reads, on the
+// existing open session, before its 256-event audit buffer can fill. Mutations
+// and boot/startup_busy recovery retain their separate single-shot rules.
+struct ReadOnlyResponseRetry {
+    enabled: bool,
+    remaining: u8,
+    last_progress: Instant,
+}
+
+impl ReadOnlyResponseRetry {
+    fn new(policy: SerialRetryPolicy, now: Instant) -> Self {
+        Self {
+            enabled: matches!(policy, SerialRetryPolicy::ReadOnly),
+            remaining: 2,
+            last_progress: now,
+        }
+    }
+
+    fn observe_progress(&mut self, now: Instant) {
+        self.last_progress = now;
+    }
+
+    fn ready_to_retry(&self, now: Instant, deadline: Instant, startup_pending: bool) -> bool {
+        self.enabled
+            && self.remaining > 0
+            && !startup_pending
+            && now < deadline
+            && now.saturating_duration_since(self.last_progress) >= Duration::from_secs(10)
+    }
+
+    fn resend_if_stalled(
+        &mut self,
+        port: &mut dyn SerialSessionPort,
+        request: &str,
+        now: Instant,
+        deadline: Instant,
+        startup_pending: bool,
+    ) -> Result<bool, HttpError> {
+        if !self.ready_to_retry(now, deadline, startup_pending) {
+            return Ok(false);
+        }
+        // Do not reopen or reset a live MCU to recover a missing response.
+        write_serial_request(port, request, deadline)?;
+        self.remaining -= 1;
+        self.last_progress = now;
+        Ok(true)
+    }
 }
 
 fn reopen_serial_request_with_identity(
@@ -1172,6 +1357,19 @@ pub(crate) fn serial_rpc_timeout(retry_policy: SerialRetryPolicy) -> Duration {
         SerialRetryPolicy::ReadOnly => SERIAL_READ_ONLY_RPC_TIMEOUT,
         SerialRetryPolicy::SingleShot => SERIAL_RPC_TIMEOUT,
     }
+}
+
+fn serial_write_timeout(request_len: usize) -> Duration {
+    if request_len > 4_096 {
+        Duration::from_secs(10)
+    } else {
+        SERIAL_WRITE_TIMEOUT
+    }
+}
+
+fn serial_request_timeout(retry_policy: SerialRetryPolicy, request_len: usize) -> Duration {
+    serial_rpc_timeout(retry_policy)
+        .max(serial_write_timeout(request_len) + Duration::from_secs(10))
 }
 
 pub(crate) fn emit_serial_log_line(
@@ -1467,13 +1665,13 @@ pub(crate) struct SerialSession {
 }
 
 pub trait SerialSessionPort: Read + Write + Send {
-    fn begin_write(&mut self) -> Result<(), HttpError>;
+    fn begin_write(&mut self, timeout: Duration) -> Result<(), HttpError>;
     fn finish_write(&mut self) -> Result<(), HttpError>;
 }
 
 impl SerialSessionPort for Box<dyn serialport::SerialPort> {
-    fn begin_write(&mut self) -> Result<(), HttpError> {
-        self.set_timeout(SERIAL_WRITE_TIMEOUT)
+    fn begin_write(&mut self, timeout: Duration) -> Result<(), HttpError> {
+        self.set_timeout(timeout)
             .map_err(serial_timeout_config_http_error)
     }
 
@@ -1518,7 +1716,7 @@ impl Write for RawUsbSerialJtagPort {
 
 #[cfg(target_os = "macos")]
 impl SerialSessionPort for RawUsbSerialJtagPort {
-    fn begin_write(&mut self) -> Result<(), HttpError> {
+    fn begin_write(&mut self, _timeout: Duration) -> Result<(), HttpError> {
         Ok(())
     }
 
@@ -2103,16 +2301,71 @@ fn serial_port_path_is_present(port_path: &str) -> bool {
 pub(crate) fn write_serial_request(
     port: &mut dyn SerialSessionPort,
     request: &str,
+    deadline: Instant,
 ) -> Result<(), HttpError> {
     validate_serial_request_len(request)?;
-    port.begin_write()?;
-    let write_result = port
-        .write_all(request.as_bytes())
-        .and_then(|_| port.write_all(b"\n"))
-        .and_then(|_| port.flush());
+    let write_timeout = serial_write_timeout(request.len());
+    port.begin_write(write_timeout)?;
+    let write_deadline = (Instant::now() + write_timeout).min(deadline);
+    let write_result = write_serial_bytes(port, request.as_bytes(), write_deadline)
+        .and_then(|_| write_serial_bytes(port, b"\n", write_deadline))
+        .and_then(|_| flush_serial_write(port, write_deadline));
     let restore_result = port.finish_write();
     write_result.map_err(serial_io_http_error)?;
     restore_result
+}
+
+fn write_serial_bytes(
+    port: &mut dyn SerialSessionPort,
+    bytes: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match port.write(&bytes[written..]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(count) => written += count,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                std::thread::sleep(
+                    SERIAL_READ_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn flush_serial_write(port: &mut dyn SerialSessionPort, deadline: Instant) -> io::Result<()> {
+    loop {
+        if Instant::now() >= deadline {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        match port.flush() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                std::thread::sleep(
+                    SERIAL_READ_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(crate) fn validate_serial_request_len(request: &str) -> Result<(), HttpError> {
@@ -2141,13 +2394,13 @@ fn write_serial_request_with_reopen_with_identity(
     deadline: Instant,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<SerialSession, HttpError> {
-    match write_serial_request(&mut *session.port, request) {
+    match write_serial_request(&mut *session.port, request, deadline) {
         Ok(()) => Ok(session),
         Err(error) if is_recoverable_write_http_error(&error) => {
             drop(session);
             let mut reopened =
                 reopen_serial_session_with_identity(port_path, deadline, expected_usb_identity)?;
-            write_serial_request(&mut *reopened.port, request)?;
+            write_serial_request(&mut *reopened.port, request, deadline)?;
             Ok(reopened)
         }
         Err(error) => Err(error),
@@ -2423,4 +2676,161 @@ pub(crate) fn is_recoverable_write_http_error(error: &HttpError) -> bool {
             .strip_prefix("Serial I/O failed: ")
             .map(is_recoverable_serial_error_message)
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    struct IntermittentPort {
+        written: Vec<u8>,
+        write_calls: usize,
+    }
+
+    impl Read for IntermittentPort {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for IntermittentPort {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.write_calls += 1;
+            if self.write_calls == 2 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            let count = buf.len().min(3);
+            self.written.extend_from_slice(&buf[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SerialSessionPort for IntermittentPort {
+        fn begin_write(&mut self, _timeout: Duration) -> Result<(), HttpError> {
+            Ok(())
+        }
+
+        fn finish_write(&mut self) -> Result<(), HttpError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn request_write_resumes_after_partial_nonblocking_write() {
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let request = "x".repeat(5_000);
+        write_serial_request(&mut port, &request, Instant::now() + Duration::from_secs(1)).unwrap();
+        assert_eq!(port.written, format!("{request}\n").as_bytes());
+    }
+
+    #[test]
+    fn lost_read_response_retries_the_same_event_ack_without_reopening() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(45);
+        let request =
+            r#"{"type":"thermal_tuning","op":"read","runId":"same-run","afterSequence":42}"#;
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let mut retry = ReadOnlyResponseRetry::new(SerialRetryPolicy::ReadOnly, now);
+        for seconds in [10, 20] {
+            assert!(
+                retry
+                    .resend_if_stalled(
+                        &mut port,
+                        request,
+                        now + Duration::from_secs(seconds),
+                        deadline,
+                        false
+                    )
+                    .unwrap()
+            );
+        }
+        assert!(
+            !retry
+                .resend_if_stalled(
+                    &mut port,
+                    request,
+                    now + Duration::from_secs(30),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        assert_eq!(port.written, format!("{request}\n{request}\n").as_bytes());
+    }
+
+    #[test]
+    fn read_recovery_preserves_progress_startup_and_single_shot_boundaries() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(45);
+        let mut port = IntermittentPort {
+            written: Vec::new(),
+            write_calls: 0,
+        };
+        let mut mutation = ReadOnlyResponseRetry::new(SerialRetryPolicy::SingleShot, now);
+        assert!(
+            !mutation
+                .resend_if_stalled(
+                    &mut port,
+                    "mutation",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        let mut read = ReadOnlyResponseRetry::new(SerialRetryPolicy::ReadOnly, now);
+        assert!(
+            !read
+                .resend_if_stalled(
+                    &mut port,
+                    "read",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    true
+                )
+                .unwrap()
+        );
+        read.observe_progress(now + Duration::from_secs(19));
+        assert!(
+            !read
+                .resend_if_stalled(
+                    &mut port,
+                    "read",
+                    now + Duration::from_secs(20),
+                    deadline,
+                    false
+                )
+                .unwrap()
+        );
+        assert!(
+            !read
+                .resend_if_stalled(&mut port, "read", deadline, deadline, false)
+                .unwrap()
+        );
+        assert!(port.written.is_empty());
+    }
+
+    #[test]
+    fn large_control_frames_have_a_bounded_longer_write_window() {
+        assert_eq!(serial_write_timeout(4_096), SERIAL_WRITE_TIMEOUT);
+        assert!(serial_write_timeout(5_000) > SERIAL_WRITE_TIMEOUT);
+        assert!(
+            serial_request_timeout(SerialRetryPolicy::SingleShot, 5_000)
+                >= serial_write_timeout(5_000) + Duration::from_secs(10)
+        );
+        assert_eq!(
+            serial_request_timeout(SerialRetryPolicy::SingleShot, 4_096),
+            SERIAL_RPC_TIMEOUT
+        );
+    }
 }

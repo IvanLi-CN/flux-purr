@@ -2,6 +2,28 @@ use super::*;
 use std::process::ExitStatus;
 use tempfile::tempdir;
 
+#[test]
+fn calibration_bridge_preserves_the_firmware_shutdown_response() {
+    let response = flux_purr_firmware::thermal_response::HeatResponse {
+        delay_ms: 0,
+        decay_ms: 3_900,
+        rmse_c: 0.4,
+        maximum_error_c: 0.8,
+    };
+    let active = ThermalPlantActiveResult {
+        heat_response: Some(response),
+        ..ThermalPlantActiveResult::default()
+    };
+    let wire = serde_json::to_value(&active).unwrap();
+    let decoded: ThermalPlantActiveResult = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(decoded.heat_response, Some(response));
+    assert_eq!(wire["heatResponse"]["decayMs"], 3_900);
+    let mut legacy = wire;
+    legacy.as_object_mut().unwrap().remove("heatResponse");
+    let decoded: ThermalPlantActiveResult = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.heat_response, None);
+}
+
 #[path = "product_hil_tests.rs"]
 mod product_hil;
 
@@ -180,6 +202,51 @@ fn device_event_backlog_replays_existing_bounded_events() {
         backlog[DEVICE_EVENT_REPLAY_LIMIT - 1].payload["leaseId"],
         format!("lease-{}", DEVICE_EVENT_REPLAY_LIMIT + 6)
     );
+}
+
+#[tokio::test]
+async fn monitor_history_retains_reset_evidence_beyond_device_list_limit() {
+    let state = AppState::test();
+    state.emit(event(
+        "mock-fp-lab-01",
+        "serial",
+        "boot reset",
+        json!({"line": "reset_reason=cpu_mwdt0"}),
+    ));
+    for index in 0..40 {
+        state.emit(event(
+            "mock-fp-lab-01",
+            "serial",
+            "boot stage",
+            json!({"stage": index}),
+        ));
+    }
+    let response = app(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/devices/mock-fp-lab-01/events/history?tail=80")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(body["events"].as_array().unwrap().len(), 41);
+    assert_eq!(
+        body["events"][0]["payload"]["line"],
+        "reset_reason=cpu_mwdt0"
+    );
+    let empty = device_event_history(
+        State(state),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(DeviceEventHistoryQuery { tail: Some(0) }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert!(empty["events"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -462,6 +529,28 @@ fn serial_scan_without_fixed_target_lists_all_espressif_candidates() {
         devices
             .iter()
             .all(|device| device.identity.hostname.is_empty())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn serial_scan_prefers_authorized_callout_alias_when_tty_is_enumerated() {
+    let port = serialport::SerialPortInfo {
+        port_name: "/dev/tty.usbmodem2111401".to_string(),
+        port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+            vid: ESP32S3_USB_SERIAL_JTAG_VID,
+            pid: ESP32S3_USB_SERIAL_JTAG_PID,
+            serial_number: Some("test-device".to_string()),
+            manufacturer: Some("Espressif".to_string()),
+            product: Some("USB JTAG/serial debug unit".to_string()),
+        }),
+    };
+
+    let devices = scan_serial_devices_from_available(None, &[port]);
+
+    assert_eq!(
+        devices[0].port_path.as_deref(),
+        Some("/dev/cu.usbmodem2111401")
     );
 }
 
@@ -3214,6 +3303,32 @@ fn usb_response_decoder_extracts_runtime_config_status_payload() {
     assert!(status.heater_enabled);
     assert!(!status.active_cooling_enabled);
     assert!(status.adc_diagnostics.is_none());
+    assert!(status.fan_pad_observation.is_none());
+}
+
+#[test]
+fn usb_response_decoder_preserves_fan_pad_disagreement_with_command() {
+    let mut status = mock_status(&native_placeholder_network());
+    status.fan_enabled = true;
+    status.fan_pwm_permille = 0;
+    status.fan_pad_observation = Some(FanPadObservation {
+        enable_pad_high: true,
+        pwm_pad_high: true,
+    });
+    let frame = format!(
+        r#"{{"type":"response","requestId":"fan-pad","ok":true,"result":{{"status":{}}}}}"#,
+        serde_json::to_string(&status).unwrap()
+    );
+    let payload = decode_usb_response_line(frame.as_bytes(), "fan-pad")
+        .unwrap()
+        .unwrap();
+    let decoded = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+    let observed = decoded.fan_pad_observation.as_ref().unwrap();
+    assert!(observed.enable_pad_high);
+    assert!(observed.pwm_pad_high);
+    assert_eq!(decoded.fan_pwm_permille, 0);
+    let forwarded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(forwarded["fanPadObservation"]["pwmPadHigh"], true);
 }
 
 #[test]
@@ -3234,6 +3349,32 @@ fn usb_response_decoder_extracts_buzzer_test_payload() {
 }
 
 #[test]
+fn usb_response_decoder_preserves_rtd_divider_supply() {
+    for supply_mv in [3_328, 3_208] {
+        let mut status = serde_json::to_value(mock_status(&native_placeholder_network())).unwrap();
+        status["rtdDividerSupplyMv"] = json!(supply_mv);
+        let frame = format!(
+            r#"{{"type":"response","requestId":"rtd-supply","ok":true,"result":{{"status":{}}}}}"#,
+            serde_json::to_string(&status).unwrap()
+        );
+        let payload = decode_usb_response_line(frame.as_bytes(), "rtd-supply")
+            .unwrap()
+            .unwrap();
+        let decoded = extract_usb_payload::<ControlPlaneStatus>(payload, "status").unwrap();
+        assert_eq!(decoded.rtd_divider_supply_mv, Some(supply_mv));
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["rtdDividerSupplyMv"],
+            supply_mv
+        );
+    }
+    let legacy: ControlPlaneStatus = serde_json::from_value(
+        serde_json::to_value(mock_status(&native_placeholder_network())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(legacy.rtd_divider_supply_mv, None);
+}
+
+#[test]
 fn usb_response_decoder_preserves_adc_diagnostics() {
     let payload = decode_usb_response_line(
             br#"{"type":"response","requestId":"status-adc","ok":true,"result":{"status":{"mode":"sampling","uptimeSeconds":12,"currentTempC":31.5,"targetTempC":240,"heaterEnabled":false,"heaterOutputPercent":0,"activeCoolingEnabled":false,"fanDisplayState":"OFF","fanEnabled":false,"fanPwmPermille":0,"voltageMv":20000,"currentMa":0,"boardTempCenti":3150,"adcDiagnostics":{"calibrationSource":"efuse","efuseVersion":1,"attenuationDb":6,"initCode":1850,"referenceCode":1600,"referenceMv":850,"rtdRawCodeMean":2100,"rtdRawCodeMin":2098,"rtdRawCodeMax":2102,"rtdRawCodeSpread":4,"vinRawCodeMean":1800},"pdRequestMv":20000,"pdContractMv":20000,"pdState":"ready","frontpanelKey":null,"network":{"state":"idle","dns":[],"wifiRssi":null}}}}"#,
@@ -3247,6 +3388,24 @@ fn usb_response_decoder_preserves_adc_diagnostics() {
 
     assert_eq!(diagnostics.calibration_source, "efuse");
     assert_eq!(diagnostics.rtd_raw_code_spread, 4);
+    assert_eq!(diagnostics.rtd_assumed_offset_uv, 0);
+}
+
+#[test]
+fn adc_diagnostics_preserves_explicit_assumed_rtd_offset() {
+    let value = json!({
+        "calibrationSource": "efuse", "efuseVersion": 1, "attenuationDb": 6,
+        "initCode": 1850, "referenceCode": 1600, "referenceMv": 850,
+        "rtdRawCodeMean": 2100, "rtdRawCodeMin": 2098, "rtdRawCodeMax": 2102,
+        "rtdRawCodeSpread": 4, "vinRawCodeMean": 1800, "rtdAssumedOffsetUv": -13500
+    });
+    let diagnostics: AdcDiagnostics = serde_json::from_value(value).unwrap();
+    assert_eq!(diagnostics.rtd_assumed_offset_uv, -13_500);
+    assert_eq!(diagnostics.calibration_source, "efuse");
+    assert_eq!(
+        serde_json::to_value(diagnostics).unwrap()["rtdAssumedOffsetUv"],
+        -13_500
+    );
 }
 
 #[test]
@@ -4248,6 +4407,7 @@ fn runtime_verification_requires_product_firmware_kind() {
         firmware_version: bundle.manifest.identity.version.clone(),
         build_id: bundle.manifest.identity.build_id.clone(),
         git_sha: bundle.manifest.identity.source_sha.clone(),
+        reset_reason: None,
         board: "esp32-s3".into(),
         api_version: "2026-05-29".into(),
         protocol_version: "flux-purr.usb.v1".into(),
@@ -4607,4 +4767,61 @@ async fn install_status_endpoint_rejects_non_native_transports() {
     .expect_err("mock transport must not expose install status");
 
     assert_eq!(error.error.code, "native_serial_required");
+}
+
+#[tokio::test]
+async fn setup_completion_requires_a_lease_and_native_transport() {
+    let state = AppState::test();
+    let error = complete_device_setup(
+        State(state.clone()),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(LeaseQuery { lease_id: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "lease_required");
+    let lease = state.lease_device("mock-fp-lab-01").unwrap();
+    let error = complete_device_setup(
+        State(state),
+        AxumPath("mock-fp-lab-01".into()),
+        Query(LeaseQuery {
+            lease_id: Some(lease.lease_id),
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "native_serial_required");
+}
+
+#[test]
+fn setup_completion_requires_a_persisted_healthy_generation() {
+    let before: InstallStatus = serde_json::from_value(json!({
+        "layoutId":"flux-purr.esp32s3fh4r2.factory","layoutVersion":1,
+        "partitionTableSha256":"sha256:test","persistenceSource":"eeprom",
+        "recordState":"valid","recordSequence":4,"commissioningRequired":true,
+        "setupReason":"explicit_reset","sensorState":"ready","heaterLocked":true
+    }))
+    .unwrap();
+    let mut after = before.clone();
+    after.commissioning_required = false;
+    after.heater_locked = false;
+    assert!(!setup_completion_is_persisted(&before, &after));
+    after.record_sequence = 5;
+    assert!(setup_completion_is_persisted(&before, &after));
+    for (field, value) in [
+        ("recordState", json!("corrupt")),
+        ("persistenceSource", json!("none")),
+        ("commissioningRequired", json!(true)),
+        ("heaterLocked", json!(true)),
+        ("persistenceFaultAttentionPending", json!(true)),
+    ] {
+        let mut value_after = serde_json::to_value(&after).unwrap();
+        value_after[field] = value;
+        let rejected = serde_json::from_value(value_after).unwrap();
+        assert!(
+            !setup_completion_is_persisted(&before, &rejected),
+            "{field}"
+        );
+    }
+    assert!(setup_completion_is_persisted(&after, &after));
 }

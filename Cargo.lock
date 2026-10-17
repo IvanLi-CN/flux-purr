@@ -1828,6 +1828,7 @@ dependencies = [
  "crossterm",
  "esp-idf-part",
  "espflash",
+ "flux-purr-firmware",
  "hex",
  "ipnet",
  "libc",

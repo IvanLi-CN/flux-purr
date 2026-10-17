@@ -136,6 +136,10 @@ pub struct ControlMailboxCommand {
     pub expected_revision: Option<u32>,
     /// Cursor used by the read-only thermal-plant trace endpoint.
     pub after_sample: Option<u8>,
+    /// Cursor used by the thermal-tuning event stream. This is deliberately
+    /// separate from the legacy thermal-plant cursor and keeps the full
+    /// monotonic sequence width on LAN.
+    pub after_sequence: Option<u32>,
     pub body: Box<str>,
 }
 
@@ -209,6 +213,7 @@ pub struct HttpRequest<'a> {
     pub lease_id: Option<&'a str>,
     pub expected_revision: Option<u32>,
     pub after_sample: Option<u8>,
+    pub after_sequence: Option<u32>,
     pub request_private_network: bool,
     pub body: &'a str,
     /// Entropy produced by the hardware RNG. It is never emitted in responses.
@@ -608,6 +613,7 @@ impl NetHttpState {
                 lease_id,
                 expected_revision: request.expected_revision,
                 after_sample: request.after_sample,
+                after_sequence: request.after_sequence,
                 body: Box::from(request.body),
             },
             allow_origin: None,
@@ -764,6 +770,7 @@ fn endpoint_for_path(path: &str) -> Option<LanEndpoint> {
         "/api/v1/calibration" => Some(LanEndpoint::Calibration),
         "/api/v1/calibration/job" => Some(LanEndpoint::CalibrationJob),
         "/api/v1/calibration/thermal-plant/run" => Some(LanEndpoint::ThermalPlantRun),
+        "/api/v1/thermal-tuning" => Some(LanEndpoint::ThermalTuning),
         "/api/v1/heater-curve" => Some(LanEndpoint::HeaterCurve),
         "/api/v1/heater-curve/save" => Some(LanEndpoint::HeaterCurveSave),
         "/api/v1/thermal-profile" => Some(LanEndpoint::ThermalProfile),
@@ -801,6 +808,10 @@ fn endpoint_allows_method(endpoint: LanEndpoint, method: HttpMethod) -> bool {
                 HttpMethod::Get | HttpMethod::Post
             )
             | (LanEndpoint::ThermalPlantRun, HttpMethod::Get)
+            | (
+                LanEndpoint::ThermalTuning,
+                HttpMethod::Get | HttpMethod::Post
+            )
             | (LanEndpoint::HeaterCurveSave, HttpMethod::Post)
     )
 }
@@ -940,6 +951,7 @@ mod tests {
             lease_id: None,
             expected_revision: None,
             after_sample: None,
+            after_sequence: None,
             request_private_network: false,
             body: "",
             entropy: [7; crate::lan::LAN_TOKEN_BYTES],

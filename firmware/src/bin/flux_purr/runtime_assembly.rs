@@ -39,6 +39,7 @@ macro_rules! build_runtime_loop_state {
             calibration_runtime_state,
             thermal_plant_workspace,
             thermal_control_profile_preview,
+            thermal_tuning,
             heater_power_backend,
             pending_automatic_power_request,
             hold_pps_governor,
@@ -65,6 +66,8 @@ macro_rules! build_runtime_loop_state {
             cooling_disabled_lock_armed,
             fan_policy_state,
             heater_enabled_last_cycle,
+            tuning_cooling_latched,
+            tuning_was_armed_last_cycle,
             last_fan_command,
             last_raw_state,
             fan_command,
@@ -124,12 +127,17 @@ macro_rules! build_runtime_loop_state {
         let mut power_state_subscription = pd_port
             .subscribe_power_state()
             .expect("power state receiver capacity is reserved for the runtime loop");
+        let display_power_state_subscription = pd_port
+            .subscribe_power_state()
+            .expect("power state receiver capacity is reserved for the display");
         let power_state = power_state_subscription
             .try_get()
             .unwrap_or_else(PowerState::unavailable);
         let last_control_ms = 0;
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
         let heater_control_timing = HeaterControlTiming::default();
+        let tuning_pd_wait_started_ms = None;
+        let tuning_heater_rearm_pending = false;
         let _ = reset_reason;
         let _ = status_light_started_ms;
         let transport = RuntimeTransportState {
@@ -170,6 +178,7 @@ macro_rules! build_runtime_loop_state {
             eeprom_i2c,
             pd_port,
             power_state_subscription,
+            display_power_state_subscription,
             power_state,
             fan_enable,
             fan_pwm,
@@ -195,6 +204,9 @@ macro_rules! build_runtime_loop_state {
             calibration_runtime_state,
             thermal_plant_workspace,
             thermal_control_profile_preview,
+            thermal_tuning,
+            tuning_pd_wait_started_ms,
+            tuning_heater_rearm_pending,
             heater_power_backend,
             pending_automatic_power_request,
             hold_pps_governor,
@@ -228,6 +240,8 @@ macro_rules! build_runtime_loop_state {
             cooling_disabled_lock_armed,
             fan_policy_state,
             heater_enabled_last_cycle,
+            tuning_cooling_latched,
+            tuning_was_armed_last_cycle,
             last_fan_command,
             fan_working_power_ticket,
             fan_working_next_attempt_ms,

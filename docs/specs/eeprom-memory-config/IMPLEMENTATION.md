@@ -4,6 +4,14 @@
 
 - Implementation: firmware uses the external M24C64 as its only persistent configuration store.
 - Lifecycle: active.
+- Raw maintenance retains pending automatic-idle power tickets until confirmation or a five-second caller timeout. EEPROM writes begin only after confirmation; failed or expired requests retain the maintenance lock. Focused regressions cover delayed confirmation, explicit rejection and timeout boundaries.
+
+## Hardware Evidence
+
+- Firmware `0.27.6-dev.71edd81` completed the repository CLI EEPROM erase operation and readback verification of all 8192 erased bytes. The flashed ELF SHA-256 is `aa38fb2a117abfd1ffcaf6ca72c6a791f40cc533d73e58d5d3ef9cbefcb9e940`; no EEPROM backup was created, as explicitly authorized.
+- A cold start confirmed missing thermal model, empty heater curve, inactive saved tuning profile, and empty user ADC calibration samples. A fresh protected heating/natural-cooling calibration then persisted transaction `1346525729` with 102 ordered samples and a bound heater curve. Natural-cooling samples have zero heater duty; all 172 captured runtime observations have the fan disabled.
+- On `0.27.6-dev.71edd81`, install-status readback retained `commissioningRequired=true`, `sensorState=ready` and `heaterLocked=true`. That implementation incorrectly required two user ADC samples on each channel, even when valid factory eFuse calibration was active. The firmware tuner therefore rejected startup as `thermal_model_unavailable` before collecting any tuning samples. EEPROM maintenance and fresh thermal calibration are verified; tuning from a fully erased EEPROM is not yet qualified.
+- Local private evidence is retained under `firmware/target/hil-calibration-only/`. Its calibration-only seed and provenance use the fresh transaction rather than a historical tuning profile.
 
 ## Implementation Coverage
 
@@ -13,11 +21,13 @@
 - `ControlPlaneStatus.persistenceFault` / `persistenceFaultAttentionPending` and `InstallStatus.lastPersistenceFault` retain their existing fields. Fault `code` identifies the domain and `slot` is `A`, `B`, or `single`; ordinary-domain failures remain local and the EEPROM error page owns explicit retry.
 - The `ThermalPlant` FPR2 payload keeps the fixed 768-byte slot by encoding each transient sample in 5 bytes: the low 15 bits of `elapsed_ticks` retain time and bit 15 records non-zero duty. Legacy FPM1 transient samples remain decoded from their 6-byte representation; records outside the 15-bit persisted time range are rejected before commit.
 - `tools/flux-purr-devd` does not stage or restore MCU internal configuration during update, flash, or recovery.
+- The firmware tuning path records a RAM preview receipt only after the candidate hash is applied, and binds its save receipt to the verified `pps5a` bank hash and FPR2 ACTIVE generation. Host tests cover matching and mismatched identities; no EEPROM-on-device tuning receipt has been accepted yet.
 
 ## Remaining Gaps
 
 - Keep EEPROM record compatibility only within EEPROM; do not import internal Flash records.
 - Keep firmware, host-tool, layout, and bundle tests aligned with the EEPROM-only boundary.
+- Validate tuning `confirm-save` across an authorized real EEPROM commit, readback, interruption, and rollback before considering its receipt qualified.
 
 ## References
 

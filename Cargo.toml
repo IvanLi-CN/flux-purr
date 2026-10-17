@@ -9,3 +9,7 @@ members = [
   "tools/flux-purr-devd",
   "tools/rust-style-check",
 ]
+
+[profile.release.package.flux-purr-firmware]
+opt-level = "s"
+codegen-units = 1
