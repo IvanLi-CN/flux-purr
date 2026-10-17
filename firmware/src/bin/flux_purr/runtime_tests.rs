@@ -1147,6 +1147,67 @@ fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
 }
 
 #[test]
+fn calibration_request_preserves_the_advertised_apdo_through_the_capability_bridge() {
+    let pdos = [
+        (100_u32 << 10) | 300,
+        pps_source_capability(3_300, 11_000, 3_000),
+        pps_source_capability(3_300, 21_000, 3_000),
+    ];
+    let source = SourceCapabilities::from_pdos(&pdos);
+    let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+    let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    manual.supply_scan_range = manual.thermal_plant_pps_range();
+    manual
+        .enable(ManualPpsOwner::Calibration, 5_500, Some(3_000))
+        .unwrap();
+    let request = manual_pps_contract_request(&manual, true).unwrap();
+    let mut sink = fusb302b::SinkPolicy::new_standby(5_000, 1_000);
+    assert!(sink.on_source_capabilities(&pdos).is_some());
+    sink.on_control_message(3, 0);
+    sink.on_control_message(6, 0);
+    assert!(sink.prepare_contract_refresh(request));
+    let rdo = sink.on_source_capabilities(&pdos).expect(
+        "the real capability bridge must not replace an advertised APDO with a clipped identity",
+    );
+    assert_eq!((u32::from_le_bytes(rdo) >> 28) & 0x07, 3);
+    assert_eq!(sink.pending_contract().voltage_mv, 5_500);
+    assert_eq!(sink.pending_contract().current_ma, 3_000);
+    sink.on_control_message(3, 50);
+    sink.on_control_message(6, 100);
+    assert!(request_matches_active(
+        request,
+        sink.confirmed_active_contract()
+    ));
+}
+
+#[test]
+fn advertised_apdo_identity_does_not_relax_the_product_request_bounds() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(3_300, 21_000, 6_000)]);
+    let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+    let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    assert_eq!(manual.maximum_pps_current_for_target(5_500), Some(5_000));
+    assert!(manual.validate_target(3_300, 3_000).is_err());
+    assert!(manual.validate_target(5_500, 5_500).is_err());
+    manual.enable(ManualPpsOwner::Debug, 5_500, None).unwrap();
+    assert_eq!(manual.target_ma, Some(5_000));
+    let candidate = manual
+        .automatic_heater_pps_candidate(25.0, None, &MemoryConfig::default(), None)
+        .unwrap();
+    assert_eq!(candidate.current_ma, 5_000);
+    let request = manual
+        .automatic_heater_request_contract(
+            25.0,
+            &MemoryConfig::default(),
+            candidate.allowed_mv,
+            candidate.current_ma,
+            None,
+        )
+        .unwrap();
+    assert_eq!(request.pps_range().unwrap().max_current_ma, 6_000);
+    assert!(source.select_exact_contract(request).is_some());
+}
+
+#[test]
 fn fusb302b_capability_refresh_preserves_manual_pps_intent() {
     let capabilities = ch224q::AdjustablePowerCapabilities {
         pps_min_mv: Some(5_500),

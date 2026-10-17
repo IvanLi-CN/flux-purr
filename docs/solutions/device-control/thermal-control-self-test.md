@@ -30,12 +30,14 @@ with loss feed-forward, predictive PI, saturation, and conditional anti-windup. 
 
 The usable scan floor and advertised APDO minimum are different facts: a source advertising 5.0V may be scanned from 5.5V. Persist both ranges, and match later contracts against the advertised range. Pin the selected APDO through capability refresh and confirmation; equal voltage/current settings do not identify an overlapping APDO. Host regressions cover both mismatches and a complete calibration followed by automatic warm-up, asserting that retained points are actually used. A transient tracking point applies only from its projected temperature through 1°C warmer; outside that window, missing coverage uses the labelled preset fallback. Extending a low-voltage point indefinitely can stall warm-up despite otherwise valid calibration.
 
+The FUSB302B capability bridge retains each APDO's original advertised minimum, maximum and current. Clipping that identity to product request bounds makes exact raw-PDO selection fail, even when the requested voltage and current are legal. Apply product bounds to requests separately. A regression must start from raw source PDOs, traverse the production bridge and calibration request builder, and obtain the intended RDO from the sink policy; hand-built clipped capabilities cannot verify this path.
+
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
-- one protected `thermal_plant_auto` transient calibration, from ambient through `220C` and passive cooling to `80C`
+- one protected `thermal_plant_auto` transient calibration, from ambient to the `220°C` cutoff or the final `3A` equilibrium, followed by passive cooling to `80°C`; model acceptance requires at least `100°C` of valid heating coverage and a complete, physically valid fit
 - whole-device supply-boundary observations captured during that same run; legacy resistance fields remain empty
 - canonical HTML HIL bundles generated through the Rust report renderer
 
@@ -128,9 +130,9 @@ The RTD path has two distinct consumers and they must stay separated:
 Current control-path truth is:
 
 - control loop frequency: `20Hz`
-- RTD oversampling per control cycle: `64` kept conversions
-- settle discard per cycle: `24`
-- minimum valid samples: `48`
+- RTD oversampling per control cycle: `80` kept conversions across all ten PWM phases
+- channel-switch settling: `5ms`, followed by `96` discarded conversions
+- minimum valid samples: `60`
 - default `tempFilterAlphaPermille`: `750`
 
 The control-side plausibility gate is deliberately narrower than a smoothing filter: it only rejects a single sample whose change exceeds `35°C/s` at the actual control-cycle interval. It does not modify `currentTempC`, raw ADC telemetry, front-panel display, or formal report evidence; accepted control samples still go directly through the configured EMA. Do not add a multi-sample window or median filter.

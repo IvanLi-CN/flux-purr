@@ -149,9 +149,11 @@ pub(crate) fn fusb302b_adjustable_power_capabilities(
             .find(|slot| slot.is_none())
         {
             *slot = Some(ch224q::PpsApdo {
-                min_mv,
-                max_mv,
-                max_ma,
+                // Exact requests identify the advertised APDO. Product bounds
+                // apply to requests, not to the identity used by the adapter.
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_ma: apdo.max_ma,
             });
         }
     }

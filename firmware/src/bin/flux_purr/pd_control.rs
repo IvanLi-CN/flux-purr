@@ -1234,7 +1234,9 @@ impl ManualPpsState {
         self.capability_apdos.iter().flatten().any(|apdo| {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
             let max_mv = apdo.max_mv.min(self.request_max_mv);
-            target_mv >= min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
+            target_mv >= min_mv
+                && target_mv <= max_mv
+                && target_ma <= apdo.max_ma.min(MAX_HEATER_CONTRACT_MA)
         })
     }
 
@@ -1245,7 +1247,8 @@ impl ManualPpsState {
             .filter_map(|apdo| {
                 let min_mv = apdo.min_mv.max(self.request_min_mv);
                 let max_mv = apdo.max_mv.min(self.request_max_mv);
-                (target_mv >= min_mv && target_mv <= max_mv).then_some(apdo.max_ma)
+                (target_mv >= min_mv && target_mv <= max_mv)
+                    .then_some(apdo.max_ma.min(MAX_HEATER_CONTRACT_MA))
             })
             .max()
     }

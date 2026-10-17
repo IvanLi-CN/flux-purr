@@ -466,6 +466,7 @@ None
 - 用单一 `HeaterController` 管理 PID 与 hard fault-latch，再把 cooling-disabled lock 作为独立安全层挂在 fan policy 旁边。
 - 用 `fan_display_state + heater_lock_reason + dashboard_warning_visible` 作为 Dashboard 真相源，不再复用单布尔 fan 标记表达全部运行态。
 - 用 `HeaterPowerBackend` 把控制器输出与硬件输出解耦：`pps-mos` 后端通过 FUSB302B PPS 调压和已确认合同下的 MOS PWM 分配同一瓦特需求；`fixed-pd-pwm-fallback` 仅使用满导通负载满足安全边界的 Fixed 合同，并以同一功率基准驱动 `GPIO47` PWM。
+- FUSB302B 能力转换保留每个实际 APDO 的原始广告电压范围与最大电流，用于精确选择和确认合同；产品电压范围与硬件电流上限只限制请求，不改写档位身份。校准和自动加热均沿该转换链生成可被原始 PDO 接受的请求。
 - Approach 调优与验收以目标温度相关的 full-speed-to-stable gate、overshoot、hold p2p、hold 高低侧误差和 source telemetry 为真相源；默认 flagship sprint 不再额外采集 `0% / 25% / 50%` approach-only 曲线作为门槛。
 - FUSB302B 作为电源准备层而不是 heater interlock；只有启动 capability gate 与后续调压写入失败会影响 heater 后端选择。
 - 两个 bank 各 10 个完整 point-local 目标点必须能与最长 Wi-Fi 凭据和完整校准状态同时持久化；EEPROM 使用 FPR2 分类记录，两个 thermal bank 独立位于 `ThermalPolicy` A/B 槽，不再写入整份 `MemoryRecord` 快照。旧 v1-v5 FPM1 记录仅在迁移阶段流式解码，逐域验证后通过 `PREPARED`/`ACTIVE` 布局标记完成迁移；EEPROM 不可达或安全域无法恢复时进入 `EEPROM_REQUIRED`，不得使用 `flux_cfg`、raw Flash 或 NVS。host 在开始调优前必须拒绝超过 profile 10 点容量的目标集合。
