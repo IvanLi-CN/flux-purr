@@ -258,6 +258,45 @@ fn ambiguous_voltage_response_is_retried_before_advancing() {
     panic!("the simulated electrical sweep did not reach an ambiguous response");
 }
 
+#[test]
+fn persistent_ambiguous_response_keeps_a_conservative_boundary() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    let mut ambiguous_request = None;
+    let mut ambiguous_vin_mv = 0;
+    let mut ambiguous_samples = 0;
+    for now_ms in (0..120_000).step_by(50) {
+        let output = job.output();
+        let mut input = sample(now_ms, output, 10_000);
+        if let Some(request_mv) = ambiguous_request
+            && output.request_mv == request_mv
+        {
+            if ambiguous_samples == 0 {
+                ambiguous_vin_mv = input.vin_mv.saturating_sub(4);
+            } else {
+                ambiguous_vin_mv = ambiguous_vin_mv.saturating_add(4);
+            }
+            input.vin_mv = ambiguous_vin_mv;
+            ambiguous_samples += 1;
+        }
+        let next = job.update(input);
+        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        if ambiguous_samples >= 5 {
+            assert!(matches!(
+                job.phase,
+                scan::ScanPhase::Equilibrium
+                    | scan::ScanPhase::Sweep
+                    | scan::ScanPhase::TemperatureSettle
+            ));
+            assert!(next.request_mv <= ambiguous_request.unwrap());
+            return;
+        }
+        if next.request_mv > output.request_mv && output.request_mv >= 5_500 {
+            ambiguous_request = Some(next.request_mv);
+        }
+    }
+    panic!("the simulated sweep did not reach persistent ambiguity");
+}
+
 fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::ScanInput {
     // Fake PPS source with an explicit current loop, no actual-current input.
     let delivered_mv = output.request_mv.min(output.request_ma * 4);

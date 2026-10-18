@@ -338,7 +338,14 @@ impl SupplyScan {
             self.previous = Some(input);
             self.changed_at_ms = input.now_ms;
             if self.ambiguous_count >= 5 {
-                self.fail(ScanFailure::AmbiguousResponse);
+                // Treat a persistent intermediate response as the
+                // conservative side of the boundary. It may be a source
+                // current-limit knee or an ADC transition that never settles
+                // exactly on either threshold; retaining it as a flat point
+                // cannot raise the usable voltage, while aborting the whole
+                // calibration would discard all earlier safe observations.
+                self.flat_request_mv = self.request_mv;
+                self.begin_equilibrium(input);
             }
             return;
         }
