@@ -7044,6 +7044,64 @@ fn transient_temperature_steps_are_rate_limited_after_dense_startup() {
 }
 
 #[test]
+fn transient_trace_compaction_keeps_the_full_heating_span_for_fitting() {
+    let memory = synthetic_memory_config();
+    let (samples, sample_count) = synthetic_trace(&memory, 25.0);
+    assert!(sample_count > 48);
+    let ambient_raw_rtd_adc_mv = samples[0].raw_rtd_adc_mv;
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_current_ma: 3_000,
+        ambient_raw_rtd_adc_mv,
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        supply_scan: None,
+        started_at_ms: None,
+        elapsed_ticks: samples[sample_count - 1].elapsed_ticks,
+        phase_started_tick: samples
+            .iter()
+            .take(sample_count)
+            .position(|sample| sample.duty_percent == 0)
+            .map_or(0, |index| samples[index].elapsed_ticks),
+        sample_count: sample_count as u8,
+        last_saved_temp_c: 79.0,
+        last_saved_tick: samples[sample_count - 1].elapsed_ticks,
+        samples,
+    };
+
+    compact_supply_calibration_trace(&mut job);
+
+    let compacted = &job.samples[..usize::from(job.sample_count)];
+    let first_powered = compacted
+        .iter()
+        .find(|sample| sample.duty_percent != 0)
+        .expect("compacted trace retains powered samples");
+    let peak_powered = compacted
+        .iter()
+        .filter(|sample| sample.duty_percent != 0)
+        .map(|sample| projected_rtd_temperature_c(&memory, sample.raw_rtd_adc_mv).unwrap())
+        .fold(f32::MIN, f32::max);
+    assert!(projected_rtd_temperature_c(&memory, first_powered.raw_rtd_adc_mv).unwrap() < 100.0);
+    assert!(peak_powered >= THERMAL_PLANT_TARGET_TEMP_C);
+    assert!(
+        compacted
+            .last()
+            .is_some_and(|sample| sample.duty_percent == 0)
+    );
+    assert!(
+        fit_thermal_plant_transient(
+            0x434f_4d50,
+            ambient_raw_rtd_adc_mv,
+            &job.samples,
+            job.sample_count,
+            None,
+            &memory,
+        )
+        .is_some()
+    );
+}
+
+#[test]
 fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degrees() {
     let mut job = CalibrationThermalPlantAutoJob {
         run_id: 1,

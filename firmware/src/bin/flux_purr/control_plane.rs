@@ -1106,36 +1106,81 @@ pub(crate) fn commit_vin_auto_samples_to_draft(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn mark_trace_indices_by_temperature(
+    samples: &[ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    keep: &mut [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    start: usize,
+    end: usize,
+    slots: usize,
+) {
+    let available = end.saturating_sub(start).saturating_add(1);
+    let slots = slots.min(available);
+    if slots == 0 {
+        return;
+    }
+    let first_raw = u32::from(samples[start].raw_rtd_adc_mv);
+    let last_raw = u32::from(samples[end].raw_rtd_adc_mv);
+    let raw_span = last_raw.saturating_sub(first_raw);
+    let mut cursor = start;
+    for slot in 0..slots {
+        let target_raw = if slots == 1 {
+            last_raw
+        } else {
+            first_raw + slot as u32 * raw_span / (slots - 1) as u32
+        };
+        while cursor < end && u32::from(samples[cursor].raw_rtd_adc_mv) < target_raw {
+            cursor += 1;
+        }
+        keep[cursor] = true;
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn mark_trace_indices_evenly(
+    keep: &mut [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    start: usize,
+    end: usize,
+    slots: usize,
+) {
+    let available = end.saturating_sub(start).saturating_add(1);
+    let slots = slots.min(available);
+    if slots == 0 {
+        return;
+    }
+    for slot in 0..slots {
+        let index = if slots == 1 {
+            end
+        } else {
+            start + slot * (end - start) / (slots - 1)
+        };
+        keep[index] = true;
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlantAutoJob) {
     let count = usize::from(job.sample_count);
     if count <= 48 {
         return;
     }
-    // Keep recent excitation and cooling, not sparse samples separated by
-    // discarded current/voltage sweeps. The boundary owns equilibrium history.
+    // Keep the complete powered temperature span and the cooling tail. The
+    // boundary owns equilibrium history, but the transient fit still needs
+    // observations from the beginning of heating through the peak.
     let mut keep = [false; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     keep[0] = true;
+    let first_powered = job.samples[..count]
+        .iter()
+        .position(|sample| sample.duty_percent != 0);
     let last_powered = job.samples[..count]
         .iter()
         .rposition(|sample| sample.duty_percent != 0);
-    if let Some(last) = last_powered {
+    if let (Some(first), Some(last)) = (first_powered, last_powered) {
         let cooling_count = count - last - 1;
-        let powered_slots = if cooling_count == 0 { 47 } else { 24 };
-        for item in keep
-            .iter_mut()
-            .take(last + 1)
-            .skip((last + 1).saturating_sub(powered_slots))
-        {
-            *item = true;
-        }
-        let slots = cooling_count.min(23);
-        for slot in 0..slots {
-            let index = if slots == 1 {
-                count - 1
-            } else {
-                last + 1 + slot * (cooling_count - 1) / (slots - 1)
-            };
-            keep[index] = true;
+        let cooling_slots = cooling_count.min(23);
+        let powered_slots = 47usize.saturating_sub(cooling_slots);
+        mark_trace_indices_by_temperature(&job.samples, &mut keep, first, last, powered_slots);
+        if cooling_count > 0 {
+            mark_trace_indices_evenly(&mut keep, last + 1, count - 1, cooling_slots);
         }
     }
     let mut output = 0;
@@ -1182,8 +1227,9 @@ pub(crate) fn record_thermal_plant_transient_sample(
     let electrical_change = job.sample_count > 0 && {
         let previous = job.samples[usize::from(job.sample_count) - 1];
         previous.duty_percent != duty_percent
-            || previous.heater_voltage_125mv
-                != quantize_thermal_plant_heater_voltage_mv(latest_vin_mv)
+            || (duty_percent != 0
+                && previous.heater_voltage_125mv
+                    != quantize_thermal_plant_heater_voltage_mv(latest_vin_mv))
     };
     let should_record = force
         || electrical_change
@@ -1313,12 +1359,10 @@ pub(crate) fn transient_fit_row(
     ambient_temp_c: f32,
 ) -> Option<([f32; 3], f32)> {
     let previous_index = transient_fit_previous_index(samples, index)?;
-    if samples[previous_index.saturating_sub(1)..=index]
-        .windows(2)
-        .any(|pair| pair[1].elapsed_ticks.saturating_sub(pair[0].elapsed_ticks) > 200)
-    {
-        return None;
-    }
+    // Supply scans can spend minutes at one safe point while the plate
+    // approaches equilibrium. The integrated energy balance remains valid
+    // across that interval; rejecting it would discard the only full-span
+    // observations available to the transient fit.
     let ambient_kelvin = ambient_temp_c + 273.15;
     let mut values = [0.0; 3];
     let mut energy_mj = 0.0;
@@ -1412,41 +1456,24 @@ pub(crate) struct TransientFitData {
     samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     count: usize,
     powers_mw: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
-    input_energy_mw_ticks: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     rows: [Option<([f32; 3], u8)>; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 impl TransientFitData {
-    fn input_energy_at(&self, elapsed_ticks: f32) -> f32 {
-        let samples = &self.samples[..self.count];
-        if elapsed_ticks <= (samples[0].elapsed_ticks as f32) {
-            return 0.0;
-        }
-        let index =
-            samples.partition_point(|sample| (sample.elapsed_ticks as f32) <= elapsed_ticks) - 1;
-        let mut energy = self.input_energy_mw_ticks[index];
-        if index + 1 < self.count {
-            let width = (samples[index + 1].elapsed_ticks - samples[index].elapsed_ticks) as f32;
-            let overlap = elapsed_ticks - (samples[index].elapsed_ticks as f32);
-            let mut mean_power = self.powers_mw[index];
-            if samples[index].duty_percent == samples[index + 1].duty_percent {
-                mean_power += (self.powers_mw[index + 1] - mean_power) * overlap / width * 0.5;
-            }
-            energy += mean_power * overlap;
-        }
-        energy
-    }
-
     pub(crate) fn row(&self, index: usize, delay_ticks: u16) -> Option<([f32; 3], f32)> {
         let (values, previous_index) = self.rows[index]?;
         let mut energy = 0.0;
+        let samples = &self.samples[..self.count];
+        let powers_mw = &self.powers_mw[..self.count];
         for offset in 0..=1 {
             let first = usize::from(previous_index).saturating_sub(offset);
             let last = index.saturating_sub(offset);
-            let shift = f32::from(delay_ticks);
-            energy += self.input_energy_at((self.samples[last].elapsed_ticks as f32) - shift)
-                - self.input_energy_at((self.samples[first].elapsed_ticks as f32) - shift);
+            let start = samples[first].elapsed_ticks as f32;
+            let end = samples[last].elapsed_ticks as f32;
+            let power =
+                transient_mean_delayed_power_mw(samples, powers_mw, start, end, delay_ticks)?;
+            energy += power * (end - start);
         }
         Some((
             values,
@@ -1470,7 +1497,6 @@ pub(crate) fn prepare_transient_fit(
     let ambient_temp_c = projected_rtd_temperature_c(memory_config, ambient_raw_rtd_adc_mv)?;
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
-    let mut input_energy_mw_ticks = [0.0; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut rows = [None; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..count].iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
@@ -1481,20 +1507,8 @@ pub(crate) fn prepare_transient_fit(
         }
         temperatures_c[index] = temperature_c;
         powers_mw[index] = power_mw;
-        if index > 0 {
-            let ticks = sample
-                .elapsed_ticks
-                .checked_sub(samples[index - 1].elapsed_ticks)?;
-            if ticks == 0 {
-                return None;
-            }
-            let mean_power = if samples[index - 1].duty_percent == sample.duty_percent {
-                (powers_mw[index - 1] + power_mw) * 0.5
-            } else {
-                powers_mw[index - 1]
-            };
-            input_energy_mw_ticks[index] =
-                input_energy_mw_ticks[index - 1] + mean_power * ticks as f32;
+        if index > 0 && sample.elapsed_ticks <= samples[index - 1].elapsed_ticks {
+            return None;
         }
     }
     let accepted = transient_temperature_acceptance(&samples[..count], &temperatures_c[..count]);
@@ -1538,7 +1552,6 @@ pub(crate) fn prepare_transient_fit(
         samples: *samples,
         count,
         powers_mw,
-        input_energy_mw_ticks,
         rows,
     })
 }
