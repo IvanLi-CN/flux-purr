@@ -7,7 +7,15 @@ const devdEnabled = process.env.E2E_DISABLE_DEVD === '1' ? '0' : '1'
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: 'public-demo.spec.ts',
+  testIgnore: [
+    'public-demo.spec.ts',
+    'formal-runtime.spec.ts',
+    'routing.spec.ts',
+    'calibration-layout.spec.ts',
+    'thermal-plant-layout.spec.ts',
+    'firmware-tuning-journal.spec.ts',
+    'ui-demo-firmware.spec.ts',
+  ],
   // Vite can still be transforming the first route module after its HTTP server is ready.
   expect: {
     timeout: 10_000,

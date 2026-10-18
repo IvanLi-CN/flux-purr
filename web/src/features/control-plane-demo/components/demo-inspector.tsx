@@ -1,11 +1,8 @@
 import { Clipboard, PanelRightClose, PanelRightOpen, Radio, RotateCcw, X } from 'lucide-react'
-import { useMemo, useState } from 'react'
-import {
-  type DemoInspectorState,
-  type DemoSceneId,
-  defaultDemoInspectorState,
-} from '../demo-inspector-state'
-import type { DeviceTarget, EventLogEntry } from '../types'
+import { useState } from 'react'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import type { DemoActionKind, DemoInspectorState, DemoSceneId } from '../demo-inspector-state'
+import type { DeviceTarget } from '../types'
 import { resolveWifiSettingsAccess } from '../wifi-settings-access'
 
 interface DemoInspectorProps {
@@ -14,7 +11,10 @@ interface DemoInspectorProps {
   selectedDeviceId: string
   onStateChange: (partial: Partial<DemoInspectorState>) => void
   onSelectDevice: (deviceId: string) => void
-  onSimulate: (event: Pick<EventLogEntry, 'message' | 'tone'>) => void
+  shareUrl: string
+  clipboard?: { writeText(value: string): Promise<void> } | null
+  onSimulate: (kind: DemoActionKind) => void
+  onReset: () => void | Promise<void>
 }
 
 const scenes: Array<{ id: DemoSceneId; label: string; description: string }> = [
@@ -33,23 +33,25 @@ export function DemoInspector({
   selectedDeviceId,
   onStateChange,
   onSelectDevice,
+  shareUrl,
+  clipboard,
   onSimulate,
+  onReset,
 }: DemoInspectorProps) {
   const [open, setOpen] = useState(
     () => typeof window === 'undefined' || window.innerWidth >= dockedInspectorMinViewport
   )
-  const [copied, setCopied] = useState(false)
-  const stateSummary = useMemo(
-    () =>
-      `scene=${state.demoScene} lease=${state.demoLease} network=${state.demoNetwork} artifact=${state.demoArtifact}`,
-    [state]
-  )
+  const [copyState, setCopyState] = useState<'idle' | 'success' | 'error'>('idle')
 
-  const copyState = async () => {
-    const value = typeof window === 'undefined' ? stateSummary : window.location.href
-    await navigator.clipboard?.writeText(value)
-    setCopied(true)
-    onSimulate({ message: 'Demo share URL copied to clipboard', tone: 'success' })
+  const copyShareUrl = async () => {
+    try {
+      const targetClipboard = clipboard === undefined ? navigator.clipboard : clipboard
+      if (!targetClipboard) throw new Error('Clipboard API unavailable')
+      await targetClipboard.writeText(shareUrl)
+      setCopyState('success')
+    } catch {
+      setCopyState('error')
+    }
   }
 
   const update = (partial: Partial<DemoInspectorState>) => onStateChange(partial)
@@ -80,142 +82,178 @@ export function DemoInspector({
             </button>
           </header>
 
-          <fieldset className="demo-inspector__group">
-            <legend>Scene</legend>
-            <div className="demo-inspector__scene-grid">
-              {scenes.map((scene) => (
-                <button
-                  key={scene.id}
-                  type="button"
-                  className={
-                    state.demoScene === scene.id
-                      ? 'demo-inspector__scene is-selected'
-                      : 'demo-inspector__scene'
+          <ScrollArea className="demo-inspector__scroll">
+            <fieldset className="demo-inspector__group">
+              <legend>Scene</legend>
+              <div className="demo-inspector__scene-grid">
+                {scenes.map((scene) => (
+                  <button
+                    key={scene.id}
+                    type="button"
+                    className={
+                      state.demoScene === scene.id
+                        ? 'demo-inspector__scene is-selected'
+                        : 'demo-inspector__scene'
+                    }
+                    aria-pressed={state.demoScene === scene.id}
+                    onClick={() => update({ demoScene: scene.id })}
+                  >
+                    <strong>{scene.label}</strong>
+                    <span>{scene.description}</span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="demo-inspector__group">
+              <legend>Target</legend>
+              <div className="demo-inspector__targets">
+                {devices.map((device) => (
+                  <button
+                    key={device.id}
+                    type="button"
+                    className={
+                      selectedDeviceId === device.id
+                        ? 'demo-inspector__target is-selected'
+                        : 'demo-inspector__target'
+                    }
+                    aria-pressed={selectedDeviceId === device.id}
+                    onClick={() => onSelectDevice(device.id)}
+                  >
+                    <strong>{device.alias}</strong>
+                    <span>
+                      {device.id === 'fp-kit-02'
+                        ? 'SIMULATED SERIAL'
+                        : device.transport.toUpperCase()}{' '}
+                      · {device.firmware} · WiFi{' '}
+                      {resolveWifiSettingsAccess(device).mode === 'read-write'
+                        ? '可配置'
+                        : resolveWifiSettingsAccess(device).mode === 'read-only'
+                          ? '只读'
+                          : '不可用'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </fieldset>
+
+            <fieldset className="demo-inspector__group">
+              <legend>Network &amp; Safety</legend>
+              <label className="demo-inspector__toggle">
+                <input
+                  type="checkbox"
+                  checked={state.demoLease === 'conflict'}
+                  onChange={(event) =>
+                    update({ demoLease: event.target.checked ? 'conflict' : 'none' })
                   }
-                  aria-pressed={state.demoScene === scene.id}
-                  onClick={() => update({ demoScene: scene.id })}
-                >
-                  <strong>{scene.label}</strong>
-                  <span>{scene.description}</span>
-                </button>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="demo-inspector__group">
-            <legend>Target</legend>
-            <div className="demo-inspector__targets">
-              {devices.map((device) => (
-                <button
-                  key={device.id}
-                  type="button"
-                  className={
-                    selectedDeviceId === device.id
-                      ? 'demo-inspector__target is-selected'
-                      : 'demo-inspector__target'
+                />{' '}
+                Simulate lease conflict
+              </label>
+              <label className="demo-inspector__toggle">
+                <input
+                  type="checkbox"
+                  checked={state.demoNetwork === 'timeout'}
+                  onChange={(event) =>
+                    update({ demoNetwork: event.target.checked ? 'timeout' : 'healthy' })
                   }
-                  aria-pressed={selectedDeviceId === device.id}
-                  onClick={() => onSelectDevice(device.id)}
+                />{' '}
+                Simulate network timeout
+              </label>
+              <label className="demo-inspector__toggle">
+                <input
+                  type="checkbox"
+                  checked={state.demoArtifact === 'blocked'}
+                  onChange={(event) =>
+                    update({ demoArtifact: event.target.checked ? 'blocked' : 'ready' })
+                  }
+                />{' '}
+                Block artifact dry-check
+              </label>
+            </fieldset>
+
+            <fieldset className="demo-inspector__group">
+              <legend>Capabilities &amp; Data</legend>
+              <label className="demo-inspector__select">
+                WiFi capability
+                <select
+                  value={state.demoWifiCapability}
+                  onChange={(event) =>
+                    update({
+                      demoWifiCapability: event.target
+                        .value as DemoInspectorState['demoWifiCapability'],
+                    })
+                  }
                 >
-                  <strong>{device.alias}</strong>
-                  <span>
-                    {device.id === 'fp-kit-02'
-                      ? 'SIMULATED SERIAL'
-                      : device.transport.toUpperCase()}{' '}
-                    · {device.firmware} · WiFi{' '}
-                    {resolveWifiSettingsAccess(device).mode === 'read-write'
-                      ? '可配置'
-                      : resolveWifiSettingsAccess(device).mode === 'read-only'
-                        ? '只读'
-                        : '不可用'}
-                  </span>
+                  <option value="default">Default capability</option>
+                  <option value="read-only">Read-only WiFi</option>
+                  <option value="unavailable">Unavailable</option>
+                </select>
+              </label>
+              <label className="demo-inspector__select">
+                Event log
+                <select
+                  value={state.demoLogs}
+                  onChange={(event) =>
+                    update({ demoLogs: event.target.value as 'normal' | 'empty' })
+                  }
+                >
+                  <option value="normal">Seeded trace</option>
+                  <option value="empty">Empty trace</option>
+                </select>
+              </label>
+              <label className="demo-inspector__select">
+                Telemetry
+                <select
+                  value={state.demoTelemetry}
+                  onChange={(event) =>
+                    update({ demoTelemetry: event.target.value as 'available' | 'unavailable' })
+                  }
+                >
+                  <option value="available">Available measurements</option>
+                  <option value="unavailable">Measurements unavailable</option>
+                </select>
+              </label>
+            </fieldset>
+
+            <fieldset className="demo-inspector__group">
+              <legend>Data &amp; Actions</legend>
+              <div className="demo-inspector__actions">
+                <button type="button" onClick={() => onSimulate('thermal-warning')}>
+                  Simulate thermal warning
                 </button>
-              ))}
-            </div>
-          </fieldset>
+                <button type="button" onClick={() => onSimulate('fan-recovery')}>
+                  Simulate fan recovery
+                </button>
+              </div>
+            </fieldset>
 
-          <fieldset className="demo-inspector__group">
-            <legend>Network &amp; Safety</legend>
-            <label className="demo-inspector__toggle">
-              <input
-                type="checkbox"
-                checked={state.demoLease === 'conflict'}
-                onChange={(event) =>
-                  update({ demoLease: event.target.checked ? 'conflict' : 'none' })
-                }
-              />{' '}
-              Simulate lease conflict
-            </label>
-            <label className="demo-inspector__toggle">
-              <input
-                type="checkbox"
-                checked={state.demoNetwork === 'timeout'}
-                onChange={(event) =>
-                  update({ demoNetwork: event.target.checked ? 'timeout' : 'healthy' })
-                }
-              />{' '}
-              Simulate network timeout
-            </label>
-            <label className="demo-inspector__toggle">
-              <input
-                type="checkbox"
-                checked={state.demoArtifact === 'blocked'}
-                onChange={(event) =>
-                  update({ demoArtifact: event.target.checked ? 'blocked' : 'ready' })
-                }
-              />{' '}
-              Block artifact dry-check
-            </label>
-          </fieldset>
+            <fieldset className="demo-inspector__group">
+              <legend>Share</legend>
+              <div className="demo-inspector__share-row">
+                <input aria-label="当前 Demo 分享链接" readOnly value={shareUrl} />
+                <button
+                  type="button"
+                  className="demo-inspector__icon-button"
+                  aria-label="复制 Demo 分享链接"
+                  title="复制 Demo 分享链接"
+                  onClick={() => void copyShareUrl()}
+                >
+                  <Clipboard size={17} aria-hidden="true" />
+                </button>
+              </div>
+              <span className="demo-inspector__hint">
+                {copyState === 'success'
+                  ? 'Copied initial scene URL'
+                  : copyState === 'error'
+                    ? 'Copy failed; select the URL manually'
+                    : 'Share restores initial scene conditions only'}
+              </span>
+            </fieldset>
 
-          <fieldset className="demo-inspector__group">
-            <legend>Data &amp; Actions</legend>
-            <div className="demo-inspector__actions">
-              <button
-                type="button"
-                onClick={() =>
-                  onSimulate({ message: 'simulated thermal warning acknowledged', tone: 'warning' })
-                }
-              >
-                Simulate thermal warning
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  onSimulate({ message: 'simulated fan policy settled at AUTO', tone: 'success' })
-                }
-              >
-                Simulate fan recovery
-              </button>
-            </div>
-          </fieldset>
-
-          <fieldset className="demo-inspector__group">
-            <legend>Share</legend>
-            <div className="demo-inspector__share-row">
-              <input aria-label="当前 Demo 状态" readOnly value={stateSummary} />
-              <button
-                type="button"
-                className="demo-inspector__icon-button"
-                aria-label="复制 Demo 分享链接"
-                title="复制 Demo 分享链接"
-                onClick={() => void copyState()}
-              >
-                <Clipboard size={17} aria-hidden="true" />
-              </button>
-            </div>
-            <span className="demo-inspector__hint">
-              {copied ? 'Copied current URL' : 'URL updates without reloading'}
-            </span>
-          </fieldset>
-
-          <button
-            type="button"
-            className="demo-inspector__reset"
-            onClick={() => onStateChange(defaultDemoInspectorState)}
-          >
-            <RotateCcw size={15} aria-hidden="true" /> Reset demo state
-          </button>
+            <button type="button" className="demo-inspector__reset" onClick={() => void onReset()}>
+              <RotateCcw size={15} aria-hidden="true" /> Reset demo state
+            </button>
+          </ScrollArea>
         </section>
       ) : (
         <button

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { validateAppSearch } from './search'
 
 describe('app search validation', () => {
-  it('keeps only canonical Demo Inspector query values', () => {
+  it('binds formal builds to live and ignores demo scene flags', () => {
     expect(
       validateAppSearch({
         demo: true,
@@ -11,12 +11,6 @@ describe('app search validation', () => {
         demoNetwork: 'timeout',
         demoArtifact: 'blocked',
       })
-    ).toMatchObject({
-      demo: true,
-      demoScene: 'degraded',
-      demoLease: 'conflict',
-      demoNetwork: 'timeout',
-      demoArtifact: 'blocked',
-    })
+    ).toEqual({ demo: false, uiDemo: true })
   })
 })

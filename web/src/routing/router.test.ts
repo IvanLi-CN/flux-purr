@@ -12,15 +12,15 @@ function createTestRouter(initialEntry: string) {
 
 describe('TanStack route tree', () => {
   it.each([
-    '/devices/device-1/overview?demo=true',
-    '/devices/device-1/settings/presets?demo=true',
-    '/devices/device-1/settings/fan?demo=true',
-    '/devices/device-1/settings/wifi?demo=true',
-    '/devices/device-1/update?demo=true',
-    '/devices/device-1/calibration/heater-curve?demo=true',
-    '/devices/device-1/calibration/rtd-adc?demo=true',
-    '/devices/device-1/calibration/vin-adc?demo=true',
-    '/devices/device-1/calibration/firmware-tuning?demo=true',
+    '/devices/device-1/overview?demo=false',
+    '/devices/device-1/settings/presets?demo=false',
+    '/devices/device-1/settings/fan?demo=false',
+    '/devices/device-1/settings/wifi?demo=false',
+    '/devices/device-1/update?demo=false',
+    '/devices/device-1/calibration/heater-curve?demo=false',
+    '/devices/device-1/calibration/rtd-adc?demo=false',
+    '/devices/device-1/calibration/vin-adc?demo=false',
+    '/devices/device-1/calibration/firmware-tuning?demo=false',
   ])('directly matches canonical leaf %s', async (entry) => {
     const router = createTestRouter(entry)
     await router.load()

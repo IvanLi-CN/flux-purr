@@ -18,7 +18,8 @@
     "test:storybook": "vitest --project=storybook --run",
     "storybook:ci": "bun run build-storybook",
     "test:e2e": "playwright test --pass-with-no-tests",
-    "test:e2e:public-demo": "playwright test --config playwright.public-demo.config.ts --pass-with-no-tests"
+    "test:e2e:public-demo": "playwright test --config playwright.public-demo.config.ts --pass-with-no-tests",
+    "test:e2e:formal": "playwright test --config playwright.formal.config.ts --pass-with-no-tests"
   },
   "dependencies": {
     "@tanstack/react-router": "^1.170.29",

@@ -41,7 +41,7 @@ test.describe('public demo build', () => {
     })
 
     await page.goto('/?demo=false&uiDemo=true')
-    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/overview\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/overview$/)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
     await expect(page.getByRole('complementary', { name: 'Demo Inspector' })).toBeVisible()
     await expect(page.getByLabel('LAN pairing demo')).toHaveCount(0)
@@ -49,12 +49,12 @@ test.describe('public demo build', () => {
 
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
     await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
-    await expect(page.getByText('simulated thermal warning acknowledged').last()).toBeVisible()
+    await expect(
+      page.getByText('simulated thermal warning latched on current target').last()
+    ).toBeVisible()
 
     await page.getByRole('button', { name: 'Degraded' }).click()
-    await expect(page).toHaveURL(
-      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoScene=degraded)/
-    )
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demoScene=degraded$/)
     await expect(page.getByText('Simulate lease conflict')).toBeVisible()
     expect(controlRequests).toEqual([])
     expect(
@@ -80,6 +80,66 @@ test.describe('public demo build', () => {
     await expect.poll(() => new URL(page.url()).searchParams.get('demoNetwork')).toBe('timeout')
   })
 
+  test('shares initial conditions and resets all in-memory demo results', async ({ page }) => {
+    let copiedUrl = ''
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: (value: string) => {
+            ;(window as unknown as { __copiedDemoUrl: string }).__copiedDemoUrl = value
+            return Promise.resolve()
+          },
+        },
+      })
+    })
+    await page.goto('/devices/fp-lab-01/overview?demoScene=degraded&demoLease=conflict')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByLabel('WiFi capability').selectOption('unavailable')
+    await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
+    await expect(
+      page.getByText('simulated thermal warning latched on current target')
+    ).toBeVisible()
+    await expect(page).toHaveURL(
+      /\/devices\/fp-lab-01\/overview\?(?=.*demoScene=degraded)(?=.*demoLease=conflict)(?=.*demoWifiCapability=unavailable)/
+    )
+
+    await page.getByRole('button', { name: '复制 Demo 分享链接' }).click()
+    await expect(page.getByText('Copied initial scene URL')).toBeVisible()
+    copiedUrl = await page.evaluate(
+      () => (window as unknown as { __copiedDemoUrl: string }).__copiedDemoUrl
+    )
+    expect(copiedUrl).toContain('demoScene=degraded')
+    expect(copiedUrl).not.toContain('thermal')
+
+    await page.getByRole('button', { name: 'Reset demo state' }).click()
+    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/overview$/)
+    await expect(page.getByText('simulated thermal warning latched on current target')).toHaveCount(
+      0
+    )
+    await expect(page.getByLabel('WiFi capability')).toHaveValue('default')
+    await expect(page.getByRole('checkbox', { name: 'Simulate lease conflict' })).not.toBeChecked()
+  })
+
+  test('reports clipboard refusal without a false success', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: () => Promise.reject(new Error('clipboard denied')) },
+      })
+    })
+    await page.goto('/')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+    await page.getByRole('button', { name: '复制 Demo 分享链接' }).click()
+
+    await expect(page.getByText('Copy failed; select the URL manually')).toBeVisible()
+    await expect(page.getByText('Copied initial scene URL')).toHaveCount(0)
+    await expect(page.getByLabel('当前 Demo 分享链接')).toHaveValue(
+      /\/devices\/fp-lab-01\/overview$/
+    )
+  })
+
   test('keeps scene routing and overrides aligned during concurrent changes', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
@@ -93,7 +153,7 @@ test.describe('public demo build', () => {
     })
 
     await expect(page).toHaveURL(
-      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoScene=degraded)(?=.*demoLease=conflict)/
+      /\/devices\/fp-kit-02\/overview\?(?=.*demoScene=degraded)(?=.*demoLease=conflict)/
     )
   })
 
@@ -109,9 +169,7 @@ test.describe('public demo build', () => {
       target.click()
     })
 
-    await expect(page).toHaveURL(
-      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoLease=conflict)/
-    )
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demoLease=conflict$/)
   })
 
   test('keeps the exact calibration subroute when share state changes', async ({ page }) => {
@@ -119,9 +177,7 @@ test.describe('public demo build', () => {
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
     await page.getByRole('checkbox', { name: 'Simulate lease conflict' }).check()
 
-    await expect(page).toHaveURL(
-      /\/devices\/fp-lab-01\/calibration\/rtd-adc\?(?=.*demo=true)(?=.*demoLease=conflict)/
-    )
+    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/calibration\/rtd-adc\?demoLease=conflict$/)
   })
 
   test('uses a mobile bubble that opens a touch-safe drawer', async ({ page }) => {
@@ -212,7 +268,7 @@ test.describe('public demo build', () => {
 
     const fieldKit = page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ })
     await fieldKit.click()
-    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview$/)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
 
@@ -224,13 +280,13 @@ test.describe('public demo build', () => {
 
     await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
-    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/calibration\/rtd-adc\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/calibration\/rtd-adc$/)
     await page.getByRole('button', { name: '留在当前页' }).click()
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
 
     await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
     await page.getByRole('button', { name: '关闭并继续' }).click()
-    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demo=true$/)
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview$/)
     await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
   })
@@ -254,9 +310,7 @@ test.describe('public demo build', () => {
 
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
     await page.getByRole('button', { name: '关闭并继续' }).click()
-    await expect(page).toHaveURL(
-      /\/devices\/fp-kit-02\/overview\?(?=.*demo=true)(?=.*demoLease=conflict)/
-    )
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demoLease=conflict$/)
   })
 
   test('renders every public demo scene through its deterministic route', async ({ page }) => {

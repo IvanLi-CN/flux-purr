@@ -5,8 +5,9 @@
 ## Related ADRs
 
 - [ADR 0003: Transport-scoped WiFi provisioning](../../adr/0003-transport-scoped-wifi-provisioning.md)
+- [ADR 0019: Separate live console and Demo runtime](../../adr/0019-separate-live-console-and-demo-runtime.md)
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md` 已沉淀 Web、native USB daemon、USB CDC、WiFi provisioning、firmware flashing 与 monitoring 的长期控制面方案。
 - 本轮 Web demo 不应呈现为管理后台，也不应让用户面对完整 fleet / operations / dashboard 信息墙。
@@ -52,7 +53,17 @@
 - native daemon 工具链
 - 真实设备 API 契约变更
 
-## 需求（Requirements）
+## Requirements
+
+### Stable requirement identifiers
+
+- `REQ-WEB-DEMO-001`：正式构建 MUST 固定 live，公开 Demo 构建 MUST 固定 mock；旧模式参数不得改变运行时边界。
+- `REQ-WEB-DEMO-002`：Demo 初始条件 MUST 由 typed URL 表达，产品操作、Inspector action、日志和任务 MUST 共享内存会话。
+- `REQ-WEB-DEMO-003`：当前设备、故障和能力覆盖 MUST 只作用于路由 identity；保护状态 MUST 优先于已有操作结果。
+- `REQ-WEB-DEMO-004`：Reset MUST 原子恢复完整默认基线并丢弃迟到异步结果，校准离开取消时 URL 与模型 MUST 保持不变。
+- `REQ-WEB-DEMO-005`：WiFi 显式 null 回执 MUST 保持清空字段；分享链接 MUST 只恢复初始条件且复制失败不得提示成功。
+- `REQ-WEB-DEMO-006`：Inspector MUST 保持宽屏 dock、桌面浮层、移动 drawer/bubble、键盘可达和触控目标约束。
+- `REQ-WEB-DEMO-007`：Demo 初始化失败 MUST 停留在安全错误页面，正式构建 MUST 不请求 Demo 的 mock 或旧模式 API。
 
 ### MUST
 
@@ -63,7 +74,8 @@
 - 规范路径必须为 `/devices/:deviceId/overview`、`/devices/:deviceId/settings/presets`、`/devices/:deviceId/settings/fan`、`/devices/:deviceId/settings/wifi`、`/devices/:deviceId/update`、`/devices/:deviceId/calibration/heater-curve`、`/devices/:deviceId/calibration/rtd-adc`、`/devices/:deviceId/calibration/vin-adc` 与 `/devices/new`；旧 `/devices/:deviceId/settings` 必须 replace 到 presets。
 - `:deviceId` 必须使用稳定物理 `identityId`；transport target ID 只能用于本地连接候选解析。
 - `/` 必须 replace 到当前 variant 最近设备的 overview；没有有效记录时 replace 到 `/devices/new`。`/devices`、`/devices/:deviceId` 与 `/devices/:deviceId/calibration` 必须 replace 到对应规范页。
-- `demo`、`uiDemo`、`demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 必须由 router 作为 typed search 参数验证和规范化；`demo` 与 Inspector state 在站内导航中保留，`uiDemo` 保持 production 根入口专用，不得使用裸 History API 绕过 router 状态。
+- 正式构建必须固定 live，公开 Demo 构建必须固定 mock；URL、localStorage 和旧模式参数不得改变运行时边界。正式构建收到 `demo=true` 或 `uiDemo` 时显示入口停用页，公开 Demo 清理这些旧参数。
+- `demoScene`、`demoLease`、`demoNetwork`、`demoArtifact`、`demoWifiCapability`、`demoLogs` 与 `demoTelemetry` 必须由 router 作为 typed search 参数验证和规范化；它们只表达 Demo 的场景初始条件，不表达产品操作回放。
 - 结构无效的路径必须显示 404；结构有效但设备未知或不可连接时必须保留原 URL，并提供重试、选择设备与添加连接动作。
 - 桌面端必须提供全局日志面板，并能与 `Dashboard` / `Settings` / `Update` 当前内容同时显示。
 - 桌面端全局日志不得退化成窄侧栏；在宽桌面上应以可读 trace console 呈现，保留足够行宽阅读 message。
@@ -83,7 +95,7 @@
 - 一级页面 tabs 与校准 workspace tabs 必须使用链接语义、支持键盘操作，并正确表达 `aria-current`。
 - 校准运行期间，站内 Link、程序跳转、设备切换、variant/search 变化与浏览器 Back/Forward 必须共用同一离开保护；页面关闭或地址栏导航必须启用原生 `beforeunload`。
 - 生产静态构建必须包含 EdgeOne history fallback，将 `/devices` history pathname rewrite 到 `/index.html`，且不得拦截静态资源。
-- `build:demo` 必须生成独立静态 artifact，并在运行时强制 mock fixture、关闭 devd/Web Serial/direct LAN；根路径必须 replace 到 `/devices/fp-lab-01/overview`，忽略 `uiDemo` 与本地 live preference。
+- `build:demo` 必须生成独立静态 artifact，并在运行时强制 mock fixture、关闭 devd/Web Serial/direct LAN；根路径必须 replace 到 `/devices/fp-lab-01/overview`，清理旧模式参数与本地 live preference。Demo 初始化失败必须停留在安全错误页面，不得回退 live。
 
 ### SHOULD
 
@@ -110,8 +122,9 @@
 - `Routing`
   - 生产 app shell 持续挂载 `ControlPlaneDemo`，leaf route 只提供类型化 `ConsoleRouteState`，切换 tabs 不得重建 transport/runtime 状态。
   - Storybook 未提供 production navigation adapter 时继续使用 `initialView` 与组件本地 state。
-  - `uiDemo=true` 保持 query-driven UI demo 语义，并规范化到根路径；普通根路径按最近设备规则跳转。
-  - 公开 Demo build 把根路径固定到 `fp-lab-01` overview，Inspector 的 scene/fault query 使用 client-side replace；面板布局状态不写入 URL。
+  - 正式构建中的 `uiDemo=true` 仅保留为旧入口停用判定；公开 Demo 忽略并清理该参数。普通正式根路径按 live 最近设备规则跳转，公开 Demo 根路径固定到 `fp-lab-01` overview。
+  - 公开 Demo build 把根路径固定到 `fp-lab-01` overview，Inspector 的 scene、目标故障、能力和数据 query 使用 client-side replace；面板布局状态不写入 URL。
+  - 分享链接只恢复场景、当前设备、故障及能力/数据开关的初始条件；复制必须等待路由提交，产品操作结果、临时日志、任务、计时器与凭据不进入链接。
   - 设备偏好使用版本化本地结构，只保存 variant 对应 identity 和 identity 对应 transport kind；损坏值必须忽略。
 - `Dashboard`
   - 当前温度是唯一主视觉，不得被连接、WiFi 或日志抢占层级。
@@ -173,21 +186,51 @@
 - Given 点击 `Update`，When 切换 firmware artifact，Then 可以看到 compatibility verdict、dry-check progress 与 blocked/warning 状态。
 - Given 点击 `Degrade mock`，When 查看当前页面，Then 能看到 degraded runtime 或 blocked artifact state。
 - Given 任意规范设备深链，When 直接打开、刷新或使用 Back/Forward，Then 设备、页面、校准 tab 与 active state 均由 URL 恢复。
-- Given 缺少 pathname 或打开索引路径，When router 解析位置，Then 使用 replace 导向最近设备 overview 或 `/devices/new`，并保留规范化后的 `demo`；production `uiDemo` 仍规范化到根路径。
+- Given 缺少 pathname 或打开索引路径，When router 解析位置，Then 正式构建按 live 最近设备规则处理，公开 Demo replace 到 `fp-lab-01` overview；旧 `demo` / `uiDemo` 输入不会改变运行时。
 - Given 一个结构有效但未知的 `identityId`，When 自动恢复无法匹配连接，Then pathname 保持不变并显示可操作恢复态，而不是跳到其他设备。
 - Given 校准模式正在运行，When 用户切换页面、tab、设备或浏览器历史，Then 离开确认先退出模式，只有成功后才继续导航；取消或失败保持原路由。
 - Given 自动恢复 Web Serial，When 没有唯一已授权且匹配的 port，Then 页面不调用 `requestPort()` 并要求用户显式选择。
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 - Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
-- Given Demo Inspector，When 切换 scene、lease/network/artifact 覆盖或模拟动作，Then console 与全局 trace 同步更新，URL 可刷新恢复；选择 Calibration active 时同一校准离开保护生效。
+- Given formal build，When 打开 `/?demo=true` 或任意带 `uiDemo` 的旧入口，Then 显示入口停用页，不挂载 live 控制台。
+- Given Demo Inspector，When 切换 scene、lease/network/artifact、能力/数据覆盖或模拟动作，Then console 与全局 trace 同步更新；场景初始条件可刷新恢复，临时操作不回放；选择 Calibration active 时同一校准离开保护生效。
+- Given Demo 中选定设备，When 注入 lease/network fault 或 thermal warning，Then 故障只作用于当前 URL identity，保护态覆盖已有操作值，fan recovery 不能解除有效安全锁。
+- Given Demo Reset，When 已完成温度、preset、fan、WiFi 或任务操作，Then 原子恢复 normal 与默认开关，保留当前设备和页面，并清理所有设备临时结果、日志、表单、任务、计时器及迟到回调。
+- Given WiFi clear receipt，When 设备明确返回成功且字段为 null，Then SSID、RSSI、密码长度与失败码保持空值，不被旧快照回填。
 - Given WiFi 配置等待达到 10 秒，When operator 选择取消，Then mock fixture 与 live Web Serial 都等待 `cancel` receipt 的 `idle` 结果；等待、确认成功与取消失败分别有可辨识状态，且取消不会清空保存的 SSID 或密码掩码。
+
+## Verification
+
+### VER-WEB-DEMO-001
+
+- Method: 正式与 Demo 独立构建、formal/public E2E 隔离报告以及无真实 API 请求断言。
+- covers: `REQ-WEB-DEMO-001`, `REQ-WEB-DEMO-007`
+- Pass condition: 正式旧入口停在停用页，Demo 根路径与设备深链固定 mock，初始化失败不回退 live，静态资源不被 history fallback 吞掉。
+
+### VER-WEB-DEMO-002
+
+- Method: DemoSession 与 Inspector state unit tests，加上 public Demo Playwright 场景、设备、故障、能力/数据、分享和刷新用例。
+- covers: `REQ-WEB-DEMO-002`, `REQ-WEB-DEMO-003`, `REQ-WEB-DEMO-005`
+- Pass condition: 产品和 Inspector 操作回显于同一会话，URL 只恢复初始条件，未知设备保持 identity，WiFi null 与剪贴板拒绝均无错误回填或假成功。
+
+### VER-WEB-DEMO-003
+
+- Method: reducer generation/reset unit tests、路由 Back/Forward E2E 和校准离开保护交互测试。
+- covers: `REQ-WEB-DEMO-004`
+- Pass condition: Reset 完整恢复默认基线，迟到回调不能恢复旧结果，取消确认保持原路由和模型，确认后正确清理。
+
+### VER-WEB-DEMO-004
+
+- Method: DemoInspector Storybook interaction stories 与固定视口 `ui_demo` 截图证据。
+- covers: `REQ-WEB-DEMO-006`
+- Pass condition: 数据/权限/复制失败/重置状态可交互验证，1700×1000、1440×1000、1024×900 和 375×812 无横向溢出，Inspector dock/floating/drawer/bubble 均可达。
 
 ## 验收清单（Acceptance checklist）
 
-- [x] 核心路径的长期行为已被明确描述。
-- [x] 关键边界/错误场景已被覆盖。
-- [x] 涉及的接口/契约已写清楚或明确为 `None`。
-- [x] 相关验收条件已经可以用于实现与 review 对齐。
+- 核心路径的长期行为已被明确描述。
+- 关键边界/错误场景已被覆盖。
+- 涉及的接口/契约已写清楚或明确为 `None`。
+- 相关验收条件已经可以用于实现与 review 对齐。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -217,20 +260,18 @@
 
 ## Visual Evidence
 
-- 证据来源：Vite mock-only `uiDemo`，deterministic fixtures。
+- 证据来源：独立 Vite mock-only Demo 构建，deterministic fixtures。
 - 绑定说明：当前 PR 图来自 Chrome 中的正常控制台，固定为 `fp-lab-01` normal 场景；未知 identity 恢复态只作为历史辅助证据。
 - 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
 - Public Demo target fixtures display English names: `Bench Fixture A`, `Field Kit`, and `Offline Mock Device`.
 
 ### Current Public Demo Console with Inspector (1746×1136)
 
-PR: include
 
 ![Current Public Demo Console with Inspector](./assets/public-demo-inspector-canonical-console.jpg)
 
 ### Current Public Demo Inspector drawer (375×812)
 
-PR: include
 
 ![Current Public Demo Inspector drawer](./assets/public-demo-inspector-current-mobile.jpg)
 
@@ -238,85 +279,68 @@ PR: include
 
 ### Unknown device recovery (auxiliary)
 
-PR: none
 
 ![Public Demo unknown device recovery](./assets/public-demo-inspector-unknown-recovery.jpg)
 
 ### Public Demo target fixture names
 
-PR: none
 
 ![Public demo Inspector English target fixtures](./assets/public-demo-inspector-english-targets.png)
 
 ### Public Demo Inspector desktop 1440×1000
 
-PR: none
 
 ![Public demo Inspector desktop](./assets/public-demo-inspector-desktop.png)
 
 ### Public Demo Inspector wide dock 1700×1000
 
-PR: none
 
 ![Public demo Inspector wide dock](./assets/public-demo-inspector-wide-docked.png)
 
 ### Public Demo Inspector tablet 1024×900
 
-PR: none
 
 ![Public demo Inspector tablet](./assets/public-demo-inspector-tablet.png)
 
 ### Public Demo Inspector mobile 375×812
 
-PR: none
 
 ![Public demo Inspector mobile](./assets/public-demo-inspector-mobile.png)
 
 ### Routed UI Demo desktop 1440×1000
 
-PR: none
 
 ![Routed UI demo desktop](./assets/routing-ui-demo-desktop.png)
 
 ### Routed UI Demo mobile 375×812
 
-PR: none
 
 ![Routed UI demo mobile](./assets/routing-ui-demo-mobile.png)
 
 ### Unknown device recovery 1440×1000
 
-PR: none
 
 ![Unknown device recovery](./assets/routing-unknown-device.png)
 
 ### Dashboard desktop 1440px
 
-PR: none
 
 ![Control plane demo desktop](./assets/control-plane-demo-desktop.png)
 
 ### Settings desktop 1440px
 
-PR: none
 
 ![Control plane demo settings](./assets/control-plane-demo-settings.png)
 
 ### Update desktop 1440px
 
-PR: none
 
 ![Control plane demo update](./assets/control-plane-demo-update.png)
 
 ### Mobile 375px
 
-PR: none
 
 ![Control plane demo mobile](./assets/control-plane-demo-mobile.png)
-
-## Related PRs
-
-- None
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 

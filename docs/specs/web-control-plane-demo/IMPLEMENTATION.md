@@ -13,14 +13,16 @@
 - `web/src/main.tsx` 以 TanStack `RouterProvider` 挂载生产应用；Vite file-based routing 插件生成并提交 `web/src/routeTree.gen.ts`。
 - pathless console layout 在 `web/src/App.tsx` 把 leaf match 转换为 `ConsoleNavigationAdapter`，生产导航由 URL 驱动；Storybook 不传 adapter 时继续使用本地 view state。
 - 设备页面使用 `/devices/:deviceId/{overview,settings,update}`，校准页面使用 `/devices/:deviceId/calibration/{heater-curve,rtd-adc,vin-adc}`，连接入口使用 `/devices/new`。
-- root search validator 将 `demo` 与 `uiDemo` 规范化为类型化 boolean，并通过 search middleware 在 Link 与程序导航中保留 `demo` 和 Inspector state；`uiDemo` 保持 production 根入口专用。
+- `isPublicDemoBuild()` 固定运行时边界：正式构建只挂载 live，公开 Demo 只挂载 mock；旧正式 `demo=true` / `uiDemo` 入口显示停用页，Demo 构建清理旧模式参数。
+- root search validator 将 Demo Inspector 的 scene、目标故障、能力和数据开关规范化为 typed search；规范分享链接只保留这些初始条件与设备/page identity，不保留临时操作。
 - `flux-purr.routePreferences.v1` 只保存 variant 最近成功的稳定 identity 与该 identity 最近成功的 transport kind；transport target id、地址与凭据不进入 URL。
 - 深链恢复按 transport 偏好和健康候选串行解析；Web Serial 自动恢复只读取已授权端口，只有显式添加操作可以调用 chooser。
 - 未知 identity 保留原 URL 并显示重试、选择设备和添加连接操作；结构无效的 URL 由 root 404 处理。
 - 校准运行期间的 Link、程序导航、设备切换、search 变化与浏览器 Back/Forward 统一进入 TanStack blocker resolver；armed 状态同时注册 `beforeunload`。
 - `web/public/edgeone.json` 仅将 `/devices` history 深链 rewrite 到 `/index.html`，让 `/assets/*` 按文件路径提供。
 - `build:demo` 使用 Vite demo mode 输出 `web/dist-demo`；它固定为 fixture runtime、关闭 devd/Web Serial，并把 root replace 到 `fp-lab-01` overview。
-- `DemoInspector` 作为控制台同级的可收起工具层，使用 `demoScene`、`demoLease`、`demoNetwork` 与 `demoArtifact` 复现确定性状态；高级状态只读可复制，面板布局不进入 URL。
+- `DemoSession` 由 App 的 reducer-like state 与 typed command 接线组成，产品操作和 Inspector action 共用同一模拟状态；scene、设备、fault、能力/数据开关和 Reset 共享校准离开保护。
+- `DemoInspector` 作为控制台同级的可收起工具层，使用 `demoScene`、`demoLease`、`demoNetwork`、`demoArtifact`、`demoWifiCapability`、`demoLogs` 与 `demoTelemetry` 复现确定性状态；分享复制等待路由提交并区分 Clipboard 成功/拒绝，面板布局不进入 URL。
 - `Release Product` 将独立的版本化 public-demo archive 发布到 GitHub Release，并只在发布资产验证完成后部署该 archive 到 `flux-purr-demo`；release marker 使 recovery 不会重复部署。
 - `web/src/features/control-plane-demo/**` 提供 scenario types、deterministic mock data 与工业风固定控制台界面。
 - `web/src/stories/ControlPlaneDemo.stories.tsx` 覆盖 default、degraded、settings review、update review、gallery、mobile review 与 interaction smoke。

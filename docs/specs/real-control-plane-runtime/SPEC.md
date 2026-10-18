@@ -146,8 +146,8 @@
 - Calibration mode live control 请求必须同时满足硬件 `5V~28V` 与实时 PPS capability。任何 transport 都不得实际发出不在该交集内的电压请求。
 - `runtime_config` 必须支持 `postHeatCoolingMode=off|normal|fast`、`heatingFanGuardMode=off|low|medium|high` 与 `calibration` 子对象；旧 `activeCoolingEnabled` 仅在新字段缺失时作为兼容别名，和新字段冲突时拒绝请求。status 必须回传两个模式、`fanPolicySource=idle|post_heat|heating_guard|safety` 与抽象 `fanOutputLevel=off|low|medium|high|limited`。`thermalProfileMode` 固定为 `auto|65w|100w`；`thermalControlProfile` 的 preview 继续是单一 RAM overlay，save/clear_saved 必须可携带 `bank=pps3a|pps5a` 写入指定 EEPROM bank。
 - first-class calibration auto jobs 必须支持 `vin_adc_auto` 与 `thermal_plant_auto` 两种 `kind`。`thermal_plant_auto` 是加热曲线工作区内的自动命令，不是第四个手动校准模式；它负责同一次瞬态运行中的 heater-curve 与热模型采集，并通过 `calibration_job` frame / `/calibration/job` endpoint 暴露 `idle|running|completed|failed|canceled` 状态、进度、样本数、下一目标电压与错误信息。
-- Web app 必须用 URL 参数 `demo=true|false` 选择 demo 或 live 版本，并在 browser storage 记住最近一次显式 URL 选择；缺少 URL 参数时必须回填记住的版本参数，不得在没有显式 URL 参数切换的情况下自动改变版本。
-- `demo=true` 必须只加载 demo scenario，不得启用 devd、Web Serial 或任何真实后端请求。
+- 正式 Web app 的构建必须固定为 live；公开 Demo 由独立构建固定为 mock。URL 参数和 browser storage 不得选择或切换运行时。
+- 公开 Demo 构建必须只加载 deterministic demo scenario，不得启用 devd、Web Serial 或任何真实后端请求；正式构建收到旧 `demo=true` / `uiDemo` 入口时显示停用页，不挂载 live 控制台。
 - `demo=false` 必须使用独立 live scenario，不得混入 demo fixture、degraded demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。
 - Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
 - Product release manifest 必须记录 Web、firmware、host-tools 组件的 `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
