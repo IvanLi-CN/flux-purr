@@ -122,6 +122,23 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('checkbox', { name: 'Simulate lease conflict' })).not.toBeChecked()
   })
 
+  test('reset atomically closes an active calibration guard', async ({ page }) => {
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    await page.getByRole('switch', { name: '标定模式' }).click()
+    await expect(page.getByRole('switch', { name: '标定模式' })).toBeChecked()
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: 'Reset demo state' }).click()
+
+    await expect(page).toHaveURL('/devices/fp-lab-01/calibration/rtd-adc')
+    await expect(page.getByRole('switch', { name: '标定模式' })).not.toBeChecked()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Normal' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+  })
+
   test('reports clipboard refusal without a false success', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'clipboard', {
@@ -140,7 +157,9 @@ test.describe('public demo build', () => {
     )
   })
 
-  test('resets the current device and page while rebuilding scene-local results', async ({ page }) => {
+  test('resets the current device and page while rebuilding scene-local results', async ({
+    page,
+  }) => {
     await page.goto('/devices/fp-kit-02/settings/presets?demoScene=degraded')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
     await page.getByRole('button', { name: 'Reset demo state' }).click()
@@ -159,9 +178,9 @@ test.describe('public demo build', () => {
     ).toBeVisible()
     await page.getByRole('button', { name: 'Degraded' }).click()
     await page.getByRole('button', { name: 'Normal' }).click()
-    await expect(
-      page.getByText('simulated thermal warning latched on current target')
-    ).toHaveCount(0)
+    await expect(page.getByText('simulated thermal warning latched on current target')).toHaveCount(
+      0
+    )
   })
 
   test('keeps scene routing and overrides aligned during concurrent changes', async ({ page }) => {

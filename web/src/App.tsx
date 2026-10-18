@@ -420,7 +420,10 @@ function App() {
   )
 
   const updateInspectorState = useCallback(
-    (nextState: Partial<DemoInspectorState>, options?: { preserveRoute?: boolean }) =>
+    (
+      nextState: Partial<DemoInspectorState>,
+      options?: { preserveRoute?: boolean; ignoreBlocker?: boolean }
+    ) =>
       enqueueInspectorNavigation(async () => {
         const previousState = inspectorStateRef.current
         const mergedState = { ...previousState, ...nextState }
@@ -457,6 +460,7 @@ function App() {
               to: nextPathname as '/',
               search: nextSearch,
               replace: true,
+              ignoreBlocker: options?.ignoreBlocker,
             }),
           inspectorNavigationTargetKey(nextPathname, nextSearch)
         )
@@ -535,7 +539,10 @@ function App() {
   )
 
   const resetDemo = useCallback(async () => {
-    const completed = await updateInspectorState(defaultDemoInspectorState, { preserveRoute: true })
+    const completed = await updateInspectorState(defaultDemoInspectorState, {
+      preserveRoute: true,
+      ignoreBlocker: true,
+    })
     if (completed !== false) {
       dispatchDemoSession({ type: 'reset' })
     }
