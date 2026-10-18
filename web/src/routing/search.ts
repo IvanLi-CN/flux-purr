@@ -25,7 +25,8 @@ export function validateAppSearch(search: Record<string, unknown>): AppSearch {
   const demoBuild = isPublicDemoBuild()
   const demoState = demoInspectorStateFromSearch(search)
   const inspectorSearch = demoInspectorSearch(demoState)
-  const legacyDemoRequest = !demoBuild && normalizeBoolean(search.demo)
+  const legacyDemoRequest =
+    !demoBuild && (normalizeBoolean(search.demo) || search.uiDemo !== undefined)
   return {
     ...(demoBuild ? {} : { demo: false }),
     ...(!demoBuild && (normalizeBoolean(search.uiDemo) || legacyDemoRequest)

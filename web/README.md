@@ -60,7 +60,7 @@ Canonical routes:
 
 `bun run build:demo` produces `dist-demo`, a public mock-only variant that always opens the full control console at `/devices/fp-lab-01/overview`. It strips `demo`/`uiDemo` mode inputs and local live preferences; it never enables devd, Web Serial, direct LAN, or hardware writes. The Demo Inspector stores initial scene, target fault, capability, and data conditions in typed URL state while transient operations stay in memory and its expanded/collapsed layout stays local. The public Demo is deployed at [flux-purr-demo.ivanli.cc](https://flux-purr-demo.ivanli.cc/); the formal and Demo builds remain separate EdgeOne Makers deployments.
 
-Both EdgeOne variants use `public/edgeone.json` to rewrite `/devices` history-route requests to `/index.html` while serving static assets directly. The public Demo pipeline deploys the verified `web-demo-bundle` through `.github/workflows/deploy-edgeone-demo.yml` after a successful `main` push. It requires the restricted `EDGEONE_API_TOKEN` and `EDGEONE_DEMO_PROJECT_NAME` secrets; the `flux-purr-demo` project owns the `flux-purr-demo.ivanli.cc` domain binding and certificate.
+Both EdgeOne variants use `public/edgeone.json` to rewrite `/devices` history-route requests to `/index.html` while serving static assets directly. The release pipeline deploys the verified formal Web archive and `web-demo-bundle` from `.github/workflows/release.yml` after a successful `main` release. It requires the restricted `EDGEONE_API_TOKEN` and `EDGEONE_DEMO_PROJECT_NAME` secrets; the `flux-purr-demo` project owns the `flux-purr-demo.ivanli.cc` domain binding and certificate.
 
 The stable implementation surface is:
 

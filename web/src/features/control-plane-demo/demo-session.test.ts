@@ -24,7 +24,7 @@ describe('DemoSession reducer', () => {
     })
   })
 
-  it('clears transient results without changing the session generation', () => {
+  it('clears transient results and rebuilds the session generation', () => {
     const populated: DemoSessionState = reduceDemoSession(defaultDemoSessionState, {
       type: 'append-action',
       kind: 'thermal-warning',
@@ -35,7 +35,7 @@ describe('DemoSession reducer', () => {
     expect(reduceDemoSession(populated, { type: 'clear-results' })).toEqual({
       actions: [],
       events: [],
-      generation: 0,
+      generation: 1,
     })
   })
 

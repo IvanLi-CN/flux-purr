@@ -420,7 +420,7 @@ function App() {
   )
 
   const updateInspectorState = useCallback(
-    (nextState: Partial<DemoInspectorState>) =>
+    (nextState: Partial<DemoInspectorState>, options?: { preserveRoute?: boolean }) =>
       enqueueInspectorNavigation(async () => {
         const previousState = inspectorStateRef.current
         const mergedState = { ...previousState, ...nextState }
@@ -445,11 +445,12 @@ function App() {
           demoSession.actions,
           sceneChanged ? undefined : inspectorPathnameRef.current.match(/^\/devices\/([^/]+)/)?.[1]
         )
-        const nextPathname = sceneChanged
-          ? mergedState.demoScene === 'calibration-active'
-            ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
-            : `/devices/${nextScenario.selectedDeviceId}/overview`
-          : inspectorPathnameRef.current
+        const nextPathname =
+          sceneChanged && !options?.preserveRoute
+            ? mergedState.demoScene === 'calibration-active'
+              ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
+              : `/devices/${nextScenario.selectedDeviceId}/overview`
+            : inspectorPathnameRef.current
         const completed = await settleInspectorNavigation(
           () =>
             navigate({
@@ -534,7 +535,7 @@ function App() {
   )
 
   const resetDemo = useCallback(async () => {
-    const completed = await updateInspectorState(defaultDemoInspectorState)
+    const completed = await updateInspectorState(defaultDemoInspectorState, { preserveRoute: true })
     if (completed !== false) {
       dispatchDemoSession({ type: 'reset' })
     }

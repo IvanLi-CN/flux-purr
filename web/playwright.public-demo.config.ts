@@ -10,6 +10,7 @@ export default defineConfig({
     'calibration-layout.spec.ts',
     'thermal-plant-layout.spec.ts',
     'ui-demo-firmware.spec.ts',
+    'public-routing.spec.ts',
   ],
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,

@@ -140,6 +140,30 @@ test.describe('public demo build', () => {
     )
   })
 
+  test('resets the current device and page while rebuilding scene-local results', async ({ page }) => {
+    await page.goto('/devices/fp-kit-02/settings/presets?demoScene=degraded')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+    await page.getByRole('button', { name: 'Reset demo state' }).click()
+
+    await expect(page).toHaveURL('/devices/fp-kit-02/settings/presets')
+    await expect(page.getByRole('button', { name: 'Normal' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+
+    await page.goto('/devices/fp-lab-01/overview')
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+    await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
+    await expect(
+      page.getByText('simulated thermal warning latched on current target')
+    ).toBeVisible()
+    await page.getByRole('button', { name: 'Degraded' }).click()
+    await page.getByRole('button', { name: 'Normal' }).click()
+    await expect(
+      page.getByText('simulated thermal warning latched on current target')
+    ).toHaveCount(0)
+  })
+
   test('keeps scene routing and overrides aligned during concurrent changes', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()

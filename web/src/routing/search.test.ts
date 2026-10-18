@@ -13,4 +13,11 @@ describe('app search validation', () => {
       })
     ).toEqual({ demo: false, uiDemo: true })
   })
+
+  it('preserves any formal uiDemo query as a disabled legacy entry', () => {
+    expect(validateAppSearch({ uiDemo: 'firmware-workspace' })).toEqual({
+      demo: false,
+      uiDemo: true,
+    })
+  })
 })

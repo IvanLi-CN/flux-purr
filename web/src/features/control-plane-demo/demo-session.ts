@@ -23,7 +23,7 @@ export function reduceDemoSession(
   command: DemoSessionCommand
 ): DemoSessionState {
   if (command.type === 'clear-results') {
-    return { ...state, actions: [], events: [] }
+    return { actions: [], events: [], generation: state.generation + 1 }
   }
   if (command.type === 'reset') {
     return { actions: [], events: [], generation: state.generation + 1 }

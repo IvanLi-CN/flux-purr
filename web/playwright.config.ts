@@ -15,6 +15,7 @@ export default defineConfig({
     'thermal-plant-layout.spec.ts',
     'firmware-tuning-journal.spec.ts',
     'ui-demo-firmware.spec.ts',
+    'public-routing.spec.ts',
   ],
   // Vite can still be transforming the first route module after its HTTP server is ready.
   expect: {

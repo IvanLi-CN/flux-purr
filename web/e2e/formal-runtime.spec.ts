@@ -19,6 +19,8 @@ test.describe('formal runtime boundary', () => {
 
     await page.goto('/?uiDemo=firmware-workspace')
     await expect(page.getByRole('heading', { name: '旧 Demo 入口已停用' })).toBeVisible()
+    await page.goto('/devices/fp-lab-01/overview?uiDemo=firmware-workspace')
+    await expect(page.getByRole('heading', { name: '旧 Demo 入口已停用' })).toBeVisible()
     await page.goto('/devices/fp-lab-01/overview?demo=true')
     await expect(page.getByRole('heading', { name: '旧 Demo 入口已停用' })).toBeVisible()
     expect(controlRequests).toEqual([])

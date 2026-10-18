@@ -8,7 +8,8 @@ export const Route = createFileRoute('/_console/')({
     const rawSearch = new URLSearchParams(
       typeof window === 'undefined' ? location.searchStr : window.location.search
     )
-    if (!isPublicDemoBuild() && rawSearch.get('demo') === 'true') return
+    if (!isPublicDemoBuild() && (rawSearch.get('demo') === 'true' || rawSearch.has('uiDemo')))
+      return
     return redirectFromDeviceIndex(search)
   },
   component: UiDemo,
