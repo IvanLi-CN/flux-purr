@@ -298,6 +298,42 @@ fn scan_discovers_the_sustainable_start_current_and_never_forces_one_amp() {
 }
 
 #[test]
+fn scan_retains_each_sustainable_current_stage_with_raw_adc_samples() {
+    let mut value = boundary();
+    value.point_count = 0;
+    let mut job = scan::SupplyScan::new(value).unwrap();
+    for time in (0..2_000_000).step_by(50) {
+        let output = job.output();
+        job.update(sample(time, output, 3_000));
+        if job.phase == scan::ScanPhase::Complete {
+            let points = &job.boundary.points[..usize::from(job.boundary.point_count)];
+            let mut stages = [false; 21];
+            for point in points.iter().filter(|point| !point.tracking_only) {
+                assert!(point.rtd_code > 0);
+                assert!(point.rtd_mv > 0);
+                assert!(point.vin_code > 0);
+                assert!(point.vin_mv > 0);
+                let index = usize::from(point.request_current_ma - 1_000) / 100;
+                stages[index] = true;
+            }
+            for current_ma in (1_400_u16..=3_000).step_by(100) {
+                assert!(
+                    stages[usize::from(current_ma - 1_000) / 100],
+                    "missing equilibrium stage at {current_ma}mA"
+                );
+            }
+            assert!(!stages[0]);
+            assert!(!stages[1]);
+            assert!(!stages[2]);
+            assert!(!stages[3]);
+            return;
+        }
+        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+    }
+    panic!("fake source scan did not terminate");
+}
+
+#[test]
 fn cutoff_and_wifi_change_turn_off_the_output_in_the_same_update() {
     for wifi_change in [false, true] {
         let mut job = scan::SupplyScan::new(boundary()).unwrap();
