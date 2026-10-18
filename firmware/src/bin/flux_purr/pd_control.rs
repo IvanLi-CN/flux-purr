@@ -784,6 +784,9 @@ pub(crate) struct CalibrationRuntimeState {
     pub(crate) stable: bool,
     pub(crate) stability_error_mv: Option<i16>,
     pub(crate) error: Option<ManualPpsError>,
+    pub(crate) scan_phase: Option<flux_purr_firmware::heater_supply::scan::ScanPhase>,
+    pub(crate) scan_failure: Option<flux_purr_firmware::heater_supply::scan::ScanFailure>,
+    pub(crate) scan_contract_confirmed: bool,
     pub(crate) job: CalibrationJobState,
     pub(crate) job_data: Option<CalibrationJobData>,
     pub(crate) model_target_temp_c: Option<i16>,
@@ -804,6 +807,9 @@ impl Default for CalibrationRuntimeState {
             stable: false,
             stability_error_mv: None,
             error: None,
+            scan_phase: None,
+            scan_failure: None,
+            scan_contract_confirmed: false,
             job: CalibrationJobState::default(),
             job_data: None,
             model_target_temp_c: None,
@@ -827,6 +833,17 @@ pub(crate) fn calibration_runtime_state_to_wire(
         stable: state.stable,
         stability_error_mv: state.stability_error_mv,
         error: state.error.map(manual_pps_error_code),
+        scan_phase: state.scan_phase.map(|phase| {
+            let mut value = heapless::String::new();
+            let _ = value.push_str(phase.label());
+            value
+        }),
+        scan_failure: state.scan_failure.map(|failure| {
+            let mut value = heapless::String::new();
+            let _ = value.push_str(failure.code());
+            value
+        }),
+        scan_contract_confirmed: state.scan_phase.map(|_| state.scan_contract_confirmed),
         job: CalibrationJobStateWire {
             kind: state.job.kind.map(CalibrationJobKind::to_wire),
             status: state.job.status.to_wire(),

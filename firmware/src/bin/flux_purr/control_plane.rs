@@ -642,6 +642,9 @@ pub(crate) fn apply_calibration_control_config(
             calibration.stability_error_mv = None;
             calibration.job = CalibrationJobState::default();
             calibration.job_data = None;
+            calibration.scan_phase = None;
+            calibration.scan_failure = None;
+            calibration.scan_contract_confirmed = false;
             if manual_pps.owner == ManualPpsOwner::Calibration {
                 manual_pps.clear();
                 calibration.immediate_heater_disarm_pending = true;
@@ -895,6 +898,9 @@ pub(crate) fn start_vin_calibration_job(
         next_request_mv: Some(next_request_mv),
         message: None,
     };
+    calibration.scan_phase = None;
+    calibration.scan_failure = None;
+    calibration.scan_contract_confirmed = false;
     calibration.job_data = Some(CalibrationJobData::VinAdc(CalibrationVinAutoJob {
         start_request_mv: next_request_mv,
         next_request_mv,
@@ -960,6 +966,9 @@ pub(crate) fn start_thermal_plant_calibration_job(
         next_request_mv: Some(request_mv),
         message: None,
     };
+    calibration.scan_phase = Some(flux_purr_firmware::heater_supply::scan::ScanPhase::Baseline);
+    calibration.scan_failure = None;
+    calibration.scan_contract_confirmed = false;
     workspace.next_run_id = workspace.next_run_id.wrapping_add(1).max(1);
     workspace.job = Some(CalibrationThermalPlantAutoJob {
         run_id: workspace.next_run_id,
@@ -2188,6 +2197,7 @@ pub(crate) fn update_thermal_heating_phase(
         );
         return false;
     };
+    calibration.scan_contract_confirmed = input.pd_confirmed;
     let Some(wifi_started) = input.wifi_started else {
         fail_thermal_plant_calibration(
             calibration,
@@ -2211,6 +2221,8 @@ pub(crate) fn update_thermal_heating_phase(
         vin_code: input.latest_vin_raw_code,
         vin_mv: input.latest_vin_raw_adc_mv,
     });
+    calibration.scan_phase = Some(scan.phase);
+    calibration.scan_failure = scan.failure;
     if scan.phase == flux_purr_firmware::heater_supply::scan::ScanPhase::Failed {
         let reason = scan
             .failure

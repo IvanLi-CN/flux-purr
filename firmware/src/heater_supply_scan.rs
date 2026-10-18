@@ -15,6 +15,21 @@ pub enum ScanPhase {
     Failed,
 }
 
+impl ScanPhase {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Preflight => "preflight",
+            Self::PreflightRecovery => "preflight_recovery",
+            Self::Sweep => "sweep",
+            Self::TemperatureSettle => "temperature_settle",
+            Self::Equilibrium => "equilibrium",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanFailure {
     WifiChanged,
@@ -22,6 +37,18 @@ pub enum ScanFailure {
     AmbiguousResponse,
     StageTimeout,
     InvalidSample,
+}
+
+impl ScanFailure {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::WifiChanged => "supply_scan_wifi_changed",
+            Self::SupplyUnstable => "supply_scan_supply_unstable",
+            Self::AmbiguousResponse => "supply_scan_ambiguous_response",
+            Self::StageTimeout => "supply_scan_stage_timeout",
+            Self::InvalidSample => "supply_scan_invalid_sample",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

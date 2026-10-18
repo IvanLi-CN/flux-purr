@@ -781,6 +781,12 @@ pub struct CalibrationRuntimeStateWire {
     pub stable: bool,
     pub stability_error_mv: Option<i16>,
     pub error: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_phase: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_failure: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_contract_confirmed: Option<bool>,
     pub job: CalibrationJobStateWire,
 }
 
@@ -796,6 +802,9 @@ impl Default for CalibrationRuntimeStateWire {
             stable: false,
             stability_error_mv: None,
             error: None,
+            scan_phase: None,
+            scan_failure: None,
+            scan_contract_confirmed: None,
             job: CalibrationJobStateWire::default(),
         }
     }
