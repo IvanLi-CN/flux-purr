@@ -57,7 +57,7 @@
 
 ### MUST
 
-- 正常运行和真机调优固件必须保留全部默认功能，包括Wi-Fi、HTTP、USB控制和蜂鸣器。固件package的release配置固定为`opt-level="s"`、`codegen-units=1`；实际ESP-IDF factory app image不得超过既有2MiB分区，并须通过启动栈预算检查。编译成功、ELF文件大小或无网络配置编译通过均不能替代完整功能app image的检查。
+- 正常运行和真机调优固件必须保留全部默认功能，包括Wi-Fi、HTTP、USB控制和蜂鸣器。固件package的release配置固定为`opt-level="z"`、`codegen-units=1`；实际ESP-IDF factory app image不得超过既有2MiB分区，并须通过启动栈预算检查。编译成功、ELF文件大小或无网络配置编译通过均不能替代完整功能app image的检查。
 - REQ-AUTO-RESISTANCE: 正常自动加热 MUST 使用 ADR 0019 定义的整机供电边界；旧版合同电流反推的电阻曲线和关联热模型 MUST 视为不存在，不得迁移、投影、预览或兜底。缺少适用边界的区域 MUST 明确使用预设电气模型估算，不得描述成实测标定。
 - REQ-AUTO-CANDIDATE: 正常自动加热 MUST 对每个实际 PPS/APDO 独立编码电流并计算安全电压和 Pmax；MUST NOT 固定预留 200mA 或编造未知辅助功耗。PPS 优先，Fixed 仅在其满导通负载满足同一边界时可选，候选不得跨档位拼接。
 - REQ-AUTO-WATTS: 正常自动加热 MUST 保持统一的模型估算瓦特基准；PWM 仅按已确认合同分配，最终电压不得越过安全上限。整数 mW 的满量程 MUST 对应其量化电压上限及软启动结束后的 100% 导通，不得二次取整为少一档电压或 99%。
