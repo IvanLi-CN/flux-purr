@@ -368,8 +368,9 @@ pub struct ThermalPlantTransientSample {
     /// 50 ms ticks from the start of the automatic job.
     pub elapsed_ticks: u32,
     pub raw_rtd_adc_mv: u16,
-    /// Measured heater voltage, quantized to 125 mV. This covers the complete
-    /// 28 V PD guard in one byte without changing the persisted sample size.
+    /// Measured heater voltage, quantized to 125 mV. Code 255 is reserved for
+    /// an explicit passive-cooling sample; real voltage codes cover the
+    /// complete 28 V PD guard without changing the persisted sample size.
     pub heater_voltage_125mv: u8,
     pub duty_percent: u8,
 }
@@ -423,6 +424,22 @@ pub const fn quantize_thermal_plant_heater_voltage_mv(voltage_mv: u32) -> u8 {
 
 pub const fn thermal_plant_heater_voltage_mv(code: u8) -> u16 {
     code as u16 * THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV
+}
+
+/// Real heater voltage codes end at 224 (28 V), so 255 is an unambiguous
+/// phase marker that fits the existing one-byte voltage field.
+pub const THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL: u8 = u8::MAX;
+
+pub const fn thermal_plant_sample_is_cooling(sample: ThermalPlantTransientSample) -> bool {
+    sample.heater_voltage_125mv == THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+}
+
+pub const fn thermal_plant_sample_voltage_125mv(sample: ThermalPlantTransientSample) -> u8 {
+    if thermal_plant_sample_is_cooling(sample) {
+        0
+    } else {
+        sample.heater_voltage_125mv
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -804,28 +821,34 @@ pub fn thermal_plant_transient_transaction_has_valid_structure(
     let samples = &value.samples[..usize::from(value.sample_count)];
     if samples
         .first()
-        .is_none_or(|sample| sample.duty_percent != 0)
+        .is_none_or(|sample| sample.duty_percent != 0 || thermal_plant_sample_is_cooling(*sample))
     {
         return false;
     }
     let mut powered_sample_count = 0_u8;
     let mut has_cooling_sample = false;
-    let last_powered = samples.iter().rposition(|sample| sample.duty_percent != 0);
+    let last_powered = samples
+        .iter()
+        .rposition(|sample| !thermal_plant_sample_is_cooling(*sample) && sample.duty_percent != 0);
     let mut peak_raw_rtd_adc_mv = 0u16;
     for (index, sample) in samples.iter().enumerate() {
         if sample.raw_rtd_adc_mv == 0
             || sample.duty_percent > 100
-            || sample.heater_voltage_125mv > THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_125MV
+            || (thermal_plant_sample_is_cooling(*sample) && sample.duty_percent != 0)
+            || (!thermal_plant_sample_is_cooling(*sample)
+                && sample.heater_voltage_125mv > THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_125MV)
         {
             return false;
         }
         if index > 0 && sample.elapsed_ticks <= samples[index - 1].elapsed_ticks {
             return false;
         }
-        if sample.duty_percent == 0 {
+        if thermal_plant_sample_is_cooling(*sample) {
             if last_powered.is_some_and(|last| index > last) {
                 has_cooling_sample |= sample.raw_rtd_adc_mv < peak_raw_rtd_adc_mv;
             }
+        } else if sample.duty_percent == 0 {
+            // A zero-duty gap during the supply scan remains a heating sample.
         } else if sample.duty_percent == 100
             && sample.heater_voltage_125mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV
         {
@@ -3386,6 +3409,9 @@ fn thermal_plant_persisted_transaction_fits(value: &ThermalPlantTransientTransac
             sample.elapsed_ticks <= THERMAL_PLANT_SUPPLY_MAX_TICKS
                 && sample.raw_rtd_adc_mv <= 4_095
                 && matches!(sample.duty_percent, 0 | 100)
+                && (thermal_plant_sample_is_cooling(*sample)
+                    || sample.heater_voltage_125mv
+                        <= THERMAL_PLANT_TRANSIENT_MAX_HEATER_VOLTAGE_125MV)
         })
 }
 
@@ -3416,9 +3442,14 @@ fn encode_thermal_plant_persisted_transaction(
             THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
         // 19 time bits, 12 ADC-mV bits, 8 voltage bits and one gate bit.
         // 50 ms ticks cover over seven hours without losing transport-delay data.
+        let voltage_125mv = if thermal_plant_sample_is_cooling(*sample) {
+            THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+        } else {
+            sample.heater_voltage_125mv
+        };
         let packed = u64::from(sample.elapsed_ticks)
             | (u64::from(sample.raw_rtd_adc_mv) << 19)
-            | (u64::from(sample.heater_voltage_125mv) << 31)
+            | (u64::from(voltage_125mv) << 31)
             | (u64::from(sample.duty_percent != 0) << 39);
         out[offset..offset + 5].copy_from_slice(&packed.to_le_bytes()[..5]);
     }
@@ -6024,7 +6055,13 @@ mod tests {
                 } else {
                     346 - (index as u16 - 12) * 8
                 },
-                heater_voltage_125mv: if (1..=12).contains(&index) { 160 } else { 0 },
+                heater_voltage_125mv: if (1..=12).contains(&index) {
+                    160
+                } else if index > 12 {
+                    THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+                } else {
+                    0
+                },
                 duty_percent: if (1..=12).contains(&index) { 100 } else { 0 },
             };
         }
@@ -6088,7 +6125,11 @@ mod tests {
                 } else {
                     442 - (index as u16 - 24) * 8
                 },
-                heater_voltage_125mv: 80,
+                heater_voltage_125mv: if index > 24 {
+                    THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+                } else {
+                    80
+                },
                 duty_percent: if (1..=24).contains(&index) { 100 } else { 0 },
             };
         }
@@ -6168,7 +6209,7 @@ mod tests {
     #[test]
     fn persisted_transient_samples_retain_zero_duty_during_cooling() {
         let mut transaction = sample_transient_thermal_plant_transaction();
-        transaction.samples[13].heater_voltage_125mv = 160;
+        transaction.samples[13].heater_voltage_125mv = THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL;
         assert!(thermal_plant_transient_transaction_has_valid_structure(
             &transaction
         ));
@@ -6181,7 +6222,10 @@ mod tests {
 
         let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
             .expect("current persisted transient format must decode");
-        assert_eq!(decoded.samples[13].heater_voltage_125mv, 160);
+        assert_eq!(
+            decoded.samples[13].heater_voltage_125mv,
+            THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+        );
         assert_eq!(decoded.samples[13].duty_percent, 0);
         assert_eq!(decoded, transaction);
     }
@@ -6381,6 +6425,38 @@ mod tests {
         let mut transaction = sample_transient_thermal_plant_transaction();
         transaction.samples[1].heater_voltage_125mv = 225;
 
+        assert!(!thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+    }
+
+    #[test]
+    fn transient_trace_without_a_cooling_marker_is_absent() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        for sample in transaction.samples.iter_mut().take(24).skip(13) {
+            sample.heater_voltage_125mv = 0;
+        }
+        assert!(!thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+
+        let record = MemoryRecord {
+            sequence: 71,
+            config: MemoryConfig {
+                thermal_plant_transient_active: Some(transaction),
+                ..sample_config()
+            },
+        };
+        let mut bytes = [0u8; MEMORY_SLOT_SIZE];
+        let length = encode_memory_record(&record, &mut bytes).expect("legacy trace encodes");
+        let decoded = decode_memory_record(&bytes[..length]).expect("record decodes");
+        assert!(decoded.config.thermal_plant_transient_active.is_none());
+    }
+
+    #[test]
+    fn transient_cooling_marker_requires_zero_duty() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[13].duty_percent = 100;
         assert!(!thermal_plant_transient_transaction_has_valid_structure(
             &transaction
         ));

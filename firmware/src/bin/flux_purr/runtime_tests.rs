@@ -5574,7 +5574,11 @@ fn synthetic_trace_with_delay(
             samples[sample_count] = ThermalPlantTransientSample {
                 elapsed_ticks: u32::from(tick),
                 raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
-                heater_voltage_125mv: if heating { 160 } else { 0 },
+                heater_voltage_125mv: if heating {
+                    160
+                } else {
+                    flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+                },
                 duty_percent,
             };
             sample_count += 1;
@@ -5809,7 +5813,7 @@ fn assert_synthetic_invalid_trace_guards(
     nonterminal_cooldown.samples[append_index] = ThermalPlantTransientSample {
         elapsed_ticks: previous.elapsed_ticks.saturating_add(1),
         raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(100.0),
-        heater_voltage_125mv: 0,
+        heater_voltage_125mv: flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL,
         duty_percent: 0,
     };
     nonterminal_cooldown.sample_count = nonterminal_cooldown.sample_count.saturating_add(1);
@@ -5934,11 +5938,22 @@ fn transient_thermal_fit_excludes_captured_instantaneous_spike_windows() {
         heater_voltage_125mv: 0,
         duty_percent: 0,
     }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut cooling = false;
+    let mut saw_power = false;
     for (sample, row) in samples.iter_mut().zip(&rows) {
+        if row[3] > 0 {
+            saw_power = true;
+        } else if saw_power {
+            cooling = true;
+        }
         *sample = ThermalPlantTransientSample {
             elapsed_ticks: row[0],
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(row[1] as f32 / 100.0),
-            heater_voltage_125mv: row[2] as u8,
+            heater_voltage_125mv: if cooling {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                row[2] as u8
+            },
             duty_percent: row[3] as u8,
         };
     }
@@ -6502,11 +6517,22 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
         heater_voltage_125mv: 0,
         duty_percent: 0,
     }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut cooling = false;
+    let mut saw_power = false;
     for (index, (elapsed_ticks, temp_c, duty_percent)) in trace.iter().copied().enumerate() {
+        if duty_percent > 0 {
+            saw_power = true;
+        } else if saw_power {
+            cooling = true;
+        }
         samples[index] = ThermalPlantTransientSample {
             elapsed_ticks: u32::from(elapsed_ticks),
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temp_c),
-            heater_voltage_125mv: 160,
+            heater_voltage_125mv: if cooling {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                160
+            },
             duty_percent,
         };
     }
@@ -6969,6 +6995,7 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     assert_eq!(job.samples[0].heater_voltage_125mv, 160);
     assert_eq!(job.samples[0].duty_percent, 0);
 
+    job.phase = ThermalPlantAutoPhase::Heating;
     job.elapsed_ticks = 2;
     assert!(record_thermal_plant_transient_sample(
         &mut job, 260, 26.0, 20_000, 100, true
@@ -6988,6 +7015,20 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     assert_eq!(job.sample_count, 25);
     assert_eq!(job.samples[24].elapsed_ticks, 3);
     assert_eq!(job.samples[24].duty_percent, 0);
+    assert_ne!(
+        job.samples[24].heater_voltage_125mv,
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+    );
+
+    job.phase = ThermalPlantAutoPhase::Cooling;
+    job.elapsed_ticks = 4;
+    assert!(record_thermal_plant_transient_sample(
+        &mut job, 259, 25.9, 20_000, 0, true
+    ));
+    assert_eq!(
+        job.samples[25].heater_voltage_125mv,
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+    );
 }
 
 #[test]

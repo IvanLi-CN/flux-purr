@@ -1139,7 +1139,10 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
         if !temperature_c.is_finite() {
             return false;
         }
-        if sample.duty_percent > 0 && temperature_c > powered_max_temp_c {
+        if sample.duty_percent > 0
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+            && temperature_c > powered_max_temp_c
+        {
             powered_max_temp_c = temperature_c;
             powered_peak_index = Some(index);
         }
@@ -1156,7 +1159,7 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
         samples[powered_peak_index].raw_rtd_adc_mv,
     ) && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
         && powered_peak_index + 1 < count
-        && final_sample.is_some_and(|sample| sample.duty_percent == 0)
+        && final_sample.is_some_and(flux_purr_firmware::memory::thermal_plant_sample_is_cooling)
         && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
 }
 
@@ -2064,10 +2067,10 @@ pub(crate) fn thermal_plant_trace_page(
 ) -> ThermalPlantTracePageWire {
     let start = after_sample.min(sample_count);
     let mut points = heapless::Vec::new();
-    let mut saw_heating = samples
-        .iter()
-        .take(usize::from(start))
-        .any(|sample| sample.duty_percent > 0);
+    let mut saw_heating = samples.iter().take(usize::from(start)).any(|sample| {
+        sample.duty_percent > 0
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+    });
     for (offset, sample) in samples
         .iter()
         .take(usize::from(sample_count))
@@ -2075,7 +2078,7 @@ pub(crate) fn thermal_plant_trace_page(
         .skip(usize::from(start))
         .take(flux_purr_firmware::control_plane::THERMAL_PLANT_TRACE_PAGE_MAX)
     {
-        let phase = thermal_plant_trace_phase(&mut saw_heating, sample.duty_percent);
+        let phase = thermal_plant_trace_phase(&mut saw_heating, *sample);
         let temperature_centi_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)
             .map(|value| round_to_i16(value * 100.0))
             .unwrap_or(fallback_temp_centi_c);
@@ -2085,7 +2088,9 @@ pub(crate) fn thermal_plant_trace_page(
                 .elapsed_ticks
                 .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
             temperature_centi_c,
-            heater_voltage_mv: thermal_plant_heater_voltage_mv(sample.heater_voltage_125mv),
+            heater_voltage_mv: thermal_plant_heater_voltage_mv(
+                flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(*sample),
+            ),
             duty_percent: sample.duty_percent.min(100),
             phase,
         });
@@ -2103,13 +2108,13 @@ pub(crate) fn thermal_plant_trace_page(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn thermal_plant_trace_phase(
     saw_heating: &mut bool,
-    duty_percent: u8,
+    sample: ThermalPlantTransientSample,
 ) -> ThermalPlantRunPhaseWire {
-    if duty_percent > 0 {
+    if flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample) {
+        ThermalPlantRunPhaseWire::Cooling
+    } else if sample.duty_percent > 0 || *saw_heating {
         *saw_heating = true;
         ThermalPlantRunPhaseWire::Heating
-    } else if *saw_heating {
-        ThermalPlantRunPhaseWire::Cooling
     } else {
         ThermalPlantRunPhaseWire::Ambient
     }

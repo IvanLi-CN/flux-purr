@@ -1168,12 +1168,14 @@ pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlant
     // observations from the beginning of heating through the peak.
     let mut keep = [false; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     keep[0] = true;
-    let first_powered = job.samples[..count]
-        .iter()
-        .position(|sample| sample.duty_percent != 0);
-    let last_powered = job.samples[..count]
-        .iter()
-        .rposition(|sample| sample.duty_percent != 0);
+    let first_powered = job.samples[..count].iter().position(|sample| {
+        !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+            && sample.duty_percent != 0
+    });
+    let last_powered = job.samples[..count].iter().rposition(|sample| {
+        !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+            && sample.duty_percent != 0
+    });
     if let (Some(first), Some(last)) = (first_powered, last_powered) {
         let cooling_count = count - last - 1;
         let cooling_slots = cooling_count.min(23);
@@ -1233,6 +1235,8 @@ pub(crate) fn record_thermal_plant_transient_sample(
             || (duty_percent != 0
                 && previous.heater_voltage_125mv
                     != quantize_thermal_plant_heater_voltage_mv(latest_vin_mv))
+            || (job.phase == ThermalPlantAutoPhase::Cooling
+                && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(previous))
     };
     let should_record = force
         || electrical_change
@@ -1252,10 +1256,15 @@ pub(crate) fn record_thermal_plant_transient_sample(
     {
         return false;
     }
+    let heater_voltage_125mv = if job.phase == ThermalPlantAutoPhase::Cooling {
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+    } else {
+        quantize_thermal_plant_heater_voltage_mv(latest_vin_mv)
+    };
     job.samples[index] = ThermalPlantTransientSample {
         elapsed_ticks,
         raw_rtd_adc_mv,
-        heater_voltage_125mv: quantize_thermal_plant_heater_voltage_mv(latest_vin_mv),
+        heater_voltage_125mv,
         duty_percent,
     };
     job.sample_count = job.sample_count.saturating_add(1);
@@ -1271,11 +1280,14 @@ pub(crate) fn transient_sample_power_mw(
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
 ) -> Option<f32> {
-    if sample.duty_percent == 0 {
+    if sample.duty_percent == 0
+        || flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample)
+    {
         return Some(0.0);
     }
-    let voltage_v =
-        f32::from(thermal_plant_heater_voltage_mv(sample.heater_voltage_125mv)) / 1_000.0;
+    let voltage_v = f32::from(thermal_plant_heater_voltage_mv(
+        flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(sample),
+    )) / 1_000.0;
     let _ = (preview_heater_curve, memory_config);
     let resistance_ohms = default_estimated_heater_resistance_ohms(temp_c);
     (voltage_v > 0.0 && resistance_ohms.is_finite() && resistance_ohms > 0.1).then_some(
@@ -1517,11 +1529,15 @@ pub(crate) fn prepare_transient_fit(
     }
     let accepted = transient_temperature_acceptance(&samples[..count], &temperatures_c[..count]);
     let powered_peak_index = (0..count)
-        .filter(|index| accepted[*index] && samples[*index].duty_percent == 100)
+        .filter(|index| {
+            accepted[*index]
+                && samples[*index].duty_percent == 100
+                && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[*index])
+        })
         .max_by(|left, right| temperatures_c[*left].total_cmp(&temperatures_c[*right]))?;
     let last_sample_is_cooling = samples[..count]
         .last()
-        .is_some_and(|sample| sample.duty_percent == 0);
+        .is_some_and(|sample| flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample));
     if !thermal_plant_heating_sample_covers_minimum(
         memory_config,
         samples[powered_peak_index].raw_rtd_adc_mv,
@@ -1571,11 +1587,7 @@ pub(crate) fn transient_temperature_acceptance(
     let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut previous_accepted_index = 0;
     let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
-        index > 0
-            && sample.duty_percent == 0
-            && samples[..index]
-                .iter()
-                .any(|previous| previous.duty_percent > 0)
+        index > 0 && flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
     });
     for index in 1..samples.len() {
         let elapsed_s = (samples[index].elapsed_ticks
@@ -1586,7 +1598,7 @@ pub(crate) fn transient_temperature_acceptance(
             .abs()
             > RTD_CONTROL_MAX_SLEW_C_PER_S * elapsed_s;
         let late_cooling_rise = cooling_start_index.is_some_and(|start| {
-            samples[index].duty_percent == 0
+            flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index])
                 && samples[index]
                     .elapsed_ticks
                     .saturating_sub(samples[start].elapsed_ticks)
@@ -1598,6 +1610,9 @@ pub(crate) fn transient_temperature_acceptance(
             && samples[index - 1].duty_percent > 0
             && samples[index].duty_percent > 0
             && samples[index + 1].duty_percent > 0
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index - 1])
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index])
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index + 1])
             && ((temperatures_c[index] - temperatures_c[index - 1]
                 > HEATING_CONTACT_EXCURSION_TOLERANCE_C
                 && temperatures_c[index] - temperatures_c[index + 1]
