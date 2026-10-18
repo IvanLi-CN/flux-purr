@@ -139,6 +139,26 @@ test.describe('public demo build', () => {
     )
   })
 
+  test('prioritizes reset over a blocked Inspector navigation', async ({ page }) => {
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    await page.getByRole('switch', { name: '标定模式' }).click()
+    await expect(page.getByRole('switch', { name: '标定模式' })).toBeChecked()
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+
+    await page.getByRole('button', { name: 'Reset demo state' }).click()
+
+    await expect(page).toHaveURL('/devices/fp-lab-01/calibration/rtd-adc')
+    await expect(page.getByRole('switch', { name: '标定模式' })).not.toBeChecked()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Normal' })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
+  })
+
   test('reports clipboard refusal without a false success', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'clipboard', {

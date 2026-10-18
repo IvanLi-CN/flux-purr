@@ -90,6 +90,7 @@ function App() {
   const inspectorNavigationQueueRef = useRef<Promise<InspectorNavigationResult>>(
     Promise.resolve(undefined)
   )
+  const inspectorNavigationGenerationRef = useRef(0)
   const inspectorPendingNavigationCountRef = useRef(0)
   const inspectorNavigationAbortRef = useRef<(() => void) | null>(null)
   const inspectorNavigationTargetRef = useRef<string | null>(null)
@@ -347,12 +348,24 @@ function App() {
   }, [])
 
   const enqueueInspectorNavigation = useCallback(
-    (runNavigation: () => Promise<InspectorNavigationResult>) => {
+    (runNavigation: () => Promise<InspectorNavigationResult>, options?: { priority?: boolean }) => {
+      if (options?.priority) {
+        inspectorNavigationGenerationRef.current += 1
+        const pending = pendingBlockRef.current
+        if (pending) {
+          settlePendingBlock(pending.id, true)
+        } else {
+          inspectorNavigationAbortRef.current?.()
+        }
+        inspectorNavigationQueueRef.current = Promise.resolve(undefined)
+      }
+      const generation = inspectorNavigationGenerationRef.current
       inspectorPendingNavigationCountRef.current += 1
-      const queuedNavigation = inspectorNavigationQueueRef.current.then(
-        runNavigation,
-        runNavigation
-      )
+      const runIfCurrent = () =>
+        generation === inspectorNavigationGenerationRef.current
+          ? runNavigation()
+          : Promise.resolve(false)
+      const queuedNavigation = inspectorNavigationQueueRef.current.then(runIfCurrent, runIfCurrent)
       inspectorNavigationQueueRef.current = queuedNavigation.then(
         () => undefined,
         () => undefined
@@ -367,7 +380,7 @@ function App() {
       )
       return queuedNavigation
     },
-    []
+    [settlePendingBlock]
   )
 
   // A cancelled route blocker does not settle TanStack's navigation promise.
@@ -422,57 +435,62 @@ function App() {
   const updateInspectorState = useCallback(
     (
       nextState: Partial<DemoInspectorState>,
-      options?: { preserveRoute?: boolean; ignoreBlocker?: boolean }
+      options?: { preserveRoute?: boolean; ignoreBlocker?: boolean; priority?: boolean }
     ) =>
-      enqueueInspectorNavigation(async () => {
-        const previousState = inspectorStateRef.current
-        const mergedState = { ...previousState, ...nextState }
-        const {
-          demoScene: _demoScene,
-          demoLease: _demoLease,
-          demoNetwork: _demoNetwork,
-          demoArtifact: _demoArtifact,
-          demoWifiCapability: _demoWifiCapability,
-          demoLogs: _demoLogs,
-          demoTelemetry: _demoTelemetry,
-          ...searchWithoutInspector
-        } = inspectorSearchRef.current
-        const nextSearch = {
-          ...searchWithoutInspector,
-          ...demoInspectorSearch(mergedState),
-        }
-        const sceneChanged = mergedState.demoScene !== previousState.demoScene
-        const nextScenario = deriveDemoScenario(
-          mergedState,
-          demoSession.events,
-          demoSession.actions,
-          sceneChanged ? undefined : inspectorPathnameRef.current.match(/^\/devices\/([^/]+)/)?.[1]
-        )
-        const nextPathname =
-          sceneChanged && !options?.preserveRoute
-            ? mergedState.demoScene === 'calibration-active'
-              ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
-              : `/devices/${nextScenario.selectedDeviceId}/overview`
-            : inspectorPathnameRef.current
-        const completed = await settleInspectorNavigation(
-          () =>
-            navigate({
-              to: nextPathname as '/',
-              search: nextSearch,
-              replace: true,
-              ignoreBlocker: options?.ignoreBlocker,
-            }),
-          inspectorNavigationTargetKey(nextPathname, nextSearch)
-        )
-        if (!completed) return false
-        if (sceneChanged) {
-          dispatchDemoSession({ type: 'clear-results' })
-        }
-        inspectorStateRef.current = mergedState
-        inspectorSearchRef.current = nextSearch
-        inspectorPathnameRef.current = nextPathname
-        return true
-      }),
+      enqueueInspectorNavigation(
+        async () => {
+          const previousState = inspectorStateRef.current
+          const mergedState = { ...previousState, ...nextState }
+          const {
+            demoScene: _demoScene,
+            demoLease: _demoLease,
+            demoNetwork: _demoNetwork,
+            demoArtifact: _demoArtifact,
+            demoWifiCapability: _demoWifiCapability,
+            demoLogs: _demoLogs,
+            demoTelemetry: _demoTelemetry,
+            ...searchWithoutInspector
+          } = inspectorSearchRef.current
+          const nextSearch = {
+            ...searchWithoutInspector,
+            ...demoInspectorSearch(mergedState),
+          }
+          const sceneChanged = mergedState.demoScene !== previousState.demoScene
+          const nextScenario = deriveDemoScenario(
+            mergedState,
+            demoSession.events,
+            demoSession.actions,
+            sceneChanged
+              ? undefined
+              : inspectorPathnameRef.current.match(/^\/devices\/([^/]+)/)?.[1]
+          )
+          const nextPathname =
+            sceneChanged && !options?.preserveRoute
+              ? mergedState.demoScene === 'calibration-active'
+                ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
+                : `/devices/${nextScenario.selectedDeviceId}/overview`
+              : inspectorPathnameRef.current
+          const completed = await settleInspectorNavigation(
+            () =>
+              navigate({
+                to: nextPathname as '/',
+                search: nextSearch,
+                replace: true,
+                ignoreBlocker: options?.ignoreBlocker,
+              }),
+            inspectorNavigationTargetKey(nextPathname, nextSearch)
+          )
+          if (!completed) return false
+          if (sceneChanged) {
+            dispatchDemoSession({ type: 'clear-results' })
+          }
+          inspectorStateRef.current = mergedState
+          inspectorSearchRef.current = nextSearch
+          inspectorPathnameRef.current = nextPathname
+          return true
+        },
+        { priority: options?.priority }
+      ),
     [
       demoSession.actions,
       demoSession.events,
@@ -542,6 +560,7 @@ function App() {
     const completed = await updateInspectorState(defaultDemoInspectorState, {
       preserveRoute: true,
       ignoreBlocker: true,
+      priority: true,
     })
     if (completed !== false) {
       dispatchDemoSession({ type: 'reset' })
