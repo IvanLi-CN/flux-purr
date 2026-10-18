@@ -7154,6 +7154,45 @@ fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degre
     assert!(job.sample_count < THERMAL_PLANT_TRANSIENT_MAX_SAMPLES as u8);
 }
 
+#[test]
+fn transient_trace_periodically_samples_slow_cooling() {
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_current_ma: 3_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(30.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        supply_scan: None,
+        started_at_ms: None,
+        elapsed_ticks: 1_000 + THERMAL_PLANT_TRACE_INTERVAL_TICKS,
+        phase_started_tick: 1_000,
+        sample_count: 1,
+        last_saved_temp_c: 120.0,
+        last_saved_tick: 1_000,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 1_000,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(120.0),
+            heater_voltage_125mv: 160,
+            duty_percent: 100,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+
+    assert!(record_thermal_plant_transient_sample(
+        &mut job,
+        runtime_test_raw_rtd_adc_mv_for_temp(119.5),
+        119.5,
+        20_000,
+        0,
+        false,
+    ));
+    assert_eq!(job.sample_count, 2);
+    assert_eq!(
+        job.samples[1].elapsed_ticks,
+        1_000 + THERMAL_PLANT_TRACE_INTERVAL_TICKS
+    );
+    assert_eq!(job.samples[1].duty_percent, 0);
+}
+
 struct SupplyCalibrationPlant {
     temperature_c: f32,
     now_ms: u64,

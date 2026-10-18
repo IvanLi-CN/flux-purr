@@ -1224,6 +1224,9 @@ pub(crate) fn record_thermal_plant_transient_sample(
         && elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10;
     let temperature_step_sample = elapsed_ticks.saturating_sub(job.last_saved_tick) >= 10
         && (latest_temp_c - job.last_saved_temp_c).abs() >= THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C;
+    let interval_sample = elapsed_ticks.saturating_sub(job.last_saved_tick)
+        >= THERMAL_PLANT_TRACE_INTERVAL_TICKS
+        && (job.phase == ThermalPlantAutoPhase::Cooling || duty_percent != 0);
     let electrical_change = job.sample_count > 0 && {
         let previous = job.samples[usize::from(job.sample_count) - 1];
         previous.duty_percent != duty_percent
@@ -1235,7 +1238,8 @@ pub(crate) fn record_thermal_plant_transient_sample(
         || electrical_change
         || job.sample_count < 16
         || cutoff_time_sample
-        || temperature_step_sample;
+        || temperature_step_sample
+        || interval_sample;
     if !should_record {
         return true;
     }

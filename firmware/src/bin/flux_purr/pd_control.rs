@@ -676,6 +676,8 @@ pub(crate) const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
 pub(crate) const THERMAL_PLANT_COOL_COMPLETE_TEMP_C: f32 = 80.0;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C: f32 = 4.0;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const THERMAL_PLANT_TRACE_INTERVAL_TICKS: u32 = 200;
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
