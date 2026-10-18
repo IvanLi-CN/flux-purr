@@ -88,6 +88,7 @@ pub struct SupplyScan {
     flat_count: u8,
     ambiguous_count: u8,
     equilibrium: EquilibriumWindow,
+    stability_temperature_centi_c: Option<i32>,
     normal_probe: bool,
     return_current_ma: u16,
     normal_probe_started_ms: u32,
@@ -122,6 +123,7 @@ impl SupplyScan {
             flat_count: 0,
             ambiguous_count: 0,
             equilibrium: EquilibriumWindow::default(),
+            stability_temperature_centi_c: None,
             normal_probe: false,
             return_current_ma: 3_000,
             normal_probe_started_ms: 0,
@@ -154,6 +156,19 @@ impl SupplyScan {
         self.changed_at_ms = input.now_ms;
     }
 
+    fn stability_temperature_centi_c(&mut self, raw_temperature_centi_c: i16) -> i16 {
+        // The raw sample remains authoritative for the 220 C cutoff and is
+        // persisted with each boundary point. A short fixed-point low-pass
+        // is only used for thermal stability and response decisions because
+        // the powered ADC batch can contain repeatable PWM-coupled spikes.
+        let raw = i32::from(raw_temperature_centi_c);
+        let filtered = self
+            .stability_temperature_centi_c
+            .map_or(raw, |previous| previous + (raw - previous) / 4);
+        self.stability_temperature_centi_c = Some(filtered);
+        filtered.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+    }
+
     fn point(&self, input: ScanInput) -> BoundaryPoint {
         BoundaryPoint {
             elapsed_ms: input.now_ms,
@@ -172,6 +187,8 @@ impl SupplyScan {
         if matches!(self.phase, ScanPhase::Complete | ScanPhase::Failed) {
             return self.output();
         }
+        let stability_temperature_centi_c =
+            self.stability_temperature_centi_c(input.temperature_centi_c);
         if input.wifi_started != self.boundary.wifi_started {
             self.fail(ScanFailure::WifiChanged);
         } else if input.temperature_centi_c >= 22_000 {
@@ -195,7 +212,10 @@ impl SupplyScan {
             // Negotiation time is not a settled electrical observation.
             self.changed_at_ms = input.now_ms;
         } else if input.now_ms.saturating_sub(self.changed_at_ms) >= SETTLE_MS {
-            self.advance(input);
+            self.advance(ScanInput {
+                temperature_centi_c: stability_temperature_centi_c,
+                ..input
+            });
         }
         self.output()
     }
@@ -280,30 +300,47 @@ impl SupplyScan {
             self.probe_next_voltage(input);
             return;
         };
-        if (i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c)).abs()
-            > 100
-        {
-            // Temperature movement can mimic a CC-loop voltage response.
-            self.phase = ScanPhase::TemperatureSettle;
-            self.equilibrium.reset();
-            if let Some(point) = self.last_tracking {
-                self.change(input, point.tracking_request_mv, self.request_ma);
-            }
-            self.previous = None;
-            return;
-        }
+        // Keep the electrical sweep moving while the plate warms. A low
+        // voltage/current pair can take minutes to approach equilibrium, and
+        // waiting here would prevent the scan from reaching a higher PPS
+        // voltage that provides a useful thermal observation. Temperature
+        // stability is checked only after the electrical boundary is bracketed.
         let expected_delta = (u32::from(self.baseline_vin_mv) * 100)
             .div_ceil(u32::from(self.boundary.source_min_mv));
         let observed_delta = u32::from(input.vin_mv.saturating_sub(previous.vin_mv));
+        let thermal_ramp =
+            (i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c)).abs()
+                > 100;
         if observed_delta * 100 >= expected_delta * 80 {
             self.last_tracking = Some(self.point(input));
             self.retain_normal_tracking(input);
             self.flat_count = 0;
             self.ambiguous_count = 0;
+        } else if thermal_ramp {
+            // A changing thermal load can reduce the VIN delta without
+            // proving that the source entered CC. Keep the electrical sweep
+            // moving; only a response observed after the temperature settles
+            // may contribute to the flat/ambiguous bracket.
+            self.flat_count = 0;
+            self.ambiguous_count = 0;
+            self.previous = Some(input);
+            self.probe_next_voltage(input);
+            return;
         } else if observed_delta * 100 <= expected_delta * 25 {
             self.flat_count += 1;
         } else {
             self.ambiguous_count = self.ambiguous_count.saturating_add(1);
+            // A PPS contract can be confirmed before the ADC has caught up
+            // with the new VBUS level. Hold this request for one more settled
+            // sample instead of advancing through an unclassified response.
+            // No boundary point is retained until a later tracking or flat
+            // observation proves which side of the bracket it belongs to.
+            self.previous = Some(input);
+            self.changed_at_ms = input.now_ms;
+            if self.ambiguous_count >= 5 {
+                self.fail(ScanFailure::AmbiguousResponse);
+            }
+            return;
         }
         self.previous = Some(input);
         if self.flat_count >= 2 {
@@ -314,9 +351,6 @@ impl SupplyScan {
             self.begin_equilibrium(input);
         } else {
             self.probe_next_voltage(input);
-        }
-        if self.ambiguous_count >= 5 {
-            self.fail(ScanFailure::AmbiguousResponse);
         }
     }
 

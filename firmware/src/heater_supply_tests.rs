@@ -113,10 +113,10 @@ fn correcting_the_temperature_projection_changes_lookup_without_rewriting_raw_ad
 }
 
 #[test]
-fn a_slow_ramp_through_one_degree_is_not_equilibrium() {
+fn a_temperature_ramp_outside_one_degree_is_not_equilibrium() {
     let mut window = EquilibriumWindow::default();
     for tick in 0..=200 {
-        assert!(!window.observe(tick * 50, 10_000 + (tick / 4) as i16));
+        assert!(!window.observe(tick * 50, 10_000 + tick as i16));
     }
     for tick in 201..=402 {
         if window.observe(tick * 50, 10_050) {
@@ -134,6 +134,16 @@ fn noise_outside_the_full_band_restarts_the_equilibrium_window() {
     assert!(!window.observe(9_000, 10_101));
     assert!(!window.observe(10_000, 10_101));
     assert!(window.observe(19_000, 10_101));
+}
+
+#[test]
+fn in_band_temperature_drift_is_allowed_after_ten_seconds() {
+    let mut window = EquilibriumWindow::default();
+    for tick in 0..200 {
+        let temperature = 10_000 + (tick / 7) as i16;
+        assert!(!window.observe(tick * 50, temperature));
+    }
+    assert!(window.observe(10_050, 10_030));
 }
 
 #[test]
@@ -164,21 +174,88 @@ fn in_band_temperature_response_to_safe_voltage_does_not_starve_equilibrium() {
 }
 
 #[test]
-fn warming_beyond_the_equilibrium_band_still_rescans_the_boundary() {
+fn adc_jitter_is_filtered_for_equilibrium_without_relaxing_cutoff() {
+    let mut value = boundary();
+    value.point_count = 0;
+    let mut job = scan::SupplyScan::new(value).unwrap();
+    for now_ms in (0..2_000_000).step_by(50) {
+        let output = job.output();
+        let raw_temperature = if (now_ms / 50) % 2 == 0 { 6_533 } else { 6_799 };
+        job.update(sample(now_ms, output, raw_temperature));
+        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        if job.phase == scan::ScanPhase::Complete {
+            assert!(job.boundary.point_count > 0);
+            return;
+        }
+    }
+    panic!("ADC-coupled temperature jitter must not starve a stable scan");
+}
+
+#[test]
+fn warming_during_electrical_sweep_does_not_starve_voltage_probing() {
     let mut job = scan::SupplyScan::new(boundary()).unwrap();
     for now_ms in (0..60_000).step_by(50) {
         let output = job.output();
         job.update(sample(now_ms, output, 10_000));
-        if job.phase == scan::ScanPhase::Equilibrium {
-            let safe = job.output();
-            let warmed = job.update(sample(now_ms + 1_000, safe, 10_101));
-            assert_eq!(job.phase, scan::ScanPhase::Sweep);
-            assert!(warmed.request_mv > safe.request_mv);
+        if job.phase == scan::ScanPhase::Sweep && output.request_mv > 5_500 {
+            let warmed = job.update(sample(now_ms + 1_000, job.output(), 10_500));
+            assert!(warmed.request_mv > 5_500);
             assert_eq!(job.boundary.point_count, 0);
             return;
         }
     }
-    panic!("the simulated current-loop boundary was not reached");
+    panic!("the simulated electrical sweep did not advance while warming");
+}
+
+#[test]
+fn thermal_ramp_does_not_turn_a_flat_sample_into_a_cc_boundary() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    for now_ms in (0..60_000).step_by(50) {
+        let output = job.output();
+        job.update(sample(now_ms, output, 10_000));
+        if job.phase == scan::ScanPhase::Sweep && output.request_mv > 5_500 {
+            let mut warming = sample(now_ms + 1_000, job.output(), 10_500);
+            warming.vin_mv = 1;
+            let next = job.update(warming);
+            assert_eq!(job.phase, scan::ScanPhase::Sweep);
+            assert!(next.request_mv > output.request_mv);
+            assert_eq!(job.boundary.point_count, 0);
+            return;
+        }
+    }
+    panic!("the simulated electrical sweep did not reach a warming probe");
+}
+
+#[test]
+fn ambiguous_voltage_response_is_retried_before_advancing() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    let mut inject_at = None;
+    let mut injected = false;
+    for now_ms in (0..60_000).step_by(50) {
+        let output = job.output();
+        let mut input = sample(now_ms, output, 10_000);
+        if let Some(request_mv) = inject_at
+            && output.request_mv == request_mv
+            && !injected
+        {
+            input.vin_mv = input.vin_mv.saturating_sub(4);
+            injected = true;
+        }
+        let previous_request_mv = output.request_mv;
+        let next = job.update(input);
+        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        if injected {
+            assert_eq!(next.request_mv, previous_request_mv);
+            let retried = job.update(sample(now_ms + 1_000, next, 10_000));
+            assert_eq!(retried.request_ma, next.request_ma);
+            assert!(retried.request_mv > previous_request_mv);
+            return;
+        }
+        if next.request_mv > previous_request_mv && previous_request_mv >= 5_500 {
+            inject_at = Some(next.request_mv);
+        }
+    }
+    panic!("the simulated electrical sweep did not reach an ambiguous response");
 }
 
 fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::ScanInput {

@@ -319,12 +319,12 @@ impl SupplyBoundary {
     }
 }
 
-/// A 1 C band alone accepts slow ramps. Require both the full band and a small
-/// end-to-end drift over the same ten-second window.
+/// Require the measured temperature to remain within a 1 C band for ten
+/// seconds. The band bounds the complete window, so normal sensor noise and
+/// slow thermal drift inside that band do not restart it.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EquilibriumWindow {
     started_ms: Option<u32>,
-    first_centi_c: i16,
     min_centi_c: i16,
     max_centi_c: i16,
 }
@@ -337,7 +337,6 @@ impl EquilibriumWindow {
     pub fn observe(&mut self, now_ms: u32, temperature_centi_c: i16) -> bool {
         if self.started_ms.is_none() {
             self.started_ms = Some(now_ms);
-            self.first_centi_c = temperature_centi_c;
             self.min_centi_c = temperature_centi_c;
             self.max_centi_c = temperature_centi_c;
             return false;
@@ -352,11 +351,7 @@ impl EquilibriumWindow {
         if elapsed < 10_000 {
             return false;
         }
-        let stable = (i32::from(temperature_centi_c) - i32::from(self.first_centi_c)).abs() <= 20;
-        if !stable {
-            self.reset();
-        }
-        stable
+        true
     }
 }
 
