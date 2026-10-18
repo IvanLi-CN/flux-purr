@@ -23,17 +23,19 @@
 - Demo 使用独立 `control-plane-demo` feature，避免把轻量连接工具与既有 `160×50` 前面板 preview contract 混在一起。
 - 生产导航采用 TanStack Router file-based routing：设备稳定 identity 位于一级路径，工作台 view 与校准 workspace 位于二级路径；浏览器 history、刷新和分享链接因此使用同一状态源。
 - Storybook 保留无 router adapter 的本地状态模式，生产应用则通过 `ConsoleNavigationAdapter` 把同一控制台组件受控化，避免复制视觉与业务实现。
-- `demo` 与 `uiDemo` 保留为 typed search，而不是组件内模式 state；`uiDemo` 只服务 production 根入口，Inspector state 随站内导航保留，EdgeOne 通过 SPA rewrite 承接 history 深链。
+- 早期版本曾把 `demo` 与 `uiDemo` 作为 typed search 模式入口；随着正式与 Demo 分站，运行时改由构建固定，旧参数只用于停用页或清理，Inspector state 单独随 Demo 深链保留。
 - transport target id、设备地址与凭据不具备跨连接稳定性，因此规范 URL 只接受探针验证后的物理 identity；无法恢复时保留地址并显示恢复操作。
 - 校准离开保护迁入 router blocker，使 Link、程序导航、设备切换、search 变化和浏览器历史共享“先退出校准、成功后继续”的安全顺序。
 - 公开 Demo 复用正式控制台和路由，而非替换 `uiDemo` LAN pairing surface；Inspector 只控制确定性 fixture state，并通过同一 search blocker 接入校准离开保护。
 - EdgeOne public Demo 使用独立 Makers artifact 与项目绑定，避免把 `flux-purr-demo.ivanli.cc` 误作 live direct-LAN origin。
+- 正式与 Demo 构建进一步固定运行时边界：正式版不再支持 URL 或本地偏好切换，旧正式入口显示停用页；Demo 清理旧模式参数。Inspector URL 只表达场景初始条件，产品操作留在内存并由共享 DemoSession 投影到产品回显。
+- Inspector 的能力/数据开关、当前目标故障作用域、热保护优先级、完整 Reset、显式 WiFi null 回执和 Clipboard 失败状态成为长期行为契约。
 
 ## Key Reasons / Replacements
 
 - 工业拟物风格用于表达硬件工具的物理可靠性，但信息架构必须保持轻，不能扩张成 fleet 管理后台，也不能通过长滚动堆复杂度。
 - Storybook 是 Web UI 的稳定视觉证据来源，优先于临时浏览器窗口截图。
-- 路由视觉证据使用 mock-only `uiDemo` 与离线 identity 恢复态，不以真实设备状态或真实硬件截图作为验收输入。
+- 路由视觉证据使用独立 mock-only Demo 构建与离线 identity 恢复态，不以真实设备状态或真实硬件截图作为验收输入。
 - `docs/solutions/device-control/web-native-wifi-bridge-console.md` 继续作为跨任务复用经验；本 spec 只冻结 Flux Purr 当前 demo surface。
 
 ## References

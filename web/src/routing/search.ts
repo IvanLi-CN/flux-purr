@@ -1,4 +1,4 @@
-import { type AppVariant, readStoredAppVariant, resolveAppVariant } from '@/app-mode'
+import type { AppVariant } from '@/app-mode'
 import {
   type DemoArtifactState,
   type DemoLeaseState,
@@ -10,22 +10,29 @@ import {
 import { isPublicDemoBuild } from '@/public-demo'
 
 export interface AppSearch {
-  demo: boolean
+  demo?: boolean
   uiDemo?: true
   demoScene?: DemoSceneId
   demoLease?: DemoLeaseState
   demoNetwork?: DemoNetworkState
   demoArtifact?: DemoArtifactState
+  demoWifiCapability?: 'default' | 'read-only' | 'unavailable'
+  demoLogs?: 'normal' | 'empty'
+  demoTelemetry?: 'available' | 'unavailable'
 }
 
 export function validateAppSearch(search: Record<string, unknown>): AppSearch {
-  const variant = resolveAppVariant(search.demo, readStoredAppVariant())
+  const demoBuild = isPublicDemoBuild()
   const demoState = demoInspectorStateFromSearch(search)
   const inspectorSearch = demoInspectorSearch(demoState)
+  const legacyDemoRequest =
+    !demoBuild && (normalizeBoolean(search.demo) || search.uiDemo !== undefined)
   return {
-    demo: variant === 'demo',
-    ...(!isPublicDemoBuild() && normalizeBoolean(search.uiDemo) ? { uiDemo: true as const } : {}),
-    ...(variant === 'demo' ? inspectorSearch : {}),
+    ...(demoBuild ? {} : { demo: false }),
+    ...(!demoBuild && (normalizeBoolean(search.uiDemo) || legacyDemoRequest)
+      ? { uiDemo: true as const }
+      : {}),
+    ...(demoBuild ? inspectorSearch : {}),
   }
 }
 

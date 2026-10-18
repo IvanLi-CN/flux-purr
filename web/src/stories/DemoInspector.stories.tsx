@@ -7,8 +7,14 @@ import {
   deriveDemoScenario,
 } from '@/features/control-plane-demo/demo-inspector-state'
 
-function InspectorStory() {
-  const [state, setState] = useState(defaultDemoInspectorState)
+function InspectorStory({
+  initialState = defaultDemoInspectorState,
+  clipboard,
+}: {
+  initialState?: typeof defaultDemoInspectorState
+  clipboard?: { writeText(value: string): Promise<void> } | null
+}) {
+  const [state, setState] = useState(initialState)
   const scenario = deriveDemoScenario(state)
   return (
     <div className="industrial-shell" style={{ minHeight: 740, padding: 24 }}>
@@ -18,7 +24,10 @@ function InspectorStory() {
         selectedDeviceId={scenario.selectedDeviceId}
         onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
         onSelectDevice={() => undefined}
+        shareUrl="https://flux-purr-demo.ivanli.cc/devices/fp-lab-01/overview"
+        clipboard={clipboard}
         onSimulate={() => undefined}
+        onReset={() => setState(defaultDemoInspectorState)}
       />
     </div>
   )
@@ -52,5 +61,45 @@ export const InteractionSmoke: Story = {
     await expect(
       await canvas.findByRole('button', { name: /USB Config Fixture.*WiFi 可配置/ })
     ).toBeVisible()
+  },
+}
+
+export const DataUnavailable: Story = {
+  render: () => (
+    <InspectorStory
+      initialState={{
+        ...defaultDemoInspectorState,
+        demoWifiCapability: 'unavailable',
+        demoLogs: 'empty',
+        demoTelemetry: 'unavailable',
+      }}
+    />
+  ),
+}
+
+export const CopyFailure: Story = {
+  render: () => (
+    <InspectorStory clipboard={{ writeText: async () => Promise.reject(new Error('denied')) }} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
+    await userEvent.click(await canvas.findByRole('button', { name: '复制 Demo 分享链接' }))
+    await expect(await canvas.findByText('Copy failed; select the URL manually')).toBeVisible()
+  },
+}
+
+export const ResetState: Story = {
+  render: () => (
+    <InspectorStory initialState={{ ...defaultDemoInspectorState, demoScene: 'degraded' }} />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
+    await userEvent.click(await canvas.findByRole('button', { name: 'Reset demo state' }))
+    await expect(await canvas.findByRole('button', { name: /^Normal/ })).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    )
   },
 }

@@ -5,7 +5,7 @@ test.describe('thermal plant result layout', () => {
     page,
   }) => {
     await page.setViewportSize({ width: 960, height: 900 })
-    await page.goto('/devices/fp-lab-01/calibration/heater-curve?demo=true')
+    await page.goto('/devices/fp-lab-01/calibration/heater-curve')
 
     const resultCard = page.getByRole('article', { name: '自动热模型标定结果' })
     await expect(resultCard).toBeVisible({ timeout: 10_000 })

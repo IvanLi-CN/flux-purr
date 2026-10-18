@@ -5,7 +5,13 @@ const canReuseExistingServer = !process.env.CI && process.env.E2E_REUSE_SERVER =
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'public-demo.spec.ts',
+  testMatch: [
+    'public-demo.spec.ts',
+    'calibration-layout.spec.ts',
+    'thermal-plant-layout.spec.ts',
+    'ui-demo-firmware.spec.ts',
+    'public-routing.spec.ts',
+  ],
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,
   },

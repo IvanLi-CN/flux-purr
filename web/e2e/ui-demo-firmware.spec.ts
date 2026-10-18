@@ -18,15 +18,9 @@ type DemoPage = Parameters<typeof test>[0]['page']
 test.describe('firmware workspace ui demo', () => {
   test.setTimeout(90_000)
 
-  test('keeps the development firmware evidence route fully mocked', async ({ page }, testInfo) => {
-    const crossOriginRequests = await installDemoGuards(page, testInfo.project.use.baseURL)
-    await runMockFirmwareTransaction(page, '/?uiDemo=firmware-workspace&workspace=firmware')
-    expect(crossOriginRequests).toEqual([])
-  })
-
   test('keeps the regular demo firmware route fully mocked', async ({ page }, testInfo) => {
     const crossOriginRequests = await installDemoGuards(page, testInfo.project.use.baseURL)
-    await runMockFirmwareTransaction(page, '/devices/fp-lab-01/update?demo=true')
+    await runMockFirmwareTransaction(page, '/devices/fp-lab-01/update')
     expect(crossOriginRequests).toEqual([])
   })
 })

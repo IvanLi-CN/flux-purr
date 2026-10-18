@@ -9709,6 +9709,8 @@
   }
 
   .demo-inspector__surface {
+    display: flex;
+    flex-direction: column;
     border: 1px solid color-mix(in oklch, var(--industrial-light) 62%, var(--industrial-shadow) 38%);
     border-radius: 12px;
     background: color-mix(in oklch, var(--industrial-panel) 92%, var(--industrial-bg) 8%);
@@ -9717,9 +9719,18 @@
       -3px -3px 9px color-mix(in oklch, var(--industrial-light) 72%, transparent);
     color: var(--industrial-text);
     max-height: calc(100dvh - 2rem);
-    overflow: auto;
     overscroll-behavior: contain;
     padding: 0.85rem;
+  }
+
+  .demo-inspector__scroll {
+    min-height: 0;
+    flex: 1 1 auto;
+    max-height: calc(100dvh - 3.7rem);
+  }
+
+  .demo-inspector__scroll .simplebar-content {
+    padding-right: 0.2rem;
   }
 
   .demo-inspector__header {
@@ -9763,14 +9774,15 @@
   .demo-inspector__icon-button,
   .demo-inspector__bubble {
     display: inline-grid;
-    width: 2.5rem;
-    height: 2.5rem;
+    min-width: 3rem;
+    height: 3rem;
     place-items: center;
     border: 1px solid var(--industrial-panel-border-strong);
     border-radius: 9px;
     background: var(--industrial-panel-tint);
     color: var(--industrial-text);
     box-shadow: var(--industrial-surface-shadow);
+    cursor: pointer;
     transition:
       transform 160ms ease,
       color 160ms ease,
@@ -9781,6 +9793,12 @@
   .demo-inspector__bubble:hover {
     color: var(--industrial-accent);
     transform: translateY(-1px);
+  }
+
+  .demo-inspector__icon-button:active,
+  .demo-inspector__bubble:active {
+    box-shadow: var(--industrial-surface-inset);
+    transform: translateY(1px);
   }
 
   .demo-inspector__icon-button:focus-visible,
@@ -9889,6 +9907,28 @@
     width: 1rem;
     height: 1rem;
     accent-color: var(--industrial-accent);
+  }
+
+  .demo-inspector__select {
+    display: grid;
+    gap: 0.35rem;
+    color: var(--industrial-muted-text);
+    font-size: 0.74rem;
+    line-height: 1.35;
+  }
+
+  .demo-inspector__select + .demo-inspector__select {
+    margin-top: 0.6rem;
+  }
+
+  .demo-inspector__select select {
+    min-height: 2.25rem;
+    width: 100%;
+    border: 1px solid var(--industrial-panel-border-strong);
+    border-radius: 0.5rem;
+    background: var(--industrial-bg);
+    color: var(--industrial-text);
+    padding: 0.45rem 0.6rem;
   }
 
   .demo-inspector__actions button {
@@ -10006,9 +10046,14 @@
       min-height: 3rem;
     }
 
-    .demo-inspector__icon-button,
-    .demo-inspector__bubble {
+    .demo-inspector__icon-button {
       width: 3rem;
+      height: 3rem;
+    }
+
+    .demo-inspector__bubble {
+      width: auto;
+      min-width: 3rem;
       height: 3rem;
     }
 

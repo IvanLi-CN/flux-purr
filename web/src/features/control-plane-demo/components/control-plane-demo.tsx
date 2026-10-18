@@ -1652,14 +1652,21 @@ export function ControlPlaneDemo({
       pdContractMv:
         manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.pdContractMv,
       voltageMv: manualPpsEnabled && manualPpsMv != null ? manualPpsMv : selectedDevice.voltageMv,
-      wifiSsid: effectiveNetwork?.ssid ?? selectedDevice.wifiSsid,
-      wifiRssi: effectiveNetwork?.wifiRssi ?? selectedDevice.wifiRssi,
-      wifiPasswordLength: effectiveNetwork?.wifiPasswordLength ?? selectedDevice.wifiPasswordLength,
-      networkState: effectiveNetwork?.state ?? selectedDevice.networkState,
-      configurationGeneration:
-        effectiveNetwork?.configurationGeneration ?? selectedDevice.configurationGeneration,
-      transitionSequence: effectiveNetwork?.transitionSequence ?? selectedDevice.transitionSequence,
-      wifiFailureCode: effectiveNetwork?.failureCode ?? selectedDevice.wifiFailureCode,
+      wifiSsid: effectiveNetwork ? effectiveNetwork.ssid : selectedDevice.wifiSsid,
+      wifiRssi: effectiveNetwork ? (effectiveNetwork.wifiRssi ?? null) : selectedDevice.wifiRssi,
+      wifiPasswordLength: effectiveNetwork
+        ? effectiveNetwork.wifiPasswordLength
+        : selectedDevice.wifiPasswordLength,
+      networkState: effectiveNetwork ? effectiveNetwork.state : selectedDevice.networkState,
+      configurationGeneration: effectiveNetwork
+        ? effectiveNetwork.configurationGeneration
+        : selectedDevice.configurationGeneration,
+      transitionSequence: effectiveNetwork
+        ? effectiveNetwork.transitionSequence
+        : selectedDevice.transitionSequence,
+      wifiFailureCode: effectiveNetwork
+        ? effectiveNetwork.failureCode
+        : selectedDevice.wifiFailureCode,
       leaseId: lanLease?.leaseId ?? selectedDevice.leaseId,
       leaseState: isDirectLanDevice(selectedDevice)
         ? lanLease
