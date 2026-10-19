@@ -1900,7 +1900,6 @@ pub(crate) struct CalibrationJobUpdateInput {
     pub(crate) latest_rtd_raw_adc_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) latest_temp_c: f32,
-    pub(crate) confirmed_voltage_mv: Option<u16>,
     pub(crate) latest_vin_mv: u32,
     pub(crate) heater_duty_percent: u8,
 }
@@ -2319,7 +2318,10 @@ pub(crate) fn update_thermal_heating_phase(
         job,
         input.latest_rtd_raw_adc_mv,
         recorded_temp_c,
-        u32::from(input.confirmed_voltage_mv.unwrap_or(0)),
+        // The PD contract is the requested/negotiated ceiling, not the
+        // voltage that reached the heater while a source or cable is in CC.
+        // Thermal power must use the calibrated board-side VIN sample.
+        input.latest_vin_mv,
         input.heater_duty_percent,
         complete,
     ) {

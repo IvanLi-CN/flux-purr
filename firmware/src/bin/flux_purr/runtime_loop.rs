@@ -1741,7 +1741,6 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_calibration_job(
     state: &mut RuntimeLoopState,
-    current_pd_observation: Option<PdStatusObservation>,
     calibration_live_rtd_temp_c: Option<f32>,
     elapsed_ms: u64,
 ) -> bool {
@@ -1798,8 +1797,6 @@ pub(crate) fn runtime_update_calibration_job(
             latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_temp_c: calibration_temp_c,
-            confirmed_voltage_mv: current_pd_observation
-                .and_then(|observation| observation.contract_voltage_mv),
             latest_vin_mv: state.latest_vin_mv,
             heater_duty_percent,
         };
@@ -3158,12 +3155,8 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
             needs_redraw = true;
         }
         let memory_before_calibration_job = state.memory_config.clone();
-        let thermal_plant_was_running = runtime_update_calibration_job(
-            state,
-            current_pd_observation,
-            calibration_live_rtd_temp_c,
-            elapsed_ms,
-        );
+        let thermal_plant_was_running =
+            runtime_update_calibration_job(state, calibration_live_rtd_temp_c, elapsed_ms);
         if fusb302b_capabilities_changed {
             disarm_calibration_after_capability_refresh(
                 &mut state.calibration_runtime_state,

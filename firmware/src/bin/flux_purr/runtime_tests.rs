@@ -4988,7 +4988,6 @@ fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: vin_raw_mv,
                     latest_temp_c: 25.0,
-                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv,
                     heater_duty_percent: 0,
                 },
@@ -5075,7 +5074,6 @@ fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
                 latest_rtd_raw_adc_mv: 0,
                 latest_vin_raw_adc_mv: vin_raw_mv,
                 latest_temp_c: 25.0,
-                confirmed_voltage_mv: Some(20_000),
                 latest_vin_mv: u32::from(request_mv),
                 heater_duty_percent: 0,
             },
@@ -5147,7 +5145,6 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv.saturating_sub(80),
                     latest_temp_c: 25.0,
-                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv: u32::from(request_mv),
                     heater_duty_percent: 0,
                 },
@@ -5169,7 +5166,6 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
                     latest_rtd_raw_adc_mv: 0,
                     latest_vin_raw_adc_mv: settled_raw_mv,
                     latest_temp_c: 25.0,
-                    confirmed_voltage_mv: Some(20_000),
                     latest_vin_mv: u32::from(request_mv),
                     heater_duty_percent: 0,
                 },
@@ -5391,6 +5387,7 @@ fn assert_auto_thermal_plant_job_start(max_mv: u16, max_ma: u16) {
     let mut plant = SupplyCalibrationPlant {
         temperature_c: 25.0,
         now_ms: 0,
+        saw_board_voltage_drop: false,
     };
     for _ in 0..THERMAL_PLANT_AMBIENT_TICKS {
         plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
@@ -7302,6 +7299,7 @@ fn transient_trace_periodically_samples_slow_cooling() {
 struct SupplyCalibrationPlant {
     temperature_c: f32,
     now_ms: u64,
+    saw_board_voltage_drop: bool,
 }
 
 impl SupplyCalibrationPlant {
@@ -7322,8 +7320,14 @@ impl SupplyCalibrationPlant {
             resistance * (current_a + (current_a.powi(2) - 3.2 / resistance).sqrt()) / 2.0;
         let delivered_v =
             (f32::from(source_mv) / 1_000.0).min(if duty > 0 { cc_voltage } else { 21.0 });
+        let delivered_mv = (delivered_v * 1_000.0).round() as u32;
+        self.saw_board_voltage_drop |= delivered_mv + 100 < u32::from(source_mv);
         let raw_rtd = runtime_test_raw_rtd_adc_mv_for_temp(self.temperature_c);
         let projected = projected_rtd_temperature_c(config, raw_rtd).unwrap();
+        let previous_sample_count = workspace
+            .job
+            .as_ref()
+            .map_or(0, |job| usize::from(job.sample_count));
         update_calibration_job_state_with_workspace(
             calibration,
             config,
@@ -7338,11 +7342,23 @@ impl SupplyCalibrationPlant {
                 latest_rtd_raw_adc_mv: raw_rtd,
                 latest_vin_raw_adc_mv: (delivered_v * 75.0).round() as u16,
                 latest_temp_c: projected,
-                confirmed_voltage_mv: Some(source_mv),
-                latest_vin_mv: (delivered_v * 1_000.0).round() as u32,
+                latest_vin_mv: delivered_mv,
                 heater_duty_percent: duty,
             },
         );
+        let recorded_sample = workspace.job.as_ref().and_then(|job| {
+            let current_sample_count = usize::from(job.sample_count);
+            (current_sample_count > 0 && current_sample_count != previous_sample_count)
+                .then_some(job.samples[current_sample_count - 1])
+        });
+        if let Some(sample) = recorded_sample
+            .filter(|sample| !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample))
+        {
+            assert_eq!(
+                sample.heater_voltage_125mv,
+                quantize_thermal_plant_heater_voltage_mv(delivered_mv)
+            );
+        }
         let power_w = if duty > 0 {
             delivered_v.powi(2) / resistance
         } else {
@@ -7420,7 +7436,6 @@ fn supply_scan_equilibrium_preserves_fractional_adc_temperature_precision() {
                 latest_rtd_raw_adc_mv: fractional_mv.round() as u16,
                 latest_vin_raw_adc_mv: 400,
                 latest_temp_c: live_temp,
-                confirmed_voltage_mv: Some(5_500),
                 latest_vin_mv: 5_500,
                 heater_duty_percent: 100,
             },
@@ -7459,6 +7474,7 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
     let mut plant = SupplyCalibrationPlant {
         temperature_c: 25.0,
         now_ms: 0,
+        saw_board_voltage_drop: false,
     };
     while plant.now_ms < 22_000_000 && calibration.job.status == CalibrationJobStatus::Running {
         plant.tick(
@@ -7491,6 +7507,7 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
         plant.now_ms
     );
     assert_eq!(calibration.mode, CalibrationMode::Off);
+    assert!(plant.saw_board_voltage_drop);
     assert!(!calibration.heater_enabled);
     assert!(!manual_pps.enabled);
     assert!(config.thermal_plant_transient_active.is_some());
@@ -7616,7 +7633,6 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
             latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(221.0),
             latest_vin_raw_adc_mv: 750,
             latest_temp_c: THERMAL_PLANT_TARGET_TEMP_C,
-            confirmed_voltage_mv: Some(5_500),
             latest_vin_mv: 20_000,
             heater_duty_percent: 100,
         },
@@ -7720,7 +7736,6 @@ fn thermal_plant_job_fails_before_sampling_after_a_manual_pps_override() {
             latest_rtd_raw_adc_mv: 0,
             latest_vin_raw_adc_mv: 0,
             latest_temp_c: 20.0,
-            confirmed_voltage_mv: Some(20_000),
             latest_vin_mv: 20_000,
             heater_duty_percent: 0,
         },
@@ -7749,6 +7764,7 @@ fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract()
         let mut plant = SupplyCalibrationPlant {
             temperature_c: 25.0,
             now_ms: 0,
+            saw_board_voltage_drop: false,
         };
         while plant.now_ms < 4_000 && !calibration.heater_enabled {
             plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
@@ -7768,7 +7784,6 @@ fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract()
                 latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(26.0),
                 latest_vin_raw_adc_mv: if invalid_adc { 0 } else { 400 },
                 latest_temp_c: 26.0,
-                confirmed_voltage_mv: invalid_adc.then_some(5_500),
                 latest_vin_mv: if invalid_adc { 0 } else { 5_500 },
                 heater_duty_percent: 100,
             },
