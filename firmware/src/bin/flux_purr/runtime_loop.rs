@@ -1779,22 +1779,29 @@ pub(crate) fn runtime_update_calibration_job(
             calibration_live_rtd_temp_c,
             state.latest_temp_c,
         );
+        let pd_confirmed = supply_scan_contract_matches(
+            state.pd_port.snapshot().with_fresh_observation(elapsed_ms),
+            &state.manual_pps_state,
+        );
+        let heater_duty_percent = calibration_trace_duty_percent(
+            thermal_plant_was_running,
+            state.calibration_runtime_state.heater_enabled,
+            pd_confirmed,
+            state.last_heater_duty,
+        );
         let job_input = CalibrationJobUpdateInput {
             now_ms: elapsed_ms,
             latest_rtd_raw_code: state.latest_rtd_raw_code,
             latest_vin_raw_code: state.latest_vin_raw_code,
             wifi_started: flux_purr_firmware::heater_supply::wifi_hardware_started(),
-            pd_confirmed: supply_scan_contract_matches(
-                state.pd_port.snapshot().with_fresh_observation(elapsed_ms),
-                &state.manual_pps_state,
-            ),
+            pd_confirmed,
             latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
             latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
             latest_temp_c: calibration_temp_c,
             confirmed_voltage_mv: current_pd_observation
                 .and_then(|observation| observation.contract_voltage_mv),
             latest_vin_mv: state.latest_vin_mv,
-            heater_duty_percent: state.last_heater_duty,
+            heater_duty_percent,
         };
         update_calibration_job_state(
             &mut state.calibration_runtime_state,
@@ -1805,6 +1812,24 @@ pub(crate) fn runtime_update_calibration_job(
         );
     }
     thermal_plant_was_running
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn calibration_trace_duty_percent(
+    thermal_plant_running: bool,
+    calibration_heater_enabled: bool,
+    pd_confirmed: bool,
+    physical_duty_percent: u8,
+) -> u8 {
+    // Calibration sampling runs before the asynchronous output pass applies
+    // this frame's PWM. Once the calibration-owned PPS contract is confirmed,
+    // its heating phase is a full-conduction interval; retain that effective
+    // duty instead of persisting the previous frame's stale zero.
+    if thermal_plant_running && calibration_heater_enabled && pd_confirmed {
+        100
+    } else {
+        physical_duty_percent
+    }
 }
 
 #[cfg(target_arch = "xtensa")]

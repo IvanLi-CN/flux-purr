@@ -40,6 +40,16 @@ fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
 }
 
 #[test]
+fn calibration_trace_uses_confirmed_full_conduction_before_output_apply() {
+    assert_eq!(calibration_trace_duty_percent(true, true, true, 0), 100);
+    assert_eq!(calibration_trace_duty_percent(true, true, true, 37), 100);
+    assert_eq!(calibration_trace_duty_percent(true, true, false, 0), 0);
+    assert_eq!(calibration_trace_duty_percent(true, false, true, 0), 0);
+    assert_eq!(calibration_trace_duty_percent(false, true, true, 0), 0);
+    assert_eq!(calibration_trace_duty_percent(false, false, false, 43), 43);
+}
+
+#[test]
 fn vin_adc_range_covers_the_board_and_confirmed_pps_input() {
     // Espressif specifies 1750mV at 6dB and 3100mV at 11dB. The actual
     // board divider, rather than the RTD range, defines VIN's requirement.
