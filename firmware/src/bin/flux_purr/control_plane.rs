@@ -1133,6 +1133,41 @@ fn mark_trace_indices_by_temperature(
         }
         keep[cursor] = true;
     }
+
+    // Real supply scans can warm, cool, and warm again as the current stage
+    // changes. In that case the raw RTD sequence is not monotonic and the
+    // temperature-target walk above can select the same sample repeatedly.
+    // Fill any missing slots by elapsed-time order so compaction preserves a
+    // usable powered span and never drops below the fit minimum solely due to
+    // a non-monotonic ADC trace.
+    let mut selected = (start..=end).filter(|index| keep[*index]).count();
+    if selected < slots {
+        for slot in 0..slots {
+            let index = if slots == 1 {
+                end
+            } else {
+                start + slot * (end - start) / (slots - 1)
+            };
+            if !keep[index] {
+                keep[index] = true;
+                selected += 1;
+            }
+            if selected == slots {
+                break;
+            }
+        }
+    }
+    if selected < slots {
+        for keep_item in keep.iter_mut().take(end + 1).skip(start) {
+            if !*keep_item {
+                *keep_item = true;
+                selected += 1;
+            }
+            if selected == slots {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

@@ -7143,6 +7143,61 @@ fn transient_trace_compaction_keeps_the_full_heating_span_for_fitting() {
 }
 
 #[test]
+fn transient_trace_compaction_handles_non_monotonic_rtd_samples() {
+    let ambient_raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(25.0);
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_current_ma: 3_000,
+        ambient_raw_rtd_adc_mv,
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        supply_scan: None,
+        started_at_ms: None,
+        elapsed_ticks: 127 * 10,
+        phase_started_tick: 101 * 10,
+        sample_count: 128,
+        last_saved_temp_c: 80.0,
+        last_saved_tick: 127 * 10,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+    for index in 0..=100 {
+        let temperature = if index % 2 == 0 { 220.0 } else { 80.0 };
+        job.samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: index as u32 * 10,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature),
+            heater_voltage_125mv: 160,
+            duty_percent: 100,
+        };
+    }
+    for index in 101..128 {
+        job.samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: index as u32 * 10,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(80.0),
+            heater_voltage_125mv:
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL,
+            duty_percent: 0,
+        };
+    }
+
+    compact_supply_calibration_trace(&mut job);
+
+    assert!(job.sample_count >= 24);
+    assert!(job.sample_count <= 48);
+    let compacted = &job.samples[..usize::from(job.sample_count)];
+    assert!(compacted.iter().any(|sample| sample.duty_percent > 0));
+    assert!(
+        compacted
+            .iter()
+            .any(|sample| { flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample) })
+    );
+}
+
+#[test]
 fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degrees() {
     let mut job = CalibrationThermalPlantAutoJob {
         run_id: 1,
