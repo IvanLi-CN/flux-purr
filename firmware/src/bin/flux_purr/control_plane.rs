@@ -1494,6 +1494,12 @@ pub(crate) fn transient_mean_delayed_power_mw(
         let power = if before.duty_percent == after.duty_percent {
             let mean_fraction = ((overlap_start + overlap_end) * 0.5 - left) / (right - left);
             powers_mw[index - 1] + (powers_mw[index] - powers_mw[index - 1]) * mean_fraction
+        } else if before.duty_percent == 0 && after.duty_percent > 0 {
+            // A sparse compacted trace can retain the first confirmed
+            // conducting sample after a long PPS transition gap. Attribute
+            // that rising edge to the newly confirmed power so the interval
+            // is not recorded as a zero-input warm-up.
+            powers_mw[index]
         } else {
             powers_mw[index - 1]
         };

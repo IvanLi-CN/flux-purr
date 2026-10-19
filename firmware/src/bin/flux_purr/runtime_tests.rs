@@ -6313,6 +6313,17 @@ fn transient_power_matches_the_temperature_derivative_interval() {
         Some(1500.0),
         "measured VIN drift under fixed PPS is not a discrete duty edge"
     );
+    let rising_edge_samples = [0, 10].map(|elapsed_ticks| ThermalPlantTransientSample {
+        elapsed_ticks,
+        raw_rtd_adc_mv: 1000,
+        heater_voltage_125mv: 160,
+        duty_percent: if elapsed_ticks == 0 { 0 } else { 100 },
+    });
+    assert_eq!(
+        transient_mean_delayed_power_mw(&rising_edge_samples, &[0.0, 2000.0], 0.0, 10.0, 0),
+        Some(2000.0),
+        "a sparse trace must attribute a confirmed rising edge to its new power"
+    );
 }
 
 const LIVE_DEVICE_TRACE: &[(u16, f32, u8)] = &[
