@@ -7327,8 +7327,10 @@ impl SupplyCalibrationPlant {
         let resistance = 3.2 * (1.0 + 0.00393 * (self.temperature_c - 20.0));
         // An independent synthetic board load and source CC loop. No such
         // current or watt measurement is supplied to the product algorithm.
-        let cc_voltage =
-            resistance * (current_a + (current_a.powi(2) - 3.2 / resistance).sqrt()) / 2.0;
+        // Below the synthetic source's CC operating point there is no positive
+        // quadratic root; keep the plant bounded instead of panicking in debug.
+        let cc_discriminant = (current_a.powi(2) - 3.2 / resistance).max(0.0);
+        let cc_voltage = resistance * (current_a + cc_discriminant.sqrt()) / 2.0;
         let delivered_v =
             (f32::from(source_mv) / 1_000.0).min(if duty > 0 { cc_voltage } else { 21.0 });
         let delivered_mv = (delivered_v * 1_000.0).round() as u32;
@@ -7360,7 +7362,7 @@ impl SupplyCalibrationPlant {
         let recorded_sample = workspace.job.as_ref().and_then(|job| {
             let current_sample_count = usize::from(job.sample_count);
             (current_sample_count > 0 && current_sample_count != previous_sample_count)
-                .then_some(job.samples[current_sample_count - 1])
+                .then(|| job.samples[current_sample_count - 1])
         });
         if let Some(sample) = recorded_sample
             .filter(|sample| !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample))
@@ -7392,7 +7394,8 @@ fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualP
         boundary_was_used |= candidate.boundary_applied;
         let resistance = default_estimated_heater_resistance_ohms(temperature);
         let current = f32::from(candidate.current_ma) / 1_000.0;
-        let cc_voltage = resistance * (current + (current.powi(2) - 3.2 / resistance).sqrt()) / 2.0;
+        let cc_discriminant = (current.powi(2) - 3.2 / resistance).max(0.0);
+        let cc_voltage = resistance * (current + cc_discriminant.sqrt()) / 2.0;
         let voltage = (f32::from(candidate.allowed_mv) / 1_000.0).min(cc_voltage);
         let power_w = voltage.powi(2) / resistance;
         temperature += (power_w - 0.16 * (temperature - 25.0)) / 12.0 * 0.05;
