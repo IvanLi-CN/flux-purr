@@ -6779,6 +6779,95 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
 }
 
 #[test]
+fn transient_thermal_fit_accepts_physical_3a_stage_transitions() {
+    let memory = MemoryConfig::default();
+    let trace = [
+        (3450, 27.00, 5375, 0),
+        (3550, 27.00, 5375, 100),
+        (21800, 34.31, 5125, 100),
+        (67850, 39.67, 5000, 100),
+        (119900, 46.78, 5000, 100),
+        (160100, 50.60, 5125, 100),
+        (306600, 59.64, 5750, 100),
+        (581200, 63.57, 6375, 100),
+        (732550, 72.90, 7375, 100),
+        (807500, 81.05, 8000, 100),
+        (1243250, 89.37, 10625, 100),
+        (1255100, 94.06, 10875, 100),
+        (2496450, 198.51, 6750, 100),
+        (3164550, 131.92, 14000, 100),
+        (3195450, 145.98, 16625, 100),
+        (3206750, 157.22, 17625, 100),
+        (3233150, 172.08, 19000, 100),
+        (3234650, 173.76, 19125, 100),
+        (3240650, 179.40, 19875, 100),
+        (3247300, 182.82, 19875, 100),
+        (3253050, 190.31, 19375, 100),
+        (3258100, 192.64, 19375, 100),
+        (3270650, 200.88, 19875, 100),
+        (3283500, 209.86, 19875, 100),
+        (3299550, 220.24, 19375, 100),
+        (3299650, 220.24, 0, 0),
+        (3302850, 219.01, 0, 0),
+        (3306000, 217.16, 0, 0),
+        (3309150, 215.33, 0, 0),
+        (3341350, 177.70, 0, 0),
+        (3360950, 163.22, 0, 0),
+        (3415950, 144.40, 0, 0),
+        (3423900, 144.92, 0, 0),
+        (3437550, 107.94, 0, 0),
+        (3444250, 116.29, 0, 0),
+        (3446300, 131.41, 0, 0),
+        (3454500, 98.32, 0, 0),
+        (3469250, 126.82, 0, 0),
+        (3471550, 140.72, 0, 0),
+        (3473200, 108.92, 0, 0),
+        (3476050, 128.85, 0, 0),
+        (3477650, 92.65, 0, 0),
+        (3493850, 96.89, 0, 0),
+        (3495550, 135.52, 0, 0),
+        (3500450, 119.77, 0, 0),
+        (3503950, 112.34, 0, 0),
+        (3515100, 143.87, 0, 0),
+        (3529300, 79.68, 0, 0),
+    ];
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, (elapsed_ms, temp_c, voltage_mv, duty_percent)) in trace.into_iter().enumerate() {
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: (elapsed_ms / HEATER_CONTROL_INTERVAL_MS) as u32,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temp_c),
+            heater_voltage_125mv: if duty_percent == 0 && index > 0 {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (voltage_mv / 125) as u8
+            },
+            duty_percent,
+        };
+    }
+    let temperatures = trace.map(|(_, temp_c, _, _)| temp_c);
+    let accepted = transient_temperature_acceptance(
+        &samples[..trace.len()],
+        &temperatures.map(|temp_c| temp_c as f32),
+    );
+    assert!(accepted[12] && accepted[13]);
+    let (_, residual) = fit_thermal_plant_transient(
+        0x335f_3341,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        trace.len() as u8,
+        None,
+        &memory,
+    )
+    .expect("physical 3A trace should produce a model");
+    assert!(residual <= 0.20);
+}
+
+#[test]
 fn runtime_ready_boot_stage_matches_post_flash_contract() {
     assert_eq!(RUNTIME_READY_BOOT_STAGE_LINE, b"boot_stage=runtime_ready\n");
 }

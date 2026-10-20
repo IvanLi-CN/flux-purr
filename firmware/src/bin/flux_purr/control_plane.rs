@@ -1635,6 +1635,7 @@ pub(crate) fn transient_temperature_acceptance(
     const COOLING_RISE_GRACE_TICKS: u32 = 200; // 10s on the persisted 50ms grid.
     const COOLING_RISE_TOLERANCE_C: f32 = 1.0;
     const HEATING_CONTACT_EXCURSION_TOLERANCE_C: f32 = 3.0;
+    const HEATING_CONTACT_EXCURSION_MAX_INTERVAL_TICKS: u32 = 200; // 10s.
     let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut previous_accepted_index = 0;
     let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
@@ -1664,6 +1665,23 @@ pub(crate) fn transient_temperature_acceptance(
             && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index - 1])
             && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index])
             && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[index + 1])
+            // A real PPS stage transition can create a large, slow peak or
+            // valley while the requested voltage changes. Only reject a
+            // short-window excursion that remains on the same conducting
+            // voltage; otherwise the guard would discard valid thermal
+            // response at current-stage boundaries.
+            && samples[index]
+                .elapsed_ticks
+                .saturating_sub(samples[index - 1].elapsed_ticks)
+                <= HEATING_CONTACT_EXCURSION_MAX_INTERVAL_TICKS
+            && samples[index + 1]
+                .elapsed_ticks
+                .saturating_sub(samples[index].elapsed_ticks)
+                <= HEATING_CONTACT_EXCURSION_MAX_INTERVAL_TICKS
+            && samples[index - 1].heater_voltage_125mv
+                == samples[index].heater_voltage_125mv
+            && samples[index].heater_voltage_125mv
+                == samples[index + 1].heater_voltage_125mv
             && ((temperatures_c[index] - temperatures_c[index - 1]
                 > HEATING_CONTACT_EXCURSION_TOLERANCE_C
                 && temperatures_c[index] - temperatures_c[index + 1]
