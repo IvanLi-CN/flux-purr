@@ -244,6 +244,10 @@ fn pps_source_capability(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
         | (u32::from(min_mv / 100) << 8)
         | u32::from(max_ma / 50)
 }
+
+fn fixed_source_capability(voltage_mv: u16, max_ma: u16) -> u32 {
+    (u32::from(voltage_mv / 50) << 10) | u32::from(max_ma / 10)
+}
 const RUNTIME_IMPLEMENTATION: &str = concat!(
     include_str!("support.rs"),
     include_str!("eeprom_snapshot.rs"),
@@ -1188,6 +1192,31 @@ fn calibration_request_preserves_the_advertised_apdo_through_the_capability_brid
         request,
         sink.confirmed_active_contract()
     ));
+}
+
+#[test]
+fn thermal_plant_scan_respects_fixed_power_envelope_without_changing_apdo_identity() {
+    let source = SourceCapabilities::from_pdos(&[
+        fixed_source_capability(20_000, 3_000),
+        pps_source_capability(5_000, 21_000, 3_000),
+    ]);
+    let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+    assert_eq!(capabilities.source_power_limit_mw, Some(60_000));
+    assert_eq!(capabilities.source_power_limit_ma, Some(3_000));
+
+    let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    assert_eq!(
+        manual.thermal_plant_pps_range(),
+        Some(PpsAdjustmentRange {
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_current_ma: 3_000,
+        })
+    );
+    assert_eq!(
+        manual.thermal_plant_source_limits(),
+        Some((5_500, 20_000, 3_000))
+    );
 }
 
 #[test]
@@ -4913,6 +4942,7 @@ fn manual_pps_current_validation_uses_matching_apdo() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
 
     manual_pps
@@ -4995,6 +5025,7 @@ fn vin_auto_job_finishes_full_sweep_without_storage_overflow() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
 
     calibration_job_start(
@@ -5077,6 +5108,7 @@ fn vin_auto_job_reselects_current_when_sweep_crosses_apdo_boundary() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
 
     calibration_job_start(
@@ -5152,6 +5184,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
 
     calibration_job_start(
@@ -5248,6 +5281,7 @@ fn thermal_plant_auto_job_starts_at_the_selected_apdo_floor_and_caps_current_at_
                 ],
                 avs_min_mv: None,
                 avs_max_mv: None,
+                ..Default::default()
             }));
 
         calibration_job_start(
@@ -5295,6 +5329,7 @@ fn thermal_plant_auto_job_uses_the_apdo_that_covers_20v_not_another_range() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
 
     calibration_job_start(
@@ -5336,6 +5371,7 @@ fn thermal_plant_source_selects_lowest_floor_after_current_and_ceiling_tie() {
         ],
         avs_min_mv: None,
         avs_max_mv: None,
+        ..Default::default()
     }));
 
     assert_eq!(
@@ -5799,6 +5835,7 @@ fn assert_synthetic_apdo_and_persistence(
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
     assert!(!thermal_model_heater_allowed(
         memory_config,
@@ -11173,6 +11210,7 @@ fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
         ],
         avs_min_mv: None,
         avs_max_mv: None,
+        ..Default::default()
     }));
     assert_eq!(
         resolve_thermal_profile_bank(ThermalProfileMode::Auto, &five_amp),
@@ -11198,6 +11236,7 @@ fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
         ],
         avs_min_mv: None,
         avs_max_mv: None,
+        ..Default::default()
     }));
     assert_eq!(
         resolve_thermal_profile_bank(ThermalProfileMode::Auto, &three_amp),
@@ -11228,6 +11267,7 @@ fn thermal_profile_auto_resolution_uses_advertised_20v_5a_capability() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }));
     assert_eq!(
         resolve_thermal_profile_bank(ThermalProfileMode::Auto, &split_apdos),
@@ -14236,6 +14276,7 @@ fn heater_backend_uses_the_20v_apdo_current_not_another_range() {
             ],
             avs_min_mv: None,
             avs_max_mv: None,
+            ..Default::default()
         }),
         Some(Status::default()),
     );

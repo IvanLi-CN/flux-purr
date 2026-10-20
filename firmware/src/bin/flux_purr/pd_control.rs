@@ -502,6 +502,8 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_max_mv: Option<u16>,
     pub(crate) capability_max_ma: Option<u16>,
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
+    pub(crate) source_power_limit_mw: Option<u32>,
+    pub(crate) source_power_limit_ma: Option<u16>,
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
     pub(crate) automatic_restore_ticket: Option<PowerTicket>,
@@ -527,6 +529,8 @@ impl Default for ManualPpsState {
             capability_max_mv: None,
             capability_max_ma: None,
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
+            source_power_limit_mw: None,
+            source_power_limit_ma: None,
             error: None,
             automatic_restore_pending: false,
             automatic_restore_ticket: None,
@@ -1218,6 +1222,8 @@ impl ManualPpsState {
         state.capability_max_mv = Some(bounded_max_mv);
         state.capability_max_ma = Some(max_ma);
         state.capability_apdos = capabilities.pps_apdos;
+        state.source_power_limit_mw = capabilities.source_power_limit_mw;
+        state.source_power_limit_ma = capabilities.source_power_limit_ma;
         if state.capability_apdos.iter().all(Option::is_none) {
             state.capability_apdos[0] = Some(ch224q::PpsApdo {
                 min_mv: bounded_min_mv,
@@ -1277,9 +1283,19 @@ impl ManualPpsState {
 
     pub(crate) fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
         let range = self.thermal_plant_pps_range()?;
+        let operational_max_mv = self
+            .source_power_limit_mw
+            .zip(self.source_power_limit_ma)
+            .filter(|(_, envelope_ma)| range.max_current_ma <= *envelope_ma)
+            .map(|(power_mw, _)| (power_mw * 1_000 / u32::from(range.max_current_ma)) as u16)
+            .map(|mv| mv / 100 * 100)
+            .map_or(range.max_mv, |mv| mv.min(range.max_mv));
+        if operational_max_mv < range.min_mv.max(self.request_min_mv) {
+            return None;
+        }
         Some((
             range.min_mv.max(self.request_min_mv),
-            range.max_mv.min(self.request_max_mv),
+            operational_max_mv.min(self.request_max_mv),
             range.max_current_ma,
         ))
     }
