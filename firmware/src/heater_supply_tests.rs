@@ -180,7 +180,11 @@ fn adc_jitter_is_filtered_for_equilibrium_without_relaxing_cutoff() {
     let mut job = scan::SupplyScan::new(value).unwrap();
     for now_ms in (0..2_000_000).step_by(50) {
         let output = job.output();
-        let raw_temperature = if (now_ms / 50) % 2 == 0 { 6_533 } else { 6_799 };
+        let raw_temperature = if (now_ms / 50) % 2 == 0 {
+            10_533
+        } else {
+            10_799
+        };
         job.update(sample(now_ms, output, raw_temperature));
         assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
         if job.phase == scan::ScanPhase::Complete {
@@ -397,7 +401,7 @@ fn scan_discovers_the_sustainable_start_current_and_never_forces_one_amp() {
     let mut job = scan::SupplyScan::new(value).unwrap();
     for time in (0..2_000_000).step_by(50) {
         let output = job.output();
-        job.update(sample(time, output, 3_000));
+        job.update(sample(time, output, 10_000));
         if job.phase == scan::ScanPhase::Complete {
             assert!(job.boundary.is_valid());
             assert!(job.boundary.point_count > 5);
@@ -420,7 +424,7 @@ fn scan_retains_each_sustainable_current_stage_with_raw_adc_samples() {
     let mut job = scan::SupplyScan::new(value).unwrap();
     for time in (0..2_000_000).step_by(50) {
         let output = job.output();
-        job.update(sample(time, output, 3_000));
+        job.update(sample(time, output, 10_000));
         if job.phase == scan::ScanPhase::Complete {
             let points = &job.boundary.points[..usize::from(job.boundary.point_count)];
             let mut stages = [false; 21];
@@ -523,6 +527,7 @@ fn dynamic_scan_keeps_three_amp_tracking_points_across_warmup() {
         if job.phase == scan::ScanPhase::Complete {
             let points = &job.boundary.points[..usize::from(job.boundary.point_count)];
             assert!(job.boundary.is_valid());
+            assert!(temperature >= 100.0);
             assert!(points.iter().any(|p| p.tracking_only && p.rtd_mv < 1_400));
             assert!(points.iter().any(|p| p.tracking_only && p.rtd_mv > 1_600));
             assert!(points.iter().all(|p| p.rtd_mv < 1_900));

@@ -2,6 +2,7 @@ use super::{BoundaryPoint, EquilibriumWindow, SupplyBoundary};
 
 const SETTLE_MS: u32 = 1_000;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
+const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanPhase {
@@ -428,7 +429,28 @@ impl SupplyScan {
             self.last_tracking = Some(self.point(input));
             self.retain_tracking();
             if self.request_ma == 3_000 {
-                self.phase = ScanPhase::Complete;
+                let scan_ceiling_reached = self.last_tracking.is_some_and(|point| {
+                    point.tracking_request_mv.saturating_add(100) >= self.boundary.source_max_mv
+                });
+                if input.temperature_centi_c >= MIN_THERMAL_COVERAGE_CENTI_C || scan_ceiling_reached
+                {
+                    self.phase = ScanPhase::Complete;
+                } else {
+                    // A low-temperature 3 A equilibrium is only a safe
+                    // pause while the plate resistance is still rising. Keep
+                    // the same bounded stage alive and resume the voltage
+                    // sweep one 100 mV step above the last proven tracking
+                    // point; the source response continues to enforce the
+                    // current-loop boundary.
+                    self.phase = ScanPhase::Sweep;
+                    self.previous = None;
+                    self.last_tracking = None;
+                    self.flat_count = 0;
+                    self.ambiguous_count = 0;
+                    self.flat_request_mv = 0;
+                    self.equilibrium.reset();
+                    self.probe_next_voltage(input);
+                }
             } else {
                 self.normal_probe = true;
                 self.normal_probe_started_ms = input.now_ms;
@@ -555,6 +577,47 @@ mod tests {
             vin_code: 400,
             vin_mv: 450,
         }
+    }
+
+    #[test]
+    fn final_three_amp_low_equilibrium_resumes_voltage_scan() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::Equilibrium;
+        scan.request_mv = 6_900;
+        scan.request_ma = 3_000;
+        scan.last_tracking = Some(BoundaryPoint {
+            tracking_request_mv: 7_000,
+            request_current_ma: 3_000,
+            ..BoundaryPoint::default()
+        });
+        scan.equilibrium.started_ms = Some(0);
+        scan.equilibrium.min_centi_c = 8_000;
+        scan.equilibrium.max_centi_c = 8_000;
+
+        let output = scan.update(ScanInput {
+            now_ms: 10_000,
+            temperature_centi_c: 8_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 500,
+            vin_mv: 500,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(output.request_mv, 7_000);
+        assert_eq!(output.request_ma, 3_000);
+        assert!(output.heater_enabled);
     }
 
     #[test]

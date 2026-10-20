@@ -44,7 +44,7 @@ Legacy profile controls remain only for decoding historical records and rerender
 Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
-- one protected `thermal_plant_auto` transient calibration, from ambient to the `220°C` cutoff or the final `3A` equilibrium, followed by passive cooling to `80°C`; model acceptance requires at least `100°C` of valid heating coverage and a complete, physically valid fit
+- one protected `thermal_plant_auto` transient calibration, from ambient through the final `3A` voltage rescan until valid powered coverage reaches `100°C`, the `220°C` cutoff, or the safe scan ceiling, followed by passive cooling to `80°C`; model acceptance requires at least `100°C` of valid heating coverage and a complete, physically valid fit
 - whole-device supply-boundary observations captured during that same run; legacy resistance fields remain empty
 - canonical HTML HIL bundles generated through the Rust report renderer
 
