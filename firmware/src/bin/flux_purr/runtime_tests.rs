@@ -4752,6 +4752,41 @@ fn capability_refresh_disarms_active_calibration_before_output() {
 }
 
 #[test]
+fn capability_refresh_preserves_a_running_thermal_plant_job() {
+    let mut calibration = CalibrationRuntimeState {
+        mode: CalibrationMode::ThermalPlant,
+        pps_enabled: true,
+        pps_mv: Some(5_500),
+        pps_ma: Some(3_000),
+        job: CalibrationJobState {
+            kind: Some(CalibrationJobKind::ThermalPlant),
+            status: CalibrationJobStatus::Running,
+            progress_percent: 2,
+            samples_collected: 1,
+            next_request_mv: Some(5_500),
+            message: None,
+        },
+        ..CalibrationRuntimeState::default()
+    };
+    let mut manual_pps = ManualPpsState {
+        enabled: true,
+        owner: ManualPpsOwner::Calibration,
+        target_mv: Some(5_500),
+        target_ma: Some(3_000),
+        applied_mv: Some(5_500),
+        ..ManualPpsState::default()
+    };
+
+    disarm_calibration_after_capability_refresh(&mut calibration, &mut manual_pps);
+
+    assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
+    assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
+    assert!(calibration.pps_enabled);
+    assert!(manual_pps.enabled);
+    assert_eq!(manual_pps.owner, ManualPpsOwner::Calibration);
+}
+
+#[test]
 fn capability_refresh_keeps_passive_adc_calibration_available() {
     let mut calibration = CalibrationRuntimeState {
         mode: CalibrationMode::RtdAdc,

@@ -823,6 +823,16 @@ pub(crate) fn disarm_calibration_after_capability_refresh(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
 ) {
+    // The thermal-plant job owns its PPS request and must observe the refreshed
+    // capabilities in its next control update. A capability publication can be
+    // the first valid snapshot after the job starts; disarming here would erase
+    // that job before it can settle its first contract. An unsupported refresh
+    // still fails through update_thermal_plant_calibration_job.
+    if calibration.mode == CalibrationMode::ThermalPlant
+        && calibration.job.status == CalibrationJobStatus::Running
+    {
+        return;
+    }
     if calibration.heater_enabled
         || calibration.pps_enabled
         || manual_pps.owner == ManualPpsOwner::Calibration
