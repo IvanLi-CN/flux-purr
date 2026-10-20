@@ -2320,6 +2320,19 @@ pub(crate) fn update_thermal_heating_phase(
     calibration.pps_ma = Some(output.request_ma);
     calibration.job.next_request_mv = Some(output.request_mv);
     calibration.heater_enabled = output.heater_enabled && input.pd_confirmed;
+    // A supply-scan sample is only an electrical observation after the
+    // requested PPS contract is settled. The calibration contract drives the
+    // heater fully on for those observations; a stale pre-output duty value
+    // must not turn a confirmed conducting interval into a zero-power fit row.
+    if !input.pd_confirmed && !complete {
+        calibration.job.progress_percent = (2 + points.saturating_mul(2)).min(59);
+        return true;
+    }
+    let recorded_duty_percent = if output.heater_enabled && input.pd_confirmed {
+        100
+    } else {
+        input.heater_duty_percent
+    };
     if !record_thermal_plant_transient_sample(
         job,
         input.latest_rtd_raw_adc_mv,
@@ -2328,7 +2341,7 @@ pub(crate) fn update_thermal_heating_phase(
         // voltage that reached the heater while a source or cable is in CC.
         // Thermal power must use the calibrated board-side VIN sample.
         input.latest_vin_mv,
-        input.heater_duty_percent,
+        recorded_duty_percent,
         complete,
     ) {
         fail_thermal_plant_calibration(

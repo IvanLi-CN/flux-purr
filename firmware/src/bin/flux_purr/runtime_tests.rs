@@ -6231,6 +6231,116 @@ fn transient_fit_preserves_a_real_transport_delay() {
 }
 
 #[test]
+fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
+    let trace: &[(u32, i16, u16, u8, bool)] = &[
+        (3_250, 2_740, 5_375, 0, false),
+        (3_450, 2_740, 5_250, 100, false),
+        (52_150, 3_677, 5_500, 0, false),
+        (74_800, 4_091, 5_625, 0, false),
+        (157_800, 5_060, 5_750, 0, false),
+        (206_400, 5_531, 5_250, 100, false),
+        (286_300, 6_269, 6_250, 100, false),
+        (374_050, 7_021, 7_250, 0, false),
+        (992_700, 7_877, 8_500, 0, false),
+        (1_025_100, 8_658, 10_125, 0, false),
+        (1_057_250, 9_595, 10_625, 0, false),
+        (1_078_000, 10_119, 11_500, 0, false),
+        (1_102_000, 10_940, 12_625, 0, false),
+        (1_129_950, 11_977, 12_875, 0, false),
+        (1_148_750, 12_682, 13_625, 0, false),
+        (1_174_450, 13_656, 14_625, 100, false),
+        (1_192_850, 14_282, 16_250, 0, false),
+        (1_206_000, 15_183, 17_375, 0, false),
+        (1_236_150, 16_652, 18_000, 0, false),
+        (1_244_750, 17_040, 17_250, 100, false),
+        (1_277_350, 18_339, 19_000, 0, false),
+        (1_295_600, 19_147, 18_875, 100, false),
+        (1_326_700, 20_206, 19_375, 100, false),
+        (1_360_450, 21_168, 19_875, 0, false),
+        (1_397_950, 21_962, 20_375, 0, false),
+        (1_398_150, 22_024, 0, 0, true),
+        (1_399_700, 21_901, 0, 0, true),
+        (1_401_800, 21_716, 0, 0, true),
+        (1_402_800, 21_594, 0, 0, true),
+        (1_404_400, 21_411, 0, 0, true),
+        (1_405_950, 21_168, 0, 0, true),
+        (1_408_050, 20_986, 0, 0, true),
+        (1_414_400, 20_147, 0, 0, true),
+        (1_425_300, 18_915, 0, 0, true),
+        (1_440_700, 17_208, 0, 0, true),
+        (1_451_050, 16_322, 0, 0, true),
+        (1_460_500, 15_452, 0, 0, true),
+        (1_471_950, 14_598, 0, 0, true),
+        (1_491_050, 13_346, 0, 0, true),
+        (1_504_650, 12_530, 0, 0, true),
+        (1_522_300, 11_679, 0, 0, true),
+        (1_542_100, 10_843, 0, 0, true),
+        (1_572_200, 9_737, 0, 0, true),
+        (1_592_250, 9_312, 0, 0, true),
+        (1_612_300, 8_751, 0, 0, true),
+        (1_639_600, 7_968, 0, 0, true),
+    ];
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, (elapsed_ms, temp_centi_c, heater_mv, duty, cooling)) in
+        trace.iter().copied().enumerate()
+    {
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: elapsed_ms / 50,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(f32::from(temp_centi_c) / 100.0),
+            heater_voltage_125mv: if cooling {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (heater_mv / 125) as u8
+            },
+            duty_percent: duty,
+        };
+    }
+    let memory = MemoryConfig::default();
+    let data = prepare_transient_fit(
+        &samples,
+        trace.len() as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("the captured trace should pass basic acceptance");
+    assert!(best_transient_projection(&data).is_none());
+    let mut filtered = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut filtered_count = 0usize;
+    for sample in samples[..trace.len()].iter().copied() {
+        if filtered_count == 0
+            || sample.duty_percent > 0
+            || flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample)
+        {
+            filtered[filtered_count] = sample;
+            filtered_count += 1;
+        }
+    }
+    let filtered_data = prepare_transient_fit(
+        &filtered,
+        filtered_count as u8,
+        None,
+        &memory,
+        filtered[0].raw_rtd_adc_mv,
+    );
+    let (_, residual) = best_transient_projection(
+        &filtered_data.expect("confirmed samples should produce a physical model"),
+    )
+    .expect("confirmed samples should produce a projection");
+    assert!(residual <= 0.20);
+}
+
+#[test]
 fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
     let memory = synthetic_memory_config();
     let (samples, count) = synthetic_trace_with_delay(&memory, 25.0, 20);
@@ -7784,6 +7894,7 @@ fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract()
             plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
         }
         assert!(calibration.heater_enabled);
+        let samples_before_unconfirmed = workspace.job.as_ref().map_or(0, |job| job.sample_count);
         update_calibration_job_state_with_workspace(
             &mut calibration,
             &mut config,
@@ -7811,6 +7922,13 @@ fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract()
                 CalibrationJobStatus::Running
             }
         );
+        if !invalid_adc {
+            assert_eq!(
+                workspace.job.as_ref().map_or(0, |job| job.sample_count),
+                samples_before_unconfirmed,
+                "unconfirmed PPS frames must not enter the transient fit",
+            );
+        }
         assert_eq!(manual.enabled, !invalid_adc);
         assert_eq!(take_immediate_heater_disarm(&mut calibration), invalid_adc);
         assert_eq!(config.thermal_plant_transient_active, None);
