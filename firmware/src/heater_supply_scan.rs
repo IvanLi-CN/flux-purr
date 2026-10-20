@@ -203,7 +203,7 @@ impl SupplyScan {
         {
             self.fail(ScanFailure::InvalidSample);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
-            self.fail(ScanFailure::StageTimeout);
+            self.handle_stage_timeout(input);
         } else if self.normal_probe
             && input.now_ms.saturating_sub(self.normal_probe_started_ms) >= 10_000
         {
@@ -393,6 +393,32 @@ impl SupplyScan {
         );
     }
 
+    fn handle_stage_timeout(&mut self, input: ScanInput) {
+        if self.phase != ScanPhase::Equilibrium || self.request_ma >= 3_000 {
+            self.fail(ScanFailure::StageTimeout);
+            return;
+        }
+
+        // A low-current stage that never settles is not a steady-state
+        // observation. Skip it without retaining a fabricated boundary point
+        // and continue the bounded 100 mA sweep. The 3 A stage remains a hard
+        // timeout because it is the required warm-up coverage path.
+        self.phase = ScanPhase::Sweep;
+        self.previous = None;
+        self.last_tracking = None;
+        self.flat_request_mv = 0;
+        self.flat_count = 0;
+        self.ambiguous_count = 0;
+        self.normal_probe = false;
+        self.equilibrium.reset();
+        self.stage_started_ms = input.now_ms;
+        self.change(
+            input,
+            self.boundary.source_min_mv,
+            self.request_ma.saturating_add(100).min(3_000),
+        );
+    }
+
     fn equilibrium(&mut self, input: ScanInput) {
         if self
             .equilibrium
@@ -480,5 +506,96 @@ impl SupplyScan {
         {
             self.boundary.retain(point);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scan_for_timeout(current_ma: u16) -> SupplyScan {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 21_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::Equilibrium;
+        scan.request_mv = 5_600;
+        scan.request_ma = current_ma;
+        scan.stage_started_ms = 0;
+        scan.changed_at_ms = 0;
+        scan.previous = Some(ScanInput {
+            now_ms: 0,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 400,
+            vin_mv: 450,
+        });
+        scan.equilibrium.reset();
+        scan
+    }
+
+    fn timeout_input(now_ms: u32, output: ScanOutput, high: bool) -> ScanInput {
+        ScanInput {
+            now_ms,
+            temperature_centi_c: if high { 10_090 } else { 9_910 },
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: u8::from(output.heater_enabled) * 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 400,
+            vin_mv: 450,
+        }
+    }
+
+    #[test]
+    fn low_current_stage_timeout_skips_without_retaining_a_steady_point() {
+        let mut scan = scan_for_timeout(1_300);
+        for tick in 1..=18_002_u32 {
+            let now_ms = tick * 50;
+            let output = scan.output();
+            scan.update(timeout_input(
+                now_ms,
+                output,
+                (tick / 200).is_multiple_of(2),
+            ));
+            if scan.phase == ScanPhase::Sweep && scan.request_ma == 1_400 {
+                assert_eq!(scan.boundary.point_count, 0);
+                assert_eq!(scan.failure, None);
+                return;
+            }
+        }
+        panic!(
+            "low-current equilibrium timeout did not advance: phase={:?}, current={}mA",
+            scan.phase, scan.request_ma
+        );
+    }
+
+    #[test]
+    fn three_amp_stage_timeout_still_fails_closed() {
+        let mut scan = scan_for_timeout(3_000);
+        for tick in 1..=18_002_u32 {
+            let now_ms = tick * 50;
+            let output = scan.output();
+            scan.update(timeout_input(
+                now_ms,
+                output,
+                (tick / 200).is_multiple_of(2),
+            ));
+            if scan.phase == ScanPhase::Failed {
+                assert_eq!(scan.failure, Some(ScanFailure::StageTimeout));
+                return;
+            }
+        }
+        panic!("3 A equilibrium timeout did not fail closed");
     }
 }
