@@ -4,6 +4,7 @@ import type { LanProbe } from '@/features/control-plane-demo/lan-client'
 import { liveControlPlaneScenario } from '@/features/control-plane-demo/live-scenario'
 import { controlPlaneScenario } from '@/features/control-plane-demo/mock-data'
 import type { FirmwareActivityEntry, OfficialFirmwareArtifact } from '@/features/firmware-installer'
+import { isPublicDemoBuild } from '@/public-demo'
 
 type FirmwareDemoArtifact = Pick<
   OfficialFirmwareArtifact,
@@ -286,6 +287,10 @@ export function UiDemo() {
   const params = new URLSearchParams(window.location.search)
   const demo = params.get('uiDemo')
 
+  if (!isPublicDemoBuild() && (params.get('demo') === 'true' || params.has('uiDemo'))) {
+    return <LegacyDemoDisabled />
+  }
+
   if (demo === 'firmware-workspace') {
     const noDeviceSelected = params.get('state') === 'unselected'
     return (
@@ -321,6 +326,20 @@ export function UiDemo() {
           }
         }}
       />
+    </main>
+  )
+}
+
+export function LegacyDemoDisabled() {
+  return (
+    <main className="industrial-shell text-[var(--industrial-text)]">
+      <section className="industrial-route-message" aria-labelledby="legacy-demo-disabled-title">
+        <h1 id="legacy-demo-disabled-title">旧 Demo 入口已停用</h1>
+        <p>正式控制台固定连接真实设备。请打开独立 Demo 站点体验模拟控制台。</p>
+        <a className="industrial-route-message__action" href="https://flux-purr-demo.ivanli.cc/">
+          打开独立 Demo
+        </a>
+      </section>
     </main>
   )
 }

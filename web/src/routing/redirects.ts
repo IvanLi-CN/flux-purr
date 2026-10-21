@@ -5,7 +5,7 @@ import { type AppSearch, appVariantFromSearch } from './search'
 
 export function redirectFromDeviceIndex(search: AppSearch) {
   if (isPublicDemoBuild()) {
-    const { uiDemo: _uiDemo, ...publicDemoSearch } = search
+    const { demo: _demo, uiDemo: _uiDemo, ...publicDemoSearch } = search
     throw redirect({
       to: '/devices/$deviceId/overview',
       params: { deviceId: 'fp-lab-01' },

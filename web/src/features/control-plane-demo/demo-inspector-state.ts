@@ -1,5 +1,5 @@
 import { controlPlaneScenario, degradedControlPlaneScenario } from './mock-data'
-import type { ControlPlaneScenario, EventLogEntry } from './types'
+import { type ControlPlaneScenario, type EventLogEntry, UNAVAILABLE_TEMPERATURE_C } from './types'
 
 const demoWifiUsbDevice = {
   ...controlPlaneScenario.devices[0],
@@ -34,12 +34,26 @@ export type DemoSceneId = (typeof demoSceneIds)[number]
 export type DemoLeaseState = 'none' | 'conflict'
 export type DemoNetworkState = 'healthy' | 'timeout'
 export type DemoArtifactState = 'ready' | 'blocked'
+export type DemoWifiCapabilityState = 'default' | 'read-only' | 'unavailable'
+export type DemoLogState = 'normal' | 'empty'
+export type DemoTelemetryState = 'available' | 'unavailable'
+
+export type DemoActionKind = 'thermal-warning' | 'fan-recovery'
+
+export interface DemoAction {
+  kind: DemoActionKind
+  targetDeviceId: string
+  sequence: number
+}
 
 export interface DemoInspectorState {
   demoScene: DemoSceneId
   demoLease: DemoLeaseState
   demoNetwork: DemoNetworkState
   demoArtifact: DemoArtifactState
+  demoWifiCapability: DemoWifiCapabilityState
+  demoLogs: DemoLogState
+  demoTelemetry: DemoTelemetryState
 }
 
 export const defaultDemoInspectorState: DemoInspectorState = {
@@ -47,6 +61,9 @@ export const defaultDemoInspectorState: DemoInspectorState = {
   demoLease: 'none',
   demoNetwork: 'healthy',
   demoArtifact: 'ready',
+  demoWifiCapability: 'default',
+  demoLogs: 'normal',
+  demoTelemetry: 'available',
 }
 
 export function demoInspectorStateFromSearch(search: Record<string, unknown>): DemoInspectorState {
@@ -55,6 +72,12 @@ export function demoInspectorStateFromSearch(search: Record<string, unknown>): D
     demoLease: search.demoLease === 'conflict' ? 'conflict' : 'none',
     demoNetwork: search.demoNetwork === 'timeout' ? 'timeout' : 'healthy',
     demoArtifact: search.demoArtifact === 'blocked' ? 'blocked' : 'ready',
+    demoWifiCapability:
+      search.demoWifiCapability === 'read-only' || search.demoWifiCapability === 'unavailable'
+        ? search.demoWifiCapability
+        : 'default',
+    demoLogs: search.demoLogs === 'empty' ? 'empty' : 'normal',
+    demoTelemetry: search.demoTelemetry === 'unavailable' ? 'unavailable' : 'available',
   }
 }
 
@@ -64,12 +87,18 @@ export function demoInspectorSearch(state: DemoInspectorState) {
     demoLease: state.demoLease === 'none' ? undefined : state.demoLease,
     demoNetwork: state.demoNetwork === 'healthy' ? undefined : state.demoNetwork,
     demoArtifact: state.demoArtifact === 'ready' ? undefined : state.demoArtifact,
+    demoWifiCapability:
+      state.demoWifiCapability === 'default' ? undefined : state.demoWifiCapability,
+    demoLogs: state.demoLogs === 'normal' ? undefined : state.demoLogs,
+    demoTelemetry: state.demoTelemetry === 'available' ? undefined : state.demoTelemetry,
   }
 }
 
 export function deriveDemoScenario(
   state: DemoInspectorState,
-  actionEvents: readonly EventLogEntry[] = []
+  actionEvents: readonly EventLogEntry[] = [],
+  actions: readonly DemoAction[] = [],
+  routedDeviceId?: string
 ): ControlPlaneScenario {
   const base =
     state.demoScene === 'degraded'
@@ -77,12 +106,15 @@ export function deriveDemoScenario(
       : state.demoScene === 'offline'
         ? { ...controlPlaneScenario, selectedDeviceId: 'fp-demo-03' }
         : controlPlaneScenario
-  const selectedDeviceId =
+  const defaultSelectedDeviceId =
     state.demoScene === 'offline'
       ? 'fp-demo-03'
       : state.demoScene === 'degraded'
         ? 'fp-kit-02'
         : 'fp-lab-01'
+  const baseDeviceIds = new Set([...base.devices.map((device) => device.id), demoWifiUsbDevice.id])
+  const selectedDeviceId =
+    routedDeviceId && baseDeviceIds.has(routedDeviceId) ? routedDeviceId : defaultSelectedDeviceId
 
   const devices = [...base.devices, demoWifiUsbDevice].map((device) => {
     const fixture =
@@ -125,6 +157,43 @@ export function deriveDemoScenario(
       next.wifiRssi = null
       next.transportIssue = 'Simulated network handoff timed out without a live request.'
     }
+    if (state.demoWifiCapability === 'read-only') {
+      next.capabilities = next.capabilities.filter((capability) => capability !== 'wifi_config')
+    } else if (state.demoWifiCapability === 'unavailable') {
+      next.capabilities = next.capabilities.filter(
+        (capability) => capability !== 'wifi_config' && capability !== 'wifi_state_v2'
+      )
+      next.wifiSsid = null
+      next.wifiRssi = null
+      next.wifiPasswordLength = 0
+      next.networkState = 'disabled'
+    }
+    if (state.demoTelemetry === 'unavailable') {
+      next.currentTempC = UNAVAILABLE_TEMPERATURE_C
+      next.boardTempC = UNAVAILABLE_TEMPERATURE_C
+      next.voltageMv = 0
+      next.currentMa = 0
+    }
+    for (const action of actions) {
+      if (action.targetDeviceId !== selectedDeviceId) continue
+      if (action.kind === 'thermal-warning') {
+        next.heaterLockReason = 'hard-overtemp'
+        next.faultAttentionPending = true
+        next.heaterEnabled = false
+        next.heaterOutputPercent = 0
+        next.activeCoolingEnabled = true
+        next.fanState = 'SAFE'
+        next.fanDisplayState = 'SAFE'
+        next.fanPolicySource = 'safety'
+        next.fanOutputLevel = 'limited'
+        if (state.demoTelemetry === 'available') next.currentTempC = 420
+      } else if (action.kind === 'fan-recovery' && !next.heaterLockReason) {
+        next.fanState = 'AUTO'
+        next.fanDisplayState = 'AUTO'
+        next.fanPolicySource = 'post_heat'
+        next.fanOutputLevel = 'medium'
+      }
+    }
     return next
   })
 
@@ -158,7 +227,11 @@ export function deriveDemoScenario(
     selectedDeviceId,
     devices,
     artifacts,
-    events: [...base.events, ...(sceneEvent ? [sceneEvent] : []), ...actionEvents].slice(-64),
+    events: [
+      ...(state.demoLogs === 'empty' ? [] : base.events),
+      ...(sceneEvent ? [sceneEvent] : []),
+      ...actionEvents,
+    ].slice(-64),
   }
 }
 

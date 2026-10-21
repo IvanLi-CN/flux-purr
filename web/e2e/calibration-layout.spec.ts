@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 test.describe('calibration layout', () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 1000 })
-    await page.goto('/devices/fp-lab-01/calibration/rtd-adc?demo=true')
+    await page.goto('/devices/fp-lab-01/calibration/rtd-adc')
   })
 
   test('keeps the temperature status summary rows away from list edges', async ({ page }) => {

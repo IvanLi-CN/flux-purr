@@ -30,7 +30,7 @@ export function beginBrowserUsbPreflight({
   now?: () => Date
   onTrace: (entry: BrowserPreflightTraceEvent) => void
 }): Promise<BrowserSerialPort> {
-  const userActivation = navigator.userActivation?.isActive === true
+  const userActivation = globalThis.navigator?.userActivation?.isActive === true
   onTrace(
     createTraceEvent(
       now,
