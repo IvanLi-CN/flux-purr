@@ -151,7 +151,7 @@ jobs:
     name: Web checks
     needs: classify
     if: needs.classify.outputs.kind == 'source'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Checkout
