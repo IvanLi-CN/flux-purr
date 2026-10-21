@@ -148,17 +148,27 @@ impl SupplyBoundary {
         {
             return None;
         }
-        // Use the highest observed current class eligible for this contract.
-        // A low-current equilibrium must not clamp a 3 A warm-up into a stall.
+        // Only equilibrium/boundary observations can authorize an automatic
+        // voltage ceiling. A transient 3 A probe proves that the source
+        // tracked one request while the plate was moving, but it does not
+        // prove an upper boundary. Keep those points for coverage and trace
+        // diagnostics without turning their first low-voltage sample into a
+        // warm-up cap.
+        // A lower-current equilibrium must not clamp a full 3 A warm-up. If
+        // no qualified point exists at the full calibration current, let the
+        // caller use the preset electrical fallback instead.
         let current_class = self.points[..usize::from(self.point_count)]
             .iter()
-            .filter(|point| point.request_current_ma <= query.current_ma)
+            .filter(|point| !point.tracking_only && point.request_current_ma <= query.current_ma)
             .map(|point| point.request_current_ma)
             .max()?;
+        if query.current_ma >= 3_000 && current_class < 3_000 {
+            return None;
+        }
         self.points[..usize::from(self.point_count)]
             .iter()
             .copied()
-            .filter(|point| point.request_current_ma == current_class)
+            .filter(|point| !point.tracking_only && point.request_current_ma == current_class)
             .filter(|point| {
                 // A retained sample covers its observed 1 C window only.
                 // Extending an old low-voltage probe through all warmer

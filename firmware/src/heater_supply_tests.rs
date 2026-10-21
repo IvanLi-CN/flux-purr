@@ -72,7 +72,7 @@ fn lookup_does_not_invent_colder_lower_current_or_other_wifi_observations() {
     assert_eq!(lookup(5_000, 1_700, true), None);
     assert_eq!(lookup(5_000, 3_000, false), None);
     assert_eq!(lookup(5_000, 3_000, true), None);
-    assert_eq!(lookup(10_100, 3_000, true), Some(10_000));
+    assert_eq!(lookup(10_100, 3_000, true), None);
     assert_eq!(lookup(3_100, 1_900, true), Some(7_200));
     assert_eq!(lookup(3_101, 1_900, true), None);
     assert_eq!(lookup(10_101, 3_000, true), None);
@@ -86,6 +86,7 @@ fn scan_floor_and_advertised_apdo_are_distinct_and_bound_the_lookup() {
     let request = BoundaryQuery {
         source_min_mv: 3_300,
         source_max_mv: 22_000,
+        current_ma: 2_000,
         ..query(10_100, 3_000, true)
     };
     assert_eq!(
@@ -110,6 +111,27 @@ fn correcting_the_temperature_projection_changes_lookup_without_rewriting_raw_ad
         None,
     );
     assert_eq!(value, boundary());
+}
+
+#[test]
+fn transient_three_amp_probe_does_not_become_an_automatic_voltage_ceiling() {
+    let mut value = boundary();
+    value.point_count = 0;
+    assert!(value.retain(BoundaryPoint {
+        elapsed_ms: 10_000,
+        rtd_code: 1_500,
+        rtd_mv: 1_000,
+        vin_code: 1_000,
+        vin_mv: 800,
+        request_current_ma: 3_000,
+        tracking_request_mv: 6_400,
+        flat_request_mv: 0,
+        tracking_only: true,
+    }));
+    assert_eq!(
+        value.safe_request_mv(query(3_000, 3_000, true), |_| Some(3_000)),
+        None
+    );
 }
 
 #[test]

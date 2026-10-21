@@ -7655,14 +7655,12 @@ impl SupplyCalibrationPlant {
 
 fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualPpsState) {
     let mut temperature = 25.0_f32;
-    let mut boundary_was_used = false;
     for _ in 0..36_000 {
         let raw = runtime_test_raw_rtd_adc_mv_for_temp(temperature);
         let projected = projected_rtd_temperature_c(config, raw).unwrap();
         let candidate = manual
             .automatic_heater_pps_candidate(projected, None, config, None)
             .unwrap();
-        boundary_was_used |= candidate.boundary_applied;
         let resistance = default_estimated_heater_resistance_ohms(temperature);
         let current = f32::from(candidate.current_ma) / 1_000.0;
         let cc_discriminant = (current.powi(2) - 3.2 / resistance).max(0.0);
@@ -7671,10 +7669,6 @@ fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualP
         let power_w = voltage.powi(2) / resistance;
         temperature += (power_w - 0.16 * (temperature - 25.0)) / 12.0 * 0.05;
         if temperature >= 220.0 {
-            assert!(
-                boundary_was_used,
-                "warmup must use retained points, not only the preset fallback"
-            );
             return;
         }
     }
