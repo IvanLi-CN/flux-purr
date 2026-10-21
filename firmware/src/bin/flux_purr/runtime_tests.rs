@@ -6303,6 +6303,7 @@ fn transient_fit_preserves_a_real_transport_delay() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
     let trace: &[(u32, i16, u16, u8, bool)] = &[
         (3_250, 2_740, 5_375, 0, false),
@@ -6850,10 +6851,7 @@ fn transient_thermal_fit_accepts_physical_3a_stage_transitions() {
         };
     }
     let temperatures = trace.map(|(_, temp_c, _, _)| temp_c);
-    let accepted = transient_temperature_acceptance(
-        &samples[..trace.len()],
-        &temperatures.map(|temp_c| temp_c as f32),
-    );
+    let accepted = transient_temperature_acceptance(&samples[..trace.len()], &temperatures);
     assert!(accepted[12] && accepted[13]);
     let (_, residual) = fit_thermal_plant_transient(
         0x335f_3341,

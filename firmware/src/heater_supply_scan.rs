@@ -429,28 +429,7 @@ impl SupplyScan {
             self.last_tracking = Some(self.point(input));
             self.retain_tracking();
             if self.request_ma == 3_000 {
-                let scan_ceiling_reached = self.last_tracking.is_some_and(|point| {
-                    point.tracking_request_mv.saturating_add(100) >= self.boundary.source_max_mv
-                });
-                if input.temperature_centi_c >= MIN_THERMAL_COVERAGE_CENTI_C || scan_ceiling_reached
-                {
-                    self.phase = ScanPhase::Complete;
-                } else {
-                    // A low-temperature 3 A equilibrium is only a safe
-                    // pause while the plate resistance is still rising. Keep
-                    // the same bounded stage alive and resume the voltage
-                    // sweep one 100 mV step above the last proven tracking
-                    // point; the source response continues to enforce the
-                    // current-loop boundary.
-                    self.phase = ScanPhase::Sweep;
-                    self.previous = None;
-                    self.last_tracking = None;
-                    self.flat_count = 0;
-                    self.ambiguous_count = 0;
-                    self.flat_request_mv = 0;
-                    self.equilibrium.reset();
-                    self.probe_next_voltage(input);
-                }
+                self.finish_three_amp_equilibrium(input);
             } else {
                 self.normal_probe = true;
                 self.normal_probe_started_ms = input.now_ms;
@@ -477,6 +456,30 @@ impl SupplyScan {
             self.equilibrium.reset();
             self.probe_next_voltage(input);
         }
+    }
+
+    fn finish_three_amp_equilibrium(&mut self, input: ScanInput) {
+        let scan_ceiling_reached = self.last_tracking.is_some_and(|point| {
+            point.tracking_request_mv.saturating_add(100) >= self.boundary.source_max_mv
+        });
+        if input.temperature_centi_c >= MIN_THERMAL_COVERAGE_CENTI_C || scan_ceiling_reached {
+            self.phase = ScanPhase::Complete;
+            return;
+        }
+
+        // A low-temperature 3 A equilibrium is only a safe pause while the
+        // plate resistance is still rising. Keep the same bounded stage alive
+        // and resume the voltage sweep one 100 mV step above the last proven
+        // tracking point; the source response continues to enforce the
+        // current-loop boundary.
+        self.phase = ScanPhase::Sweep;
+        self.previous = None;
+        self.last_tracking = None;
+        self.flat_count = 0;
+        self.ambiguous_count = 0;
+        self.flat_request_mv = 0;
+        self.equilibrium.reset();
+        self.probe_next_voltage(input);
     }
 
     fn finish_normal_probe(&mut self, input: ScanInput) {
