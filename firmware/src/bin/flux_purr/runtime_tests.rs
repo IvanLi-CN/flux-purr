@@ -6302,10 +6302,8 @@ fn transient_fit_preserves_a_real_transport_delay() {
     );
 }
 
-#[test]
-#[allow(clippy::too_many_lines)]
-fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
-    let trace: &[(u32, i16, u16, u8, bool)] = &[
+fn captured_thermal_trace() -> &'static [(u32, i16, u16, u8, bool)] {
+    &[
         (3_250, 2_740, 5_375, 0, false),
         (3_450, 2_740, 5_250, 100, false),
         (52_150, 3_677, 5_500, 0, false),
@@ -6352,7 +6350,12 @@ fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
         (1_592_250, 9_312, 0, 0, true),
         (1_612_300, 8_751, 0, 0, true),
         (1_639_600, 7_968, 0, 0, true),
-    ];
+    ]
+}
+
+#[test]
+fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
+    let trace = captured_thermal_trace();
     let mut samples = [ThermalPlantTransientSample {
         elapsed_ticks: 0,
         raw_rtd_adc_mv: 0,
