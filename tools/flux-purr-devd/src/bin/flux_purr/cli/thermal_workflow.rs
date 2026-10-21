@@ -350,6 +350,7 @@ pub(crate) async fn collect_batch_live_runs(
         input.args.source_kind,
         &input.args.source_url,
         &input.args.source_id,
+        input.source_power_watts,
     )
     .await
         && error.is_none()
@@ -1158,6 +1159,7 @@ pub(crate) async fn run_live_thermal_self_test(
         args.source_kind,
         &args.source_url,
         &args.source_id,
+        source_power_watts,
     )
     .await
         && run_error.is_none()
@@ -5788,14 +5790,11 @@ pub(crate) async fn restore_thermal_bench_source_default(
     source_kind: BenchSourceKind,
     source_url: &str,
     source_id: &str,
+    source_power_watts: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match source_kind {
         BenchSourceKind::Isolapurr => {
-            ensure_isolapurr_thermal_capability(
-                source_url,
-                source_id,
-                THERMAL_SOURCE_100W_POWER_WATTS as u16,
-            )?;
+            ensure_isolapurr_thermal_capability(source_url, source_id, source_power_watts)?;
             set_isolapurr_output_auto(client, source_url, source_id).await
         }
     }
@@ -6090,6 +6089,7 @@ pub(crate) async fn prepare_thermal_source_and_lease(
                 source_kind,
                 config.source_url,
                 config.source_id,
+                config.source_power_watts,
             )
             .await
             {
