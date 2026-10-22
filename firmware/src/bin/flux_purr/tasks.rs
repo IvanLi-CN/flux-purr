@@ -173,18 +173,23 @@ fn automatic_output_response_fault<PWM>(context: &mut HeaterPowerOutputContext<'
     let response_matches = context.pd_observation.is_none_or(|observed| {
         !automatic_response_sample_ready(context, observed.contract.voltage_mv)
             || observed.contract.kind != ContractKind::Pps
-            || context.manual_pps.automatic_voltage_response_matches(
-                context.memory_config,
-                context.current_temp_c,
-                observed.contract.voltage_mv,
-                observed.current_ma.min(observed.contract.current_ma),
-                context.vin_raw_adc_mv,
-                context
-                    .pd_port
-                    .snapshot()
-                    .active
-                    .and_then(|active| active.pps_range),
-            )
+            || context
+                .manual_pps
+                .automatic_voltage_response_matches_with_rtd(
+                    context.memory_config,
+                    context.current_temp_c,
+                    observed.contract.voltage_mv,
+                    observed.current_ma.min(observed.contract.current_ma),
+                    context.vin_raw_adc_mv,
+                    AutomaticVoltageResponseContext {
+                        confirmed_range: context
+                            .pd_port
+                            .snapshot()
+                            .active
+                            .and_then(|active| active.pps_range),
+                        current_rtd_mv: Some(context.rtd_raw_adc_mv),
+                    },
+                )
     });
     let response_latched = automatic_supply_response_fault_latched(
         *context.automatic_supply_response_latched,
@@ -774,11 +779,12 @@ where
             ..
         } => {
             if context.normal_auto {
-                let candidate = context.manual_pps.automatic_heater_pps_candidate(
+                let candidate = context.manual_pps.automatic_heater_pps_candidate_with_rtd(
                     context.current_temp_c,
                     context.preview_heater_curve,
                     context.memory_config,
                     Some(current_request_mv),
+                    Some(context.rtd_raw_adc_mv),
                 )?;
                 Some(PpsOperatingLimits {
                     pps_min_mv: candidate.min_mv,
@@ -1238,13 +1244,16 @@ where
         return None;
     }
     let request_contract = if context.normal_auto {
-        context.manual_pps.automatic_heater_request_contract(
-            context.current_temp_c,
-            context.memory_config,
-            request.request_mv,
-            request.request_current_ma,
-            Some(context.backend.pd_request_mv()),
-        )
+        context
+            .manual_pps
+            .automatic_heater_request_contract_with_rtd(
+                context.current_temp_c,
+                context.memory_config,
+                request.request_mv,
+                request.request_current_ma,
+                Some(context.backend.pd_request_mv()),
+                Some(context.rtd_raw_adc_mv),
+            )
     } else {
         PdContractRequest::pps(request.request_mv, request.request_current_ma).ok()
     };
@@ -1391,6 +1400,16 @@ fn pps_request_mv_for_context<PWM>(
             source_request_ceiling_mv,
         )
     };
+    let automatic_request_mv = if context.normal_auto && !manual_pps_active {
+        automatic_heater_step_request_mv(
+            current_request_mv,
+            automatic_request_mv,
+            control_floor_mv,
+            source_request_ceiling_mv,
+        )
+    } else {
+        automatic_request_mv
+    };
     if manual_pps_active
         || context.tuning_power_stage
         || (context.normal_auto
@@ -1494,10 +1513,11 @@ fn pps_transition_safety<PWM>(
     let recovery_required = context.normal_auto
         && context
             .manual_pps
-            .automatic_heater_confirmed_pps_candidate(
+            .automatic_heater_confirmed_pps_candidate_with_rtd(
                 context.current_temp_c,
                 context.memory_config,
                 pd_snapshot,
+                Some(context.rtd_raw_adc_mv),
             )
             .is_none();
     PpsTransitionSafety {
@@ -1551,13 +1571,17 @@ fn automatic_pps_request_is_safe<PWM>(
     request: PdContractRequest,
     confirmed_range: Option<PpsAdjustmentRange>,
 ) -> bool {
-    let Some(candidate) = context.manual_pps.automatic_heater_pps_for_contract(
-        context.current_temp_c,
-        context.memory_config,
-        request.voltage_mv(),
-        request.operating_current_ma(),
-        confirmed_range,
-    ) else {
+    let Some(candidate) = context
+        .manual_pps
+        .automatic_heater_pps_for_contract_with_rtd(
+            context.current_temp_c,
+            context.memory_config,
+            request.voltage_mv(),
+            request.operating_current_ma(),
+            confirmed_range,
+            Some(context.rtd_raw_adc_mv),
+        )
+    else {
         return false;
     };
     request.mode() == PdContractRequestMode::Pps
@@ -1576,10 +1600,11 @@ fn pending_automatic_pps_duty<PWM>(
     let snapshot = context.pd_port.snapshot();
     if context
         .manual_pps
-        .automatic_heater_confirmed_pps_candidate(
+        .automatic_heater_confirmed_pps_candidate_with_rtd(
             context.current_temp_c,
             context.memory_config,
             snapshot,
+            Some(context.rtd_raw_adc_mv),
         )
         .is_none()
     {
@@ -1849,11 +1874,12 @@ where
         );
         let boundary_source = context
             .manual_pps
-            .automatic_heater_pps_candidate(
+            .automatic_heater_pps_candidate_with_rtd(
                 context.current_temp_c,
                 context.preview_heater_curve,
                 context.memory_config,
                 Some(limits.current_request_mv),
+                Some(context.rtd_raw_adc_mv),
             )
             .map_or("unavailable", |candidate| {
                 if candidate.boundary_applied {

@@ -727,6 +727,7 @@ impl BootRuntimeState {
             pd_observation: self.last_pd_observation,
             measured_heater_mv: 0,
             vin_raw_adc_mv: 0,
+            rtd_raw_adc_mv: 0,
             current_temp_c: 0.0,
             source_capabilities: SourceCapabilitiesView::default(),
             requested_power_mw: 0,

@@ -29,7 +29,7 @@ Rows above `250 C` in the fixed-PD tables are included for cap and protection be
 
 ## 3) Supported Versions
 
-Firmware must treat the heater plate as a calibrated load profile. The board revision, measured cold resistance, and selected firmware profile must match during bring-up.
+Firmware must bind the installed heater plate to its board profile during bring-up. The board revision and nominal electrical profile must match; normal automatic safety is established by the device-local supply-boundary calibration described below.
 
 | Profile ID | Board size | Nominal `R20` | Trace width | Routed length | Version file |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -43,17 +43,17 @@ The `70 mm x 70 mm` heater stack also uses separate non-heater companion boards 
 
 ## 4) Common Electrical Model
 
-Each heater plate must be measured during bring-up. Its measured resistance curve is used first when normal automatic heating estimates electrical power; the firmware falls back to projected raw observations, a saved curve, and finally the theoretical model when calibration data is absent. Calibration and manual PPS paths keep their existing electrical control behavior.
+Each heater plate must run the device-local supply-boundary calibration during bring-up. The calibration records the highest confirmed full-conduction PPS request that tracks at each observed board RTD temperature, together with raw RTD/VIN ADC values, the assumed 3V3 divider supply, the selected APDO envelope, and WiFi-driver state. This is a complete-device operating boundary, not a separately measured copper-trace resistance curve and not an auxiliary-power measurement. OvO or other source telemetry is HIL evidence only and is never a calibration input.
 
-For normal automatic heating, the firmware evaluates each actual PPS APDO independently:
+For normal automatic heating, the firmware evaluates each actual PPS APDO independently and applies the measured device-local boundary before the preset electrical model:
 
 ```text
-I_heater_budget = max(I_contract_encoded - 0.200 A, 0)
-V_limit(T) = min(V_source_max, V_hardware_max, R_estimated(T) * I_heater_budget)
-Pmax(T) = V_limit(T)^2 / R_estimated(T)
+I_contract = encoded PPS current ceiling
+V_limit(T) = min(V_apdo_max, V_hardware_max, V_boundary(T))
+Pmodel(T) = V_limit(T)^2 / R_preset(T)
 ```
 
-PPS current is encoded downward to the protocol step and voltage is encoded downward to `100mV`. An APDO whose safe voltage is below its effective minimum is rejected. Fixed-PD fallback is eligible only when `V_fixed / R_estimated(T) <= I_heater_budget`; PWM duty cannot make an unsafe fixed voltage eligible. PPS is preferred over Fixed, and the selection never combines fields from separate APDOs.
+PPS current is encoded downward to the protocol step and voltage is encoded downward to `100mV`. A calibrated boundary point is used only for the matching APDO, WiFi state, and 3A automatic contract; an APDO whose safe voltage is below its effective minimum is rejected. Fixed-PD fallback is eligible only when the preset model predicts full-conduction current within the advertised Fixed limit; PWM duty cannot make an unsafe Fixed voltage eligible. PPS is preferred over Fixed, and the selection never combines fields from separate APDOs. The product does not reserve a fictitious fixed current for the board; the complete-device boundary already includes the board load present during calibration.
 
 Copper temperature coefficient used for first-order estimation:
 
@@ -61,7 +61,7 @@ Copper temperature coefficient used for first-order estimation:
 R(T) = R20 * (1 + 0.00393 * (T - 20))
 ```
 
-The fixed-PD tables in the version files remain reference data for calibration and legacy voltage-step selection. Normal automatic heating applies the live resistance and source-current budget before selecting a fixed voltage.
+The fixed-PD tables in the version files remain reference data for bring-up and legacy voltage-step selection. Normal automatic heating applies the device-local supply boundary and the preset model before selecting a fixed voltage. The product does not convert a boundary point into plate resistance or subtract an invented auxiliary-power allowance.
 
 ## 5) Surface Finish and Solder Mask
 

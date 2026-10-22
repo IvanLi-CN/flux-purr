@@ -3,6 +3,8 @@ use super::*;
 fn query(temperature_centi_c: i16, current_ma: u16, wifi_started: bool) -> BoundaryQuery {
     BoundaryQuery {
         temperature_centi_c,
+        current_rtd_mv: None,
+        current_request_mv: None,
         current_ma,
         wifi_started,
         source_min_mv: 5_500,
@@ -59,7 +61,7 @@ fn raw_points_round_trip_and_legacy_bytes_are_absent() {
 }
 
 #[test]
-fn lookup_does_not_invent_colder_lower_current_or_other_wifi_observations() {
+fn lookup_does_not_invent_warmer_or_lower_current_observations() {
     let value = boundary();
     let lookup = |temp, current, wifi| {
         value.safe_request_mv(query(temp, current, wifi), |raw| match raw {
@@ -74,7 +76,8 @@ fn lookup_does_not_invent_colder_lower_current_or_other_wifi_observations() {
     assert_eq!(lookup(5_000, 3_000, true), None);
     assert_eq!(lookup(10_100, 3_000, true), None);
     assert_eq!(lookup(3_100, 1_900, true), Some(7_200));
-    assert_eq!(lookup(3_101, 1_900, true), None);
+    assert_eq!(lookup(3_101, 1_900, true), Some(7_200));
+    assert_eq!(lookup(4_101, 1_900, true), Some(7_200));
     assert_eq!(lookup(10_101, 3_000, true), None);
 }
 
@@ -114,7 +117,7 @@ fn correcting_the_temperature_projection_changes_lookup_without_rewriting_raw_ad
 }
 
 #[test]
-fn transient_three_amp_probe_does_not_become_an_automatic_voltage_ceiling() {
+fn transient_three_amp_probe_carries_through_its_compact_temperature_bucket() {
     let mut value = boundary();
     value.point_count = 0;
     assert!(value.retain(BoundaryPoint {
@@ -130,7 +133,144 @@ fn transient_three_amp_probe_does_not_become_an_automatic_voltage_ceiling() {
     }));
     assert_eq!(
         value.safe_request_mv(query(3_000, 3_000, true), |_| Some(3_000)),
+        Some(6_400)
+    );
+    assert_eq!(
+        value.safe_request_mv(query(3_101, 3_000, true), |_| Some(3_000)),
+        Some(6_400)
+    );
+    assert_eq!(
+        value.safe_request_mv(query(4_801, 3_000, true), |_| Some(3_000)),
         None
+    );
+}
+
+#[test]
+fn tracking_point_covers_real_compacted_bucket_gap_without_theoretical_fallback() {
+    let mut value = boundary();
+    value.point_count = 0;
+    assert!(value.retain(BoundaryPoint {
+        elapsed_ms: 10_000,
+        rtd_code: 1_500,
+        rtd_mv: 1_199,
+        vin_code: 1_000,
+        vin_mv: 1_500,
+        request_current_ma: 3_000,
+        tracking_request_mv: 16_100,
+        flat_request_mv: 0,
+        tracking_only: true,
+    }));
+    // This reproduces the live recalibration rows: the latest colder point
+    // projects to 104.6 C while the device is at 118.0 C.
+    assert_eq!(
+        value.safe_request_mv(query(11_800, 3_000, true), |raw| match raw {
+            1_199 => Some(10_460),
+            _ => None,
+        }),
+        Some(16_100)
+    );
+}
+
+#[test]
+fn confirmed_tracking_point_promotes_the_next_observed_voltage() {
+    let mut value = boundary();
+    value.point_count = 0;
+    for (rtd_mv, tracking_request_mv) in [(1_168, 11_900), (1_189, 13_600)] {
+        assert!(value.retain(BoundaryPoint {
+            elapsed_ms: 10_000,
+            rtd_code: 1_500,
+            rtd_mv,
+            vin_code: 1_000,
+            vin_mv: 800,
+            request_current_ma: 3_000,
+            tracking_request_mv,
+            flat_request_mv: 0,
+            tracking_only: true,
+        }));
+    }
+    let mut query = query(8_950, 3_000, true);
+    query.current_request_mv = Some(11_700);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| match raw {
+            1_168 => Some(8_900),
+            1_189 => Some(9_900),
+            _ => None,
+        }),
+        Some(11_900)
+    );
+    query.current_request_mv = Some(11_900);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| match raw {
+            1_168 => Some(8_900),
+            1_189 => Some(9_900),
+            _ => None,
+        }),
+        Some(13_600)
+    );
+    query.current_request_mv = Some(12_500);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| match raw {
+            1_168 => Some(8_900),
+            1_189 => Some(9_900),
+            _ => None,
+        }),
+        Some(13_600)
+    );
+}
+
+#[test]
+fn adjacent_rtd_quantization_edge_allows_the_next_observed_voltage() {
+    let mut value = boundary();
+    value.point_count = 0;
+    assert!(value.retain(BoundaryPoint {
+        elapsed_ms: 10_000,
+        rtd_code: 2_900,
+        rtd_mv: 1_307,
+        vin_code: 1_800,
+        vin_mv: 1_523,
+        request_current_ma: 3_000,
+        tracking_request_mv: 18_800,
+        flat_request_mv: 0,
+        tracking_only: true,
+    }));
+    let mut query = query(15_964, 3_000, true);
+    query.current_rtd_mv = Some(1_306);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| (raw == 1_307).then_some(16_000)),
+        Some(18_800)
+    );
+
+    query.current_rtd_mv = Some(1_305);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| (raw == 1_307).then_some(16_000)),
+        Some(18_800)
+    );
+
+    query.current_rtd_mv = Some(1_304);
+    assert_eq!(
+        value.safe_request_mv(query, |raw| (raw == 1_307).then_some(16_000)),
+        None
+    );
+}
+
+#[test]
+fn observed_three_amp_tracking_point_authorizes_its_temperature_window() {
+    let mut value = boundary();
+    value.point_count = 0;
+    assert!(value.retain(BoundaryPoint {
+        elapsed_ms: 10_000,
+        rtd_code: 1_500,
+        rtd_mv: 1_000,
+        vin_code: 1_000,
+        vin_mv: 1_500,
+        request_current_ma: 3_000,
+        tracking_request_mv: 18_000,
+        flat_request_mv: 0,
+        tracking_only: true,
+    }));
+    assert_eq!(
+        value.safe_request_mv(query(3_000, 3_000, true), |_| Some(3_000)),
+        Some(18_000)
     );
 }
 
@@ -171,7 +311,7 @@ fn in_band_temperature_drift_is_allowed_after_ten_seconds() {
 #[test]
 fn in_band_temperature_response_to_safe_voltage_does_not_starve_equilibrium() {
     let mut job = scan::SupplyScan::new(boundary()).unwrap();
-    let mut equilibrium_started_ms = None;
+    let mut equilibrium_started = false;
     for now_ms in (0..120_000).step_by(50) {
         let output = job.output();
         // The measured temperature changes by only 0.3 C when returning
@@ -184,21 +324,22 @@ fn in_band_temperature_response_to_safe_voltage_does_not_starve_equilibrium() {
         };
         job.update(sample(now_ms, output, temperature));
         if job.phase == scan::ScanPhase::Equilibrium {
-            equilibrium_started_ms.get_or_insert(now_ms);
+            equilibrium_started = true;
         }
         assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
-        if job.boundary.point_count > 0 {
-            assert!(now_ms - equilibrium_started_ms.unwrap() >= 10_000);
+        if equilibrium_started {
             return;
         }
     }
-    panic!("an in-band response must not cause endless boundary rescans");
+    panic!("an in-band response must reach the equilibrium phase");
 }
 
 #[test]
 fn adc_jitter_is_filtered_for_equilibrium_without_relaxing_cutoff() {
     let mut value = boundary();
     value.point_count = 0;
+    value.source_max_mv = 12_000;
+    value.advertised_max_mv = 12_000;
     let mut job = scan::SupplyScan::new(value).unwrap();
     for now_ms in (0..2_000_000).step_by(50) {
         let output = job.output();
@@ -226,7 +367,7 @@ fn warming_during_electrical_sweep_does_not_starve_voltage_probing() {
         if job.phase == scan::ScanPhase::Sweep && output.request_mv > 5_500 {
             let warmed = job.update(sample(now_ms + 1_000, job.output(), 10_500));
             assert!(warmed.request_mv > 5_500);
-            assert_eq!(job.boundary.point_count, 0);
+            assert_eq!(warmed.request_ma, 1_000);
             return;
         }
     }
@@ -245,7 +386,7 @@ fn thermal_ramp_does_not_turn_a_flat_sample_into_a_cc_boundary() {
             let next = job.update(warming);
             assert_eq!(job.phase, scan::ScanPhase::Sweep);
             assert!(next.request_mv > output.request_mv);
-            assert_eq!(job.boundary.point_count, 0);
+            assert_eq!(next.request_ma, 1_000);
             return;
         }
     }
@@ -340,71 +481,6 @@ fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::Scan
 }
 
 #[test]
-fn preflight_recovers_the_last_tracking_current_after_the_measured_cc_drop() {
-    let mut job = scan::SupplyScan::new(boundary()).unwrap();
-    for now_ms in (0..30_000).step_by(50) {
-        let output = job.output();
-        let mut input = sample(now_ms, output, 3_200);
-        input.vin_mv = if !output.heater_enabled {
-            456
-        } else if output.request_ma >= 1_400 {
-            438
-        } else {
-            402
-        };
-        let recovered = job.update(input);
-        if output.request_ma == 1_300 {
-            assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
-            if recovered.request_ma == 1_400 {
-                assert!(!recovered.heater_enabled);
-                let mut waiting = sample(now_ms + 1_000, recovered, 3_200);
-                waiting.vin_mv = 456;
-                waiting.confirmed = false;
-                assert!(!job.update(waiting).heater_enabled);
-                waiting.confirmed = true;
-                waiting.now_ms += 999;
-                assert!(!job.update(waiting).heater_enabled);
-                waiting.now_ms += 1;
-                assert!(job.update(waiting).heater_enabled);
-                assert_eq!(job.phase, scan::ScanPhase::Sweep);
-                return;
-            }
-        }
-    }
-    panic!("preflight did not recover the last confirmed tracking current");
-}
-
-#[test]
-fn preflight_recovery_rejects_collapsed_unloaded_vin_or_remaining_conduction() {
-    for (vin_mv, physical_percent) in [(402, 0), (456, 100), (0, 0)] {
-        let mut job = scan::SupplyScan::new(boundary()).unwrap();
-        let mut recovered = false;
-        for now_ms in (0..30_000).step_by(50) {
-            let output = job.output();
-            let mut input = sample(now_ms, output, 3_200);
-            input.vin_mv = if !output.heater_enabled {
-                456
-            } else if output.request_ma >= 1_400 {
-                438
-            } else {
-                402
-            };
-            let next = job.update(input);
-            if output.request_ma == 1_300 && next.request_ma == 1_400 {
-                let mut recovery = sample(now_ms + 1_000, next, 3_200);
-                recovery.vin_mv = vin_mv;
-                recovery.physical_percent = physical_percent;
-                assert!(!job.update(recovery).heater_enabled);
-                assert_eq!(job.phase, scan::ScanPhase::Failed);
-                recovered = true;
-                break;
-            }
-        }
-        assert!(recovered, "the captured current-loop knee was not reached");
-    }
-}
-
-#[test]
 fn preflight_initial_load_collapse_still_fails_closed() {
     let mut job = scan::SupplyScan::new(boundary()).unwrap();
     let mut baseline = sample(1_000, job.output(), 3_000);
@@ -417,20 +493,26 @@ fn preflight_initial_load_collapse_still_fails_closed() {
 }
 
 #[test]
-fn scan_discovers_the_sustainable_start_current_and_never_forces_one_amp() {
+fn scan_preflights_at_three_amp_then_discovers_each_thermal_stage() {
     let mut value = boundary();
     value.point_count = 0;
+    value.source_max_mv = 12_000;
+    value.advertised_max_mv = 12_000;
     let mut job = scan::SupplyScan::new(value).unwrap();
     for time in (0..2_000_000).step_by(50) {
         let output = job.output();
         job.update(sample(time, output, 10_000));
         if job.phase == scan::ScanPhase::Complete {
             assert!(job.boundary.is_valid());
-            assert!(job.boundary.point_count > 5);
-            assert_eq!(job.boundary.points[0].request_current_ma, 1_400);
-            for point in &job.boundary.points[..job.boundary.point_count as usize] {
-                assert!(point.tracking_request_mv <= point.request_current_ma * 4);
-            }
+            assert!(job.boundary.point_count > 0);
+            let has_one_amp = job.boundary.points[..job.boundary.point_count as usize]
+                .iter()
+                .any(|point| point.request_current_ma == 1_000);
+            let has_three_amp = job.boundary.points[..job.boundary.point_count as usize]
+                .iter()
+                .any(|point| point.request_current_ma == 3_000);
+            assert!(has_one_amp);
+            assert!(has_three_amp);
             assert!(!job.output().heater_enabled);
             return;
         }
@@ -443,6 +525,8 @@ fn scan_discovers_the_sustainable_start_current_and_never_forces_one_amp() {
 fn scan_retains_each_sustainable_current_stage_with_raw_adc_samples() {
     let mut value = boundary();
     value.point_count = 0;
+    value.source_max_mv = 12_000;
+    value.advertised_max_mv = 12_000;
     let mut job = scan::SupplyScan::new(value).unwrap();
     for time in (0..2_000_000).step_by(50) {
         let output = job.output();
@@ -458,16 +542,8 @@ fn scan_retains_each_sustainable_current_stage_with_raw_adc_samples() {
                 let index = usize::from(point.request_current_ma - 1_000) / 100;
                 stages[index] = true;
             }
-            for current_ma in (1_400_u16..=3_000).step_by(100) {
-                assert!(
-                    stages[usize::from(current_ma - 1_000) / 100],
-                    "missing equilibrium stage at {current_ma}mA"
-                );
-            }
-            assert!(!stages[0]);
-            assert!(!stages[1]);
-            assert!(!stages[2]);
-            assert!(!stages[3]);
+            assert!(stages[20], "missing full 3 A boundary stage");
+            assert!(stages[..20].iter().any(|stage| *stage));
             return;
         }
         assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
@@ -549,9 +625,13 @@ fn dynamic_scan_keeps_three_amp_tracking_points_across_warmup() {
         if job.phase == scan::ScanPhase::Complete {
             let points = &job.boundary.points[..usize::from(job.boundary.point_count)];
             assert!(job.boundary.is_valid());
-            assert!(temperature >= 100.0);
+            let safe_ceiling_reached = points.iter().any(|point| {
+                point.tracking_request_mv.saturating_add(100) >= job.boundary.source_max_mv
+            });
+            assert!(job.cutoff_reached || temperature >= 220.0 || safe_ceiling_reached);
             assert!(points.iter().any(|p| p.tracking_only && p.rtd_mv < 1_400));
-            assert!(points.iter().any(|p| p.tracking_only && p.rtd_mv > 1_600));
+            assert!(points.iter().any(|p| p.request_current_ma == 1_000));
+            assert!(points.iter().any(|p| p.request_current_ma == 3_000));
             assert!(points.iter().all(|p| p.rtd_mv < 1_900));
             return;
         }

@@ -979,7 +979,7 @@ pub(crate) enum ThermalTuneEngine {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ThermalModelCommand {
     #[command(
-        about = "Scan a whole-device PPS supply boundary at 1-3A, capture raw ADC data, and fit a thermal model after the 220C cutoff."
+        about = "Scan a whole-device PPS supply boundary with a confirmed 3A preflight, 1.0-3.0A equilibrium stages, bounded 3A probes, raw ADC capture, and a 220C cutoff."
     )]
     Calibrate(TargetSelector),
 }

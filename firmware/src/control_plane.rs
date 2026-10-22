@@ -4983,7 +4983,7 @@ mod tests {
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
-        assert!(json.contains(r#""formatVersion":1"#));
+        assert!(json.contains(r#""formatVersion":2"#));
         assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
     }

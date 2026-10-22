@@ -1,6 +1,12 @@
 #[allow(unused_imports)]
 use super::*;
 
+/// Normal automatic heating is calibrated and bounded against the product's
+/// 3 A operating envelope. Manual PPS, calibration, and debug paths keep the
+/// broader adapter limit from `MAX_HEATER_CONTRACT_MA`.
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const MAX_AUTOMATIC_HEATER_CONTRACT_MA: u16 = 3_000;
+
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomaticHeaterResistanceSource {
@@ -31,12 +37,12 @@ pub(crate) struct AutomaticHeaterPpsCandidate {
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn encode_automatic_pps_current_ma(max_ma: u16) -> u16 {
-    (max_ma.min(MAX_HEATER_CONTRACT_MA) / 50) * 50
+    (max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA) / 50) * 50
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn encode_automatic_fixed_current_ma(max_ma: u16) -> u16 {
-    (max_ma.min(MAX_HEATER_CONTRACT_MA) / 10) * 10
+    (max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA) / 10) * 10
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -251,6 +257,34 @@ pub(crate) fn automatic_heater_request_mv_from_power(
         .floor()
         .clamp(f32::from(floor_mv), f32::from(ceiling_mv)) as u16;
     floor_mv_to_100mv(requested_mv).clamp(floor_mv, ceiling_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_step_request_mv(
+    current_mv: u16,
+    desired_mv: u16,
+    floor_mv: u16,
+    ceiling_mv: u16,
+) -> u16 {
+    let floor_mv = floor_mv.min(HEATER_ADJUSTABLE_MAX_MV);
+    let ceiling_mv = ceiling_mv.max(floor_mv).min(HEATER_ADJUSTABLE_MAX_MV);
+    let desired_mv = desired_mv.clamp(floor_mv, ceiling_mv);
+
+    // A stale backend request can be outside the newly selected boundary. In
+    // that case move directly into the safe interval; stepping from an
+    // invalid request would create another invalid PD request.
+    if current_mv < floor_mv || current_mv > ceiling_mv {
+        return desired_mv;
+    }
+    if desired_mv > current_mv {
+        current_mv
+            .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
+            .min(desired_mv)
+    } else {
+        current_mv
+            .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
+            .max(desired_mv)
+    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]

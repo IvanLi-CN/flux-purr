@@ -1976,11 +1976,12 @@ fn runtime_heater_source_limits(
         let preview_heater_curve = preview_heater_curve_config(state.preview_heater_curve.as_ref());
         state
             .manual_pps_state
-            .automatic_heater_pps_candidate(
+            .automatic_heater_pps_candidate_with_rtd(
                 state.latest_temp_c,
                 preview_heater_curve,
                 &state.memory_config,
-                None,
+                Some(state.heater_power_backend.pd_request_mv()),
+                Some(state.latest_rtd_raw_adc_mv),
             )
             .map(|candidate| (candidate.min_mv, candidate.allowed_mv, candidate.current_ma))
             .or_else(|| {
@@ -2373,6 +2374,7 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         pd_observation: current_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
         vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
+        rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
         current_temp_c: state.latest_temp_c,
         source_capabilities: state.power_state.source_capabilities,
         requested_power_mw,
@@ -2771,6 +2773,7 @@ pub(crate) async fn runtime_force_heater_safe_off(
         pd_observation: state.last_pd_observation,
         measured_heater_mv: state.latest_vin_mv,
         vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
+        rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
         current_temp_c: state.latest_temp_c,
         source_capabilities: state.power_state.source_capabilities,
         requested_power_mw: 0,

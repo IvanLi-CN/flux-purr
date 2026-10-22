@@ -85,6 +85,7 @@ pub(crate) struct HeaterPowerOutputContext<'a, PWM> {
     pub(crate) pd_observation: Option<PdStatusObservation>,
     pub(crate) measured_heater_mv: u32,
     pub(crate) vin_raw_adc_mv: u16,
+    pub(crate) rtd_raw_adc_mv: u16,
     pub(crate) current_temp_c: f32,
     pub(crate) source_capabilities: SourceCapabilitiesView,
     pub(crate) requested_power_mw: u32,

@@ -1168,6 +1168,20 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticHeaterLookupContext {
+    current_request_mv: Option<u16>,
+    current_rtd_mv: Option<u16>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticVoltageResponseContext {
+    pub(crate) confirmed_range: Option<PpsAdjustmentRange>,
+    pub(crate) current_rtd_mv: Option<u16>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 impl ManualPpsState {
     pub(crate) fn from_capabilities(
@@ -1304,12 +1318,30 @@ impl ManualPpsState {
         self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_heater_pps_candidate(
         &self,
         current_temp_c: f32,
         preview_heater_curve: Option<&HeaterCurveConfig>,
         memory_config: &MemoryConfig,
         current_request_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_pps_candidate_with_rtd(
+            current_temp_c,
+            preview_heater_curve,
+            memory_config,
+            current_request_mv,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_pps_candidate_with_rtd(
+        &self,
+        current_temp_c: f32,
+        preview_heater_curve: Option<&HeaterCurveConfig>,
+        memory_config: &MemoryConfig,
+        current_request_mv: Option<u16>,
+        current_rtd_mv: Option<u16>,
     ) -> Option<AutomaticHeaterPpsCandidate> {
         let _ = preview_heater_curve;
         self.capability_apdos
@@ -1323,6 +1355,10 @@ impl ManualPpsState {
                     current_temp_c,
                     memory_config,
                     apdo.max_ma,
+                    AutomaticHeaterLookupContext {
+                        current_request_mv,
+                        current_rtd_mv,
+                    },
                 )
             })
             .max_by_key(|candidate| {
@@ -1343,22 +1379,31 @@ impl ManualPpsState {
         temp_c: f32,
         memory_config: &MemoryConfig,
         budget_ma: u16,
+        lookup: AutomaticHeaterLookupContext,
     ) -> Option<AutomaticHeaterPpsCandidate> {
         let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()?;
         let current_ma = encode_automatic_pps_current_ma(budget_ma.min(apdo.max_ma));
+        // Boundary records are keyed to the product's encoded automatic
+        // current budget. The raw APDO may advertise 5 A even when this
+        // product intentionally caps automatic heating at 3 A; comparing the
+        // raw advertisement with a 3 A calibration would discard the valid
+        // whole-device boundary and fall back to the theoretical model.
+        let boundary_source_max_ma = current_ma;
         let observed_limit_mv =
             memory_config
                 .heater_supply_boundary
                 .as_ref()
                 .and_then(|boundary| {
-                    boundary.safe_request_mv(
+                    boundary.safe_request_mv_or_cold_start(
                         flux_purr_firmware::heater_supply::BoundaryQuery {
                             temperature_centi_c: round_to_i16(temp_c * 100.0),
+                            current_rtd_mv: lookup.current_rtd_mv,
+                            current_request_mv: lookup.current_request_mv,
                             current_ma,
                             wifi_started,
                             source_min_mv: apdo.min_mv,
                             source_max_mv: apdo.max_mv,
-                            source_max_ma: apdo.max_ma,
+                            source_max_ma: boundary_source_max_ma,
                         },
                         |raw| {
                             projected_rtd_temperature_c(memory_config, raw)
@@ -1380,6 +1425,7 @@ impl ManualPpsState {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_heater_request_contract(
         &self,
         temp_c: f32,
@@ -1388,7 +1434,32 @@ impl ManualPpsState {
         current_ma: u16,
         previous_mv: Option<u16>,
     ) -> Option<PdContractRequest> {
-        let candidate = self.automatic_heater_pps_candidate(temp_c, None, config, previous_mv)?;
+        self.automatic_heater_request_contract_with_rtd(
+            temp_c,
+            config,
+            voltage_mv,
+            current_ma,
+            previous_mv,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_request_contract_with_rtd(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        previous_mv: Option<u16>,
+        current_rtd_mv: Option<u16>,
+    ) -> Option<PdContractRequest> {
+        let candidate = self.automatic_heater_pps_candidate_with_rtd(
+            temp_c,
+            None,
+            config,
+            previous_mv,
+            current_rtd_mv,
+        )?;
         if candidate.current_ma != current_ma
             || !(candidate.min_mv..=candidate.allowed_mv).contains(&voltage_mv)
         {
@@ -1404,11 +1475,22 @@ impl ManualPpsState {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_heater_confirmed_pps_candidate(
         &self,
         temp_c: f32,
         config: &MemoryConfig,
         snapshot: PdServiceSnapshot,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_confirmed_pps_candidate_with_rtd(temp_c, config, snapshot, None)
+    }
+
+    pub(crate) fn automatic_heater_confirmed_pps_candidate_with_rtd(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        snapshot: PdServiceSnapshot,
+        current_rtd_mv: Option<u16>,
     ) -> Option<AutomaticHeaterPpsCandidate> {
         let observed = snapshot.conducting_observation()?;
         let active = snapshot.active?;
@@ -1421,18 +1503,20 @@ impl ManualPpsState {
             return None;
         }
         let range = active.pps_range?;
-        let candidate = self.automatic_heater_pps_for_contract(
+        let candidate = self.automatic_heater_pps_for_contract_with_rtd(
             temp_c,
             config,
             active.voltage_mv,
             observed.current_ma.min(active.operating_current_ma),
             Some(range),
+            current_rtd_mv,
         )?;
         (candidate.min_mv..=candidate.allowed_mv)
             .contains(&active.voltage_mv)
             .then_some(candidate)
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_heater_pps_for_contract(
         &self,
         temp_c: f32,
@@ -1440,6 +1524,25 @@ impl ManualPpsState {
         voltage_mv: u16,
         current_ma: u16,
         confirmed_range: Option<PpsAdjustmentRange>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_pps_for_contract_with_rtd(
+            temp_c,
+            memory_config,
+            voltage_mv,
+            current_ma,
+            confirmed_range,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_pps_for_contract_with_rtd(
+        &self,
+        temp_c: f32,
+        memory_config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        confirmed_range: Option<PpsAdjustmentRange>,
+        current_rtd_mv: Option<u16>,
     ) -> Option<AutomaticHeaterPpsCandidate> {
         self.capability_apdos
             .iter()
@@ -1455,10 +1558,21 @@ impl ManualPpsState {
                 {
                     return None;
                 }
-                self.automatic_heater_pps_for_apdo(apdo, index, temp_c, memory_config, current_ma)
+                self.automatic_heater_pps_for_apdo(
+                    apdo,
+                    index,
+                    temp_c,
+                    memory_config,
+                    current_ma,
+                    AutomaticHeaterLookupContext {
+                        current_request_mv: Some(voltage_mv),
+                        current_rtd_mv,
+                    },
+                )
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn automatic_voltage_response_matches(
         &self,
         memory_config: &MemoryConfig,
@@ -1468,6 +1582,28 @@ impl ManualPpsState {
         vin_raw_adc_mv: u16,
         confirmed_range: Option<PpsAdjustmentRange>,
     ) -> bool {
+        self.automatic_voltage_response_matches_with_rtd(
+            memory_config,
+            temp_c,
+            contract_mv,
+            contract_ma,
+            vin_raw_adc_mv,
+            AutomaticVoltageResponseContext {
+                confirmed_range,
+                current_rtd_mv: None,
+            },
+        )
+    }
+
+    pub(crate) fn automatic_voltage_response_matches_with_rtd(
+        &self,
+        memory_config: &MemoryConfig,
+        temp_c: f32,
+        contract_mv: u16,
+        contract_ma: u16,
+        vin_raw_adc_mv: u16,
+        response: AutomaticVoltageResponseContext,
+    ) -> bool {
         let Some(wifi_started) = flux_purr_firmware::heater_supply::wifi_hardware_started() else {
             return false;
         };
@@ -1475,7 +1611,7 @@ impl ManualPpsState {
             return true;
         };
         let point = self.capability_apdos.iter().flatten().find_map(|apdo| {
-            if confirmed_range.is_some_and(|range| {
+            if response.confirmed_range.is_some_and(|range| {
                 range.min_mv != apdo.min_mv
                     || range.max_mv != apdo.max_mv
                     || range.max_current_ma != apdo.max_ma
@@ -1493,11 +1629,17 @@ impl ManualPpsState {
             boundary.safe_point(
                 flux_purr_firmware::heater_supply::BoundaryQuery {
                     temperature_centi_c: round_to_i16(temp_c * 100.0),
+                    current_rtd_mv: response.current_rtd_mv,
+                    // Response validation checks the point that authorized the
+                    // confirmed contract. Promotion is only for constructing
+                    // the next request; using it here would compare the
+                    // current contract against the next point's VIN ratio.
+                    current_request_mv: None,
                     current_ma: contract_ma,
                     wifi_started,
                     source_min_mv: apdo.min_mv,
                     source_max_mv: apdo.max_mv,
-                    source_max_ma: apdo.max_ma,
+                    source_max_ma: apdo.max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA),
                 },
                 |raw| {
                     projected_rtd_temperature_c(memory_config, raw)

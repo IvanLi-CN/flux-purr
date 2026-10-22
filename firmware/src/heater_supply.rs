@@ -21,11 +21,24 @@ pub fn publish_wifi_hardware_state(started: Option<bool>) {
 }
 
 pub const MAX_BOUNDARY_POINTS: usize = 41;
-pub const BOUNDARY_FORMAT_VERSION: u8 = 1;
+// Version 2 deliberately invalidates boundaries produced by the earlier
+// lookup semantics. Old calibration is absent rather than silently reused.
+pub const BOUNDARY_FORMAT_VERSION: u8 = 2;
 pub const BOUNDARY_POINT_BYTES: usize = 11;
 pub const BOUNDARY_HEADER_BYTES: usize = 24;
 pub const BOUNDARY_MAX_BYTES: usize =
     BOUNDARY_HEADER_BYTES + MAX_BOUNDARY_POINTS * BOUNDARY_POINT_BYTES;
+// A persisted RTD point and a live RTD sample are rounded ADC millivolts.
+// Treat the adjacent two-code quantization band as the same edge, but never
+// carry a warmer observation farther than the existing 1 C equilibrium window.
+const MAX_QUANTIZED_RTD_DELTA_MV: u16 = 2;
+const MAX_QUANTIZED_TEMPERATURE_LEAD_CENTI_C: i32 = 100;
+// The compact 10 C scan bins are stored using rounded ADC temperatures. A
+// point near the lower edge of one bin can be followed by the next retained
+// point near the upper edge of the following bin, leaving a real cold-point
+// gap close to 18 C. Carry that colder proof through the bounded gap instead
+// of falling back to the unconstrained model; never use a warmer point.
+const MAX_OBSERVED_LOOKUP_GAP_CENTI_C: i16 = 1_800;
 
 #[path = "heater_supply_scan.rs"]
 pub mod scan;
@@ -92,6 +105,8 @@ impl Default for SupplyBoundary {
 #[derive(Clone, Copy, Debug)]
 pub struct BoundaryQuery {
     pub temperature_centi_c: i16,
+    pub current_rtd_mv: Option<u16>,
+    pub current_request_mv: Option<u16>,
     pub current_ma: u16,
     pub wifi_started: bool,
     pub source_min_mv: u16,
@@ -148,36 +163,100 @@ impl SupplyBoundary {
         {
             return None;
         }
-        // Only equilibrium/boundary observations can authorize an automatic
-        // voltage ceiling. A transient 3 A probe proves that the source
-        // tracked one request while the plate was moving, but it does not
-        // prove an upper boundary. Keep those points for coverage and trace
-        // diagnostics without turning their first low-voltage sample into a
-        // warm-up cap.
-        // A lower-current equilibrium must not clamp a full 3 A warm-up. If
-        // no qualified point exists at the full calibration current, let the
-        // caller use the preset electrical fallback instead.
+        // A 3 A tracking point is an observed safe full-conduction request,
+        // not a resistance estimate. It may authorize only its bounded
+        // colder-to-warmer storage-bucket interval; lower-current observations
+        // must not clamp a full 3 A contract. This lets the compact calibration
+        // scan provide continuous warm-up coverage without falling back to a
+        // lower theoretical voltage at every lookup gap.
         let current_class = self.points[..usize::from(self.point_count)]
             .iter()
-            .filter(|point| !point.tracking_only && point.request_current_ma <= query.current_ma)
+            .filter(|point| {
+                point.request_current_ma <= query.current_ma
+                    && (!point.tracking_only
+                        || (query.current_ma >= 3_000 && point.request_current_ma == 3_000))
+            })
             .map(|point| point.request_current_ma)
             .max()?;
         if query.current_ma >= 3_000 && current_class < 3_000 {
             return None;
         }
-        self.points[..usize::from(self.point_count)]
+        // The compact recorder keeps one transient point per 10 C bucket. A
+        // strict one-degree lookup would therefore fall back to the preset
+        // model for most of the warm-up and periodically drop the requested
+        // voltage. Carry the closest colder observation through the next
+        // bucket and its rounded-ADC edge. Once the confirmed request has
+        // reached that tracking point, promote exactly one next observed 3 A
+        // point within the same bounded window; this is a measured staircase,
+        // not a resistance extrapolation.
+        let mut selected: Option<(BoundaryPoint, i16)> = None;
+        for point in self.points[..usize::from(self.point_count)]
             .iter()
             .copied()
-            .filter(|point| !point.tracking_only && point.request_current_ma == current_class)
             .filter(|point| {
-                // A retained sample covers its observed 1 C window only.
-                // Extending an old low-voltage probe through all warmer
-                // temperatures would turn missing coverage into a power cap.
-                project_temperature(point.rtd_mv).is_some_and(|temp| {
-                    (temp..=temp.saturating_add(100)).contains(&query.temperature_centi_c)
-                })
+                point.request_current_ma == current_class
+                    && (!point.tracking_only
+                        || (query.current_ma >= 3_000 && point.request_current_ma == 3_000))
             })
-            .max_by_key(|point| point.tracking_request_mv)
+        {
+            let Some(point_temperature) = project_temperature(point.rtd_mv) else {
+                continue;
+            };
+            let temperature_gap =
+                i32::from(query.temperature_centi_c) - i32::from(point_temperature);
+            let adjacent_quantized_rtd = query.current_rtd_mv.is_some_and(|current_rtd_mv| {
+                point.rtd_mv > current_rtd_mv
+                    && point.rtd_mv - current_rtd_mv <= MAX_QUANTIZED_RTD_DELTA_MV
+                    && temperature_gap >= -MAX_QUANTIZED_TEMPERATURE_LEAD_CENTI_C
+            });
+            if !(0..=i32::from(MAX_OBSERVED_LOOKUP_GAP_CENTI_C)).contains(&temperature_gap)
+                && !adjacent_quantized_rtd
+            {
+                continue;
+            }
+            if selected.is_none_or(|(previous, previous_temperature)| {
+                point_temperature > previous_temperature
+                    || (point_temperature == previous_temperature
+                        && point.tracking_request_mv > previous.tracking_request_mv)
+            }) {
+                selected = Some((point, point_temperature));
+            }
+        }
+        let (selected_point, selected_temperature) = selected?;
+        if selected_point.tracking_only
+            && query.current_request_mv.is_some_and(|current_request_mv| {
+                current_request_mv >= selected_point.tracking_request_mv
+            })
+        {
+            let current_request_mv = query.current_request_mv.unwrap_or_default();
+            let next_point = self.points[..usize::from(self.point_count)]
+                .iter()
+                .copied()
+                .filter(|point| {
+                    point.tracking_only
+                        && point.request_current_ma == current_class
+                        && point.tracking_request_mv > selected_point.tracking_request_mv
+                        && point.tracking_request_mv >= current_request_mv
+                })
+                .filter_map(|point| {
+                    let temperature = project_temperature(point.rtd_mv)?;
+                    let gap = i32::from(temperature) - i32::from(query.temperature_centi_c);
+                    (temperature > selected_temperature
+                        && (0..=i32::from(MAX_OBSERVED_LOOKUP_GAP_CENTI_C)).contains(&gap))
+                    .then_some((temperature, point))
+                })
+                .min_by_key(|(temperature, point)| (*temperature, point.tracking_request_mv));
+            if let Some((_, next_point)) = next_point {
+                return Some(next_point);
+            }
+            if current_request_mv > selected_point.tracking_request_mv {
+                // A request above the selected point needs its own observed
+                // authorization; never silently step it down through an
+                // unrelated colder observation.
+                return None;
+            }
+        }
+        Some(selected_point)
     }
 
     pub fn safe_request_mv(
@@ -187,6 +266,55 @@ impl SupplyBoundary {
     ) -> Option<u16> {
         self.safe_point(query, project_temperature)
             .map(|point| point.tracking_request_mv)
+    }
+
+    /// Keep a valid boundary fail-closed before its first observed temperature.
+    /// The coldest retained tracking point is the lower edge of the measured
+    /// envelope; using that observed voltage avoids both the unconstrained
+    /// resistance model and a lower APDO floor that the relative VIN guard
+    /// cannot validate during cold startup.
+    pub fn safe_request_mv_or_cold_start(
+        &self,
+        query: BoundaryQuery,
+        mut project_temperature: impl FnMut(u16) -> Option<i16>,
+    ) -> Option<u16> {
+        if let Some(request_mv) = self.safe_request_mv(query, &mut project_temperature) {
+            return Some(request_mv);
+        }
+        if !self.is_valid()
+            || self.wifi_started != query.wifi_started
+            || self.advertised_min_mv != query.source_min_mv
+            || self.advertised_max_mv != query.source_max_mv
+            || self.source_max_ma != query.source_max_ma
+        {
+            return None;
+        }
+        let current_class = self.points[..usize::from(self.point_count)]
+            .iter()
+            .filter(|point| {
+                point.request_current_ma <= query.current_ma
+                    && (!point.tracking_only
+                        || (query.current_ma >= 3_000 && point.request_current_ma == 3_000))
+            })
+            .map(|point| point.request_current_ma)
+            .max()?;
+        if query.current_ma >= 3_000 && current_class < 3_000 {
+            return None;
+        }
+        let (coldest_temperature, coldest_point) = self.points[..usize::from(self.point_count)]
+            .iter()
+            .copied()
+            .filter(|point| {
+                point.request_current_ma == current_class
+                    && (!point.tracking_only
+                        || (query.current_ma >= 3_000 && point.request_current_ma == 3_000))
+            })
+            .filter_map(|point| {
+                project_temperature(point.rtd_mv).map(|temperature| (temperature, point))
+            })
+            .min_by_key(|(temperature, point)| (*temperature, point.tracking_request_mv))?;
+        (query.temperature_centi_c < coldest_temperature)
+            .then_some(coldest_point.tracking_request_mv.max(query.source_min_mv))
     }
 
     /// Compare raw ADC response with a retained tracking observation. This is

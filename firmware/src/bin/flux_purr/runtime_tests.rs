@@ -1232,7 +1232,7 @@ fn advertised_apdo_identity_does_not_relax_the_product_request_bounds() {
     let candidate = manual
         .automatic_heater_pps_candidate(25.0, None, &MemoryConfig::default(), None)
         .unwrap();
-    assert_eq!(candidate.current_ma, 5_000);
+    assert_eq!(candidate.current_ma, 3_000);
     let request = manual
         .automatic_heater_request_contract(
             25.0,
@@ -7660,7 +7660,7 @@ fn assert_boundary_warmup_reaches_cutoff(config: &MemoryConfig, manual: &ManualP
         let raw = runtime_test_raw_rtd_adc_mv_for_temp(temperature);
         let projected = projected_rtd_temperature_c(config, raw).unwrap();
         let candidate = manual
-            .automatic_heater_pps_candidate(projected, None, config, None)
+            .automatic_heater_pps_candidate_with_rtd(projected, None, config, None, Some(raw))
             .unwrap();
         let resistance = default_estimated_heater_resistance_ohms(temperature);
         let current = f32::from(candidate.current_ma) / 1_000.0;
@@ -13939,7 +13939,7 @@ fn automatic_full_power_reaches_the_quantized_voltage_ceiling_and_full_conductio
 }
 
 #[test]
-fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
+fn automatic_heater_policy_caps_the_apdo_budget_at_three_amps() {
     let apdos = [
         Some(ch224q::PpsApdo {
             min_mv: 5_000,
@@ -13962,9 +13962,9 @@ fn automatic_heater_policy_uses_per_apdo_budget_and_watt_units() {
         None,
     )
     .expect("3.25 A APDO leaves a safe automatic range");
-    assert_eq!(candidate.current_ma, 3_250);
-    assert_eq!(candidate.allowed_mv, 10_400);
-    assert!((33_000..=34_000).contains(&candidate.power_mw));
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 9_600);
+    assert_eq!(candidate.power_mw, 28_800);
     assert_eq!(
         heater_available_power_mw_for_temp(
             20.0,
@@ -14018,6 +14018,198 @@ fn automatic_heater_policy_accepts_exact_3a_apdo_budget() {
 }
 
 #[test]
+fn automatic_heater_pps_request_ramps_large_voltage_changes() {
+    assert_eq!(
+        automatic_heater_step_request_mv(8_400, 10_300, 5_500, 10_300),
+        8_900
+    );
+    assert_eq!(
+        automatic_heater_step_request_mv(8_900, 7_700, 5_500, 10_300),
+        8_400
+    );
+    assert_eq!(
+        automatic_heater_step_request_mv(12_000, 7_700, 5_500, 7_700),
+        7_700
+    );
+}
+
+#[test]
+fn automatic_heater_observed_three_amp_boundary_can_raise_the_preset_ceiling() {
+    let candidate = automatic_heater_pps_candidate_with_limit(
+        ch224q::PpsApdo {
+            min_mv: 5_500,
+            max_mv: 21_000,
+            max_ma: 3_000,
+        },
+        5_500,
+        21_000,
+        HEATER_ADJUSTABLE_MAX_MV,
+        3.2,
+        0,
+        Some(18_000),
+    )
+    .expect("the observed 3 A tracking boundary is usable");
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 18_000);
+    assert_eq!(candidate.power_mw, 101_250);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
+fn automatic_heater_boundary_uses_encoded_budget_for_five_amp_apdo() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 5_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_ma: 5_000,
+    });
+    let mut boundary = synthetic_supply_boundary();
+    boundary.source_max_mv = 21_000;
+    boundary.advertised_max_mv = 21_000;
+    assert!(boundary.is_valid());
+    let projected_boundary_temperature =
+        projected_rtd_temperature_c(&MemoryConfig::default(), boundary.points[0].rtd_mv)
+            .expect("synthetic boundary point projects to a temperature");
+    assert!((projected_boundary_temperature - 100.0).abs() < 0.3);
+    let observed_limit = boundary.safe_request_mv(
+        flux_purr_firmware::heater_supply::BoundaryQuery {
+            temperature_centi_c: 10_100,
+            current_rtd_mv: None,
+            current_request_mv: None,
+            current_ma: 3_000,
+            wifi_started: false,
+            source_min_mv: 5_000,
+            source_max_mv: 21_000,
+            source_max_ma: 3_000,
+        },
+        |raw| {
+            projected_rtd_temperature_c(&MemoryConfig::default(), raw)
+                .map(|temperature| round_to_i16(temperature * 100.0))
+        },
+    );
+    assert_eq!(observed_limit, Some(10_000));
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let candidate = manual
+        .automatic_heater_pps_candidate(101.0, None, &config, None)
+        .expect("encoded 3 A budget keeps the calibrated boundary usable");
+
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 10_000);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
+fn automatic_heater_boundary_matches_a_raw_apdo_below_the_fusb_floor() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 5_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 5_000,
+    });
+    let mut boundary = synthetic_supply_boundary();
+    boundary.source_max_mv = 20_000;
+    boundary.advertised_min_mv = 3_300;
+    boundary.advertised_max_mv = 21_000;
+    boundary.points[0].rtd_mv = runtime_test_raw_rtd_adc_mv_for_temp(60.0);
+    boundary.points[0].tracking_request_mv = 9_200;
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let candidate = manual
+        .automatic_heater_pps_candidate(68.0, None, &config, None)
+        .expect("the persisted 3 A boundary should cover the next colder bucket");
+
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 9_200);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
+fn automatic_heater_boundary_uses_coldest_observed_floor_before_first_observation() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 5_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 5_000,
+    });
+    let mut boundary = synthetic_supply_boundary();
+    boundary.advertised_min_mv = 3_300;
+    boundary.advertised_max_mv = 21_000;
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let candidate = manual
+        .automatic_heater_pps_candidate(25.0, None, &config, None)
+        .expect("a valid boundary must keep cold startup inside the observed safe floor");
+
+    assert_eq!(candidate.allowed_mv, 10_000);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
+fn automatic_heater_boundary_carries_the_colder_point_across_a_rounded_bin_edge() {
+    let mut manual = thermal_plant_job_manual_pps(21_000, 5_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 5_000,
+    });
+    let mut boundary = synthetic_supply_boundary();
+    boundary.source_max_mv = 20_000;
+    boundary.advertised_min_mv = 3_300;
+    boundary.advertised_max_mv = 21_000;
+    boundary.points[0].rtd_mv = runtime_test_raw_rtd_adc_mv_for_temp(137.6);
+    boundary.points[0].tracking_request_mv = 18_300;
+    boundary.points[0].flat_request_mv = 0;
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let candidate = manual
+        .automatic_heater_pps_candidate(148.3, None, &config, None)
+        .expect("the colder observed point covers the rounded bin edge");
+
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 18_300);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
+fn automatic_heater_boundary_uses_the_adjacent_live_rtd_quantization_edge() {
+    let manual = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut boundary = synthetic_supply_boundary();
+    boundary.points[0].rtd_mv = 1_307;
+    boundary.points[0].tracking_request_mv = 18_800;
+    boundary.points[0].flat_request_mv = 0;
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let candidate = manual
+        .automatic_heater_pps_candidate_with_rtd(159.64, None, &config, None, Some(1_306))
+        .expect("the adjacent persisted RTD code should keep the next safe voltage");
+
+    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.allowed_mv, 18_800);
+    assert!(candidate.boundary_applied);
+}
+
+#[test]
 fn automatic_heater_pps_selection_keeps_the_current_apdo_on_a_power_tie() {
     let apdos = [
         Some(ch224q::PpsApdo {
@@ -14058,7 +14250,7 @@ fn automatic_heater_fixed_fallback_uses_only_advertised_safe_contracts() {
     let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
         .expect("the advertised 9 V fixed PDO is safe under the preset load model");
     assert_eq!(request, ch224q::VoltageRequest::V9);
-    assert_eq!(request_ma, 3_250);
+    assert_eq!(request_ma, 3_000);
 
     source.fixed[1] = Some((9_000, 3_000));
     let (request, request_ma) = automatic_heater_fixed_request(source, 2.8)

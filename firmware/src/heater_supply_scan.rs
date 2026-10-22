@@ -2,7 +2,10 @@ use super::{BoundaryPoint, EquilibriumWindow, SupplyBoundary};
 
 const SETTLE_MS: u32 = 1_000;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
-const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 10_000;
+const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
+// Finish lower-current thermal stages early enough to establish the required
+// 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
+const LOWER_CURRENT_STAGE_EXIT_CENTI_C: i16 = 18_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanPhase {
@@ -192,17 +195,26 @@ impl SupplyScan {
             self.stability_temperature_centi_c(input.temperature_centi_c);
         if input.wifi_started != self.boundary.wifi_started {
             self.fail(ScanFailure::WifiChanged);
-        } else if input.temperature_centi_c >= 22_000 {
-            self.cutoff_reached = true;
-            self.boundary.cutoff_reached = true;
-            self.retain_tracking();
-            self.phase = ScanPhase::Complete;
         } else if input.rtd_mv == 0
             || input.vin_mv == 0
             || input.rtd_code > 4_095
             || input.vin_code > 4_095
         {
             self.fail(ScanFailure::InvalidSample);
+        } else if input.temperature_centi_c >= 22_000 {
+            self.cutoff_reached = true;
+            self.boundary.cutoff_reached = true;
+            self.retain_tracking();
+            self.phase = ScanPhase::Complete;
+        } else if input.temperature_centi_c >= LOWER_CURRENT_STAGE_EXIT_CENTI_C
+            && self.request_ma < 3_000
+            && !self.normal_probe
+        {
+            // Lower-current stages describe the thermal response, but the
+            // automatic safety boundary must also cover the hot end at the
+            // actual 3 A contract. Move to that contract before the cutoff
+            // can terminate the lower-current stage.
+            self.begin_three_amp_probe(input);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
             self.handle_stage_timeout(input);
         } else if self.normal_probe
@@ -267,30 +279,55 @@ impl SupplyScan {
     }
 
     fn preflight(&mut self, input: ScanInput) {
-        if let Some(previous) = self.previous
-            && u32::from(input.vin_mv) * 100 < u32::from(previous.vin_mv) * 99
-        {
-            // A current-loop knee can cross the baseline floor in one step.
-            // Unload before restoring the last proven tracking current.
-            self.change(input, self.boundary.source_min_mv, self.request_ma + 100);
-            self.phase = ScanPhase::PreflightRecovery;
-            self.previous = None;
-            self.stage_started_ms = input.now_ms;
-            return;
-        }
         // Without a proven tracking current there is no safe recovery target.
         // Relative ADC response only: no conversion into a fictitious true VIN.
         if u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90 {
             self.fail(ScanFailure::SupplyUnstable);
             return;
         }
-        if self.request_ma == 1_000 {
+        if let Some(previous) = self.previous {
+            if u32::from(input.vin_mv) * 100 < u32::from(previous.vin_mv) * 99 {
+                // A current-loop knee during the 3 A preflight has no safe
+                // lower-current interpretation. Fail closed before any
+                // lower-current equilibrium is recorded.
+                self.fail(ScanFailure::SupplyUnstable);
+                return;
+            }
+            // The 3 A preflight proves that this APDO can carry the product's
+            // automatic-heater contract. Lower-current equilibrium stages are
+            // thermal-model evidence only; automatic limits continue to use
+            // the separate 3 A tracking observations.
+            self.request_ma = 1_000;
             self.phase = ScanPhase::Sweep;
             self.previous = None;
+            self.normal_probe = false;
+            self.last_tracking = None;
+            self.flat_request_mv = 0;
+            self.flat_count = 0;
+            self.ambiguous_count = 0;
+            self.equilibrium.reset();
+            self.stage_started_ms = input.now_ms;
+            self.change(input, self.boundary.source_min_mv, self.request_ma);
         } else {
+            // Hold the confirmed 3 A floor for one more settled sample before
+            // beginning the 1.0 A thermal-model stage.
             self.previous = Some(input);
-            self.change(input, self.request_mv, self.request_ma - 100);
+            self.changed_at_ms = input.now_ms;
         }
+    }
+
+    fn begin_three_amp_probe(&mut self, input: ScanInput) {
+        self.normal_probe = true;
+        self.normal_probe_started_ms = input.now_ms;
+        self.return_current_ma = (self.request_ma + 100).min(3_000);
+        self.phase = ScanPhase::Sweep;
+        self.previous = None;
+        self.last_tracking = None;
+        self.flat_count = 0;
+        self.ambiguous_count = 0;
+        self.flat_request_mv = 0;
+        self.stage_started_ms = input.now_ms;
+        self.change(input, self.request_mv, 3_000);
     }
 
     fn sweep(&mut self, input: ScanInput) {
@@ -431,16 +468,7 @@ impl SupplyScan {
             if self.request_ma == 3_000 {
                 self.finish_three_amp_equilibrium(input);
             } else {
-                self.normal_probe = true;
-                self.normal_probe_started_ms = input.now_ms;
-                self.return_current_ma = self.request_ma + 100;
-                self.phase = ScanPhase::Sweep;
-                self.previous = None;
-                self.last_tracking = None;
-                self.flat_count = 0;
-                self.flat_request_mv = 0;
-                self.stage_started_ms = input.now_ms;
-                self.change(input, self.request_mv, 3_000);
+                self.begin_three_amp_probe(input);
             }
         } else if self.previous.is_some_and(|previous| {
             i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c) > 100

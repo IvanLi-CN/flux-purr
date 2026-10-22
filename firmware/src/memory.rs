@@ -849,10 +849,14 @@ pub fn thermal_plant_transient_transaction_has_valid_structure(
             }
         } else if sample.duty_percent == 0 {
             // A zero-duty gap during the supply scan remains a heating sample.
-        } else if sample.duty_percent == 100
-            && sample.heater_voltage_125mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV
-        {
-            powered_sample_count = powered_sample_count.saturating_add(1);
+        } else if sample.duty_percent == 100 && sample.heater_voltage_125mv > 0 {
+            // Low-current calibration stages can produce a valid full-duty
+            // observation below the high-power evidence floor. Keep it in
+            // the transient fit, but count only samples above the floor
+            // toward the minimum powered coverage requirement.
+            if sample.heater_voltage_125mv >= THERMAL_PLANT_TRANSIENT_MIN_HEATER_VOLTAGE_125MV {
+                powered_sample_count = powered_sample_count.saturating_add(1);
+            }
             peak_raw_rtd_adc_mv = peak_raw_rtd_adc_mv.max(sample.raw_rtd_adc_mv);
         } else {
             return false;
