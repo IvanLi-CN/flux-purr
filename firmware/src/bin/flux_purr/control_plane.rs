@@ -2290,6 +2290,12 @@ fn thermal_scan_recorded_duty(
     pd_confirmed: bool,
     physical_percent: u8,
 ) -> u8 {
+    if !heater_enabled {
+        // Probe recovery requests the next contract only after the current
+        // heater output is forced off. Do not persist the previous frame's
+        // full-conduction duty as if it belonged to the recovery interval.
+        return 0;
+    }
     let established_conduction = matches!(
         previous_phase,
         flux_purr_firmware::heater_supply::scan::ScanPhase::Sweep

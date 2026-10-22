@@ -15,6 +15,7 @@ pub enum ScanPhase {
     Sweep,
     TemperatureSettle,
     Equilibrium,
+    ProbeRecovery,
     Complete,
     Failed,
 }
@@ -28,6 +29,7 @@ impl ScanPhase {
             Self::Sweep => "sweep",
             Self::TemperatureSettle => "temperature_settle",
             Self::Equilibrium => "equilibrium",
+            Self::ProbeRecovery => "probe_recovery",
             Self::Complete => "complete",
             Self::Failed => "failed",
         }
@@ -240,7 +242,10 @@ impl SupplyScan {
     fn advance(&mut self, input: ScanInput) {
         if !matches!(
             self.phase,
-            ScanPhase::Baseline | ScanPhase::Preflight | ScanPhase::PreflightRecovery
+            ScanPhase::Baseline
+                | ScanPhase::Preflight
+                | ScanPhase::PreflightRecovery
+                | ScanPhase::ProbeRecovery
         ) && input.physical_percent != 100
         {
             self.changed_at_ms = input.now_ms;
@@ -263,6 +268,14 @@ impl SupplyScan {
                     self.fail(ScanFailure::SupplyUnstable);
                 } else {
                     self.phase = ScanPhase::Sweep;
+                    self.changed_at_ms = input.now_ms;
+                }
+            }
+            ScanPhase::ProbeRecovery => {
+                if input.physical_percent == 0 && input.confirmed {
+                    self.phase = ScanPhase::Sweep;
+                    self.changed_at_ms = input.now_ms;
+                } else {
                     self.changed_at_ms = input.now_ms;
                 }
             }
@@ -542,7 +555,7 @@ impl SupplyScan {
 
     fn finish_normal_probe(&mut self, input: ScanInput) {
         self.normal_probe = false;
-        self.phase = ScanPhase::Sweep;
+        self.phase = ScanPhase::ProbeRecovery;
         self.previous = None;
         self.last_tracking = None;
         self.flat_count = 0;
@@ -755,11 +768,26 @@ mod tests {
             vin_mv: 15_000,
         });
 
-        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert!(!scan.normal_probe);
         assert_eq!(finished.request_mv, 12_300);
         assert_eq!(finished.request_ma, 2_400);
-        assert!(finished.heater_enabled);
+        assert!(!finished.heater_enabled);
+
+        let recovered = scan.update(ScanInput {
+            now_ms: 11_000,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 0,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_500,
+            vin_mv: 15_000,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert!(recovered.heater_enabled);
     }
 
     #[test]
