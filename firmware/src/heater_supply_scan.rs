@@ -3,6 +3,7 @@ use super::{BoundaryPoint, EquilibriumWindow, MIN_HEATED_CURRENT_MA, SupplyBound
 const SETTLE_MS: u32 = 1_000;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
 const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
+const PROBE_RECOVERY_STEP_MV: u16 = 500;
 // Finish lower-current thermal stages early enough to establish the required
 // 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
 const LOWER_CURRENT_STAGE_EXIT_CENTI_C: i16 = 18_000;
@@ -273,8 +274,19 @@ impl SupplyScan {
             }
             ScanPhase::ProbeRecovery => {
                 if input.physical_percent == 0 && input.confirmed {
-                    self.phase = ScanPhase::Sweep;
-                    self.changed_at_ms = input.now_ms;
+                    let return_request_mv = self.return_request_mv.max(self.boundary.source_min_mv);
+                    if self.request_mv != return_request_mv {
+                        self.change(
+                            input,
+                            self.request_mv
+                                .saturating_sub(PROBE_RECOVERY_STEP_MV)
+                                .max(return_request_mv),
+                            self.return_current_ma,
+                        );
+                    } else {
+                        self.phase = ScanPhase::Sweep;
+                        self.changed_at_ms = input.now_ms;
+                    }
                 } else {
                     self.changed_at_ms = input.now_ms;
                 }
@@ -561,11 +573,10 @@ impl SupplyScan {
         self.flat_count = 0;
         self.flat_request_mv = 0;
         self.stage_started_ms = input.now_ms;
-        self.change(
-            input,
-            self.return_request_mv.max(self.boundary.source_min_mv),
-            self.return_current_ma,
-        );
+        // Change current at the source ceiling while the heater is already
+        // off. Only then step the unloaded contract down toward the prior
+        // safe voltage, avoiding a loaded 20 V to low-voltage PD transition.
+        self.change(input, self.boundary.source_max_mv, self.return_current_ma);
     }
 
     fn retain_normal_tracking(&mut self, input: ScanInput) {
@@ -770,23 +781,32 @@ mod tests {
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert!(!scan.normal_probe);
-        assert_eq!(finished.request_mv, 12_300);
+        assert_eq!(finished.request_mv, 20_000);
         assert_eq!(finished.request_ma, 2_400);
         assert!(!finished.heater_enabled);
 
-        let recovered = scan.update(ScanInput {
-            now_ms: 11_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 0,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 15_000,
-        });
+        let mut recovered = finished;
+        for step in 1..=17 {
+            recovered = scan.update(ScanInput {
+                now_ms: 10_000 + step * 1_000,
+                temperature_centi_c: 10_000,
+                wifi_started: false,
+                confirmed: true,
+                physical_percent: 0,
+                rtd_code: 1_000,
+                rtd_mv: 1_000,
+                vin_code: 1_500,
+                vin_mv: 15_000,
+            });
+            if step < 17 {
+                assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
+                assert!(!recovered.heater_enabled);
+            }
+        }
 
         assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(recovered.request_mv, 12_300);
+        assert_eq!(recovered.request_ma, 2_400);
         assert!(recovered.heater_enabled);
     }
 
