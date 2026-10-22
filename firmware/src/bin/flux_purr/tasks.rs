@@ -342,7 +342,17 @@ where
             context.manual_pps.applied_mv = confirmed_mv;
         }
         _ => {
-            context.manual_pps.fail(ManualPpsError::WriteFailed);
+            let source_capability_refresh = context.manual_pps.owner == ManualPpsOwner::Calibration
+                && context.pd_port.controller_kind() == ControllerKind::Fusb302b
+                && context.pd_port.snapshot().capabilities.is_none()
+                && fusb302b_capability_refresh_is_transient();
+            if source_capability_refresh {
+                context
+                    .manual_pps
+                    .hold_calibration_intent_for_capability_refresh();
+            } else {
+                context.manual_pps.fail(ManualPpsError::WriteFailed);
+            }
             apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
         }
     }

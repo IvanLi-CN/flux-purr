@@ -30,6 +30,17 @@ pub(crate) fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+pub(crate) fn fusb302b_capability_refresh_is_transient() -> bool {
+    matches!(
+        fusb302b_degraded_reason(),
+        "pd_fusb_source_caps_gcrc_seen"
+            | "pd_fusb_source_caps_requested"
+            | "pd_fusb_phy_recovering"
+    )
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn fusb302b_identity_degraded_reason()
 -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
     let diagnostic = FUSB302B_IDENTITY_DIAGNOSTIC.load(Ordering::Acquire);
@@ -1838,6 +1849,15 @@ impl ManualPpsState {
             refreshed.applied_mv = None;
         }
         *self = refreshed;
+    }
+
+    pub(crate) fn hold_calibration_intent_for_capability_refresh(&mut self) {
+        self.pending_power_ticket = None;
+        self.pending_power_request_mv = None;
+        self.applied_mv = None;
+        self.error = None;
+        self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
     }
 
     pub(crate) fn clear(&mut self) {

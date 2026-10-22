@@ -83,6 +83,16 @@ fn power_state_observation(state: PowerState) -> Option<PdStatusObservation> {
     state.observation()
 }
 
+#[cfg(target_arch = "xtensa")]
+fn calibration_fusb_capability_refresh_pending(state: &RuntimeLoopState) -> bool {
+    state.calibration_runtime_state.mode == CalibrationMode::ThermalPlant
+        && state.manual_pps_state.enabled
+        && state.manual_pps_state.owner == ManualPpsOwner::Calibration
+        && state.pd_port.controller_kind() == ControllerKind::Fusb302b
+        && state.pd_port.capabilities().is_none()
+        && fusb302b_capability_refresh_is_transient()
+}
+
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn tuning_interlock_reason(
     pd_ready: bool,
@@ -303,6 +313,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
             state.manual_pps_state,
         ),
     );
+    let calibration_capability_refresh_pending = calibration_fusb_capability_refresh_pending(state);
     needs_redraw |= apply_pd_contract_observation(
         current_pd_observation,
         &mut state.pd_contract_ready,
@@ -312,7 +323,8 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         (&mut state.heater_pwm, &mut state.last_heater_duty),
         state.pending_automatic_power_request.is_some()
             || pd_contract_transition_in_progress(state.power_state)
-            || automatic_pps_start_allowed,
+            || automatic_pps_start_allowed
+            || calibration_capability_refresh_pending,
     );
     match tuning_power_decision {
         Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
@@ -1049,6 +1061,7 @@ pub(crate) async fn runtime_reconcile_network_state(
             state.manual_pps_state,
         ),
     );
+    let calibration_capability_refresh_pending = calibration_fusb_capability_refresh_pending(state);
     needs_redraw |= apply_pd_contract_observation(
         state.last_pd_observation,
         &mut state.pd_contract_ready,
@@ -1058,7 +1071,8 @@ pub(crate) async fn runtime_reconcile_network_state(
         (&mut state.heater_pwm, &mut state.last_heater_duty),
         state.pending_automatic_power_request.is_some()
             || pd_contract_transition_in_progress(state.power_state)
-            || automatic_pps_start_allowed,
+            || automatic_pps_start_allowed
+            || calibration_capability_refresh_pending,
     );
 
     needs_redraw |= disarm_pending_thermal_plant_output(ThermalPlantDisarmContext {
@@ -3491,6 +3505,8 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
                 state.manual_pps_state,
             ),
         );
+        let calibration_capability_refresh_pending =
+            calibration_fusb_capability_refresh_pending(state);
         let pd_redraw_after_flush = apply_pd_contract_observation(
             state.last_pd_observation,
             &mut state.pd_contract_ready,
@@ -3500,7 +3516,8 @@ pub(crate) async fn runtime_refresh_display(state: &mut RuntimeLoopState, elapse
             (&mut state.heater_pwm, &mut state.last_heater_duty),
             state.pending_automatic_power_request.is_some()
                 || pd_contract_transition_in_progress(state.power_state)
-                || automatic_pps_start_allowed,
+                || automatic_pps_start_allowed
+                || calibration_capability_refresh_pending,
         );
         state.ui_refresh_pending = pd_redraw_after_flush;
         match display_flush_result {
