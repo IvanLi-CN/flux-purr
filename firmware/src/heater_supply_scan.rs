@@ -1,4 +1,4 @@
-use super::{BoundaryPoint, EquilibriumWindow, SupplyBoundary};
+use super::{BoundaryPoint, EquilibriumWindow, MIN_HEATED_CURRENT_MA, SupplyBoundary};
 
 const SETTLE_MS: u32 = 1_000;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
@@ -86,6 +86,7 @@ pub struct SupplyScan {
     changed_at_ms: u32,
     stage_started_ms: u32,
     baseline_vin_mv: u16,
+    baseline_request_mv: u16,
     previous: Option<ScanInput>,
     last_tracking: Option<BoundaryPoint>,
     flat_request_mv: u16,
@@ -111,8 +112,11 @@ impl SupplyScan {
         boundary.point_count = 0;
         boundary.cutoff_reached = false;
         boundary.points.fill(BoundaryPoint::default());
+        // Prove the 3 A contract at the highest power-safe voltage first.
+        // Starting at the PPS floor can leave the board in a low-voltage
+        // current loop before the scan has established a usable contract.
         Some(Self {
-            request_mv: boundary.source_min_mv,
+            request_mv: boundary.source_max_mv,
             request_ma: 3_000,
             boundary,
             phase: ScanPhase::Baseline,
@@ -121,6 +125,7 @@ impl SupplyScan {
             changed_at_ms: 0,
             stage_started_ms: 0,
             baseline_vin_mv: 0,
+            baseline_request_mv: boundary.source_max_mv,
             previous: None,
             last_tracking: None,
             flat_request_mv: 0,
@@ -141,10 +146,7 @@ impl SupplyScan {
             request_ma: self.request_ma,
             heater_enabled: matches!(
                 self.phase,
-                ScanPhase::Preflight
-                    | ScanPhase::Sweep
-                    | ScanPhase::TemperatureSettle
-                    | ScanPhase::Equilibrium
+                ScanPhase::Sweep | ScanPhase::TemperatureSettle | ScanPhase::Equilibrium
             ),
         }
     }
@@ -236,7 +238,7 @@ impl SupplyScan {
     fn advance(&mut self, input: ScanInput) {
         if !matches!(
             self.phase,
-            ScanPhase::Baseline | ScanPhase::PreflightRecovery
+            ScanPhase::Baseline | ScanPhase::Preflight | ScanPhase::PreflightRecovery
         ) && input.physical_percent != 100
         {
             self.changed_at_ms = input.now_ms;
@@ -249,14 +251,13 @@ impl SupplyScan {
                     return;
                 }
                 self.baseline_vin_mv = input.vin_mv;
+                self.baseline_request_mv = self.request_mv;
                 self.phase = ScanPhase::Preflight;
                 self.changed_at_ms = input.now_ms;
             }
             ScanPhase::Preflight => self.preflight(input),
             ScanPhase::PreflightRecovery => {
-                if input.physical_percent != 0
-                    || u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90
-                {
+                if input.physical_percent != 0 || input.vin_mv < self.preflight_min_vin_mv() {
                     self.fail(ScanFailure::SupplyUnstable);
                 } else {
                     self.phase = ScanPhase::Sweep;
@@ -279,17 +280,19 @@ impl SupplyScan {
     }
 
     fn preflight(&mut self, input: ScanInput) {
-        // Without a proven tracking current there is no safe recovery target.
-        // Relative ADC response only: no conversion into a fictitious true VIN.
-        if u32::from(input.vin_mv) * 100 < u32::from(self.baseline_vin_mv) * 90 {
+        // The high-voltage 3 A contract is established with the heater off;
+        // full-conduction load validation happens in the bounded 3 A probes.
+        // Keep the scaled floor guard so an unloaded source collapse still
+        // fails closed before the first heated stage.
+        if input.vin_mv < self.preflight_min_vin_mv() {
             self.fail(ScanFailure::SupplyUnstable);
             return;
         }
         if let Some(previous) = self.previous {
             if u32::from(input.vin_mv) * 100 < u32::from(previous.vin_mv) * 99 {
-                // A current-loop knee during the 3 A preflight has no safe
+                // A falling unloaded VIN during preflight has no safe
                 // lower-current interpretation. Fail closed before any
-                // lower-current equilibrium is recorded.
+                // heated equilibrium is recorded.
                 self.fail(ScanFailure::SupplyUnstable);
                 return;
             }
@@ -297,7 +300,7 @@ impl SupplyScan {
             // automatic-heater contract. Lower-current equilibrium stages are
             // thermal-model evidence only; automatic limits continue to use
             // the separate 3 A tracking observations.
-            self.request_ma = 1_000;
+            self.request_ma = MIN_HEATED_CURRENT_MA;
             self.phase = ScanPhase::Sweep;
             self.previous = None;
             self.normal_probe = false;
@@ -310,10 +313,21 @@ impl SupplyScan {
             self.change(input, self.boundary.source_min_mv, self.request_ma);
         } else {
             // Hold the confirmed 3 A floor for one more settled sample before
-            // beginning the 1.0 A thermal-model stage.
+            // beginning the 2.0 A minimum heated thermal-model stage.
             self.previous = Some(input);
             self.changed_at_ms = input.now_ms;
         }
+    }
+
+    fn preflight_min_vin_mv(&self) -> u16 {
+        let request_mv = self.baseline_request_mv.max(1);
+        let scaled_floor = u32::from(self.baseline_vin_mv)
+            .saturating_mul(u32::from(self.boundary.source_min_mv))
+            / u32::from(request_mv);
+        scaled_floor
+            .saturating_mul(90)
+            .div_ceil(100)
+            .min(u32::from(u16::MAX)) as u16
     }
 
     fn begin_three_amp_probe(&mut self, input: ScanInput) {
@@ -327,7 +341,11 @@ impl SupplyScan {
         self.ambiguous_count = 0;
         self.flat_request_mv = 0;
         self.stage_started_ms = input.now_ms;
-        self.change(input, self.request_mv, 3_000);
+        // Every full-conduction 3 A probe uses the same high-voltage,
+        // power-safe contract as preflight. Returning to 3 A at a low
+        // voltage can put the source back into its current loop and reset the
+        // board before the probe establishes a boundary point.
+        self.change(input, self.boundary.source_max_mv, 3_000);
     }
 
     fn sweep(&mut self, input: ScanInput) {
@@ -344,7 +362,7 @@ impl SupplyScan {
         // voltage that provides a useful thermal observation. Temperature
         // stability is checked only after the electrical boundary is bracketed.
         let expected_delta = (u32::from(self.baseline_vin_mv) * 100)
-            .div_ceil(u32::from(self.boundary.source_min_mv));
+            .div_ceil(u32::from(self.baseline_request_mv.max(1)));
         let observed_delta = u32::from(input.vin_mv.saturating_sub(previous.vin_mv));
         let thermal_ramp =
             (i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c)).abs()
@@ -649,6 +667,23 @@ mod tests {
         assert_eq!(output.request_mv, 7_000);
         assert_eq!(output.request_ma, 3_000);
         assert!(output.heater_enabled);
+    }
+
+    #[test]
+    fn scan_starts_three_amp_preflight_at_power_safe_ceiling() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let scan = SupplyScan::new(boundary).expect("valid scan boundary");
+
+        assert_eq!(scan.output().request_mv, 20_000);
+        assert_eq!(scan.output().request_ma, 3_000);
+        assert!(!scan.output().heater_enabled);
     }
 
     #[test]

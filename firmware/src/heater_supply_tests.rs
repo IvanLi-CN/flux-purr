@@ -32,7 +32,7 @@ fn boundary() -> SupplyBoundary {
         ..SupplyBoundary::default()
     };
     for (request_current_ma, tracking_request_mv, rtd_mv, _) in
-        [(1_800, 7_200, 1_000, 3_000), (2_000, 10_000, 1_200, 10_000)]
+        [(2_000, 7_200, 1_000, 3_000), (2_100, 10_000, 1_200, 10_000)]
     {
         assert!(result.retain(BoundaryPoint {
             elapsed_ms: 10_000,
@@ -75,9 +75,9 @@ fn lookup_does_not_invent_warmer_or_lower_current_observations() {
     assert_eq!(lookup(5_000, 3_000, false), None);
     assert_eq!(lookup(5_000, 3_000, true), None);
     assert_eq!(lookup(10_100, 3_000, true), None);
-    assert_eq!(lookup(3_100, 1_900, true), Some(7_200));
-    assert_eq!(lookup(3_101, 1_900, true), Some(7_200));
-    assert_eq!(lookup(4_101, 1_900, true), Some(7_200));
+    assert_eq!(lookup(3_100, 2_000, true), Some(7_200));
+    assert_eq!(lookup(3_101, 2_000, true), Some(7_200));
+    assert_eq!(lookup(4_101, 2_000, true), Some(7_200));
     assert_eq!(lookup(10_101, 3_000, true), None);
 }
 
@@ -89,7 +89,7 @@ fn scan_floor_and_advertised_apdo_are_distinct_and_bound_the_lookup() {
     let request = BoundaryQuery {
         source_min_mv: 3_300,
         source_max_mv: 22_000,
-        current_ma: 2_000,
+        current_ma: 2_100,
         ..query(10_100, 3_000, true)
     };
     assert_eq!(
@@ -326,7 +326,16 @@ fn in_band_temperature_response_to_safe_voltage_does_not_starve_equilibrium() {
         if job.phase == scan::ScanPhase::Equilibrium {
             equilibrium_started = true;
         }
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            now_ms,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
         if equilibrium_started {
             return;
         }
@@ -349,7 +358,16 @@ fn adc_jitter_is_filtered_for_equilibrium_without_relaxing_cutoff() {
             10_799
         };
         job.update(sample(now_ms, output, raw_temperature));
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            now_ms,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
         if job.phase == scan::ScanPhase::Complete {
             assert!(job.boundary.point_count > 0);
             return;
@@ -364,10 +382,13 @@ fn warming_during_electrical_sweep_does_not_starve_voltage_probing() {
     for now_ms in (0..60_000).step_by(50) {
         let output = job.output();
         job.update(sample(now_ms, output, 10_000));
-        if job.phase == scan::ScanPhase::Sweep && output.request_mv > 5_500 {
+        if job.phase == scan::ScanPhase::Sweep
+            && output.request_ma == MIN_HEATED_CURRENT_MA
+            && output.request_mv > 5_500
+        {
             let warmed = job.update(sample(now_ms + 1_000, job.output(), 10_500));
             assert!(warmed.request_mv > 5_500);
-            assert_eq!(warmed.request_ma, 1_000);
+            assert_eq!(warmed.request_ma, MIN_HEATED_CURRENT_MA);
             return;
         }
     }
@@ -380,13 +401,16 @@ fn thermal_ramp_does_not_turn_a_flat_sample_into_a_cc_boundary() {
     for now_ms in (0..60_000).step_by(50) {
         let output = job.output();
         job.update(sample(now_ms, output, 10_000));
-        if job.phase == scan::ScanPhase::Sweep && output.request_mv > 5_500 {
+        if job.phase == scan::ScanPhase::Sweep
+            && output.request_ma == MIN_HEATED_CURRENT_MA
+            && output.request_mv > 5_500
+        {
             let mut warming = sample(now_ms + 1_000, job.output(), 10_500);
             warming.vin_mv = 1;
             let next = job.update(warming);
             assert_eq!(job.phase, scan::ScanPhase::Sweep);
             assert!(next.request_mv > output.request_mv);
-            assert_eq!(next.request_ma, 1_000);
+            assert_eq!(next.request_ma, MIN_HEATED_CURRENT_MA);
             return;
         }
     }
@@ -410,7 +434,16 @@ fn ambiguous_voltage_response_is_retried_before_advancing() {
         }
         let previous_request_mv = output.request_mv;
         let next = job.update(input);
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            now_ms,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
         if injected {
             assert_eq!(next.request_mv, previous_request_mv);
             let retried = job.update(sample(now_ms + 1_000, next, 10_000));
@@ -446,7 +479,16 @@ fn persistent_ambiguous_response_keeps_a_conservative_boundary() {
             ambiguous_samples += 1;
         }
         let next = job.update(input);
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            now_ms,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
         if ambiguous_samples >= 5 {
             assert!(matches!(
                 job.phase,
@@ -484,12 +526,32 @@ fn sample(now_ms: u32, output: scan::ScanOutput, temperature: i16) -> scan::Scan
 fn preflight_initial_load_collapse_still_fails_closed() {
     let mut job = scan::SupplyScan::new(boundary()).unwrap();
     let mut baseline = sample(1_000, job.output(), 3_000);
-    baseline.vin_mv = 456;
-    assert!(job.update(baseline).heater_enabled);
+    baseline.vin_mv = 1_000;
+    assert!(!job.update(baseline).heater_enabled);
     let mut loaded = sample(2_000, job.output(), 3_000);
-    loaded.vin_mv = 402;
+    loaded.vin_mv = 200;
     assert!(!job.update(loaded).heater_enabled);
     assert_eq!(job.failure, Some(scan::ScanFailure::SupplyUnstable));
+}
+
+#[test]
+fn high_voltage_preflight_accepts_a_stable_source_above_the_scaled_floor() {
+    let mut job = scan::SupplyScan::new(boundary()).unwrap();
+    let baseline = sample(1_000, job.output(), 3_000);
+    assert!(!job.update(baseline).heater_enabled);
+
+    let mut loaded = sample(2_000, job.output(), 3_000);
+    loaded.vin_mv = 700;
+    assert!(!job.update(loaded).heater_enabled);
+
+    let next = job.update(scan::ScanInput {
+        now_ms: 3_000,
+        ..loaded
+    });
+    assert_eq!(job.phase, scan::ScanPhase::Sweep);
+    assert_eq!(next.request_mv, 5_500);
+    assert_eq!(next.request_ma, MIN_HEATED_CURRENT_MA);
+    assert_eq!(job.failure, None);
 }
 
 #[test]
@@ -505,18 +567,27 @@ fn scan_preflights_at_three_amp_then_discovers_each_thermal_stage() {
         if job.phase == scan::ScanPhase::Complete {
             assert!(job.boundary.is_valid());
             assert!(job.boundary.point_count > 0);
-            let has_one_amp = job.boundary.points[..job.boundary.point_count as usize]
+            let has_minimum_current = job.boundary.points[..job.boundary.point_count as usize]
                 .iter()
-                .any(|point| point.request_current_ma == 1_000);
+                .any(|point| point.request_current_ma == MIN_HEATED_CURRENT_MA);
             let has_three_amp = job.boundary.points[..job.boundary.point_count as usize]
                 .iter()
                 .any(|point| point.request_current_ma == 3_000);
-            assert!(has_one_amp);
+            assert!(has_minimum_current);
             assert!(has_three_amp);
             assert!(!job.output().heater_enabled);
             return;
         }
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            time,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
     }
     panic!("fake source scan did not terminate");
 }
@@ -546,7 +617,16 @@ fn scan_retains_each_sustainable_current_stage_with_raw_adc_samples() {
             assert!(stages[..20].iter().any(|stage| *stage));
             return;
         }
-        assert_ne!(job.phase, scan::ScanPhase::Failed, "{:?}", job.failure);
+        assert_ne!(
+            job.phase,
+            scan::ScanPhase::Failed,
+            "failure={:?} time={} request={} current={} points={}",
+            job.failure,
+            time,
+            job.output().request_mv,
+            job.output().request_ma,
+            job.boundary.point_count
+        );
     }
     panic!("fake source scan did not terminate");
 }
@@ -629,8 +709,12 @@ fn dynamic_scan_keeps_three_amp_tracking_points_across_warmup() {
                 point.tracking_request_mv.saturating_add(100) >= job.boundary.source_max_mv
             });
             assert!(job.cutoff_reached || temperature >= 220.0 || safe_ceiling_reached);
-            assert!(points.iter().any(|p| p.tracking_only && p.rtd_mv < 1_400));
-            assert!(points.iter().any(|p| p.request_current_ma == 1_000));
+            assert!(points.iter().any(|p| p.tracking_only));
+            assert!(
+                points
+                    .iter()
+                    .any(|p| p.request_current_ma == MIN_HEATED_CURRENT_MA)
+            );
             assert!(points.iter().any(|p| p.request_current_ma == 3_000));
             assert!(points.iter().all(|p| p.rtd_mv < 1_900));
             return;

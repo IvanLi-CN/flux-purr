@@ -103,7 +103,7 @@ Preferred runtime mode:
 - CH224Q keeps its legacy adjustable-PD path; FUSB302BMPX applies the `5V..28V` PD guard before using its live PPS APDO (currently `5V..21V`) and fixed PDO fallback
 - `GPIO47` drives the low-side MOSFET through MCPWM at `100 Hz`; fixed-PD operation uses PWM for continuous power control
 - firmware enables heating only after the selected controller confirms a contract. The FUSB302B policy requires SourceCaps selection followed by `Accept` and `PS_RDY`; reset, detach, I2C fault, reject, or wait clears heater authority. `PdPort` dispatch prevents the FUSB302B path from receiving CH224Q register writes.
-- with the `3.2 ohm` heater plate, normal automatic heating uses the device-local PPS boundary for the matching WiFi state and source envelope, with the preset electrical model only for watt allocation and uncovered regions. Product calibration uses one confirmed 3A PPS contract for preflight and boundary probes, `1.0–3.0A` equilibrium stages, full conduction, raw RTD/VIN observations, and a hard 220°C cutoff as specified in [ADR 0019](../adr/0019-heater-supply-boundary-calibration.md); manual PPS debug remains separate.
+- with the `3.2 ohm` heater plate, normal automatic heating uses the device-local PPS boundary for the matching WiFi state and source envelope, with the preset electrical model only for watt allocation and uncovered regions. Product calibration uses one confirmed 3A PPS contract for preflight and boundary probes, `2.0–3.0A` equilibrium stages, full conduction, raw RTD/VIN observations, and a hard 220°C cutoff as specified in [ADR 0019](../adr/0019-heater-supply-boundary-calibration.md); manual PPS debug remains separate.
 
 Fallback mode:
 

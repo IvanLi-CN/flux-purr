@@ -6104,14 +6104,14 @@ mod tests {
                 rtd_mv: 1_800,
                 vin_code: 2_000,
                 vin_mv: 1_000,
-                request_current_ma: if index < 21 {
-                    1_000 + index as u16 * 100
+                request_current_ma: if index < 11 {
+                    2_000 + index as u16 * 100
                 } else {
                     3_000
                 },
                 tracking_request_mv: 9_000,
                 flat_request_mv: 9_200,
-                tracking_only: index >= 21,
+                tracking_only: index >= 11,
             }));
         }
         assert!(boundary.is_valid());

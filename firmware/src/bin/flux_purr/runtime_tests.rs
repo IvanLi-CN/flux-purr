@@ -5247,7 +5247,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
 }
 
 #[test]
-fn thermal_plant_auto_job_starts_at_the_selected_apdo_floor_and_caps_current_at_3a() {
+fn thermal_plant_auto_job_starts_at_the_power_safe_ceiling_and_caps_current_at_3a() {
     for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 3_000), (21_000, 5_000)] {
         let mut calibration = CalibrationRuntimeState::default();
         let mut memory_config = MemoryConfig::default();
@@ -5294,8 +5294,9 @@ fn thermal_plant_auto_job_starts_at_the_selected_apdo_floor_and_caps_current_at_
 
         assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
         assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
-        assert_eq!(calibration.pps_mv, Some(5_500));
-        assert_eq!(calibration.job.next_request_mv, Some(5_500));
+        let expected_mv = max_mv;
+        assert_eq!(calibration.pps_mv, Some(expected_mv));
+        assert_eq!(calibration.job.next_request_mv, Some(expected_mv));
         assert_eq!(calibration.pps_ma, Some(3_000));
     }
 }
@@ -5340,9 +5341,9 @@ fn thermal_plant_auto_job_uses_the_apdo_that_covers_20v_not_another_range() {
     )
     .unwrap();
 
-    assert_eq!(calibration.pps_mv, Some(5_500));
+    assert_eq!(calibration.pps_mv, Some(21_000));
     assert_eq!(calibration.pps_ma, Some(3_000));
-    assert_eq!(calibration.job.next_request_mv, Some(5_500));
+    assert_eq!(calibration.job.next_request_mv, Some(21_000));
 }
 
 #[test]
@@ -5471,15 +5472,21 @@ fn assert_auto_thermal_plant_job_start(max_mv: u16, max_ma: u16) {
         workspace.job.as_ref().unwrap().phase,
         ThermalPlantAutoPhase::Heating
     );
-    while plant.now_ms < 4_000 && !calibration.heater_enabled {
+    while plant.now_ms < 4_000
+        && !workspace.job.as_ref().is_some_and(|job| {
+            job.supply_scan.as_ref().is_some_and(|scan| {
+                scan.phase == flux_purr_firmware::heater_supply::scan::ScanPhase::Preflight
+            })
+        })
+    {
         plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
     }
     assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
     assert!(
-        calibration.heater_enabled,
-        "confirmed low-voltage preflight may now conduct"
+        !calibration.heater_enabled,
+        "high-voltage preflight is unloaded"
     );
-    assert_eq!(manual.target_mv, Some(5_500));
+    assert_eq!(manual.target_mv, Some(max_mv));
     assert_eq!(manual.target_ma, Some(3_000));
     assert_eq!(
         workspace
@@ -7765,18 +7772,11 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
         );
     }
     if calibration.job.status != CalibrationJobStatus::Completed {
-        {
-            let job = workspace.job.as_ref().unwrap();
-            for sample in &job.samples[..usize::from(job.sample_count)] {
-                eprintln!(
-                    "FIT,{},{},{},{}",
-                    sample.elapsed_ticks,
-                    projected_rtd_temperature_c(&config, sample.raw_rtd_adc_mv).unwrap(),
-                    sample.heater_voltage_125mv,
-                    sample.duty_percent
-                );
-            }
-        }
+        let job = workspace.job.as_ref().unwrap();
+        panic!(
+            "thermal plant calibration did not complete: error={:?}, samples={}, T={}, ms={}",
+            calibration.job.message, job.sample_count, plant.temperature_c, plant.now_ms
+        );
     }
     assert_eq!(
         calibration.job.status,
@@ -7920,7 +7920,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
 
     assert!(!calibration.heater_enabled);
     assert!(manual_pps.enabled);
-    assert_eq!(manual_pps.target_mv, Some(5_500));
+    assert_eq!(manual_pps.target_mv, Some(20_000));
     assert!(!take_immediate_heater_disarm(&mut calibration));
     assert_eq!(calibration.job_data, Some(CalibrationJobData::ThermalPlant));
     assert_eq!(
@@ -8046,7 +8046,7 @@ fn thermal_plant_job_rejects_invalid_adc_and_waits_for_an_unconfirmed_contract()
             now_ms: 0,
             saw_board_voltage_drop: false,
         };
-        while plant.now_ms < 4_000 && !calibration.heater_enabled {
+        while plant.now_ms < 10_000 && !calibration.heater_enabled {
             plant.tick(&mut calibration, &mut config, &mut manual, &mut workspace);
         }
         assert!(calibration.heater_enabled);

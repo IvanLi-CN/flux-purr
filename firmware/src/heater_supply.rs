@@ -21,6 +21,7 @@ pub fn publish_wifi_hardware_state(started: Option<bool>) {
 }
 
 pub const MAX_BOUNDARY_POINTS: usize = 41;
+pub(crate) const MIN_HEATED_CURRENT_MA: u16 = 2_000;
 // Version 2 deliberately invalidates boundaries produced by the earlier
 // lookup semantics. Old calibration is absent rather than silently reused.
 pub const BOUNDARY_FORMAT_VERSION: u8 = 2;
@@ -128,7 +129,7 @@ impl SupplyBoundary {
             && self.points[..usize::from(self.point_count)]
                 .iter()
                 .all(|point| {
-                    (1_000..=3_000).contains(&point.request_current_ma)
+                    (MIN_HEATED_CURRENT_MA..=3_000).contains(&point.request_current_ma)
                         && point.request_current_ma.is_multiple_of(100)
                         && (self.source_min_mv..=self.source_max_mv)
                             .contains(&point.tracking_request_mv)

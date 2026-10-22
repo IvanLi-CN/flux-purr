@@ -935,11 +935,11 @@ pub(crate) fn start_thermal_plant_calibration_job(
     let (source_min_mv, source_max_mv, advertised_current_ma) = manual_pps
         .thermal_plant_source_limits()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
+    let scan_min_mv = source_min_mv.max(5_500).div_ceil(100) * 100;
     let scan_range = manual_pps
         .thermal_plant_pps_range()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let source_max_mv = source_max_mv.min(21_000) / 100 * 100;
-    let request_mv = source_min_mv.max(5_500).div_ceil(100) * 100;
     let source_current_ma = 3_000;
     let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
@@ -947,7 +947,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
         flux_purr_firmware::heater_supply::SupplyBoundary {
             adc: heater_supply_adc_metadata(),
             wifi_started,
-            source_min_mv: request_mv,
+            source_min_mv: scan_min_mv,
             source_max_mv,
             source_max_ma: advertised_current_ma,
             advertised_min_mv: scan_range.min_mv,
@@ -956,6 +956,10 @@ pub(crate) fn start_thermal_plant_calibration_job(
         },
     )
     .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
+    // The scan starts its 3 A preflight at the highest voltage inside the
+    // advertised power envelope; lower-voltage sweep stages begin only after
+    // that contract is confirmed.
+    let request_mv = supply_scan.output().request_mv;
     manual_pps.enable(
         ManualPpsOwner::Calibration,
         request_mv,
@@ -2272,6 +2276,55 @@ pub(crate) fn update_thermal_ambient_phase(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn thermal_scan_recorded_duty(
+    previous_phase: flux_purr_firmware::heater_supply::scan::ScanPhase,
+    heater_enabled: bool,
+    pd_confirmed: bool,
+    physical_percent: u8,
+) -> u8 {
+    let established_conduction = matches!(
+        previous_phase,
+        flux_purr_firmware::heater_supply::scan::ScanPhase::Sweep
+            | flux_purr_firmware::heater_supply::scan::ScanPhase::TemperatureSettle
+            | flux_purr_firmware::heater_supply::scan::ScanPhase::Equilibrium
+    );
+    if heater_enabled && pd_confirmed && established_conduction {
+        100
+    } else {
+        physical_percent
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn record_thermal_scan_sample_or_fail(
+    calibration: &mut CalibrationRuntimeState,
+    manual_pps: &mut ManualPpsState,
+    job: &mut CalibrationThermalPlantAutoJob,
+    input: CalibrationJobUpdateInput,
+    temperature_c: f32,
+    duty_percent: u8,
+    complete: bool,
+) -> bool {
+    if record_thermal_plant_transient_sample(
+        job,
+        input.latest_rtd_raw_adc_mv,
+        temperature_c,
+        input.latest_vin_mv,
+        duty_percent,
+        complete,
+    ) {
+        true
+    } else {
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
+        false
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn update_thermal_heating_phase(
     calibration: &mut CalibrationRuntimeState,
     manual_pps: &mut ManualPpsState,
@@ -2297,6 +2350,7 @@ pub(crate) fn update_thermal_heating_phase(
         );
         return false;
     };
+    let previous_scan_phase = scan.phase;
     calibration.scan_contract_confirmed = input.pd_confirmed;
     let Some(wifi_started) = input.wifi_started else {
         fail_thermal_plant_calibration(
@@ -2348,35 +2402,26 @@ pub(crate) fn update_thermal_heating_phase(
     calibration.pps_ma = Some(output.request_ma);
     calibration.job.next_request_mv = Some(output.request_mv);
     calibration.heater_enabled = output.heater_enabled && input.pd_confirmed;
-    // A supply-scan sample is only an electrical observation after the
-    // requested PPS contract is settled. The calibration contract drives the
-    // heater fully on for those observations; a stale pre-output duty value
-    // must not turn a confirmed conducting interval into a zero-power fit row.
+    // Record zero-power baseline/preflight rows before the first heated frame.
     if !input.pd_confirmed && !complete {
         calibration.job.progress_percent = (2 + points.saturating_mul(2)).min(59);
         return true;
     }
-    let recorded_duty_percent = if output.heater_enabled && input.pd_confirmed {
-        100
-    } else {
-        input.heater_duty_percent
-    };
-    if !record_thermal_plant_transient_sample(
+    let recorded_duty_percent = thermal_scan_recorded_duty(
+        previous_scan_phase,
+        output.heater_enabled,
+        input.pd_confirmed,
+        input.heater_duty_percent,
+    );
+    if !record_thermal_scan_sample_or_fail(
+        calibration,
+        manual_pps,
         job,
-        input.latest_rtd_raw_adc_mv,
+        input,
         recorded_temp_c,
-        // The PD contract is the requested/negotiated ceiling, not the
-        // voltage that reached the heater while a source or cable is in CC.
-        // Thermal power must use the calibrated board-side VIN sample.
-        input.latest_vin_mv,
         recorded_duty_percent,
         complete,
     ) {
-        fail_thermal_plant_calibration(
-            calibration,
-            manual_pps,
-            ManualPpsError::ThermalPlantProjectionInvalid,
-        );
         return false;
     }
     calibration.job.progress_percent = (2 + points.saturating_mul(2)).min(59);
