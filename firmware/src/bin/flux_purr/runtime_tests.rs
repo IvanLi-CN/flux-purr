@@ -7745,6 +7745,51 @@ fn supply_scan_equilibrium_preserves_fractional_adc_temperature_precision() {
 }
 
 #[test]
+fn thermal_plant_waits_through_a_transient_missing_capability_snapshot() {
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut config = thermal_plant_job_memory_config(20_000, 3_000);
+    let mut manual_pps = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut config,
+        &mut manual_pps,
+        &mut workspace,
+    )
+    .unwrap();
+
+    // A FUSB302B source-capability refresh briefly publishes no APDO while
+    // the source is still attached. The job must hold output off and resume
+    // from its existing intent when the next snapshot arrives.
+    manual_pps.refresh_fusb302b_capabilities_preserving_intent(None);
+    update_calibration_job_state_with_workspace(
+        &mut calibration,
+        &mut config,
+        &mut manual_pps,
+        &mut workspace,
+        CalibrationJobUpdateInput {
+            now_ms: 1_000,
+            latest_rtd_raw_code: 500,
+            latest_vin_raw_code: 1_000,
+            wifi_started: Some(false),
+            pd_confirmed: false,
+            latest_rtd_raw_adc_mv: 250,
+            latest_vin_raw_adc_mv: 500,
+            latest_temp_c: 25.0,
+            latest_vin_mv: 10_000,
+            heater_duty_percent: 0,
+        },
+    );
+
+    assert_eq!(calibration.mode, CalibrationMode::ThermalPlant);
+    assert_eq!(calibration.job.status, CalibrationJobStatus::Running);
+    assert_eq!(calibration.job.message, None);
+    assert!(!calibration.heater_enabled);
+    assert!(manual_pps.enabled);
+}
+
+#[test]
 fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() {
     let mut calibration = CalibrationRuntimeState::default();
     let mut config = MemoryConfig::default();

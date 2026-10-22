@@ -2176,18 +2176,26 @@ pub(crate) fn update_thermal_plant_calibration_job(
         );
         return;
     };
-    if manual_pps.error.is_some()
-        || !manual_pps.enabled
-        || manual_pps.owner != ManualPpsOwner::Calibration
-        || !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma)
-    {
+    if let Some(error) = manual_pps.error {
+        fail_thermal_plant_calibration(calibration, manual_pps, error);
+        return;
+    }
+    if !manual_pps.enabled || manual_pps.owner != ManualPpsOwner::Calibration {
         fail_thermal_plant_calibration(
             calibration,
             manual_pps,
-            manual_pps
-                .error
-                .unwrap_or(ManualPpsError::ThermalPlantSourceUnsupported),
+            ManualPpsError::ThermalPlantSourceUnsupported,
         );
+        return;
+    }
+    if !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma) {
+        // FUSB302B clears its published capabilities while it re-queries the
+        // source after a transient transport retry. Keep the calibration
+        // session alive, but keep the heater off until a fresh APDO snapshot
+        // is available again. A real request error is handled above; this
+        // branch is only the capability-refresh gap.
+        calibration.heater_enabled = false;
+        calibration.scan_contract_confirmed = false;
         return;
     }
     let Some(recorded_temp_c) =

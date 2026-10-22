@@ -373,6 +373,17 @@ where
     if !context.manual_pps.enabled {
         return prepare_automatic_idle_restore(context);
     }
+    if context.manual_pps.owner == ManualPpsOwner::Calibration
+        && context.pd_port.controller_kind() == ControllerKind::Fusb302b
+        && context.pd_port.snapshot().capabilities.is_none()
+    {
+        // A source-capability refresh temporarily withdraws the APDO view.
+        // Hold the heater off and let the calibration job reuse its intent
+        // after the fresh snapshot arrives instead of submitting a request
+        // against an unknown source envelope.
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return Some(false);
+    }
     context.hold_pps_governor.reset();
     let target_mv = match require_manual_pps_target(context.manual_pps) {
         Ok(target_mv) => target_mv,
