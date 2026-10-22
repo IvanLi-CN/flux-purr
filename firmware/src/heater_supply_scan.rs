@@ -96,6 +96,7 @@ pub struct SupplyScan {
     stability_temperature_centi_c: Option<i32>,
     normal_probe: bool,
     return_current_ma: u16,
+    return_request_mv: u16,
     normal_probe_started_ms: u32,
     normal_bins: [Option<BoundaryPoint>; 20],
 }
@@ -135,6 +136,7 @@ impl SupplyScan {
             stability_temperature_centi_c: None,
             normal_probe: false,
             return_current_ma: 3_000,
+            return_request_mv: boundary.source_min_mv,
             normal_probe_started_ms: 0,
             normal_bins: [None; 20],
         })
@@ -304,6 +306,7 @@ impl SupplyScan {
             self.phase = ScanPhase::Sweep;
             self.previous = None;
             self.normal_probe = false;
+            self.return_request_mv = self.boundary.source_min_mv;
             self.last_tracking = None;
             self.flat_request_mv = 0;
             self.flat_count = 0;
@@ -331,6 +334,10 @@ impl SupplyScan {
     }
 
     fn begin_three_amp_probe(&mut self, input: ScanInput) {
+        // Continue the next current stage from the last confirmed safe
+        // voltage. Returning to the PPS floor would cool the plate and make
+        // later stages measure a recovery transient instead of a boundary.
+        self.return_request_mv = self.request_mv.max(self.boundary.source_min_mv);
         self.normal_probe = true;
         self.normal_probe_started_ms = input.now_ms;
         self.return_current_ma = (self.request_ma + 100).min(3_000);
@@ -541,7 +548,11 @@ impl SupplyScan {
         self.flat_count = 0;
         self.flat_request_mv = 0;
         self.stage_started_ms = input.now_ms;
-        self.change(input, self.boundary.source_min_mv, self.return_current_ma);
+        self.change(
+            input,
+            self.return_request_mv.max(self.boundary.source_min_mv),
+            self.return_current_ma,
+        );
     }
 
     fn retain_normal_tracking(&mut self, input: ScanInput) {
@@ -708,6 +719,7 @@ mod tests {
         scan.normal_probe = true;
         scan.normal_probe_started_ms = 0;
         scan.return_current_ma = 2_400;
+        scan.return_request_mv = 12_300;
         scan.baseline_vin_mv = 15_000;
         scan.baseline_request_mv = 20_000;
         scan.changed_at_ms = 0;
@@ -745,7 +757,7 @@ mod tests {
 
         assert_eq!(scan.phase, ScanPhase::Sweep);
         assert!(!scan.normal_probe);
-        assert_eq!(finished.request_mv, 5_500);
+        assert_eq!(finished.request_mv, 12_300);
         assert_eq!(finished.request_ma, 2_400);
         assert!(finished.heater_enabled);
     }
