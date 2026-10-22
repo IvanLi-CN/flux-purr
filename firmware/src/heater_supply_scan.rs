@@ -431,7 +431,12 @@ impl SupplyScan {
             return;
         };
         if self.normal_probe {
-            self.finish_normal_probe(input);
+            // The probe is a full-conduction observation, not a one-sample
+            // boundary decision. Keep the 3 A request at the source ceiling
+            // until the independent ten-second window expires; otherwise a
+            // transient VIN response can be recorded as if it were settled.
+            self.previous = Some(input);
+            self.changed_at_ms = input.now_ms;
             return;
         }
         self.phase = ScanPhase::Equilibrium;
@@ -684,6 +689,65 @@ mod tests {
         assert_eq!(scan.output().request_mv, 20_000);
         assert_eq!(scan.output().request_ma, 3_000);
         assert!(!scan.output().heater_enabled);
+    }
+
+    #[test]
+    fn three_amp_probe_holds_at_source_ceiling_for_ten_seconds() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::Sweep;
+        scan.request_mv = 20_000;
+        scan.request_ma = 3_000;
+        scan.normal_probe = true;
+        scan.normal_probe_started_ms = 0;
+        scan.return_current_ma = 2_400;
+        scan.baseline_vin_mv = 15_000;
+        scan.baseline_request_mv = 20_000;
+        scan.changed_at_ms = 0;
+        scan.stage_started_ms = 0;
+
+        let first = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_500,
+            vin_mv: 15_000,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert!(scan.normal_probe);
+        assert_eq!(first.request_mv, 20_000);
+        assert_eq!(first.request_ma, 3_000);
+        assert!(first.heater_enabled);
+
+        let finished = scan.update(ScanInput {
+            now_ms: 10_000,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_500,
+            vin_mv: 15_000,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert!(!scan.normal_probe);
+        assert_eq!(finished.request_mv, 5_500);
+        assert_eq!(finished.request_ma, 2_400);
+        assert!(finished.heater_enabled);
     }
 
     #[test]
