@@ -2195,6 +2195,18 @@ fn fake_automatic_pps_transition_restores_after_confirmed_stable_request() {
 }
 
 #[test]
+fn automatic_pps_safety_recovery_bypasses_the_stale_high_voltage_request() {
+    assert_eq!(
+        automatic_pps_safety_recovery_target_mv(5_500, 19_800),
+        5_500
+    );
+    assert_eq!(
+        automatic_pps_safety_recovery_target_mv(12_000, 9_700),
+        9_700
+    );
+}
+
+#[test]
 fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
     let mut backend = HeaterPowerBackend::PpsMos {
         pps_min_mv: 5_500,

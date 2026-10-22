@@ -62,7 +62,7 @@
 - REQ-AUTO-CANDIDATE: 正常自动加热 MUST 对每个实际 PPS/APDO 独立编码电流并计算安全电压和 Pmax；MUST NOT 固定预留 200mA 或编造未知辅助功耗。PPS 优先，Fixed 仅在其满导通负载满足同一边界时可选，候选不得跨档位拼接。
 - REQ-AUTO-WATTS: 正常自动加热 MUST 保持统一的模型估算瓦特基准；PWM 仅按已确认合同分配，最终电压不得越过安全上限。整数 mW 的满量程 MUST 对应其量化电压上限及软启动结束后的 100% 导通，不得二次取整为少一档电压或 99%。
 - REQ-AUTO-CONTRACT: 正常自动加热 MUST 在每次非零 PWM 前复查最新安全合同；不安全时先清零 PWM 再降压，过期或失败确认不得恢复输出，安全合同确认并完成稳定等待后才可在同一会话恢复。普通同 APDO 换压期间仍安全的旧合同 MUST 继续按自身功率基准输出，MUST NOT 重启软启动。
-- REQ-AUTO-RESPONSE: 适用边界下的原始 VIN 相对响应不足 95% 时 MUST 锁定暂停输出，直到停止加热后显式重新启动；卸载电压回升 MUST NOT 自动清除该异常。该锁定独立于安全合同降压后可自动恢复的暂停。
+- REQ-AUTO-RESPONSE: 适用边界下的原始 VIN 相对响应不足 95% 时 MUST 立即清零 PWM 并直接请求安全 PPS 下限；只有当前合同确认并完成稳定等待后，才可在同一加热会话通过软启动清除该异常并恢复。无安全候选、传感器故障、断连或协商失败 MUST 保持暂停或按现有故障规则停热；卸载电压回升本身 MUST NOT 清除该异常。
 - REQ-AUTO-SCOPE: 自动输出合同保护 MUST 覆盖所有正常加热入口及从调试/标定返回自动模式；手动 PPS 调试保持原行为。校准任务 MUST 遵循 ADR 0019 的独立扫描保护，不继承旧版最大电压满导通采样策略。
 
 - Production heating MUST remain locked until a physically valid thermal model from the current supply-boundary calibration format is active. A protected calibration job may use one PPS APDO covering 20V at at least 3A. Missing legacy resistance curves neither unlock nor invalidate this model; old resistance-derived model records are absent.

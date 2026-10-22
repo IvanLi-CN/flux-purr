@@ -101,6 +101,14 @@ pub(crate) fn automatic_pps_transition_should_restore_pwm(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_pps_safety_recovery_target_mv(
+    control_floor_mv: u16,
+    source_request_ceiling_mv: u16,
+) -> u16 {
+    control_floor_mv.min(source_request_ceiling_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn calibration_contract_matches(
     observation: Option<PdStatusObservation>,
     target_mv: Option<u16>,
@@ -199,10 +207,15 @@ fn automatic_output_response_fault<PWM>(context: &mut HeaterPowerOutputContext<'
         response_matches,
     );
     if response_latched && !*context.automatic_supply_response_latched {
-        info!("automatic heater paused reason=supply-response-mismatch; stop and re-arm required");
+        info!(
+            "automatic heater safety recovery reason=supply-response-mismatch; request safe PPS floor"
+        );
     }
     *context.automatic_supply_response_latched = response_latched;
-    response_latched
+    // A normal automatic response mismatch is a recoverable safety transition.
+    // The caller keeps the gate off but lets the PPS backend replace the stale
+    // high-voltage contract. Unknown WiFi-driver state remains fatal above.
+    false
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -219,6 +232,11 @@ where
     if automatic_output_response_fault(&mut context) {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
         return false;
+    }
+    if context.normal_auto && *context.automatic_supply_response_latched {
+        // Keep the MOS gate off while the PPS backend performs direct safety
+        // recovery. Returning here would leave the stale request in place.
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     }
     if !context.normal_auto
         && let Some(pending) = context.pending_automatic_power_request.take()
@@ -1154,6 +1172,22 @@ where
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
     };
+    if context.normal_auto
+        && *context.automatic_supply_response_latched
+        && current_request_mv <= pps_min_mv
+        && context
+            .manual_pps
+            .automatic_heater_confirmed_pps_candidate_with_rtd(
+                context.current_temp_c,
+                context.memory_config,
+                context.pd_port.snapshot(),
+                Some(context.rtd_raw_adc_mv),
+            )
+            .is_some()
+    {
+        *context.automatic_supply_response_latched = false;
+        info!("automatic heater safety recovery complete; resume soft start");
+    }
     if current_request_mv <= source_request_ceiling_mv {
         let settled_gate_duty_percent = pps_confirmed_gate_duty_percent(
             context,
@@ -1452,7 +1486,17 @@ fn pps_request_mv_for_context<PWM>(
     idle_request_mv: u16,
     control_floor_mv: u16,
     source_request_ceiling_mv: u16,
+    safety_recovery_required: bool,
 ) -> u16 {
+    if context.normal_auto && safety_recovery_required {
+        // A response fault or invalidated contract bypasses normal stepping and
+        // HOLD residence. Move directly to the lowest valid PPS request so the
+        // source cannot keep carrying the stale high-voltage contract.
+        return automatic_pps_safety_recovery_target_mv(
+            control_floor_mv,
+            source_request_ceiling_mv,
+        );
+    }
     let automatic_request_mv = if context.tuning_power_stage {
         source_request_ceiling_mv
     } else if context.normal_auto {
@@ -1588,15 +1632,16 @@ fn pps_transition_safety<PWM>(
 ) -> PpsTransitionSafety {
     let pd_snapshot = context.pd_port.snapshot();
     let recovery_required = context.normal_auto
-        && context
-            .manual_pps
-            .automatic_heater_confirmed_pps_candidate_with_rtd(
-                context.current_temp_c,
-                context.memory_config,
-                pd_snapshot,
-                Some(context.rtd_raw_adc_mv),
-            )
-            .is_none();
+        && (*context.automatic_supply_response_latched
+            || context
+                .manual_pps
+                .automatic_heater_confirmed_pps_candidate_with_rtd(
+                    context.current_temp_c,
+                    context.memory_config,
+                    pd_snapshot,
+                    Some(context.rtd_raw_adc_mv),
+                )
+                .is_none());
     PpsTransitionSafety {
         recovery_required,
         request_pending: !input.manual_pps_active
@@ -1821,17 +1866,6 @@ where
     else {
         return false;
     };
-    let request_mv = pps_request_mv_for_context(
-        context,
-        manual_pps_active,
-        current_request_mv,
-        idle_request_mv,
-        control_floor_mv,
-        source_request_ceiling_mv,
-    );
-    let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
-    let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
-    let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
     let transition_safety = pps_transition_safety(
         context,
         PpsTransitionSafetyInput {
@@ -1841,6 +1875,18 @@ where
     );
     let safety_recovery_required = transition_safety.recovery_required;
     let request_transition_pending = transition_safety.request_pending;
+    let request_mv = pps_request_mv_for_context(
+        context,
+        manual_pps_active,
+        current_request_mv,
+        idle_request_mv,
+        control_floor_mv,
+        source_request_ceiling_mv,
+        safety_recovery_required,
+    );
+    let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
+    let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
+    let voltage_changed = !manual_pps_active && current_request_mv != request_mv;
     let gate_duty_percent = pps_confirmed_gate_duty_percent(
         context,
         current_request_mv,
