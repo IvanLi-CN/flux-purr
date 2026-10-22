@@ -241,9 +241,11 @@ where
     };
     if context.manual_pps.owner == ManualPpsOwner::Calibration && context.manual_pps.enabled {
         let previous_duty_percent = *context.last_physical_duty_percent;
+        let settling = calibration_pps_settle_pending(&mut context);
         apply_heater_duty(
             context.heater_pwm,
-            if context.heater_enabled
+            if !settling
+                && context.heater_enabled
                 && (!context.supply_scan
                     || supply_scan_contract_matches(
                         context
@@ -340,6 +342,7 @@ where
     match outcome {
         TicketOutcome::Confirmed(_) => {
             context.manual_pps.applied_mv = confirmed_mv;
+            arm_calibration_pps_settle_window(context);
         }
         _ => {
             let source_capability_refresh = context.manual_pps.owner == ManualPpsOwner::Calibration
@@ -360,12 +363,64 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+fn arm_calibration_pps_settle_window<PWM>(context: &mut HeaterPowerOutputContext<'_, PWM>) {
+    let Some(settle_window_ms) =
+        calibration_pps_settle_window_ms(context.manual_pps.owner, context.supply_scan)
+    else {
+        return;
+    };
+    if let HeaterPowerBackend::PpsMos {
+        settle_until_ms, ..
+    } = context.backend
+    {
+        *settle_until_ms = Some(context.now_ms.saturating_add(settle_window_ms));
+    }
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn calibration_pps_settle_window_ms(
+    owner: ManualPpsOwner,
+    supply_scan: bool,
+) -> Option<u64> {
+    (owner == ManualPpsOwner::Calibration && supply_scan)
+        .then_some(pps_request_transition_ms(false))
+}
+
+#[cfg(target_arch = "xtensa")]
+fn calibration_pps_settle_pending<PWM>(context: &mut HeaterPowerOutputContext<'_, PWM>) -> bool
+where
+    PWM: SetDutyCycle,
+{
+    if context.manual_pps.owner != ManualPpsOwner::Calibration || !context.supply_scan {
+        return false;
+    }
+    let HeaterPowerBackend::PpsMos {
+        settle_until_ms, ..
+    } = context.backend
+    else {
+        return false;
+    };
+    let Some(settle_until_ms_value) = *settle_until_ms else {
+        return false;
+    };
+    if context.now_ms < settle_until_ms_value {
+        apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
+        return true;
+    }
+    *settle_until_ms = None;
+    false
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn prepare_manual_pps<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
 ) -> Option<bool>
 where
     PWM: SetDutyCycle,
 {
+    if calibration_pps_settle_pending(context) {
+        return None;
+    }
     if context.manual_pps.enabled
         && let Some(ticket) = context.manual_pps.automatic_restore_ticket.take()
     {
@@ -453,6 +508,7 @@ where
         }
         PdRequestState::Confirmed => {
             context.manual_pps.applied_mv = Some(target_mv);
+            arm_calibration_pps_settle_window(context);
             Some(true)
         }
         PdRequestState::Failed => {
@@ -2641,4 +2697,25 @@ pub(crate) struct UsbRuntimeStatusContext {
     pub(crate) latest_rtd_raw_adc_max_mv: u16,
     pub(crate) latest_vin_raw_adc_mv: u16,
     pub(crate) vin_mv: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_pps_settle_window_is_scoped_to_supply_scan() {
+        assert_eq!(
+            calibration_pps_settle_window_ms(ManualPpsOwner::Calibration, true),
+            Some(HEATER_PPS_SMALL_TRANSITION_MS),
+        );
+        assert_eq!(
+            calibration_pps_settle_window_ms(ManualPpsOwner::Calibration, false),
+            None,
+        );
+        assert_eq!(
+            calibration_pps_settle_window_ms(ManualPpsOwner::Debug, true),
+            None,
+        );
+    }
 }
