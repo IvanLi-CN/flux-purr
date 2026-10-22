@@ -4,6 +4,8 @@ const SETTLE_MS: u32 = 1_000;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
 const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
 const PROBE_RECOVERY_STEP_MV: u16 = 500;
+const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
+const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
 // Finish lower-current thermal stages early enough to establish the required
 // 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
 const LOWER_CURRENT_STAGE_EXIT_CENTI_C: i16 = 18_000;
@@ -418,7 +420,12 @@ impl SupplyScan {
             // observation proves which side of the bracket it belongs to.
             self.previous = Some(input);
             self.changed_at_ms = input.now_ms;
-            if self.ambiguous_count >= 5 {
+            let ambiguous_confirmations = if self.normal_probe {
+                NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS
+            } else {
+                5
+            };
+            if self.ambiguous_count >= ambiguous_confirmations {
                 // Treat a persistent intermediate response as the
                 // conservative side of the boundary. It may be a source
                 // current-limit knee or an ADC transition that never settles
@@ -431,7 +438,12 @@ impl SupplyScan {
             return;
         }
         self.previous = Some(input);
-        if self.flat_count >= 2 {
+        let flat_confirmations = if self.normal_probe {
+            NORMAL_PROBE_FLAT_CONFIRMATIONS
+        } else {
+            2
+        };
+        if self.flat_count >= flat_confirmations {
             self.flat_request_mv = self.request_mv;
             if let Some(point) = self.last_tracking.as_mut() {
                 point.flat_request_mv = self.flat_request_mv;
@@ -790,8 +802,26 @@ mod tests {
         assert_eq!(tracking.request_ma, 3_000);
         assert!(tracking.heater_enabled);
 
+        for now_ms in [4_000, 5_000, 6_000] {
+            let output = scan.update(ScanInput {
+                now_ms,
+                temperature_centi_c: 10_000,
+                wifi_started: false,
+                confirmed: true,
+                physical_percent: 100,
+                rtd_code: 1_000,
+                rtd_mv: 1_000,
+                vin_code: 1_500,
+                vin_mv: 12_400,
+            });
+
+            assert_eq!(scan.phase, ScanPhase::Sweep);
+            assert_eq!(output.request_ma, 3_000);
+            assert!(output.heater_enabled);
+        }
+
         let finished = scan.update(ScanInput {
-            now_ms: 4_000,
+            now_ms: 7_000,
             temperature_centi_c: 10_000,
             wifi_started: false,
             confirmed: true,
@@ -804,12 +834,12 @@ mod tests {
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert!(!scan.normal_probe);
-        assert_eq!(finished.request_mv, 12_600);
+        assert_eq!(finished.request_mv, 12_900);
         assert_eq!(finished.request_ma, 2_400);
         assert!(!finished.heater_enabled);
 
         let recovered = scan.update(ScanInput {
-            now_ms: 5_000,
+            now_ms: 8_000,
             temperature_centi_c: 10_000,
             wifi_started: false,
             confirmed: true,
@@ -821,12 +851,29 @@ mod tests {
         });
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
-        assert_eq!(recovered.request_mv, 12_300);
+        assert_eq!(recovered.request_mv, 12_400);
         assert_eq!(recovered.request_ma, 2_400);
         assert!(!recovered.heater_enabled);
 
         let resumed = scan.update(ScanInput {
-            now_ms: 6_000,
+            now_ms: 9_000,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 0,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_500,
+            vin_mv: 12_400,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
+        assert_eq!(resumed.request_mv, 12_300);
+        assert_eq!(resumed.request_ma, 2_400);
+        assert!(!resumed.heater_enabled);
+
+        let resumed = scan.update(ScanInput {
+            now_ms: 10_000,
             temperature_centi_c: 10_000,
             wifi_started: false,
             confirmed: true,
