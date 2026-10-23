@@ -281,22 +281,22 @@ impl SupplyScan {
                 }
             }
             ScanPhase::ProbeRecovery => {
-                if input.physical_percent == 0 && input.confirmed {
-                    let return_request_mv = self.return_request_mv.max(self.boundary.source_min_mv);
-                    if self.request_mv != return_request_mv {
-                        self.change(
-                            input,
-                            self.request_mv
-                                .saturating_sub(PROBE_RECOVERY_STEP_MV)
-                                .max(return_request_mv),
-                            self.return_current_ma,
-                        );
-                    } else {
-                        self.phase = ScanPhase::Sweep;
-                        self.changed_at_ms = input.now_ms;
-                    }
-                } else {
+                if input.physical_percent != 0 || !input.confirmed {
                     self.changed_at_ms = input.now_ms;
+                    return;
+                }
+                let return_request_mv = self.return_request_mv.max(self.boundary.source_min_mv);
+                if self.request_mv == return_request_mv {
+                    self.phase = ScanPhase::Sweep;
+                    self.changed_at_ms = input.now_ms;
+                } else {
+                    self.change(
+                        input,
+                        self.request_mv
+                            .saturating_sub(PROBE_RECOVERY_STEP_MV)
+                            .max(return_request_mv),
+                        self.return_current_ma,
+                    );
                 }
             }
             ScanPhase::Sweep => self.sweep(input),
@@ -688,6 +688,20 @@ mod tests {
         }
     }
 
+    fn probe_input(now_ms: u32, vin_mv: u16, physical_percent: u8) -> ScanInput {
+        ScanInput {
+            now_ms,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_500,
+            vin_mv,
+        }
+    }
+
     #[test]
     fn final_three_amp_low_equilibrium_resumes_voltage_scan() {
         let boundary = SupplyBoundary {
@@ -768,17 +782,7 @@ mod tests {
         scan.changed_at_ms = 0;
         scan.stage_started_ms = 0;
 
-        let first = scan.update(ScanInput {
-            now_ms: 1_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 100,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_300,
-        });
+        let first = scan.update(probe_input(1_000, 12_300, 100));
 
         assert_eq!(scan.phase, ScanPhase::Sweep);
         assert!(scan.normal_probe);
@@ -786,67 +790,27 @@ mod tests {
         assert_eq!(first.request_ma, 3_000);
         assert!(first.heater_enabled);
 
-        let second = scan.update(ScanInput {
-            now_ms: 2_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 100,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let second = scan.update(probe_input(2_000, 12_400, 100));
 
         assert_eq!(second.request_mv, 12_500);
         assert_eq!(second.request_ma, 3_000);
         assert!(second.heater_enabled);
 
-        let tracking = scan.update(ScanInput {
-            now_ms: 3_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 100,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let tracking = scan.update(probe_input(3_000, 12_400, 100));
 
         assert_eq!(tracking.request_mv, 12_600);
         assert_eq!(tracking.request_ma, 3_000);
         assert!(tracking.heater_enabled);
 
         for now_ms in [4_000, 5_000, 6_000] {
-            let output = scan.update(ScanInput {
-                now_ms,
-                temperature_centi_c: 10_000,
-                wifi_started: false,
-                confirmed: true,
-                physical_percent: 100,
-                rtd_code: 1_000,
-                rtd_mv: 1_000,
-                vin_code: 1_500,
-                vin_mv: 12_400,
-            });
+            let output = scan.update(probe_input(now_ms, 12_400, 100));
 
             assert_eq!(scan.phase, ScanPhase::Sweep);
             assert_eq!(output.request_ma, 3_000);
             assert!(output.heater_enabled);
         }
 
-        let finished = scan.update(ScanInput {
-            now_ms: 7_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 100,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let finished = scan.update(probe_input(7_000, 12_400, 100));
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert!(!scan.normal_probe);
@@ -854,51 +818,21 @@ mod tests {
         assert_eq!(finished.request_ma, 2_400);
         assert!(!finished.heater_enabled);
 
-        let recovered = scan.update(ScanInput {
-            now_ms: 8_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 0,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let recovered = scan.update(probe_input(8_000, 12_400, 0));
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert_eq!(recovered.request_mv, 12_400);
         assert_eq!(recovered.request_ma, 2_400);
         assert!(!recovered.heater_enabled);
 
-        let resumed = scan.update(ScanInput {
-            now_ms: 9_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 0,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let resumed = scan.update(probe_input(9_000, 12_400, 0));
 
         assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
         assert_eq!(resumed.request_mv, 12_300);
         assert_eq!(resumed.request_ma, 2_400);
         assert!(!resumed.heater_enabled);
 
-        let resumed = scan.update(ScanInput {
-            now_ms: 10_000,
-            temperature_centi_c: 10_000,
-            wifi_started: false,
-            confirmed: true,
-            physical_percent: 0,
-            rtd_code: 1_000,
-            rtd_mv: 1_000,
-            vin_code: 1_500,
-            vin_mv: 12_400,
-        });
+        let resumed = scan.update(probe_input(10_000, 12_400, 0));
 
         assert_eq!(scan.phase, ScanPhase::Sweep);
         assert_eq!(resumed.request_mv, 12_300);
