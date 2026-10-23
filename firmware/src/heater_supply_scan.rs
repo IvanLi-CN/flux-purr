@@ -8,9 +8,9 @@ const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
 const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
 const NORMAL_PROBE_TIMEOUT_MS: u32 = 10_000;
 const NORMAL_PROBE_MIN_TEMPERATURE_STEP_CENTI_C: i16 = 1_000;
-// Finish lower-current thermal stages early enough to establish the required
-// 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
-const THREE_AMP_COVERAGE_START_CENTI_C: i16 = 12_000;
+// Start measured 3 A coverage before the lower-current warm-up boundary can
+// become a thermal dead end. Subsequent probes are spaced by ten degrees.
+const THREE_AMP_COVERAGE_START_CENTI_C: i16 = 6_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanPhase {
@@ -219,15 +219,6 @@ impl SupplyScan {
             self.boundary.cutoff_reached = true;
             self.retain_tracking();
             self.phase = ScanPhase::Complete;
-        } else if input.temperature_centi_c >= THREE_AMP_COVERAGE_START_CENTI_C
-            && self.request_ma < 3_000
-            && !self.normal_probe
-        {
-            // Lower-current stages describe the thermal response, but the
-            // automatic safety boundary must also cover the hot end at the
-            // actual 3 A contract. Move to that contract before the cutoff
-            // can terminate the lower-current stage.
-            self.begin_three_amp_probe(input);
         } else if self.normal_probe
             && input.now_ms.saturating_sub(self.normal_probe_started_ms) >= NORMAL_PROBE_TIMEOUT_MS
         {
@@ -239,6 +230,23 @@ impl SupplyScan {
             self.finish_normal_probe(input);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
             self.handle_stage_timeout(input);
+        } else if input.temperature_centi_c >= THREE_AMP_COVERAGE_START_CENTI_C
+            && self.request_ma < 3_000
+            && !self.normal_probe
+            && matches!(self.phase, ScanPhase::Sweep | ScanPhase::TemperatureSettle)
+            && self
+                .last_normal_probe_temperature_centi_c
+                .is_none_or(|previous| {
+                    input.temperature_centi_c.saturating_sub(previous)
+                        >= NORMAL_PROBE_MIN_TEMPERATURE_STEP_CENTI_C
+                })
+        {
+            // Lower-current stages describe the thermal response, but the
+            // automatic safety boundary must also cover the hot end at the
+            // actual 3 A contract. Move to that contract before the cutoff
+            // can terminate the lower-current stage. An equilibrium phase is
+            // allowed to finish and retain its stage before this probe.
+            self.begin_three_amp_probe(input);
         } else if !input.confirmed {
             // Negotiation time is not a settled electrical observation.
             self.changed_at_ms = input.now_ms;
@@ -402,7 +410,14 @@ impl SupplyScan {
         self.return_request_mv = self.request_mv.max(self.boundary.source_min_mv);
         self.normal_probe = true;
         self.last_normal_probe_temperature_centi_c = Some(input.temperature_centi_c);
-        self.return_current_ma = (self.request_ma + 100).min(3_000);
+        self.return_current_ma = if self.phase == ScanPhase::Equilibrium {
+            (self.request_ma + 100).min(3_000)
+        } else {
+            // A coverage probe can begin during the first lower-current
+            // warm-up stage. Resume that same stage after unloading so the
+            // required equilibrium records are still collected.
+            self.request_ma
+        };
         self.phase = ScanPhase::Sweep;
         self.previous = None;
         self.last_tracking = None;
@@ -788,6 +803,43 @@ mod tests {
         assert_eq!(scan.output().request_mv, 20_000);
         assert_eq!(scan.output().request_ma, 3_000);
         assert!(!scan.output().heater_enabled);
+    }
+
+    #[test]
+    fn early_three_amp_probe_preserves_lower_current_stage() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::Sweep;
+        scan.request_mv = 9_000;
+        scan.request_ma = 2_000;
+        scan.changed_at_ms = 0;
+        scan.stage_started_ms = 0;
+
+        let output = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 6_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_350,
+            vin_mv: 9_000,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert!(scan.normal_probe);
+        assert_eq!(scan.return_current_ma, 2_000);
+        assert_eq!(output.request_mv, 9_000);
+        assert_eq!(output.request_ma, 3_000);
+        assert!(output.heater_enabled);
     }
 
     #[test]
