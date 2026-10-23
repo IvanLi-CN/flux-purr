@@ -7,9 +7,10 @@ const PROBE_RECOVERY_STEP_MV: u16 = 500;
 const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
 const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
 const NORMAL_PROBE_TIMEOUT_MS: u32 = 10_000;
+const NORMAL_PROBE_MIN_TEMPERATURE_STEP_CENTI_C: i16 = 1_000;
 // Finish lower-current thermal stages early enough to establish the required
 // 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
-const LOWER_CURRENT_STAGE_EXIT_CENTI_C: i16 = 18_000;
+const THREE_AMP_COVERAGE_START_CENTI_C: i16 = 12_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanPhase {
@@ -102,6 +103,7 @@ pub struct SupplyScan {
     stability_temperature_centi_c: Option<i32>,
     normal_probe: bool,
     normal_probe_started_ms: u32,
+    last_normal_probe_temperature_centi_c: Option<i16>,
     return_current_ma: u16,
     return_request_mv: u16,
     normal_bins: [Option<BoundaryPoint>; 20],
@@ -142,6 +144,7 @@ impl SupplyScan {
             stability_temperature_centi_c: None,
             normal_probe: false,
             normal_probe_started_ms: 0,
+            last_normal_probe_temperature_centi_c: None,
             return_current_ma: 3_000,
             return_request_mv: boundary.source_min_mv,
             normal_bins: [None; 20],
@@ -216,7 +219,7 @@ impl SupplyScan {
             self.boundary.cutoff_reached = true;
             self.retain_tracking();
             self.phase = ScanPhase::Complete;
-        } else if input.temperature_centi_c >= LOWER_CURRENT_STAGE_EXIT_CENTI_C
+        } else if input.temperature_centi_c >= THREE_AMP_COVERAGE_START_CENTI_C
             && self.request_ma < 3_000
             && !self.normal_probe
         {
@@ -231,8 +234,8 @@ impl SupplyScan {
             // A changing thermal load can keep the electrical response in the
             // ambiguous branch indefinitely. Do not keep a 3 A/full-power
             // probe loaded while waiting for convergence; the last tracking
-            // point is already retained and the lower-current recovery path is
-            // the safe next observation.
+            // point is already retained and the lower-current recovery path
+            // is the safe next observation.
             self.finish_normal_probe(input);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
             self.handle_stage_timeout(input);
@@ -367,11 +370,38 @@ impl SupplyScan {
     }
 
     fn begin_three_amp_probe(&mut self, input: ScanInput) {
+        if self
+            .last_normal_probe_temperature_centi_c
+            .is_some_and(|previous| {
+                input.temperature_centi_c.saturating_sub(previous)
+                    < NORMAL_PROBE_MIN_TEMPERATURE_STEP_CENTI_C
+            })
+        {
+            // Do not stack another full-conduction probe on the same thermal
+            // band. Advance the lower-current sweep and let the next ten-
+            // degree observation establish another bounded 3 A point.
+            self.normal_probe = false;
+            self.phase = ScanPhase::Sweep;
+            self.previous = None;
+            self.last_tracking = None;
+            self.flat_count = 0;
+            self.ambiguous_count = 0;
+            self.flat_request_mv = 0;
+            self.equilibrium.reset();
+            self.stage_started_ms = input.now_ms;
+            self.change(
+                input,
+                self.boundary.source_min_mv,
+                self.request_ma.saturating_add(100).min(3_000),
+            );
+            return;
+        }
         // Continue the next current stage from the last confirmed safe
         // voltage. Returning to the PPS floor would cool the plate and make
         // later stages measure a recovery transient instead of a boundary.
         self.return_request_mv = self.request_mv.max(self.boundary.source_min_mv);
         self.normal_probe = true;
+        self.last_normal_probe_temperature_centi_c = Some(input.temperature_centi_c);
         self.return_current_ma = (self.request_ma + 100).min(3_000);
         self.phase = ScanPhase::Sweep;
         self.previous = None;
