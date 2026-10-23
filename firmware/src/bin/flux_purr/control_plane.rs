@@ -1736,10 +1736,11 @@ pub(crate) fn transient_fit_scales(
 pub(crate) type TransientFitNormalMatrix = ([[f32; 3]; 3], [f32; 3], f32, usize);
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn transient_fit_normal_matrix(
+fn transient_fit_normal_matrix_with_rank(
     data: &TransientFitData,
     delay_ticks: u16,
     scales: [f32; 3],
+    require_full_rank: bool,
 ) -> Option<TransientFitNormalMatrix> {
     let mut normal = [[0.0_f32; 3]; 3];
     let mut rhs = [0.0_f32; 3];
@@ -1764,12 +1765,17 @@ pub(crate) fn transient_fit_normal_matrix(
         row_count += 1;
     }
     let gram = normal.map(|row| row.map(|value| value / row_count as f32));
-    (determinant_3x3(gram).abs() >= 1.0e-5 && power_sum_sq > 1.0).then_some((
-        normal,
-        rhs,
-        power_sum_sq,
-        row_count,
-    ))
+    ((!require_full_rank || determinant_3x3(gram).abs() >= 1.0e-5) && power_sum_sq > 1.0)
+        .then_some((normal, rhs, power_sum_sq, row_count))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn transient_fit_normal_matrix(
+    data: &TransientFitData,
+    delay_ticks: u16,
+    scales: [f32; 3],
+) -> Option<TransientFitNormalMatrix> {
+    transient_fit_normal_matrix_with_rank(data, delay_ticks, scales, true)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1846,6 +1852,45 @@ pub(crate) fn best_transient_projection(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn best_transient_projection_without_radiation(
+    data: &TransientFitData,
+) -> Option<(ThermalPlantProjection, f32)> {
+    (0..=200_u16)
+        .filter_map(|delay_ticks| {
+            let (scales, _row_count) = transient_fit_scales(data, delay_ticks)?;
+            let (normal, rhs, power_sum_sq, _row_count) =
+                transient_fit_normal_matrix_with_rank(data, delay_ticks, scales, false)?;
+            let solution = solve_transient_normal_equations(normal, rhs, 0b011)?;
+            if solution.iter().any(|value| *value < -1.0e-4) {
+                return None;
+            }
+            let coefficients = [
+                (solution[0] / scales[0]).max(0.0),
+                (solution[1] / scales[1]).max(0.0),
+                0.0,
+            ];
+            let mut residual_sum_sq = 0.0_f32;
+            for index in 1..data.count {
+                let Some((values, target)) = data.row(index, delay_ticks) else {
+                    continue;
+                };
+                let predicted = coefficients[0] * values[0] + coefficients[1] * values[1];
+                let residual = target - predicted;
+                residual_sum_sq += residual * residual;
+            }
+            let residual = (residual_sum_sq / power_sum_sq).sqrt();
+            let projection = ThermalPlantProjection {
+                thermal_capacity_mj_per_c: coefficients[0],
+                convection_mw_per_c: coefficients[1],
+                radiation_mw_per_k4: 0.0,
+                transport_delay_ms: u32::from(delay_ticks) * HEATER_CONTROL_INTERVAL_MS as u32,
+            };
+            transient_projection_is_valid(projection, residual).then_some((projection, residual))
+        })
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn fit_thermal_plant_transient(
     transaction_id: u32,
     ambient_raw_rtd_adc_mv: u16,
@@ -1862,6 +1907,34 @@ pub(crate) fn fit_thermal_plant_transient(
         ambient_raw_rtd_adc_mv,
     )?;
     let (projection, residual) = best_transient_projection(&data)?;
+    let transaction = ThermalPlantTransientTransaction {
+        transaction_id: transaction_id.max(1),
+        ambient_raw_rtd_adc_mv,
+        sample_count,
+        projection: ThermalPlantProjectionRecord::from_projection(projection),
+        samples: data.samples,
+    };
+    flux_purr_firmware::memory::thermal_plant_transient_transaction_is_complete(&transaction)
+        .then_some((transaction, residual))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn fit_thermal_plant_transient_without_radiation(
+    transaction_id: u32,
+    ambient_raw_rtd_adc_mv: u16,
+    samples: &[ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    sample_count: u8,
+    preview_heater_curve: Option<&HeaterCurveConfig>,
+    memory_config: &MemoryConfig,
+) -> Option<(ThermalPlantTransientTransaction, f32)> {
+    let data = prepare_transient_fit(
+        samples,
+        sample_count,
+        preview_heater_curve,
+        memory_config,
+        ambient_raw_rtd_adc_mv,
+    )?;
+    let (projection, residual) = best_transient_projection_without_radiation(&data)?;
     let transaction = ThermalPlantTransientTransaction {
         transaction_id: transaction_id.max(1),
         ambient_raw_rtd_adc_mv,
@@ -2531,14 +2604,29 @@ pub(crate) fn complete_thermal_plant_calibration(
         ^ u32::from(latest_rtd_raw_adc_mv)
         ^ job.elapsed_ticks
         ^ 0x5452_4e53;
-    let Some((transaction, _residual)) = fit_thermal_plant_transient(
+    let fitted = fit_thermal_plant_transient(
         transaction_id,
         job.ambient_raw_rtd_adc_mv,
         &job.samples,
         job.sample_count,
         None,
         memory_config,
-    ) else {
+    )
+    .or_else(|| {
+        // The five-minute 3A path reaches the minimum 100C coverage before
+        // cooling. At that span convection and radiation are not separately
+        // identifiable, so accept the physically constrained convection-only
+        // fit instead of inventing a radiation coefficient.
+        fit_thermal_plant_transient_without_radiation(
+            transaction_id,
+            job.ambient_raw_rtd_adc_mv,
+            &job.samples,
+            job.sample_count,
+            None,
+            memory_config,
+        )
+    });
+    let Some((transaction, _residual)) = fitted else {
         fail_thermal_plant_calibration(
             calibration,
             manual_pps,
