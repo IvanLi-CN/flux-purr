@@ -6,6 +6,7 @@ const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
 const PROBE_RECOVERY_STEP_MV: u16 = 500;
 const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
 const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
+const NORMAL_PROBE_TIMEOUT_MS: u32 = 10_000;
 // Finish lower-current thermal stages early enough to establish the required
 // 3 A safety boundary before the hard 220 C cutoff can end powered sampling.
 const LOWER_CURRENT_STAGE_EXIT_CENTI_C: i16 = 18_000;
@@ -100,6 +101,7 @@ pub struct SupplyScan {
     equilibrium: EquilibriumWindow,
     stability_temperature_centi_c: Option<i32>,
     normal_probe: bool,
+    normal_probe_started_ms: u32,
     return_current_ma: u16,
     return_request_mv: u16,
     normal_bins: [Option<BoundaryPoint>; 20],
@@ -139,6 +141,7 @@ impl SupplyScan {
             equilibrium: EquilibriumWindow::default(),
             stability_temperature_centi_c: None,
             normal_probe: false,
+            normal_probe_started_ms: 0,
             return_current_ma: 3_000,
             return_request_mv: boundary.source_min_mv,
             normal_bins: [None; 20],
@@ -222,6 +225,15 @@ impl SupplyScan {
             // actual 3 A contract. Move to that contract before the cutoff
             // can terminate the lower-current stage.
             self.begin_three_amp_probe(input);
+        } else if self.normal_probe
+            && input.now_ms.saturating_sub(self.normal_probe_started_ms) >= NORMAL_PROBE_TIMEOUT_MS
+        {
+            // A changing thermal load can keep the electrical response in the
+            // ambiguous branch indefinitely. Do not keep a 3 A/full-power
+            // probe loaded while waiting for convergence; the last tracking
+            // point is already retained and the lower-current recovery path is
+            // the safe next observation.
+            self.finish_normal_probe(input);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
             self.handle_stage_timeout(input);
         } else if !input.confirmed {
@@ -372,6 +384,7 @@ impl SupplyScan {
         // voltage that was already tracking. Sweep upward from there so the
         // source CC knee is observed instead of forcing an unsafe 20 V/3 A
         // load before the boundary is known.
+        self.normal_probe_started_ms = input.now_ms;
         self.change(input, self.return_request_mv, 3_000);
     }
 
@@ -491,15 +504,18 @@ impl SupplyScan {
     }
 
     fn handle_stage_timeout(&mut self, input: ScanInput) {
-        if self.phase != ScanPhase::Equilibrium || self.request_ma >= 3_000 {
+        if self.request_ma >= 3_000 {
             self.fail(ScanFailure::StageTimeout);
             return;
         }
 
         // A low-current stage that never settles is not a steady-state
-        // observation. Skip it without retaining a fabricated boundary point
-        // and continue the bounded 100 mA sweep. The 3 A stage remains a hard
-        // timeout because it is the required warm-up coverage path.
+        // observation. It may be in Sweep after the equilibrium window was
+        // restarted by continued warming, so the phase must not turn this
+        // recoverable stage timeout into a calibration-wide failure. Skip it
+        // without retaining a fabricated boundary point and continue the
+        // bounded 100 mA sweep. The 3 A stage remains a hard timeout because
+        // it is the required warm-up coverage path.
         self.phase = ScanPhase::Sweep;
         self.previous = None;
         self.last_tracking = None;
@@ -891,6 +907,45 @@ mod tests {
     }
 
     #[test]
+    fn three_amp_probe_timeout_unloads_when_temperature_keeps_rising() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::Sweep;
+        scan.request_mv = 19_900;
+        scan.request_ma = 3_000;
+        scan.normal_probe = true;
+        scan.normal_probe_started_ms = 1_000;
+        scan.return_current_ma = 2_900;
+        scan.return_request_mv = 19_900;
+        scan.stage_started_ms = 1_000;
+
+        let output = scan.update(ScanInput {
+            now_ms: 11_001,
+            temperature_centi_c: 17_500,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_900,
+            vin_mv: 19_800,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::ProbeRecovery);
+        assert!(!scan.normal_probe);
+        assert_eq!(output.request_mv, 19_900);
+        assert_eq!(output.request_ma, 2_900);
+        assert!(!output.heater_enabled);
+    }
+
+    #[test]
     fn low_current_stage_timeout_skips_without_retaining_a_steady_point() {
         let mut scan = scan_for_timeout(1_300);
         for tick in 1..=18_002_u32 {
@@ -911,6 +966,22 @@ mod tests {
             "low-current equilibrium timeout did not advance: phase={:?}, current={}mA",
             scan.phase, scan.request_ma
         );
+    }
+
+    #[test]
+    fn low_current_sweep_timeout_skips_after_equilibrium_restarts() {
+        let mut scan = scan_for_timeout(2_300);
+        scan.phase = ScanPhase::Sweep;
+        scan.previous = None;
+
+        let now_ms = 15 * 60 * 1_000 + 1;
+        let input = timeout_input(now_ms, scan.output(), false);
+        let output = scan.update(input);
+
+        assert_eq!(scan.failure, None);
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(output.request_ma, 2_400);
+        assert!(output.heater_enabled);
     }
 
     #[test]
