@@ -1,8 +1,10 @@
 use super::{BoundaryPoint, EquilibriumWindow, MIN_HEATED_CURRENT_MA, SupplyBoundary};
 
 const SETTLE_MS: u32 = 1_000;
+const RAPID_SETTLE_MS: u32 = 500;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
 const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
+const RAPID_MIN_COVERAGE_CENTI_C: i16 = 10_000;
 const PROBE_RECOVERY_STEP_MV: u16 = 500;
 const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
 const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
@@ -18,6 +20,7 @@ pub enum ScanPhase {
     Preflight,
     PreflightRecovery,
     Sweep,
+    RapidWarmup,
     TemperatureSettle,
     Equilibrium,
     ProbeRecovery,
@@ -32,6 +35,7 @@ impl ScanPhase {
             Self::Preflight => "preflight",
             Self::PreflightRecovery => "preflight_recovery",
             Self::Sweep => "sweep",
+            Self::RapidWarmup => "rapid_warmup",
             Self::TemperatureSettle => "temperature_settle",
             Self::Equilibrium => "equilibrium",
             Self::ProbeRecovery => "probe_recovery",
@@ -39,6 +43,12 @@ impl ScanPhase {
             Self::Failed => "failed",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanMode {
+    Detailed,
+    Rapid,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,10 +117,23 @@ pub struct SupplyScan {
     return_current_ma: u16,
     return_request_mv: u16,
     normal_bins: [Option<BoundaryPoint>; 20],
+    mode: ScanMode,
 }
 
 impl SupplyScan {
-    pub fn new(mut boundary: SupplyBoundary) -> Option<Self> {
+    pub fn new(boundary: SupplyBoundary) -> Option<Self> {
+        Self::new_with_mode(boundary, ScanMode::Detailed)
+    }
+
+    /// Build the product calibration scanner. It uses one actual 3 A PPS
+    /// contract and keeps the voltage/temperature scan bounded enough for the
+    /// user-facing calibration budget. The detailed multi-current scanner is
+    /// retained by `new` for host-side regression coverage.
+    pub fn new_rapid(boundary: SupplyBoundary) -> Option<Self> {
+        Self::new_with_mode(boundary, ScanMode::Rapid)
+    }
+
+    fn new_with_mode(mut boundary: SupplyBoundary, mode: ScanMode) -> Option<Self> {
         if boundary.source_min_mv < 5_500
             || boundary.source_min_mv >= boundary.source_max_mv
             || boundary.source_max_mv > 21_000
@@ -148,7 +171,20 @@ impl SupplyScan {
             return_current_ma: 3_000,
             return_request_mv: boundary.source_min_mv,
             normal_bins: [None; 20],
+            mode,
         })
+    }
+
+    fn settle_ms(&self) -> u32 {
+        match (self.mode, self.phase) {
+            (ScanMode::Rapid, ScanPhase::TemperatureSettle) => SETTLE_MS,
+            (ScanMode::Detailed, _) => SETTLE_MS,
+            (ScanMode::Rapid, _) => RAPID_SETTLE_MS,
+        }
+    }
+
+    fn is_rapid(&self) -> bool {
+        self.mode == ScanMode::Rapid
     }
 
     pub fn output(&self) -> ScanOutput {
@@ -157,7 +193,10 @@ impl SupplyScan {
             request_ma: self.request_ma,
             heater_enabled: matches!(
                 self.phase,
-                ScanPhase::Sweep | ScanPhase::TemperatureSettle | ScanPhase::Equilibrium
+                ScanPhase::Sweep
+                    | ScanPhase::RapidWarmup
+                    | ScanPhase::TemperatureSettle
+                    | ScanPhase::Equilibrium
             ),
         }
     }
@@ -250,7 +289,7 @@ impl SupplyScan {
         } else if !input.confirmed {
             // Negotiation time is not a settled electrical observation.
             self.changed_at_ms = input.now_ms;
-        } else if input.now_ms.saturating_sub(self.changed_at_ms) >= SETTLE_MS {
+        } else if input.now_ms.saturating_sub(self.changed_at_ms) >= self.settle_ms() {
             self.advance(ScanInput {
                 temperature_centi_c: stability_temperature_centi_c,
                 ..input
@@ -311,6 +350,7 @@ impl SupplyScan {
                 }
             }
             ScanPhase::Sweep => self.sweep(input),
+            ScanPhase::RapidWarmup => self.rapid_warmup(input),
             ScanPhase::TemperatureSettle => {
                 if self
                     .equilibrium
@@ -346,7 +386,11 @@ impl SupplyScan {
             // automatic-heater contract. Lower-current equilibrium stages are
             // thermal-model evidence only; automatic limits continue to use
             // the separate 3 A tracking observations.
-            self.request_ma = MIN_HEATED_CURRENT_MA;
+            self.request_ma = if self.is_rapid() {
+                3_000
+            } else {
+                MIN_HEATED_CURRENT_MA
+            };
             self.phase = ScanPhase::Sweep;
             self.previous = None;
             self.normal_probe = false;
@@ -514,7 +558,13 @@ impl SupplyScan {
 
     fn probe_next_voltage(&mut self, input: ScanInput) {
         if self.request_mv >= self.boundary.source_max_mv {
-            self.begin_equilibrium(input);
+            if self.is_rapid() {
+                self.phase = ScanPhase::RapidWarmup;
+                self.previous = None;
+                self.changed_at_ms = input.now_ms;
+            } else {
+                self.begin_equilibrium(input);
+            }
         } else {
             self.change(input, self.request_mv + 100, self.request_ma);
         }
@@ -533,6 +583,13 @@ impl SupplyScan {
             self.finish_normal_probe(input);
             return;
         }
+        if self.is_rapid() {
+            self.phase = ScanPhase::RapidWarmup;
+            self.previous = None;
+            self.changed_at_ms = input.now_ms;
+            self.request_mv = point.tracking_request_mv;
+            return;
+        }
         self.phase = ScanPhase::Equilibrium;
         self.equilibrium.reset();
         self.previous = Some(input);
@@ -546,6 +603,19 @@ impl SupplyScan {
                 .max(self.boundary.source_min_mv),
             self.request_ma,
         );
+    }
+
+    fn rapid_warmup(&mut self, input: ScanInput) {
+        if !input.confirmed || input.physical_percent != 100 {
+            self.changed_at_ms = input.now_ms;
+            return;
+        }
+        self.retain_normal_tracking(input);
+        if input.temperature_centi_c >= RAPID_MIN_COVERAGE_CENTI_C {
+            self.phase = ScanPhase::Complete;
+        } else {
+            self.changed_at_ms = input.now_ms;
+        }
     }
 
     fn handle_stage_timeout(&mut self, input: ScanInput) {
@@ -688,6 +758,7 @@ impl SupplyScan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heater_supply::BoundaryAdcMetadata;
 
     fn scan_for_timeout(current_ma: u16) -> SupplyScan {
         let boundary = SupplyBoundary {
@@ -745,6 +816,60 @@ mod tests {
             vin_code: 1_500,
             vin_mv,
         }
+    }
+
+    fn rapid_input(now_ms: u32, output: ScanOutput, temperature_centi_c: i16) -> ScanInput {
+        let delivered_mv = output.request_mv.min(output.request_ma.saturating_mul(4));
+        ScanInput {
+            now_ms,
+            temperature_centi_c,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: u8::from(output.heater_enabled) * 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: delivered_mv / 4,
+            vin_mv: delivered_mv / 12,
+        }
+    }
+
+    #[test]
+    fn rapid_scan_uses_only_three_amp_and_finishes_after_coverage() {
+        let boundary = SupplyBoundary {
+            adc: BoundaryAdcMetadata {
+                divider_supply_mv: 3_328,
+                ..BoundaryAdcMetadata::default()
+            },
+            source_min_mv: 5_500,
+            source_max_mv: 12_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 12_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
+        for now_ms in (0..180_000).step_by(50) {
+            let output = scan.output();
+            assert!(output.request_ma == 3_000 || scan.phase == ScanPhase::Baseline);
+            scan.update(rapid_input(
+                now_ms,
+                output,
+                3_000 + ((now_ms / 50) as i16 * 5),
+            ));
+            assert_ne!(scan.phase, ScanPhase::Failed);
+            if scan.phase == ScanPhase::Complete {
+                assert!(scan.boundary.is_valid());
+                assert!(scan.boundary.point_count > 0);
+                assert!(
+                    scan.boundary.points[..usize::from(scan.boundary.point_count)]
+                        .iter()
+                        .all(|point| point.request_current_ma == 3_000)
+                );
+                assert!(!scan.output().heater_enabled);
+                return;
+            }
+        }
+        panic!("rapid scan did not terminate within its bounded warm-up");
     }
 
     #[test]

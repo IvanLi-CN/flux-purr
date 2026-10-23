@@ -7799,6 +7799,32 @@ fn thermal_plant_waits_through_a_transient_missing_capability_snapshot() {
     assert_eq!(calibration.job.message, None);
     assert!(!calibration.heater_enabled);
     assert!(manual_pps.enabled);
+
+    update_thermal_plant_calibration_job(
+        &mut calibration,
+        &mut config,
+        &mut manual_pps,
+        &mut workspace,
+        CalibrationJobUpdateInput {
+            now_ms: u64::from(THERMAL_PLANT_TOTAL_TIMEOUT_TICKS + 1) * HEATER_CONTROL_INTERVAL_MS
+                + 1_000,
+            latest_rtd_raw_code: 500,
+            latest_vin_raw_code: 1_000,
+            wifi_started: Some(false),
+            pd_confirmed: false,
+            latest_rtd_raw_adc_mv: 250,
+            latest_vin_raw_adc_mv: 500,
+            latest_temp_c: 25.0,
+            latest_vin_mv: 10_000,
+            heater_duty_percent: 0,
+        },
+    );
+
+    assert_eq!(
+        calibration.job.message,
+        Some(ManualPpsError::ThermalPlantTimeout)
+    );
+    assert!(!manual_pps.enabled);
 }
 
 #[test]
@@ -7841,6 +7867,11 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
         "error={:?}, T={}, ms={}",
         calibration.job.message,
         plant.temperature_c,
+        plant.now_ms
+    );
+    assert!(
+        plant.now_ms <= u64::from(THERMAL_PLANT_TOTAL_TIMEOUT_TICKS) * HEATER_CONTROL_INTERVAL_MS,
+        "rapid thermal plant calibration exceeded five-minute budget: {} ms",
         plant.now_ms
     );
     assert_eq!(calibration.mode, CalibrationMode::Off);
@@ -18275,6 +18306,53 @@ fn failed_thermal_plant_calibration_keeps_heating_locked() {
         true,
         true,
     ));
+}
+
+#[test]
+fn thermal_plant_timeout_disarms_without_committing_partial_model() {
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut memory_config = thermal_plant_job_memory_config(20_000, 3_000);
+    let mut manual_pps = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut memory_config,
+        &mut manual_pps,
+        &mut workspace,
+    )
+    .unwrap();
+    workspace.job.as_mut().unwrap().started_at_ms = Some(0);
+
+    update_thermal_plant_calibration_job(
+        &mut calibration,
+        &mut memory_config,
+        &mut manual_pps,
+        &mut workspace,
+        CalibrationJobUpdateInput {
+            now_ms: (u64::from(THERMAL_PLANT_TOTAL_TIMEOUT_TICKS) + 1) * HEATER_CONTROL_INTERVAL_MS,
+            latest_rtd_raw_code: 500,
+            latest_vin_raw_code: 1_000,
+            wifi_started: Some(false),
+            pd_confirmed: true,
+            latest_rtd_raw_adc_mv: 250,
+            latest_vin_raw_adc_mv: 500,
+            latest_temp_c: 25.0,
+            latest_vin_mv: 10_000,
+            heater_duty_percent: 100,
+        },
+    );
+
+    assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
+    assert_eq!(
+        calibration.job.message,
+        Some(ManualPpsError::ThermalPlantTimeout)
+    );
+    assert_eq!(calibration.mode, CalibrationMode::Off);
+    assert!(!calibration.heater_enabled);
+    assert!(calibration.immediate_heater_disarm_pending);
+    assert!(!manual_pps.enabled);
+    assert!(memory_config.thermal_plant_transient_active.is_none());
 }
 
 #[test]

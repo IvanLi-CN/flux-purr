@@ -943,7 +943,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
     let source_current_ma = 3_000;
     let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
-    let supply_scan = flux_purr_firmware::heater_supply::scan::SupplyScan::new(
+    let supply_scan = flux_purr_firmware::heater_supply::scan::SupplyScan::new_rapid(
         flux_purr_firmware::heater_supply::SupplyBoundary {
             adc: heater_supply_adc_metadata(),
             wifi_started,
@@ -2176,6 +2176,17 @@ pub(crate) fn update_thermal_plant_calibration_job(
         );
         return;
     };
+    let started_at = *job.started_at_ms.get_or_insert(input.now_ms);
+    job.elapsed_ticks = (input.now_ms.saturating_sub(started_at) / HEATER_CONTROL_INTERVAL_MS)
+        .min(u64::from(u32::MAX)) as u32;
+    if job.elapsed_ticks > THERMAL_PLANT_TOTAL_TIMEOUT_TICKS {
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantTimeout,
+        );
+        return;
+    }
     if let Some(error) = manual_pps.error {
         fail_thermal_plant_calibration(calibration, manual_pps, error);
         return;
@@ -2208,9 +2219,6 @@ pub(crate) fn update_thermal_plant_calibration_job(
         );
         return;
     };
-    let started_at = *job.started_at_ms.get_or_insert(input.now_ms);
-    job.elapsed_ticks = (input.now_ms.saturating_sub(started_at) / HEATER_CONTROL_INTERVAL_MS)
-        .min(u64::from(u32::MAX)) as u32;
     let phase_ok = match job.phase {
         ThermalPlantAutoPhase::Ambient => {
             update_thermal_ambient_phase(calibration, manual_pps, job, input, recorded_temp_c)
@@ -2299,6 +2307,7 @@ fn thermal_scan_recorded_duty(
     let established_conduction = matches!(
         previous_phase,
         flux_purr_firmware::heater_supply::scan::ScanPhase::Sweep
+            | flux_purr_firmware::heater_supply::scan::ScanPhase::RapidWarmup
             | flux_purr_firmware::heater_supply::scan::ScanPhase::TemperatureSettle
             | flux_purr_firmware::heater_supply::scan::ScanPhase::Equilibrium
     );

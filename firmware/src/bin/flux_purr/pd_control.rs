@@ -416,6 +416,7 @@ pub(crate) enum ManualPpsError {
     HeaterCurveCoverageInsufficient,
     ThermalPlantSourceUnsupported,
     ThermalPlantProjectionInvalid,
+    ThermalPlantTimeout,
     SupplyScan(flux_purr_firmware::heater_supply::scan::ScanFailure),
     PdNotReady,
     WriteFailed,
@@ -441,6 +442,7 @@ impl ManualPpsError {
             Self::HeaterCurveCoverageInsufficient => "heater_curve_coverage_insufficient",
             Self::ThermalPlantSourceUnsupported => "thermal_plant_source_unsupported",
             Self::ThermalPlantProjectionInvalid => "thermal_plant_projection_invalid",
+            Self::ThermalPlantTimeout => "thermal_plant_timeout",
             Self::SupplyScan(reason) => match reason {
                 flux_purr_firmware::heater_supply::scan::ScanFailure::WifiChanged => {
                     "supply_scan_wifi_changed"
@@ -489,6 +491,9 @@ impl ManualPpsError {
             }
             Self::ThermalPlantProjectionInvalid => {
                 "Thermal plant observations did not produce a physical model."
+            }
+            Self::ThermalPlantTimeout => {
+                "Thermal plant calibration exceeded its five-minute time budget."
             }
             Self::SupplyScan(_) => {
                 "Whole-device supply scanning stopped; inspect the scan error code."
@@ -681,6 +686,8 @@ pub(crate) const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
 pub(crate) const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_AMBIENT_TICKS: u16 = 40;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const THERMAL_PLANT_TOTAL_TIMEOUT_TICKS: u32 = 6_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 432_000;
 #[cfg(any(target_arch = "xtensa", test))]
