@@ -176,7 +176,7 @@ jobs:
     name: Web checks
     needs: classify
     if: needs.classify.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - name: Checkout
