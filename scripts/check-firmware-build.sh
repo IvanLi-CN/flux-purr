@@ -17,8 +17,8 @@ check_factory_app_size() {
     exit 1
   fi
 
-  output_path="$(mktemp "${TMPDIR:-/tmp}/flux-purr-factory-image.XXXXXX.bin")"
-  log_path="$(mktemp "${TMPDIR:-/tmp}/flux-purr-factory-image.XXXXXX.log")"
+  output_path="$(mktemp "${TMPDIR:-/tmp}/flux-purr-factory-image.XXXXXX")"
+  log_path="$(mktemp "${TMPDIR:-/tmp}/flux-purr-factory-image.XXXXXX")"
   trap 'rm -f "$output_path" "$log_path"' RETURN
   espflash save-image \
     --chip esp32s3 \

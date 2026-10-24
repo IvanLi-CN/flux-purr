@@ -286,6 +286,20 @@ pub(super) fn render_self_test_evidence_bundle(
         transaction_id,
     })?;
 
+    Ok(self_test_render_result(
+        &run_dirs,
+        &output_dir,
+        bundle,
+        evidence.target_temps_c,
+    ))
+}
+
+fn self_test_render_result(
+    run_dirs: &[PathBuf],
+    output_dir: &Path,
+    bundle: Value,
+    target_temps_c: Vec<i16>,
+) -> Value {
     let report_passed = bundle
         .get("reportRuns")
         .and_then(Value::as_array)
@@ -293,11 +307,11 @@ pub(super) fn render_self_test_evidence_bundle(
             runs.iter()
                 .all(|run| run.get("reviewPassed").and_then(Value::as_bool) == Some(true))
         });
-    Ok(json!({
+    json!({
         "ok": true,
         "operation": "thermal_report.render_self_test_evidence_bundle",
         "runDirs": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
-        "outputDir": display_path(&output_dir),
+        "outputDir": display_path(output_dir),
         "bundleJson": bundle.pointer("/files/bundleJson").cloned().unwrap_or(Value::Null),
         "bundleIndexHtml": bundle.pointer("/files/indexHtml").cloned().unwrap_or(Value::Null),
         "samplesPath": bundle.pointer("/files/samplesPath").cloned().unwrap_or(Value::Null),
@@ -307,8 +321,8 @@ pub(super) fn render_self_test_evidence_bundle(
         "reviewPassed": report_passed,
         "provenanceComplete": bundle.get("provenanceComplete").cloned().unwrap_or(Value::Bool(false)),
         "safetyEvidenceComplete": bundle.get("safetyEvidenceComplete").cloned().unwrap_or(Value::Bool(false)),
-        "targetsC": evidence.target_temps_c,
-    }))
+        "targetsC": target_temps_c,
+    })
 }
 
 fn apply_port_metadata(summaries: &mut [Value], port_path: Option<&str>) {
@@ -474,26 +488,14 @@ fn collect_self_test_evidence(
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
-            if !active_samples.is_empty() {
-                if stage_sources
-                    .insert(
-                        target,
-                        (
-                            summary.clone(),
-                            run_id.clone(),
-                            stage.clone(),
-                            active_samples,
-                        ),
-                    )
-                    .is_some()
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("self-test report has duplicate target {target} across raw runs"),
-                    )
-                    .into());
-                }
-            }
+            insert_self_test_stage(
+                &mut stage_sources,
+                target,
+                summary,
+                &run_id,
+                stage,
+                active_samples,
+            )?;
         }
         for (target, samples) in samples {
             all_samples.entry(target).or_default().extend(samples);
@@ -504,6 +506,38 @@ fn collect_self_test_evidence(
         stage_sources,
         all_samples,
     })
+}
+
+fn insert_self_test_stage(
+    stage_sources: &mut BTreeMap<i16, SelfTestStageSource>,
+    target: i16,
+    summary: &Value,
+    run_id: &str,
+    stage: &Value,
+    active_samples: Vec<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if active_samples.is_empty() {
+        return Ok(());
+    }
+    if stage_sources
+        .insert(
+            target,
+            (
+                summary.clone(),
+                run_id.to_string(),
+                stage.clone(),
+                active_samples,
+            ),
+        )
+        .is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("self-test report has duplicate target {target} across raw runs"),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn build_self_test_report_entries(
@@ -758,34 +792,9 @@ fn self_test_report_entry(
             .and_then(|sample| sample.get("t"))
             .and_then(Value::as_f64),
     );
-    let hold_check = json!({
-        "confirmRunId": run_id,
-        "passed": passed,
-        "failureReason": if passed { Value::Null } else { failure_reason.clone() },
-        "holdSeconds": hold_seconds,
-        "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
-        "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
-        "holdMedianOutputPermille": stage.pointer("/analysis/holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
-        "holdP90OutputPermille": stage.pointer("/analysis/holdP90OutputPermille").cloned().unwrap_or(Value::Null),
-        "approachSource": stage.pointer("/analysis/approachSource").cloned().unwrap_or(Value::Null),
-        "holdSource": stage.pointer("/analysis/holdSource").cloned().unwrap_or(Value::Null),
-        "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
-    });
-    let mut result = stage.clone();
-    result["fullSpeedToStable"] = full_speed_to_stable;
-    let round = json!({
-        "round": 1,
-        "label": "runtime validation",
-        "attemptType": "validation",
-        "candidateName": "thermal-plant-model",
-        "selected": true,
-        "evidenceValid": passed,
-        "evidenceInvalidReason": if passed { Value::Null } else { failure_reason.clone() },
-        "point": Value::Null,
-        "samples": samples.clone(),
-        "failures": failures.clone(),
-        "result": result.clone(),
-    });
+    let hold_check = self_test_hold_check(run_id, passed, &failure_reason, hold_seconds, stage);
+    let result = self_test_stage_result(stage, full_speed_to_stable);
+    let round = self_test_validation_round(passed, &failure_reason, &samples, &failures, &result);
     json!({
         "runId": run_id,
         "target": target_temp_c,
@@ -816,6 +825,56 @@ fn self_test_report_entry(
         "failures": failures,
         "samples": samples,
         "holdCheck": hold_check,
+    })
+}
+
+fn self_test_hold_check(
+    run_id: &str,
+    passed: bool,
+    failure_reason: &Value,
+    hold_seconds: u64,
+    stage: &Value,
+) -> Value {
+    json!({
+        "confirmRunId": run_id,
+        "passed": passed,
+        "failureReason": if passed { Value::Null } else { failure_reason.clone() },
+        "holdSeconds": hold_seconds,
+        "maxOvershootC": stage.get("maxOvershootC").cloned().unwrap_or(Value::Null),
+        "holdPeakToPeakC": stage.get("holdPeakToPeakC").cloned().unwrap_or(Value::Null),
+        "holdMedianOutputPermille": stage.pointer("/analysis/holdMedianOutputPermille").cloned().unwrap_or(Value::Null),
+        "holdP90OutputPermille": stage.pointer("/analysis/holdP90OutputPermille").cloned().unwrap_or(Value::Null),
+        "approachSource": stage.pointer("/analysis/approachSource").cloned().unwrap_or(Value::Null),
+        "holdSource": stage.pointer("/analysis/holdSource").cloned().unwrap_or(Value::Null),
+        "stopReason": stage.get("stopReason").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn self_test_stage_result(stage: &Value, full_speed_to_stable: Value) -> Value {
+    let mut result = stage.clone();
+    result["fullSpeedToStable"] = full_speed_to_stable;
+    result
+}
+
+fn self_test_validation_round(
+    passed: bool,
+    failure_reason: &Value,
+    samples: &[Value],
+    failures: &[Value],
+    result: &Value,
+) -> Value {
+    json!({
+        "round": 1,
+        "label": "runtime validation",
+        "attemptType": "validation",
+        "candidateName": "thermal-plant-model",
+        "selected": true,
+        "evidenceValid": passed,
+        "evidenceInvalidReason": if passed { Value::Null } else { failure_reason.clone() },
+        "point": Value::Null,
+        "samples": samples,
+        "failures": failures,
+        "result": result,
     })
 }
 
