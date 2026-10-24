@@ -10,6 +10,7 @@ fn query(temperature_centi_c: i16, current_ma: u16, wifi_started: bool) -> Bound
         source_min_mv: 5_500,
         source_max_mv: 21_000,
         source_max_ma: 3_000,
+        source_power_limit_mw: 0,
     }
 }
 
@@ -66,6 +67,34 @@ fn persisted_five_amp_source_key_is_rejected() {
     value.source_max_ma = 5_000;
 
     assert!(!value.is_valid());
+}
+
+#[test]
+fn boundary_does_not_cross_fixed_pdo_power_envelopes() {
+    let mut value = boundary();
+    value.source_power_limit_mw = 60_000;
+    assert!(value.is_valid());
+
+    assert_eq!(
+        value.safe_request_mv(
+            BoundaryQuery {
+                source_power_limit_mw: 60_000,
+                ..query(3_100, 2_000, true)
+            },
+            |_| Some(3_000),
+        ),
+        Some(7_200)
+    );
+    assert_eq!(
+        value.safe_request_mv(
+            BoundaryQuery {
+                source_power_limit_mw: 100_000,
+                ..query(3_100, 2_000, true)
+            },
+            |_| Some(3_000),
+        ),
+        None
+    );
 }
 
 #[test]

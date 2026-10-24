@@ -288,7 +288,7 @@ Calibration-only commissioning on `a116df4f` flash/identity-verifies the approve
 - Firmware host tests, web unit tests, and frontpanel preview fixtures cover the runtime state model.
 - Safety paths retain fail-closed behavior when sensor, control, or transport checks fail.
 - Host-side frontpanel preview and state-transition tests cover placeholders, EEPROM restore, PD wait, initial sensor fault, first valid RTD promotion, and preservation of the last valid temperature after runtime faults.
-- Targeted host tests cover quantized full-power endpoints, exact low-current calibration RDO encoding, raw boundary replay, 3A transient coverage with a simulated CC source, same-cycle cutoff/WiFi disarm, and the maximum 765-byte combined EEPROM record. VM host verification passes 366 library and 404 runtime tests, the related PD suites, strict host/Xtensa Clippy and the Rust structure checker. Web boundary-contract tests and devd mock/transport tests pass.
+- Targeted host tests cover quantized full-power endpoints, exact low-current calibration RDO encoding, raw boundary replay, 3A transient coverage with a simulated CC source, same-cycle cutoff/WiFi disarm, and the maximum 767-byte combined EEPROM record. VM host verification passes 366 library and 404 runtime tests, the related PD suites, strict host/Xtensa Clippy and the Rust structure checker. Web boundary-contract tests and devd mock/transport tests pass.
 
 - Product calibration retains up to 21 equilibria and 20 transient 3A points, then fits and persists the same compacted trace. Samples require confirmed contracts and 100% conduction. Negotiation pauses are recorded as zero output; real elapsed time drives equilibrium windows.
 

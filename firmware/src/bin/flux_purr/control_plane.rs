@@ -935,6 +935,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
     let (source_min_mv, source_max_mv, _advertised_current_ma) = manual_pps
         .thermal_plant_source_limits()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
+    let source_power_limit_mw = manual_pps.thermal_plant_source_power_limit_mw();
     let scan_min_mv = source_min_mv.max(5_500).div_ceil(100) * 100;
     let scan_range = manual_pps
         .thermal_plant_pps_range()
@@ -950,6 +951,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
             source_min_mv: scan_min_mv,
             source_max_mv,
             source_max_ma: source_current_ma,
+            source_power_limit_mw,
             advertised_min_mv: scan_range.min_mv,
             advertised_max_mv: scan_range.max_mv,
             ..Default::default()

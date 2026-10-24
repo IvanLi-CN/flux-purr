@@ -1669,6 +1669,8 @@ pub struct SupplyBoundaryWire {
     pub source_min_mv: u16,
     pub source_max_mv: u16,
     pub source_max_ma: u16,
+    #[serde(default)]
+    pub source_power_limit_mw: u32,
     pub advertised_min_mv: u16,
     pub advertised_max_mv: u16,
     /// [ms, RTD code, RTD mV, VIN code, VIN mV, request mA, tracking mV, flat mV, tracking-only].
@@ -1699,6 +1701,7 @@ impl From<crate::heater_supply::SupplyBoundary> for SupplyBoundaryWire {
             source_min_mv: value.source_min_mv,
             source_max_mv: value.source_max_mv,
             source_max_ma: value.source_max_ma,
+            source_power_limit_mw: value.source_power_limit_mw,
             advertised_min_mv: value.advertised_min_mv,
             advertised_max_mv: value.advertised_max_mv,
             points,
@@ -4988,7 +4991,7 @@ mod tests {
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
-        assert!(json.contains(r#""formatVersion":2"#));
+        assert!(json.contains(r#""formatVersion":3"#));
         assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
     }

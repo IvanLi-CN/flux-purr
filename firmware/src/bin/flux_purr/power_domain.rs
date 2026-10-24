@@ -734,14 +734,24 @@ fn ticket_key(ticket: PowerTicket) -> u32 {
 
 #[cfg(target_arch = "xtensa")]
 fn cancel_pd_service_ticket(ticket: PowerTicket) {
-    PD_SERVICE_CANCELLED_TICKET.store(ticket_key(ticket), Ordering::Release);
+    let cancelled_key = ticket_key(ticket);
+    let mut observed = PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire);
+    while cancelled_key > observed {
+        match PD_SERVICE_CANCELLED_TICKET.compare_exchange_weak(
+            observed,
+            cancelled_key,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(current) => observed = current,
+        }
+    }
 }
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn take_pd_service_ticket_cancelled(ticket: PowerTicket) -> bool {
-    PD_SERVICE_CANCELLED_TICKET
-        .compare_exchange(ticket_key(ticket), 0, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
+    ticket_key(ticket) <= PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire)
 }
 
 #[cfg(target_arch = "xtensa")]

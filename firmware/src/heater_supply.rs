@@ -22,11 +22,11 @@ pub fn publish_wifi_hardware_state(started: Option<bool>) {
 
 pub const MAX_BOUNDARY_POINTS: usize = 41;
 pub(crate) const MIN_HEATED_CURRENT_MA: u16 = 2_000;
-// Version 2 deliberately invalidates boundaries produced by the earlier
+// Version 3 deliberately invalidates boundaries produced by the earlier
 // lookup semantics. Old calibration is absent rather than silently reused.
-pub const BOUNDARY_FORMAT_VERSION: u8 = 2;
+pub const BOUNDARY_FORMAT_VERSION: u8 = 3;
 pub const BOUNDARY_POINT_BYTES: usize = 11;
-pub const BOUNDARY_HEADER_BYTES: usize = 24;
+pub const BOUNDARY_HEADER_BYTES: usize = 26;
 pub const BOUNDARY_MAX_BYTES: usize =
     BOUNDARY_HEADER_BYTES + MAX_BOUNDARY_POINTS * BOUNDARY_POINT_BYTES;
 // A persisted RTD point and a live RTD sample are rounded ADC millivolts.
@@ -79,6 +79,9 @@ pub struct SupplyBoundary {
     pub source_min_mv: u16,
     pub source_max_mv: u16,
     pub source_max_ma: u16,
+    /// Maximum power of the high-voltage Fixed PDO used to establish the
+    /// boundary. Zero means that the source advertised no usable Fixed PDO.
+    pub source_power_limit_mw: u32,
     /// Original APDO envelope, distinct from the usable scan range above.
     pub advertised_min_mv: u16,
     pub advertised_max_mv: u16,
@@ -95,6 +98,7 @@ impl Default for SupplyBoundary {
             source_min_mv: 0,
             source_max_mv: 0,
             source_max_ma: 0,
+            source_power_limit_mw: 0,
             advertised_min_mv: 0,
             advertised_max_mv: 0,
             point_count: 0,
@@ -113,6 +117,7 @@ pub struct BoundaryQuery {
     pub source_min_mv: u16,
     pub source_max_mv: u16,
     pub source_max_ma: u16,
+    pub source_power_limit_mw: u32,
 }
 
 impl SupplyBoundary {
@@ -126,6 +131,9 @@ impl SupplyBoundary {
             && self.advertised_min_mv <= self.source_min_mv
             && self.advertised_max_mv >= self.source_max_mv
             && self.source_max_ma == 3_000
+            && (self.source_power_limit_mw == 0
+                || ((16_500..=105_000).contains(&self.source_power_limit_mw)
+                    && self.source_power_limit_mw.is_multiple_of(10)))
             && self.points[..usize::from(self.point_count)]
                 .iter()
                 .all(|point| {
@@ -161,6 +169,7 @@ impl SupplyBoundary {
             || self.advertised_min_mv != query.source_min_mv
             || self.advertised_max_mv != query.source_max_mv
             || self.source_max_ma != query.source_max_ma
+            || self.source_power_limit_mw != query.source_power_limit_mw
         {
             return None;
         }
@@ -287,6 +296,7 @@ impl SupplyBoundary {
             || self.advertised_min_mv != query.source_min_mv
             || self.advertised_max_mv != query.source_max_mv
             || self.source_max_ma != query.source_max_ma
+            || self.source_power_limit_mw != query.source_power_limit_mw
         {
             return None;
         }
@@ -371,6 +381,8 @@ impl SupplyBoundary {
         ] {
             out[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         }
+        let power_units = u16::try_from(self.source_power_limit_mw / 10).ok()?;
+        out[24..26].copy_from_slice(&power_units.to_le_bytes());
         for (index, point) in self.points[..usize::from(self.point_count)]
             .iter()
             .enumerate()
@@ -422,6 +434,7 @@ impl SupplyBoundary {
             source_max_ma: read(18),
             advertised_min_mv: read(20),
             advertised_max_mv: read(22),
+            source_power_limit_mw: u32::from(u16::from_le_bytes([bytes[24], bytes[25]])) * 10,
             point_count: bytes[2],
             ..Self::default()
         };

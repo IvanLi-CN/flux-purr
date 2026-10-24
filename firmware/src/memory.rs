@@ -6151,7 +6151,7 @@ mod tests {
         });
         let mut bytes = [0xff; FPR2_MAX_RECORD_SIZE];
         let len = encode_persist_record(70, &data, &mut bytes).unwrap();
-        assert_eq!(len, 765);
+        assert_eq!(len, 767);
         assert_eq!(decode_persist_record(&bytes[..len]).unwrap().data, data);
         // A torn record cannot expose either half of the calibration pair.
         assert!(decode_persist_record(&bytes[..len - 1]).is_err());

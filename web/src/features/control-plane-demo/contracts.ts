@@ -541,6 +541,7 @@ export interface SupplyBoundary {
   sourceMinMv: number
   sourceMaxMv: number
   sourceMaxMa: number
+  sourcePowerLimitMw?: number
   advertisedMinMv: number
   advertisedMaxMv: number
   points: Array<[number, number, number, number, number, number, number, number, number]>

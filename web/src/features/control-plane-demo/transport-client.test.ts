@@ -1313,6 +1313,7 @@ describe('control-plane transport client', () => {
           sourceMinMv: 5500,
           sourceMaxMv: 21000,
           sourceMaxMa: 3000,
+          sourcePowerLimitMw: 60000,
           advertisedMinMv: 5000,
           advertisedMaxMv: 21000,
           points: [[30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1]],

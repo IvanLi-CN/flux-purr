@@ -14283,6 +14283,7 @@ fn automatic_heater_boundary_uses_encoded_budget_for_five_amp_apdo() {
             source_min_mv: 5_000,
             source_max_mv: 21_000,
             source_max_ma: 3_000,
+            source_power_limit_mw: 0,
         },
         |raw| {
             projected_rtd_temperature_c(&MemoryConfig::default(), raw)
@@ -18950,6 +18951,7 @@ fn automatic_boundary_request_mv(
                 source_min_mv: 3_300,
                 source_max_mv: 21_000,
                 source_max_ma: 3_000,
+                source_power_limit_mw: 0,
             },
             |raw| {
                 projected_rtd_temperature_c(config, raw)
@@ -19127,6 +19129,7 @@ fn live_boundary_points_keep_a_confirmed_high_voltage_request_authorized() {
                     source_min_mv: 3_300,
                     source_max_mv: 21_000,
                     source_max_ma: 3_000,
+                    source_power_limit_mw: 0,
                 },
                 |raw| {
                     projected_rtd_temperature_c(&config, raw)

@@ -232,9 +232,8 @@ pub(super) fn render_self_test_evidence_bundle(
         .iter()
         .map(|run_dir| read_json(&run_dir.join("run.json")))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut summaries = summaries;
-    apply_port_metadata(&mut summaries, input.port_path.as_deref());
-    validate_self_test_run_set(&summaries)?;
+    let summaries = summaries;
+    let provenance_complete = validate_self_test_run_set(&summaries, input.port_path.as_deref())?;
     let summary = summaries.first().expect("non-empty raw run directories");
     if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
         return Err(io::Error::new(
@@ -255,7 +254,7 @@ pub(super) fn render_self_test_evidence_bundle(
     )?;
 
     let metadata = self_test_report_metadata(summary);
-    let transaction_id = self_test_transaction_id(&run_dirs);
+    let transaction_id = self_test_transaction_id(&run_dirs)?;
     let source_current_limit_ma = self_test_source_current_limit_ma(summary);
     let source_url = self_test_source_url(summary);
     let active_model = thermal_plant_model_snapshot(&evidence.all_samples);
@@ -269,7 +268,8 @@ pub(super) fn render_self_test_evidence_bundle(
         target_temps_c: &evidence.target_temps_c,
         source_url: &source_url,
         source_current_limit_ma,
-        provenance_complete: input.port_path.as_deref().is_some_and(non_empty_metadata)
+        provenance_complete: provenance_complete
+            && input.port_path.as_deref().is_some_and(non_empty_metadata)
             && input
                 .firmware_sha
                 .as_deref()
@@ -325,16 +325,6 @@ fn self_test_render_result(
     })
 }
 
-fn apply_port_metadata(summaries: &mut [Value], port_path: Option<&str>) {
-    if let Some(port_path) = port_path {
-        for summary in summaries {
-            if let Some(target) = summary.get_mut("target").and_then(Value::as_object_mut) {
-                target.insert("port".to_string(), json!(port_path));
-            }
-        }
-    }
-}
-
 fn non_empty_metadata(value: &str) -> bool {
     !value.trim().is_empty() && value != UNKNOWN_LEGACY_METADATA
 }
@@ -348,9 +338,10 @@ fn self_test_identity<'a>(summary: &'a Value, path: &str) -> &'a str {
 
 fn validate_self_test_run_set(
     summaries: &[Value],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    expected_port: Option<&str>,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     let Some(first) = summaries.first() else {
-        return Ok(());
+        return Ok(false);
     };
     for path in [
         "/target/deviceId",
@@ -373,7 +364,13 @@ fn validate_self_test_run_set(
             .into());
         }
     }
-    Ok(())
+    let supplied_port_matches = expected_port.is_some_and(|expected| {
+        non_empty_metadata(expected)
+            && summaries
+                .iter()
+                .all(|summary| self_test_identity(summary, "/target/port") == expected)
+    });
+    Ok(supplied_port_matches)
 }
 
 fn self_test_accepted_profile(run_dirs: &[PathBuf], active_model: Value) -> Value {
@@ -620,21 +617,34 @@ fn self_test_source_current_limit_ma(summary: &Value) -> Option<u64> {
         .and_then(Value::as_u64)
 }
 
-fn self_test_transaction_id(run_dirs: &[PathBuf]) -> Option<u64> {
-    run_dirs.iter().find_map(|run_dir| {
-        grouped_samples(&run_dir.join("samples.ndjson"))
-            .ok()?
+fn self_test_transaction_id(
+    run_dirs: &[PathBuf],
+) -> Result<Option<u64>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut transaction_id = None;
+    for run_dir in run_dirs {
+        for sample in grouped_samples(&run_dir.join("samples.ndjson"))?
             .into_values()
             .flatten()
-            .find_map(|sample| {
-                sample
-                    .pointer("/status/thermalPlantModel/activeTransactionId")
-                    .or_else(|| {
-                        sample.pointer("/heaterTelemetry/thermalPlantModel/activeTransactionId")
-                    })
-                    .and_then(Value::as_u64)
-            })
-    })
+        {
+            let sample_id = sample
+                .pointer("/status/thermalPlantModel/activeTransactionId")
+                .or_else(|| {
+                    sample.pointer("/heaterTelemetry/thermalPlantModel/activeTransactionId")
+                })
+                .and_then(Value::as_u64);
+            if let Some(sample_id) = sample_id {
+                if transaction_id.is_some_and(|expected| expected != sample_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "self-test report mixes thermal transaction ids",
+                    )
+                    .into());
+                }
+                transaction_id = Some(sample_id);
+            }
+        }
+    }
+    Ok(transaction_id)
 }
 
 fn self_test_report_metadata(summary: &Value) -> SelfTestReportMetadata {
@@ -2832,7 +2842,10 @@ mod tests {
                 "kind": "thermal_self_test",
                 "runId": "thermal-pps3a-240",
                 "complete": true,
-                "target": {"deviceId": "serial-303a-1001-A0:F2:62:F2:0D:6C"},
+                "target": {
+                    "deviceId": "serial-303a-1001-A0:F2:62:F2:0D:6C",
+                    "port": "/dev/cu.usbmodem21141401"
+                },
                 "source": {
                     "kind": "isolapurr",
                     "deviceId": "f293cc9c139e",

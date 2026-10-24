@@ -1332,6 +1332,13 @@ impl ManualPpsState {
         ))
     }
 
+    pub(crate) fn thermal_plant_source_power_limit_mw(&self) -> u32 {
+        self.source_power_limit_mw
+            .zip(self.source_power_limit_ma)
+            .filter(|(_, current_ma)| *current_ma >= 3_000)
+            .map_or(0, |(power_mw, _)| power_mw)
+    }
+
     pub(crate) fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
         self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
     }
@@ -1422,6 +1429,7 @@ impl ManualPpsState {
                             source_min_mv: apdo.min_mv,
                             source_max_mv: apdo.max_mv,
                             source_max_ma: boundary_source_max_ma,
+                            source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
                         },
                         |raw| {
                             projected_rtd_temperature_c(memory_config, raw)
@@ -1659,6 +1667,7 @@ impl ManualPpsState {
                     source_min_mv: apdo.min_mv,
                     source_max_mv: apdo.max_mv,
                     source_max_ma: apdo.max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA),
+                    source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
                 },
                 |raw| {
                     projected_rtd_temperature_c(memory_config, raw)

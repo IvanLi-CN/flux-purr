@@ -538,6 +538,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         source_min_mv: 5_500,
         source_max_mv: 21_000,
         source_max_ma: 3_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 5_000,
         advertised_max_mv: 21_000,
         points: vec![[30_000, 2_500, 750, 1_900, 600, 3_000, 9_500, 9_600, 1]],

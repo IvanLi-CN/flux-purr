@@ -175,6 +175,8 @@ pub struct SupplyBoundary {
     pub source_min_mv: u16,
     pub source_max_mv: u16,
     pub source_max_ma: u16,
+    #[serde(default)]
+    pub source_power_limit_mw: u32,
     pub advertised_min_mv: u16,
     pub advertised_max_mv: u16,
     pub points: Vec<[u32; 9]>,

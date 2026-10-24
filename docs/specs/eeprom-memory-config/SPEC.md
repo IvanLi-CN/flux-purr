@@ -125,7 +125,7 @@
   - `0x3b`: legacy heater curve identity; absent from active calibration
   - `0x3c`: commissioning-required state
   - `0x3d`: versioned whole-device supply boundary with raw ADC and conversion metadata
-- FPR2 stores the two saved profile banks and mode in ThermalPolicy, commissioning/ADC in SafetyCalibration, and `0x3d` plus new-format `0x3a` together in the unchanged ThermalPlant single slot. At most 21 equilibrium points, 20 transient temperature bins and 48 fit samples occupy at most 765 bytes including the record header. Fit and persistence consume the same compacted trace. Old resistance observations, curve identity and old-format thermal transactions are not restored, projected or migrated; unrelated preferences, ADC settings and network configuration retain their existing compatibility.
+- FPR2 stores the two saved profile banks and mode in ThermalPolicy, commissioning/ADC in SafetyCalibration, and `0x3d` plus new-format `0x3a` together in the unchanged ThermalPlant single slot. At most 21 equilibrium points, 20 transient temperature bins and 48 fit samples occupy at most 767 bytes including the record header; format 3 also persists the high-voltage Fixed PDO power envelope. Fit and persistence consume the same compacted trace. Old resistance observations, curve identity and old-format thermal transactions are not restored, projected or migrated; unrelated preferences, ADC settings and network configuration retain their existing compatibility.
 - 读取旧记录时，缺失 `0x05` 由旧 `0x04` 映射为 `Off`/`Normal`；缺失 `0x06` 默认 `Medium`。新标签优先于旧布尔值，写回同时保留 `0x04` 兼容投影。
 - 新写入的 thermal profile payload 必须以紧凑 `TCP3` 布局标识开头，两个 bank 独立存入 `ThermalPolicy` A/B 槽。`TCP2` 和无标识历史 payload 继续按各自旧布局优先解码。旧单档 thermal profile 自动迁移为 `pps3a`，且缺失 mode 时恢复为 `65w`。
 
@@ -137,7 +137,7 @@
 ## Verification
 
 - VER-EEPROM-ONLY covers: REQ-EEPROM-ONLY. Host codec and runtime tests verify EEPROM-only persistence, protected failures and heater-off restoration.
-- VER-EEPROM-SUPPLY covers: REQ-EEPROM-SUPPLY. Host tests round-trip the maximum 765-byte combined record, preserve seven-hour timestamps and raw metadata, reject malformed new records, and prove old calibration remains absent.
+- VER-EEPROM-SUPPLY covers: REQ-EEPROM-SUPPLY. Host tests round-trip the maximum 767-byte combined record, preserve seven-hour timestamps and raw metadata, reject malformed new records, and prove old calibration remains absent.
 
 - Given EEPROM 为空且可写，When 固件启动，Then 固件从批准的硬件配置初始化 EEPROM、验证写入，并在 UI 使用该配置。
 - Given EEPROM 缺失，或安全校准/温控策略记录不可读、不可写或验证失败，When 固件启动或提交配置，Then 固件进入 `EEPROM_REQUIRED`，不使用内部 Flash/NVS/raw sector 且 heater/PPS/calibration 保持锁定；Given 偏好/网络域失败，Then 只标记该域未保存并允许 heater/fan 保护继续运行。
