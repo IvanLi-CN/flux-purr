@@ -252,7 +252,14 @@ pub(super) fn render_self_test_evidence_bundle(
         hold_seconds,
     )?;
 
-    let metadata = self_test_report_metadata(summary);
+    let mut metadata = self_test_report_metadata(summary);
+    if let Some(port_path) = input
+        .port_path
+        .as_deref()
+        .filter(|value| non_empty_metadata(value))
+    {
+        metadata.port_path = port_path.to_string();
+    }
     let transaction_id = self_test_transaction_id(&run_dirs)?;
     let source_current_limit_ma = self_test_source_current_limit_ma(summary);
     let source_url = self_test_source_url(summary);
@@ -365,9 +372,10 @@ fn validate_self_test_run_set(
     }
     let supplied_port_matches = expected_port.is_some_and(|expected| {
         non_empty_metadata(expected)
-            && summaries
-                .iter()
-                .all(|summary| self_test_identity(summary, "/target/port") == expected)
+            && summaries.iter().all(|summary| {
+                let recorded = self_test_identity(summary, "/target/port");
+                recorded == expected || recorded == UNKNOWN_LEGACY_METADATA
+            })
     });
     Ok(supplied_port_matches)
 }

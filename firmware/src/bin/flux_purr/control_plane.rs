@@ -1522,6 +1522,13 @@ fn transient_fit_window_is_stable(
     true
 }
 
+// RTD contact and startup heat spreading make the first part of a cold-start
+// trace transient-heavy. Keep those observations in the raw transaction and
+// coverage checks, but only use the physically settled portion as a fit
+// candidate. The coverage gate still requires the trace to reach 100 C.
+#[cfg(any(target_arch = "xtensa", test))]
+const THERMAL_PLANT_FIT_MIN_TEMP_C: f32 = 50.0;
+
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn transient_mean_delayed_power_mw(
     samples: &[ThermalPlantTransientSample],
@@ -1695,7 +1702,8 @@ pub(crate) fn prepare_transient_fit(
         {
             *row = Some((values, previous_index as u8));
             stable_rows[index] =
-                transient_fit_window_is_stable(&samples[..count], index, previous_index);
+                transient_fit_window_is_stable(&samples[..count], index, previous_index)
+                    && temperatures_c[index] >= THERMAL_PLANT_FIT_MIN_TEMP_C;
         }
     }
     Some(TransientFitData {
@@ -2015,14 +2023,12 @@ pub(crate) fn best_transient_projection(
 #[cfg(any(target_arch = "xtensa", test))]
 fn best_transient_projection_without_radiation_for_data(
     data: &TransientFitData,
+    minimum_rows: usize,
 ) -> Option<(ThermalPlantProjection, f32)> {
     thermal_plant_fit_delay_ticks()
         .filter_map(|delay_ticks| {
-            // The reduced fit has two physical coefficients. Eight stable
-            // rows provide a bounded overdetermined fit while allowing a
-            // five-minute 3 A scan to finish after only ten retained rows at
-            // one electrically stable voltage.
-            let (scales, _row_count) = transient_fit_scales_with_min_rows(data, delay_ticks, 8)?;
+            let (scales, _row_count) =
+                transient_fit_scales_with_min_rows(data, delay_ticks, minimum_rows)?;
             let (normal, rhs, power_sum_sq, _row_count) =
                 transient_fit_normal_matrix_with_rank(data, delay_ticks, scales, false)?;
             let solution = solve_transient_normal_equations(normal, rhs, 0b011)?;
@@ -2063,8 +2069,12 @@ pub(crate) fn best_transient_projection_without_radiation(
     data: &TransientFitData,
 ) -> Option<(ThermalPlantProjection, f32)> {
     let stable = stable_transient_fit_data(data);
-    best_transient_projection_without_radiation_for_data(data)
-        .or_else(|| best_transient_projection_without_radiation_for_data(&stable))
+    // Keep the original twelve-row guard and candidate ordering for the
+    // complete trace. The reduced fit may use eight rows only after the
+    // startup/transient filter has selected a physically stable subset, which
+    // keeps a five-minute 3 A scan viable when only one voltage stage remains.
+    best_transient_projection_without_radiation_for_data(data, 12)
+        .or_else(|| best_transient_projection_without_radiation_for_data(&stable, 8))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
