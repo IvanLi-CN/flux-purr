@@ -24,8 +24,8 @@ check_factory_app_size() {
     --chip esp32s3 \
     --flash-size 4mb \
     --flash-mode dio \
-    --flash-freq 40m \
-    --xtal-freq 40m \
+    --flash-freq 40mhz \
+    --xtal-freq 40mhz \
     --partition-table firmware/partitions.csv \
     --target-app-partition factory \
     --merge \
