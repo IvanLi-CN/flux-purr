@@ -111,6 +111,7 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         provider: &metadata.provider,
         source_url: UNKNOWN_LEGACY_METADATA,
         source_current_limit_ma: None,
+        provenance_complete: false,
         firmware_sha: UNKNOWN_LEGACY_METADATA,
         source_path: UNKNOWN_LEGACY_METADATA,
         thermal_transaction_id: None,
@@ -219,10 +220,10 @@ pub(super) fn render_self_test_evidence_bundle(
             .output_dir
             .unwrap_or_else(|| infer_self_test_output_dir(run_dir)),
     )?;
-    if *run_dir == output_dir {
+    if run_dirs.iter().any(|raw_dir| raw_dir == &output_dir) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "self-test report output directory must be different from the raw run directory",
+            "self-test report output directory must be different from every raw run directory",
         )
         .into());
     }
@@ -233,6 +234,7 @@ pub(super) fn render_self_test_evidence_bundle(
         .collect::<Result<Vec<_>, _>>()?;
     let mut summaries = summaries;
     apply_port_metadata(&mut summaries, input.port_path.as_deref());
+    validate_self_test_run_set(&summaries)?;
     let summary = summaries.first().expect("non-empty raw run directories");
     if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
         return Err(io::Error::new(
@@ -267,6 +269,12 @@ pub(super) fn render_self_test_evidence_bundle(
         target_temps_c: &evidence.target_temps_c,
         source_url: &source_url,
         source_current_limit_ma,
+        provenance_complete: input.port_path.as_deref().is_some_and(non_empty_metadata)
+            && input
+                .firmware_sha
+                .as_deref()
+                .is_some_and(non_empty_metadata)
+            && input.source_path.as_deref().is_some_and(non_empty_metadata),
         firmware_sha: input
             .firmware_sha
             .as_deref()
@@ -278,6 +286,13 @@ pub(super) fn render_self_test_evidence_bundle(
         transaction_id,
     })?;
 
+    let report_passed = bundle
+        .get("reportRuns")
+        .and_then(Value::as_array)
+        .is_some_and(|runs| {
+            runs.iter()
+                .all(|run| run.get("reviewPassed").and_then(Value::as_bool) == Some(true))
+        });
     Ok(json!({
         "ok": true,
         "operation": "thermal_report.render_self_test_evidence_bundle",
@@ -289,19 +304,62 @@ pub(super) fn render_self_test_evidence_bundle(
         "acceptedProfilePath": bundle.pointer("/files/acceptedProfilePath").cloned().unwrap_or(Value::Null),
         "kind": bundle.get("kind").cloned().unwrap_or(Value::Null),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
+        "reviewPassed": report_passed,
+        "provenanceComplete": bundle.get("provenanceComplete").cloned().unwrap_or(Value::Bool(false)),
+        "safetyEvidenceComplete": bundle.get("safetyEvidenceComplete").cloned().unwrap_or(Value::Bool(false)),
         "targetsC": evidence.target_temps_c,
     }))
 }
 
 fn apply_port_metadata(summaries: &mut [Value], port_path: Option<&str>) {
-    if let Some(port_path) = port_path
-        && let Some(target) = summaries
-            .first_mut()
-            .and_then(|summary| summary.get_mut("target"))
-            .and_then(Value::as_object_mut)
-    {
-        target.insert("port".to_string(), json!(port_path));
+    if let Some(port_path) = port_path {
+        for summary in summaries {
+            if let Some(target) = summary.get_mut("target").and_then(Value::as_object_mut) {
+                target.insert("port".to_string(), json!(port_path));
+            }
+        }
     }
+}
+
+fn non_empty_metadata(value: &str) -> bool {
+    !value.trim().is_empty() && value != UNKNOWN_LEGACY_METADATA
+}
+
+fn self_test_identity<'a>(summary: &'a Value, path: &str) -> &'a str {
+    summary
+        .pointer(path)
+        .and_then(Value::as_str)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
+}
+
+fn validate_self_test_run_set(
+    summaries: &[Value],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(first) = summaries.first() else {
+        return Ok(());
+    };
+    for path in [
+        "/target/deviceId",
+        "/target/port",
+        "/source/deviceId",
+        "/source/id",
+        "/source/url",
+        "/source/endpoint",
+    ] {
+        let expected = self_test_identity(first, path);
+        if summaries
+            .iter()
+            .skip(1)
+            .any(|summary| self_test_identity(summary, path) != expected)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("self-test run identity mismatch at {path}"),
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn self_test_accepted_profile(run_dirs: &[PathBuf], active_model: Value) -> Value {
@@ -323,6 +381,7 @@ struct SelfTestBundleInput<'a> {
     target_temps_c: &'a [i16],
     source_url: &'a str,
     source_current_limit_ma: Option<u64>,
+    provenance_complete: bool,
     firmware_sha: &'a str,
     source_path: &'a str,
     transaction_id: Option<u64>,
@@ -331,7 +390,7 @@ struct SelfTestBundleInput<'a> {
 fn write_self_test_bundle(
     input: SelfTestBundleInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+    write_preliminary_review_bundle_with_provenance(PreliminaryReviewBundleInput {
         bundle_dir: input.output_dir,
         accepted_profile: input.accepted_profile,
         entries: input.entries,
@@ -354,6 +413,7 @@ fn write_self_test_bundle(
         provider: &input.metadata.provider,
         source_url: input.source_url,
         source_current_limit_ma: input.source_current_limit_ma,
+        provenance_complete: input.provenance_complete,
         firmware_sha: input.firmware_sha,
         source_path: input.source_path,
         thermal_transaction_id: input.transaction_id,
@@ -415,15 +475,24 @@ fn collect_self_test_evidence(
                 })
                 .unwrap_or_default();
             if !active_samples.is_empty() {
-                stage_sources.insert(
-                    target,
-                    (
-                        summary.clone(),
-                        run_id.clone(),
-                        stage.clone(),
-                        active_samples,
-                    ),
-                );
+                if stage_sources
+                    .insert(
+                        target,
+                        (
+                            summary.clone(),
+                            run_id.clone(),
+                            stage.clone(),
+                            active_samples,
+                        ),
+                    )
+                    .is_some()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("self-test report has duplicate target {target} across raw runs"),
+                    )
+                    .into());
+                }
             }
         }
         for (target, samples) in samples {
@@ -645,6 +714,12 @@ fn self_test_report_entry(
     full_speed_to_stable: Value,
 ) -> Value {
     let mut failures = validation_failures_for_target(summary, target_temp_c);
+    if !safety_evidence_complete(&samples) {
+        failures.push(json!({
+            "targetTempC": target_temp_c,
+            "reason": "safety_evidence_incomplete",
+        }));
+    }
     let stage_completed = stage.get("stopReason").and_then(Value::as_str) == Some("completed");
     let full_speed_limit_ms = if target_temp_c > 150 { 5_000 } else { 10_000 };
     let replay_gate_failure_reason = full_speed_to_stable
@@ -1009,17 +1084,17 @@ fn normalized_sample(sample: &Value) -> Value {
         .or_else(|| status.and_then(|payload| payload.get("voltageMv").and_then(Value::as_f64)))
         .or_else(|| {
             heater.and_then(|payload| payload.get("hotplateVoltageMv").and_then(Value::as_f64))
-        })
-        .unwrap_or(0.0);
+        });
     json!({
-        "t": round_decimal(sample.get("elapsedMs").and_then(Value::as_f64).unwrap_or(0.0) / 1000.0, 3),
+        "sampleIndex": sample.get("sampleIndex").cloned().unwrap_or(Value::Null),
+        "t": number_to_json(sample.get("elapsedMs").and_then(Value::as_f64).map(|value| round_decimal(value / 1000.0, 3))),
         "temp": status.and_then(|payload| payload.get("currentTempC")).cloned().or_else(|| heater.and_then(|payload| payload.get("currentTempC")).cloned()).unwrap_or(Value::Null),
         "filtered": status.and_then(|payload| payload.get("heaterFilteredTempC")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterFilteredTempC")).cloned()).unwrap_or(Value::Null),
         "control": status.and_then(|payload| payload.get("heaterControlTempC")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterControlTempC")).cloned()).unwrap_or(Value::Null),
         "controlGuarded": status.and_then(|payload| payload.get("heaterControlMeasurementGuarded")).cloned().unwrap_or(Value::Null),
         "command": status.and_then(|payload| payload.get("heaterOutputPercent")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterOutputPercent")).cloned()).unwrap_or(Value::Null),
         "output": status.and_then(|payload| payload.get("heaterPhysicalOutputPercent")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterPhysicalOutputPercent")).cloned()).unwrap_or(Value::Null),
-        "requestV": round_decimal(request_mv / 1000.0, 3),
+        "requestV": number_to_json(request_mv.map(|value| round_decimal(value / 1000.0, 3))),
         "contractV": number_to_json(status.and_then(|payload| payload.get("pdContractMv").and_then(Value::as_f64)).or_else(|| heater.and_then(|payload| payload.get("ppsContractMv").and_then(Value::as_f64))).map(|value| round_decimal(value / 1000.0, 3))),
         "boardV": number_to_json(heater.and_then(|payload| payload.get("hotplateVoltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
         "transactionId": status.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("activeTransactionId")).cloned().or_else(|| heater.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("activeTransactionId")).cloned()).unwrap_or(Value::Null),
@@ -1627,6 +1702,16 @@ fn candidate_metric_gate(entry: &Value) -> Option<bool> {
     if result.is_null() {
         return None;
     }
+    if target_role(entry) == "validation"
+        && !safety_evidence_complete(
+            entry
+                .get("samples")
+                .and_then(Value::as_array)
+                .map_or(&[], Vec::as_slice),
+        )
+    {
+        return Some(false);
+    }
     let stop_reason = result.get("stopReason").and_then(Value::as_str)?;
     if stop_reason != "completed" {
         return Some(false);
@@ -1660,6 +1745,33 @@ fn candidate_metric_gate(entry: &Value) -> Option<bool> {
             10_000.0
         });
     Some(settle_time_ms <= limit_ms)
+}
+
+fn safety_evidence_complete(samples: &[Value]) -> bool {
+    if samples.is_empty() {
+        return false;
+    }
+    let mut previous_key = None;
+    samples.iter().all(|sample| {
+        let key = sample
+            .get("sampleIndex")
+            .and_then(Value::as_f64)
+            .or_else(|| sample.get("t").and_then(Value::as_f64));
+        let aligned = key.is_some_and(f64::is_finite)
+            && previous_key.is_none_or(|previous| key.unwrap_or_default() >= previous);
+        let signals_present = ["temp", "requestV", "sourceVoltageV", "sourceCurrentA"]
+            .iter()
+            .all(|field| {
+                sample
+                    .get(*field)
+                    .and_then(Value::as_f64)
+                    .is_some_and(f64::is_finite)
+            });
+        if aligned {
+            previous_key = key;
+        }
+        aligned && signals_present
+    })
 }
 
 fn unique_targets_sorted(entries: &[Value]) -> Vec<i64> {
@@ -1843,6 +1955,7 @@ pub(super) struct PreliminaryReviewBundleInput<'a> {
     pub(super) provider: &'a str,
     pub(super) source_url: &'a str,
     pub(super) source_current_limit_ma: Option<u64>,
+    pub(super) provenance_complete: bool,
     pub(super) firmware_sha: &'a str,
     pub(super) source_path: &'a str,
     pub(super) thermal_transaction_id: Option<u64>,
@@ -1869,7 +1982,13 @@ impl PreliminaryBundlePaths {
 pub(super) fn write_preliminary_review_bundle(
     input: PreliminaryReviewBundleInput<'_>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let entries = normalize_preliminary_entries(&input.entries);
+    write_preliminary_review_bundle_with_provenance(input)
+}
+
+fn write_preliminary_review_bundle_with_provenance(
+    input: PreliminaryReviewBundleInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let entries = normalize_preliminary_entries(&input.entries, input.provenance_complete);
     fs::create_dir_all(input.bundle_dir)?;
     let paths = PreliminaryBundlePaths::new(input.bundle_dir);
     write_preliminary_samples(&entries, &paths.samples_path)?;
@@ -1881,11 +2000,11 @@ pub(super) fn write_preliminary_review_bundle(
     Ok(bundle)
 }
 
-fn normalize_preliminary_entries(entries: &[Value]) -> Vec<Value> {
+fn normalize_preliminary_entries(entries: &[Value], provenance_complete: bool) -> Vec<Value> {
     entries
         .iter()
         .map(sort_entry_samples)
-        .map(ensure_candidate_receipt_fields)
+        .map(|entry| ensure_candidate_receipt_fields_with_provenance(entry, provenance_complete))
         .collect()
 }
 
@@ -2000,6 +2119,17 @@ fn build_preliminary_bundle(
         "controlTempC": "Control-loop temperature used by thermal gates and scoring.",
     });
     let entries_array = Value::Array(entries.to_vec());
+    let safety_evidence_complete = report_runs
+        .iter()
+        .filter(|entry| target_role(entry) == "validation")
+        .all(|entry| {
+            safety_evidence_complete(
+                entry
+                    .get("samples")
+                    .and_then(Value::as_array)
+                    .map_or(&[], Vec::as_slice),
+            )
+        });
     json!({
         "kind": "thermal_self_test_preliminary_bundle",
         "canonicalReportFormat": "html_bundle",
@@ -2016,6 +2146,8 @@ fn build_preliminary_bundle(
         "temperatureSemantics": temperature_semantics,
         "candidateDispositions": candidate_dispositions,
         "candidateReadyTargetsC": set_to_vec(candidate_ready_targets_c),
+        "provenanceComplete": input.provenance_complete,
+        "safetyEvidenceComplete": safety_evidence_complete,
         "sourcePreset": input.source_preset,
         "provider": input.provider,
         "sourceUrl": input.source_url,
@@ -2143,7 +2275,10 @@ fn i16_array_field(value: &Value, field: &str) -> Option<Vec<i16>> {
     (!targets.is_empty()).then_some(targets)
 }
 
-fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
+fn ensure_candidate_receipt_fields_with_provenance(
+    mut entry: Value,
+    provenance_complete: bool,
+) -> Value {
     let target_role = entry
         .get("targetRole")
         .and_then(Value::as_str)
@@ -2164,9 +2299,15 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
             target_role != "validation" && has_point && valid_count > 0
         });
     let metric_gate = candidate_metric_gate(&entry);
+    let provenance_gate = target_role != "validation" || provenance_complete;
+    let effective_metric_gate = if provenance_gate {
+        metric_gate
+    } else {
+        Some(false)
+    };
     let candidate_ready =
-        target_role != "validation" && base_candidate_ready && metric_gate == Some(true);
-    let metric_gate_failed = metric_gate != Some(true);
+        target_role != "validation" && base_candidate_ready && effective_metric_gate == Some(true);
+    let metric_gate_failed = effective_metric_gate != Some(true);
     if (target_role == "validation" || base_candidate_ready) && metric_gate_failed {
         entry["ok"] = json!(false);
     }
@@ -2181,7 +2322,7 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         .unwrap_or("");
     let ok = entry.get("ok").and_then(Value::as_bool).unwrap_or(false);
     let disposition = if target_role == "validation"
-        && metric_gate == Some(true)
+        && effective_metric_gate == Some(true)
         && (ok || budget_outcome == "validation_passed")
     {
         "validation_passed"
@@ -2218,8 +2359,13 @@ fn ensure_candidate_receipt_fields(mut entry: Value) -> Value {
         final_disposition,
         "acceptance_passed" | "validation_passed" | "candidate_ready"
     );
-    entry["reviewPassed"] = json!(review_passed);
-    entry["reviewOutcome"] = json!(if review_passed { "passed" } else { "failed" });
+    entry["provenanceComplete"] = json!(provenance_complete);
+    entry["reviewPassed"] = json!(review_passed && provenance_gate);
+    entry["reviewOutcome"] = json!(if review_passed && provenance_gate {
+        "passed"
+    } else {
+        "failed"
+    });
     entry
 }
 
@@ -2552,9 +2698,9 @@ mod tests {
         render_self_test_evidence_bundle(ThermalSelfTestReportInput {
             run_dirs: vec![run_dir],
             output_dir: Some(output_dir.clone()),
-            port_path: None,
-            firmware_sha: None,
-            source_path: None,
+            port_path: Some("/dev/cu.usbmodem21141401".to_string()),
+            firmware_sha: Some("test-firmware-sha".to_string()),
+            source_path: Some("C".to_string()),
         })
         .expect("render retry self-test evidence");
         let bundle: Value = serde_json::from_slice(
@@ -2730,15 +2876,18 @@ mod tests {
 
     #[test]
     fn candidate_ready_requires_complete_hard_metric_evidence() {
-        let entry = super::ensure_candidate_receipt_fields(json!({
-            "target": 100,
-            "targetRole": "tuning",
-            "candidateReady": true,
-            "candidateDisposition": "candidate_ready",
-            "budgetOutcome": "budget_exhausted",
-            "validTestCount": 4,
-            "point": {"targetTempC": 100}
-        }));
+        let entry = super::ensure_candidate_receipt_fields_with_provenance(
+            json!({
+                "target": 100,
+                "targetRole": "tuning",
+                "candidateReady": true,
+                "candidateDisposition": "candidate_ready",
+                "budgetOutcome": "budget_exhausted",
+                "validTestCount": 4,
+                "point": {"targetTempC": 100}
+            }),
+            true,
+        );
 
         assert_eq!(entry["candidateReady"], json!(false));
         assert_eq!(entry["reviewOutcome"], json!("failed"));
@@ -2750,23 +2899,26 @@ mod tests {
 
     #[test]
     fn validation_review_cannot_pass_when_full_speed_gate_fails() {
-        let entry = super::ensure_candidate_receipt_fields(json!({
-            "target": 220,
-            "targetRole": "validation",
-            "ok": true,
-            "candidateReady": false,
-            "candidateDisposition": "validation_passed",
-            "budgetOutcome": "validation_passed",
-            "result": {
-                "stopReason": "completed",
-                "maxOvershootC": 1.0,
-                "holdPeakToPeakC": 1.0,
-                "fullSpeedToStable": {
-                    "settleTimeMs": 6_000,
-                    "limitMs": 5_000
+        let entry = super::ensure_candidate_receipt_fields_with_provenance(
+            json!({
+                "target": 220,
+                "targetRole": "validation",
+                "ok": true,
+                "candidateReady": false,
+                "candidateDisposition": "validation_passed",
+                "budgetOutcome": "validation_passed",
+                "result": {
+                    "stopReason": "completed",
+                    "maxOvershootC": 1.0,
+                    "holdPeakToPeakC": 1.0,
+                    "fullSpeedToStable": {
+                        "settleTimeMs": 6_000,
+                        "limitMs": 5_000
+                    }
                 }
-            }
-        }));
+            }),
+            true,
+        );
 
         assert_eq!(entry["ok"], json!(false));
         assert_eq!(entry["candidateDisposition"], json!("validation_failed"));
@@ -2846,6 +2998,9 @@ mod tests {
                 "samples": [{
                     "t": 0.0,
                     "temp": 78.0,
+                    "requestV": 20.0,
+                    "sourceVoltageV": 20.0,
+                    "sourceCurrentA": 2.7,
                     "temperature": {
                         "humanTempC": 78.0,
                         "filteredTempC": 77.9,
@@ -2861,6 +3016,9 @@ mod tests {
                     "samples": [{
                         "t": 0.0,
                         "temp": 78.0,
+                        "requestV": 20.0,
+                        "sourceVoltageV": 20.0,
+                        "sourceCurrentA": 2.7,
                         "temperature": {
                             "humanTempC": 78.0,
                             "filteredTempC": 77.9,
@@ -2894,6 +3052,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),
@@ -3077,6 +3236,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),
@@ -3208,6 +3368,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),
@@ -3277,6 +3438,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),
@@ -3372,6 +3534,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),
@@ -3465,6 +3628,7 @@ mod tests {
             provider: "IsolaPurr",
             source_url: "http://source.test",
             source_current_limit_ma: Some(5000),
+            provenance_complete: true,
             firmware_sha: "test-sha",
             source_path: "C",
             thermal_transaction_id: Some(7),

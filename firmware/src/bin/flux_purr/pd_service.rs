@@ -658,6 +658,15 @@ async fn process_pd_service_work(
             }
         }
         None => {
+            if let Some((ticket, _)) = pending_to_retry
+                && take_pd_service_ticket_cancelled(ticket)
+            {
+                runtime
+                    .abort_pending_operation(i2c, PdTimestamp::now())
+                    .await;
+                *pending = None;
+                return Some((ticket, TicketOutcome::Superseded));
+            }
             if flash_preparation::is_active()
                 && let Some((ticket, operation)) = pending_to_retry
                 && !matches!(operation, PendingPdOperation::Idle)

@@ -1149,7 +1149,7 @@ fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
     assert_eq!(manual.target_ma, Some(3_000));
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 21_000, 5_000))
+        Some((5_500, 21_000, 3_000))
     );
     assert_eq!(
         adjustable_mode_for_request(24_000, 28_000),
@@ -1210,6 +1210,21 @@ fn thermal_plant_scan_respects_fixed_power_envelope_without_changing_apdo_identi
             max_current_ma: 3_000,
         })
     );
+    assert_eq!(
+        manual.thermal_plant_source_limits(),
+        Some((5_500, 20_000, 3_000))
+    );
+}
+
+#[test]
+fn thermal_plant_scan_caps_five_amp_apdo_to_fixed_three_amp_power_envelope() {
+    let source = SourceCapabilities::from_pdos(&[
+        fixed_source_capability(20_000, 3_000),
+        pps_source_capability(5_000, 21_000, 5_000),
+    ]);
+    let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
+    let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+
     assert_eq!(
         manual.thermal_plant_source_limits(),
         Some((5_500, 20_000, 3_000))
@@ -1304,7 +1319,7 @@ fn thermal_plant_uses_one_apdo_covering_the_twenty_volt_anchor() {
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((20_000, 25_500, 5_000))
+        Some((20_000, 21_000, 3_000))
     );
     assert_eq!(manual.heater_source_limits(), Some((5_500, 25_500, 3_000)));
 }

@@ -61,6 +61,14 @@ fn raw_points_round_trip_and_legacy_bytes_are_absent() {
 }
 
 #[test]
+fn persisted_five_amp_source_key_is_rejected() {
+    let mut value = boundary();
+    value.source_max_ma = 5_000;
+
+    assert!(!value.is_valid());
+}
+
+#[test]
 fn lookup_does_not_invent_warmer_or_lower_current_observations() {
     let value = boundary();
     let lookup = |temp, current, wifi| {

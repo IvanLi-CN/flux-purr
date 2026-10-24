@@ -932,7 +932,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
     workspace: &mut CalibrationThermalPlantWorkspace,
     kind: CalibrationJobKind,
 ) -> Result<(), ManualPpsError> {
-    let (source_min_mv, source_max_mv, advertised_current_ma) = manual_pps
+    let (source_min_mv, source_max_mv, _advertised_current_ma) = manual_pps
         .thermal_plant_source_limits()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let scan_min_mv = source_min_mv.max(5_500).div_ceil(100) * 100;
@@ -949,7 +949,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
             wifi_started,
             source_min_mv: scan_min_mv,
             source_max_mv,
-            source_max_ma: advertised_current_ma,
+            source_max_ma: source_current_ma,
             advertised_min_mv: scan_range.min_mv,
             advertised_max_mv: scan_range.max_mv,
             ..Default::default()

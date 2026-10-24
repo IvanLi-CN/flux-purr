@@ -1314,11 +1314,12 @@ impl ManualPpsState {
 
     pub(crate) fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
         let range = self.thermal_plant_pps_range()?;
+        let scan_current_ma = 3_000;
         let operational_max_mv = self
             .source_power_limit_mw
             .zip(self.source_power_limit_ma)
-            .filter(|(_, envelope_ma)| range.max_current_ma <= *envelope_ma)
-            .map(|(power_mw, _)| (power_mw * 1_000 / u32::from(range.max_current_ma)) as u16)
+            .filter(|(_, envelope_ma)| scan_current_ma <= *envelope_ma)
+            .map(|(power_mw, _)| (power_mw * 1_000 / u32::from(scan_current_ma)) as u16)
             .map(|mv| mv / 100 * 100)
             .map_or(range.max_mv, |mv| mv.min(range.max_mv));
         if operational_max_mv < range.min_mv.max(self.request_min_mv) {
@@ -1327,7 +1328,7 @@ impl ManualPpsState {
         Some((
             range.min_mv.max(self.request_min_mv),
             operational_max_mv.min(self.request_max_mv),
-            range.max_current_ma,
+            scan_current_ma,
         ))
     }
 

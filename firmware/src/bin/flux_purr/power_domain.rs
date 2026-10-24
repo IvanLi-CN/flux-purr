@@ -738,15 +738,15 @@ fn cancel_pd_service_ticket(ticket: PowerTicket) {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bool {
+pub(crate) fn take_pd_service_ticket_cancelled(ticket: PowerTicket) -> bool {
     PD_SERVICE_CANCELLED_TICKET
-        .compare_exchange(
-            ticket_key(pd_service_command_ticket(command)),
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
+        .compare_exchange(ticket_key(ticket), 0, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bool {
+    take_pd_service_ticket_cancelled(pd_service_command_ticket(command))
 }
 
 #[cfg(target_arch = "xtensa")]

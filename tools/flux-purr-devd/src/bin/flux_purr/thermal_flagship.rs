@@ -354,6 +354,7 @@ fn write_flagship_bundle(
             provider: PROVIDER_ISOLAPURR,
             source_url: &context.args.source_url,
             source_current_limit_ma: None,
+            provenance_complete: false,
             firmware_sha: "unknown",
             source_path: "unknown",
             thermal_transaction_id: None,

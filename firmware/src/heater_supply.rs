@@ -125,7 +125,7 @@ impl SupplyBoundary {
             && self.advertised_min_mv > 0
             && self.advertised_min_mv <= self.source_min_mv
             && self.advertised_max_mv >= self.source_max_mv
-            && self.source_max_ma >= 3_000
+            && self.source_max_ma == 3_000
             && self.points[..usize::from(self.point_count)]
                 .iter()
                 .all(|point| {
