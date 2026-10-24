@@ -1836,6 +1836,15 @@ pub(crate) fn transient_fit_scales(
     data: &TransientFitData,
     delay_ticks: u16,
 ) -> Option<([f32; 3], usize)> {
+    transient_fit_scales_with_min_rows(data, delay_ticks, 12)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn transient_fit_scales_with_min_rows(
+    data: &TransientFitData,
+    delay_ticks: u16,
+    minimum_rows: usize,
+) -> Option<([f32; 3], usize)> {
     let mut scale_sums = [0.0_f32; 3];
     let mut row_count = 0usize;
     for index in 1..data.count {
@@ -1849,7 +1858,7 @@ pub(crate) fn transient_fit_scales(
             row_count += 1;
         }
     }
-    if row_count < 12 {
+    if row_count < minimum_rows {
         return None;
     }
     let scales = scale_sums.map(|sum| (sum / row_count as f32).sqrt());
@@ -2009,7 +2018,11 @@ fn best_transient_projection_without_radiation_for_data(
 ) -> Option<(ThermalPlantProjection, f32)> {
     thermal_plant_fit_delay_ticks()
         .filter_map(|delay_ticks| {
-            let (scales, _row_count) = transient_fit_scales(data, delay_ticks)?;
+            // The reduced fit has two physical coefficients. Eight stable
+            // rows provide a bounded overdetermined fit while allowing a
+            // five-minute 3 A scan to finish after only ten retained rows at
+            // one electrically stable voltage.
+            let (scales, _row_count) = transient_fit_scales_with_min_rows(data, delay_ticks, 8)?;
             let (normal, rhs, power_sum_sq, _row_count) =
                 transient_fit_normal_matrix_with_rank(data, delay_ticks, scales, false)?;
             let solution = solve_transient_normal_equations(normal, rhs, 0b011)?;
