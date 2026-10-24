@@ -368,9 +368,10 @@ pub struct ThermalPlantTransientSample {
     /// 50 ms ticks from the start of the automatic job.
     pub elapsed_ticks: u32,
     pub raw_rtd_adc_mv: u16,
-    /// Measured heater voltage, quantized to 125 mV. Code 255 is reserved for
-    /// an explicit passive-cooling sample; real voltage codes cover the
-    /// complete 28 V PD guard without changing the persisted sample size.
+    /// Measured heater voltage, quantized to 125 mV. Codes 254 and 255 are
+    /// reserved for fan-assisted and passive-cooling samples; real voltage
+    /// codes cover the complete 28 V PD guard without changing the persisted
+    /// sample size.
     pub heater_voltage_125mv: u8,
     pub duty_percent: u8,
 }
@@ -426,12 +427,22 @@ pub const fn thermal_plant_heater_voltage_mv(code: u8) -> u16 {
     code as u16 * THERMAL_PLANT_TRANSIENT_HEATER_VOLTAGE_QUANTUM_MV
 }
 
-/// Real heater voltage codes end at 224 (28 V), so 255 is an unambiguous
-/// phase marker that fits the existing one-byte voltage field.
+/// Real heater voltage codes end at 224 (28 V), so the two highest codes are
+/// unambiguous phase markers that fit the existing one-byte voltage field.
 pub const THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL: u8 = u8::MAX;
+pub const THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL: u8 = u8::MAX - 1;
 
 pub const fn thermal_plant_sample_is_cooling(sample: ThermalPlantTransientSample) -> bool {
-    sample.heater_voltage_125mv == THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+    matches!(
+        sample.heater_voltage_125mv,
+        THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL | THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+    )
+}
+
+pub const fn thermal_plant_sample_is_fan_assisted_cooling(
+    sample: ThermalPlantTransientSample,
+) -> bool {
+    sample.heater_voltage_125mv == THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
 }
 
 pub const fn thermal_plant_sample_voltage_125mv(sample: ThermalPlantTransientSample) -> u8 {
@@ -3446,11 +3457,7 @@ fn encode_thermal_plant_persisted_transaction(
             THERMAL_PLANT_TRANSIENT_HEADER_LEN + index * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
         // 19 time bits, 12 ADC-mV bits, 8 voltage bits and one gate bit.
         // 50 ms ticks cover over seven hours without losing transport-delay data.
-        let voltage_125mv = if thermal_plant_sample_is_cooling(*sample) {
-            THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
-        } else {
-            sample.heater_voltage_125mv
-        };
+        let voltage_125mv = sample.heater_voltage_125mv;
         let packed = u64::from(sample.elapsed_ticks)
             | (u64::from(sample.raw_rtd_adc_mv) << 19)
             | (u64::from(voltage_125mv) << 31)
@@ -6231,6 +6238,32 @@ mod tests {
             THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
         );
         assert_eq!(decoded.samples[13].duty_percent, 0);
+        assert_eq!(decoded, transaction);
+    }
+
+    #[test]
+    fn persisted_transient_samples_retain_fan_assisted_cooling_marker() {
+        let mut transaction = sample_transient_thermal_plant_transaction();
+        transaction.samples[13].heater_voltage_125mv = THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL;
+        assert!(thermal_plant_transient_transaction_has_valid_structure(
+            &transaction
+        ));
+
+        let payload_len = THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + usize::from(transaction.sample_count) * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN;
+        let mut encoded = [0u8; THERMAL_PLANT_TRANSIENT_HEADER_LEN
+            + THERMAL_PLANT_TRANSIENT_MAX_SAMPLES * THERMAL_PLANT_PERSISTED_SAMPLE_PAYLOAD_LEN];
+        encode_thermal_plant_persisted_transaction(&transaction, &mut encoded[..payload_len]);
+
+        let decoded = decode_thermal_plant_persisted_transaction(&encoded[..payload_len])
+            .expect("fan-assisted cooling marker must decode");
+        assert_eq!(
+            decoded.samples[13].heater_voltage_125mv,
+            THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+        );
+        assert!(thermal_plant_sample_is_fan_assisted_cooling(
+            decoded.samples[13]
+        ));
         assert_eq!(decoded, transaction);
     }
 

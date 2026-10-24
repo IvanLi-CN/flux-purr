@@ -1198,6 +1198,7 @@ pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, reque
         phase: Some(ThermalPlantRunPhase::Ambient),
         progress_percent: 0,
         elapsed_ms: 0,
+        ambient_raw_rtd_adc_mv: 0,
         current_temp_centi_c: 2500,
         heater_voltage_mv: request_mv,
         duty_percent: 0,

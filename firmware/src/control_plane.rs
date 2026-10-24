@@ -443,6 +443,8 @@ pub enum ThermalPlantRunPhaseWire {
 pub struct ThermalPlantTracePointWire {
     pub sample_index: u8,
     pub elapsed_ms: u32,
+    #[serde(default)]
+    pub raw_rtd_adc_mv: u16,
     pub temperature_centi_c: i16,
     pub heater_voltage_mv: u16,
     pub duty_percent: u8,
@@ -474,6 +476,8 @@ pub struct ThermalPlantRunAttemptWire {
     pub phase: Option<ThermalPlantRunPhaseWire>,
     pub progress_percent: u8,
     pub elapsed_ms: u32,
+    #[serde(default)]
+    pub ambient_raw_rtd_adc_mv: u16,
     pub current_temp_centi_c: i16,
     pub heater_voltage_mv: u16,
     pub duty_percent: u8,
@@ -4963,6 +4967,7 @@ mod tests {
                     .map(|_| ThermalPlantTracePointWire {
                         sample_index: 32,
                         elapsed_ms: 26_000_000,
+                        raw_rtd_adc_mv: 0,
                         temperature_centi_c: 8_000,
                         heater_voltage_mv: 0,
                         duty_percent: 0,

@@ -1331,6 +1331,21 @@ pub(crate) struct ThermalSelfTestReportArgs {
         help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
     )]
     pub(crate) output_dir: Option<PathBuf>,
+    #[arg(
+        long = "port-path",
+        help = "Authorized Flux Purr MCU port to record in the report context."
+    )]
+    pub(crate) port_path: Option<String>,
+    #[arg(
+        long = "firmware-sha",
+        help = "Firmware source SHA to bind to the report context."
+    )]
+    pub(crate) firmware_sha: Option<String>,
+    #[arg(
+        long = "source-path",
+        help = "Physical source output path or port label, for example C."
+    )]
+    pub(crate) source_path: Option<String>,
 }
 
 #[derive(Debug, Args)]

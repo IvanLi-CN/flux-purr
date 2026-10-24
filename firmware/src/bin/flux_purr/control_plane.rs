@@ -1207,8 +1207,11 @@ fn mark_trace_indices_evenly(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlantAutoJob) {
-    let count = usize::from(job.sample_count);
+fn compact_transient_trace(
+    samples: &mut [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    sample_count: &mut u8,
+) {
+    let count = usize::from(*sample_count);
     if count <= 48 {
         return;
     }
@@ -1217,11 +1220,11 @@ pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlant
     // observations from the beginning of heating through the peak.
     let mut keep = [false; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     keep[0] = true;
-    let first_powered = job.samples[..count].iter().position(|sample| {
+    let first_powered = samples[..count].iter().position(|sample| {
         !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
             && sample.duty_percent != 0
     });
-    let last_powered = job.samples[..count].iter().rposition(|sample| {
+    let last_powered = samples[..count].iter().rposition(|sample| {
         !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
             && sample.duty_percent != 0
     });
@@ -1229,7 +1232,7 @@ pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlant
         let cooling_count = count - last - 1;
         let cooling_slots = cooling_count.min(23);
         let powered_slots = 47usize.saturating_sub(cooling_slots);
-        mark_trace_indices_by_temperature(&job.samples, &mut keep, first, last, powered_slots);
+        mark_trace_indices_by_temperature(samples, &mut keep, first, last, powered_slots);
         if cooling_count > 0 {
             mark_trace_indices_evenly(&mut keep, last + 1, count - 1, cooling_slots);
         }
@@ -1237,17 +1240,22 @@ pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlant
     let mut output = 0;
     for (index, retain) in keep.iter().copied().take(count).enumerate() {
         if retain {
-            job.samples[output] = job.samples[index];
+            samples[output] = samples[index];
             output += 1;
         }
     }
-    job.samples[output..].fill(ThermalPlantTransientSample {
+    samples[output..].fill(ThermalPlantTransientSample {
         elapsed_ticks: 0,
         raw_rtd_adc_mv: 0,
         heater_voltage_125mv: 0,
         duty_percent: 0,
     });
-    job.sample_count = output as u8;
+    *sample_count = output as u8;
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn compact_supply_calibration_trace(job: &mut CalibrationThermalPlantAutoJob) {
+    compact_transient_trace(&mut job.samples, &mut job.sample_count);
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1259,6 +1267,8 @@ pub(crate) fn record_thermal_plant_transient_sample(
     duty_percent: u8,
     force: bool,
 ) -> bool {
+    let (raw_rtd_adc_mv, latest_temp_c) =
+        thermal_plant_trace_observation(job, raw_rtd_adc_mv, latest_temp_c, duty_percent);
     if raw_rtd_adc_mv == 0 || !latest_temp_c.is_finite() || duty_percent > 100 {
         return false;
     }
@@ -1306,7 +1316,7 @@ pub(crate) fn record_thermal_plant_transient_sample(
         return false;
     }
     let heater_voltage_125mv = if job.phase == ThermalPlantAutoPhase::Cooling {
-        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+        flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
     } else {
         quantize_thermal_plant_heater_voltage_mv(latest_vin_mv)
     };
@@ -1325,9 +1335,9 @@ pub(crate) fn record_thermal_plant_transient_sample(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn transient_sample_power_mw(
     sample: ThermalPlantTransientSample,
-    temp_c: f32,
-    preview_heater_curve: Option<&HeaterCurveConfig>,
-    memory_config: &MemoryConfig,
+    _temp_c: f32,
+    _preview_heater_curve: Option<&HeaterCurveConfig>,
+    _memory_config: &MemoryConfig,
 ) -> Option<f32> {
     if sample.duty_percent == 0
         || flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample)
@@ -1337,11 +1347,7 @@ pub(crate) fn transient_sample_power_mw(
     let voltage_v = f32::from(thermal_plant_heater_voltage_mv(
         flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(sample),
     )) / 1_000.0;
-    let _ = (preview_heater_curve, memory_config);
-    let resistance_ohms = default_estimated_heater_resistance_ohms(temp_c);
-    (voltage_v > 0.0 && resistance_ohms.is_finite() && resistance_ohms > 0.1).then_some(
-        voltage_v * voltage_v / resistance_ohms * 1_000.0 * f32::from(sample.duty_percent) / 100.0,
-    )
+    (voltage_v > 0.0).then_some(voltage_v * 3_000.0 * f32::from(sample.duty_percent) / 100.0)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1477,6 +1483,44 @@ fn transient_fit_previous_index(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+fn transient_fit_window_is_stable(
+    samples: &[ThermalPlantTransientSample],
+    index: usize,
+    previous_index: usize,
+) -> bool {
+    for offset in 0..=1 {
+        let first = previous_index.saturating_sub(offset);
+        let last = index.saturating_sub(offset);
+        let reference = samples[first];
+        if flux_purr_firmware::memory::thermal_plant_sample_is_cooling(reference) {
+            return false;
+        }
+        let min_voltage = samples[first..=last]
+            .iter()
+            .filter(|sample| !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(**sample))
+            .map(|sample| sample.heater_voltage_125mv)
+            .min();
+        let max_voltage = samples[first..=last]
+            .iter()
+            .filter(|sample| !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(**sample))
+            .map(|sample| sample.heater_voltage_125mv)
+            .max();
+        if samples[first..=last]
+            .iter()
+            .any(|sample| flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample))
+            || min_voltage
+                .zip(max_voltage)
+                .is_none_or(|(min_voltage, max_voltage)| {
+                    max_voltage.saturating_sub(min_voltage) > 1
+                })
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn transient_mean_delayed_power_mw(
     samples: &[ThermalPlantTransientSample],
     powers_mw: &[f32],
@@ -1523,11 +1567,13 @@ pub(crate) fn transient_mean_delayed_power_mw(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy)]
 pub(crate) struct TransientFitData {
     samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     count: usize,
     powers_mw: [f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     rows: [Option<([f32; 3], u8)>; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    stable_rows: [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1535,6 +1581,7 @@ impl TransientFitData {
     pub(crate) fn row(&self, index: usize, delay_ticks: u16) -> Option<([f32; 3], f32)> {
         let (values, previous_index) = self.rows[index]?;
         let mut energy = 0.0;
+        let mut window_count = 0;
         let samples = &self.samples[..self.count];
         let powers_mw = &self.powers_mw[..self.count];
         for offset in 0..=1 {
@@ -1545,10 +1592,11 @@ impl TransientFitData {
             let power =
                 transient_mean_delayed_power_mw(samples, powers_mw, start, end, delay_ticks)?;
             energy += power * (end - start);
+            window_count += 1;
         }
-        Some((
+        (window_count > 0).then_some((
             values,
-            energy * 0.5 * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
+            energy / window_count as f32 * HEATER_CONTROL_INTERVAL_MS as f32 / 1_000.0,
         ))
     }
 }
@@ -1569,6 +1617,7 @@ pub(crate) fn prepare_transient_fit(
     let mut temperatures_c = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut powers_mw = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut rows = [None; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    let mut stable_rows = [false; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..count].iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
         let power_mw =
@@ -1583,10 +1632,14 @@ pub(crate) fn prepare_transient_fit(
         }
     }
     let accepted = transient_temperature_acceptance(&samples[..count], &temperatures_c[..count]);
+    // The controller can disarm between two 50 ms samples. In that case the
+    // first sample at or above the coverage temperature can legitimately have
+    // zero duty while still belonging to the heating phase. Keep the separate
+    // power-evidence checks in the transaction validator, but use the highest
+    // accepted non-cooling temperature for the coverage gate.
     let powered_peak_index = (0..count)
         .filter(|index| {
             accepted[*index]
-                && samples[*index].duty_percent == 100
                 && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(samples[*index])
         })
         .max_by(|left, right| temperatures_c[*left].total_cmp(&temperatures_c[*right]))?;
@@ -1619,8 +1672,11 @@ pub(crate) fn prepare_transient_fit(
             index,
             0,
             ambient_temp_c,
-        ) {
+        ) && values[0].abs() >= 1.0
+        {
             *row = Some((values, previous_index as u8));
+            stable_rows[index] =
+                transient_fit_window_is_stable(&samples[..count], index, previous_index);
         }
     }
     Some(TransientFitData {
@@ -1628,7 +1684,28 @@ pub(crate) fn prepare_transient_fit(
         count,
         powers_mw,
         rows,
+        stable_rows,
     })
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn stable_transient_fit_data(data: &TransientFitData) -> TransientFitData {
+    let mut stable = *data;
+    for (row, is_stable) in stable.rows.iter_mut().zip(data.stable_rows) {
+        if !is_stable {
+            *row = None;
+        }
+    }
+    stable
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn transient_fit_row_is_fan_assisted_cooling(data: &TransientFitData, index: usize) -> bool {
+    // The cooling phase intentionally runs the fan at its working voltage. Its
+    // electrical and thermal contribution is not present in the heater-input
+    // proxy, so retain those rows for terminal validation but exclude them
+    // from the powered energy balance.
+    flux_purr_firmware::memory::thermal_plant_sample_is_fan_assisted_cooling(data.samples[index])
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1638,6 +1715,7 @@ pub(crate) fn transient_temperature_acceptance(
 ) -> [bool; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES] {
     const COOLING_RISE_GRACE_TICKS: u32 = 200; // 10s on the persisted 50ms grid.
     const COOLING_RISE_TOLERANCE_C: f32 = 1.0;
+    const CUTOFF_BOUNDARY_EXCURSION_TOLERANCE_C: f32 = 20.0;
     const HEATING_CONTACT_EXCURSION_TOLERANCE_C: f32 = 3.0;
     const HEATING_CONTACT_EXCURSION_MAX_INTERVAL_TICKS: u32 = 200; // 10s.
     let mut accepted = [true; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
@@ -1645,7 +1723,36 @@ pub(crate) fn transient_temperature_acceptance(
     let cooling_start_index = samples.iter().enumerate().position(|(index, sample)| {
         index > 0 && flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
     });
+    // A zero-duty cutoff sample may still belong to the powered phase while
+    // the driver disarms. If the RTD jumps across that boundary, the later
+    // cooling values cannot be allowed to re-anchor the fit after the first
+    // rejected sample. The trace is invalid until a new calibration run.
+    let cutoff_boundary_index = samples
+        .iter()
+        .enumerate()
+        .find(|(index, sample)| {
+            *index > 0
+                && samples[*index - 1].duty_percent > 0
+                && sample.duty_percent == 0
+                && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(**sample)
+        })
+        .map(|(boundary, _)| boundary.saturating_sub(1));
+    let cutoff_boundary_invalid = cutoff_boundary_index.is_some_and(|last_powered| {
+        let boundary = last_powered + 1;
+        let previous_step_is_large = last_powered > 0
+            && (temperatures_c[last_powered] - temperatures_c[last_powered - 1]).abs()
+                > CUTOFF_BOUNDARY_EXCURSION_TOLERANCE_C;
+        let cutoff_step_is_large = (temperatures_c[boundary] - temperatures_c[last_powered]).abs()
+            > CUTOFF_BOUNDARY_EXCURSION_TOLERANCE_C;
+        previous_step_is_large || cutoff_step_is_large
+    });
     for index in 1..samples.len() {
+        if cutoff_boundary_invalid
+            && cutoff_boundary_index.is_some_and(|boundary| index >= boundary)
+        {
+            accepted[index] = false;
+            continue;
+        }
         let elapsed_s = (samples[index].elapsed_ticks
             - samples[previous_accepted_index].elapsed_ticks) as f32
             * HEATER_CONTROL_INTERVAL_MS as f32
@@ -1682,10 +1789,8 @@ pub(crate) fn transient_temperature_acceptance(
                 .elapsed_ticks
                 .saturating_sub(samples[index].elapsed_ticks)
                 <= HEATING_CONTACT_EXCURSION_MAX_INTERVAL_TICKS
-            && samples[index - 1].heater_voltage_125mv
-                == samples[index].heater_voltage_125mv
-            && samples[index].heater_voltage_125mv
-                == samples[index + 1].heater_voltage_125mv
+            && samples[index - 1].heater_voltage_125mv == samples[index].heater_voltage_125mv
+            && samples[index].heater_voltage_125mv == samples[index + 1].heater_voltage_125mv
             && ((temperatures_c[index] - temperatures_c[index - 1]
                 > HEATING_CONTACT_EXCURSION_TOLERANCE_C
                 && temperatures_c[index] - temperatures_c[index + 1]
@@ -1716,6 +1821,9 @@ pub(crate) fn transient_fit_scales(
     let mut row_count = 0usize;
     for index in 1..data.count {
         if let Some((values, _)) = data.row(index, delay_ticks) {
+            if transient_fit_row_is_fan_assisted_cooling(data, index) {
+                continue;
+            }
             for column in 0..3 {
                 scale_sums[column] += values[column] * values[column];
             }
@@ -1733,7 +1841,7 @@ pub(crate) fn transient_fit_scales(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) type TransientFitNormalMatrix = ([[f32; 3]; 3], [f32; 3], f32, usize);
+type TransientFitNormalMatrix = ([[f32; 3]; 3], [f32; 3], f32, usize);
 
 #[cfg(any(target_arch = "xtensa", test))]
 fn transient_fit_normal_matrix_with_rank(
@@ -1750,6 +1858,9 @@ fn transient_fit_normal_matrix_with_rank(
         let Some((values, target)) = data.row(index, delay_ticks) else {
             continue;
         };
+        if transient_fit_row_is_fan_assisted_cooling(data, index) {
+            continue;
+        }
         let normalized = [
             values[0] / scales[0],
             values[1] / scales[1],
@@ -1820,6 +1931,9 @@ pub(crate) fn transient_projection_for_delay(
             let Some((values, target)) = data.row(index, delay_ticks) else {
                 continue;
             };
+            if transient_fit_row_is_fan_assisted_cooling(data, index) {
+                continue;
+            }
             let predicted = coefficients[0] * values[0]
                 + coefficients[1] * values[1]
                 + coefficients[2] * values[2];
@@ -1842,20 +1956,39 @@ pub(crate) fn transient_projection_for_delay(
     best
 }
 
+// The plant's transport delay is measured in the same 500 ms observation
+// cadence on the host and device. A one-tick search is required because the
+// live plate can settle at delays between the older five-second candidates.
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn best_transient_projection(
+const THERMAL_PLANT_FIT_DELAY_STEP_TICKS: u16 = 1;
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_fit_delay_ticks() -> impl Iterator<Item = u16> {
+    (0..=200_u16).step_by(usize::from(THERMAL_PLANT_FIT_DELAY_STEP_TICKS))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn best_transient_projection_for_data(
     data: &TransientFitData,
 ) -> Option<(ThermalPlantProjection, f32)> {
-    (0..=200_u16)
+    thermal_plant_fit_delay_ticks()
         .filter_map(|delay_ticks| transient_projection_for_delay(data, delay_ticks))
         .min_by(|(_, left), (_, right)| left.total_cmp(right))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn best_transient_projection_without_radiation(
+pub(crate) fn best_transient_projection(
     data: &TransientFitData,
 ) -> Option<(ThermalPlantProjection, f32)> {
-    (0..=200_u16)
+    let stable = stable_transient_fit_data(data);
+    best_transient_projection_for_data(data).or_else(|| best_transient_projection_for_data(&stable))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn best_transient_projection_without_radiation_for_data(
+    data: &TransientFitData,
+) -> Option<(ThermalPlantProjection, f32)> {
+    thermal_plant_fit_delay_ticks()
         .filter_map(|delay_ticks| {
             let (scales, _row_count) = transient_fit_scales(data, delay_ticks)?;
             let (normal, rhs, power_sum_sq, _row_count) =
@@ -1874,6 +2007,9 @@ pub(crate) fn best_transient_projection_without_radiation(
                 let Some((values, target)) = data.row(index, delay_ticks) else {
                     continue;
                 };
+                if transient_fit_row_is_fan_assisted_cooling(data, index) {
+                    continue;
+                }
                 let predicted = coefficients[0] * values[0] + coefficients[1] * values[1];
                 let residual = target - predicted;
                 residual_sum_sq += residual * residual;
@@ -1888,6 +2024,15 @@ pub(crate) fn best_transient_projection_without_radiation(
             transient_projection_is_valid(projection, residual).then_some((projection, residual))
         })
         .min_by(|(_, left), (_, right)| left.total_cmp(right))
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn best_transient_projection_without_radiation(
+    data: &TransientFitData,
+) -> Option<(ThermalPlantProjection, f32)> {
+    let stable = stable_transient_fit_data(data);
+    best_transient_projection_without_radiation_for_data(data)
+        .or_else(|| best_transient_projection_without_radiation_for_data(&stable))
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1962,7 +2107,7 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
         return false;
     };
 
-    let rebuilt = fit_thermal_plant_transient(
+    let rebuilt = fit_thermal_plant_transient_without_radiation(
         previous.transaction_id,
         previous.ambient_raw_rtd_adc_mv,
         &previous.samples,
@@ -1970,6 +2115,16 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
         None,
         memory_config,
     )
+    .or_else(|| {
+        fit_thermal_plant_transient(
+            previous.transaction_id,
+            previous.ambient_raw_rtd_adc_mv,
+            &previous.samples,
+            previous.sample_count,
+            None,
+            memory_config,
+        )
+    })
     .map(|(transaction, _)| transaction);
     let rebuilt = if let Some(rebuilt) = rebuilt {
         rebuilt
@@ -2013,6 +2168,40 @@ pub(crate) struct CalibrationJobUpdateInput {
     pub(crate) latest_temp_c: f32,
     pub(crate) latest_vin_mv: u32,
     pub(crate) heater_duty_percent: u8,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+fn thermal_plant_trace_observation(
+    job: &CalibrationThermalPlantAutoJob,
+    raw_rtd_adc_mv: u16,
+    temperature_c: f32,
+    duty_percent: u8,
+) -> (u16, f32) {
+    let Some(previous) = job
+        .sample_count
+        .checked_sub(1)
+        .and_then(|index| job.samples.get(usize::from(index)))
+    else {
+        return (raw_rtd_adc_mv, temperature_c);
+    };
+    let elapsed_s = job.elapsed_ticks.saturating_sub(job.last_saved_tick).max(1) as f32
+        * HEATER_CONTROL_INTERVAL_MS as f32
+        / 1_000.0;
+    // The live cutoff still uses the unfiltered sensor value. This bounded
+    // trace filter only protects the fit from an ADC/contact transient that
+    // would imply an impossible thermal step between control samples.
+    let maximum_rise_c = 10.0 + 20.0 * elapsed_s;
+    let maximum_fall_c = 2.0
+        + if duty_percent == 0 {
+            12.0 * elapsed_s
+        } else {
+            0.2 * elapsed_s
+        };
+    let delta_c = temperature_c - job.last_saved_temp_c;
+    if delta_c > maximum_rise_c || delta_c < -maximum_fall_c {
+        return (previous.raw_rtd_adc_mv, job.last_saved_temp_c);
+    }
+    (raw_rtd_adc_mv, temperature_c)
 }
 
 #[cfg(test)]
@@ -2540,6 +2729,24 @@ pub(crate) fn update_thermal_cooling_phase(
     recorded_temp_c: f32,
 ) -> bool {
     calibration.heater_enabled = false;
+    // The fan is a 12 V working load. The rapid scan may finish at a much
+    // lower CC-limited PPS voltage, which leaves the fan enabled logically but
+    // unable to cool the board. Move the calibration-owned contract to the
+    // fan working floor before collecting fan-assisted cooling evidence.
+    if manual_pps.target_mv.unwrap_or(0) < FAN_WORKING_CONTRACT_MV {
+        if let Err(error) = manual_pps.enable(
+            ManualPpsOwner::Calibration,
+            FAN_WORKING_CONTRACT_MV,
+            Some(job.source_current_ma),
+        ) {
+            fail_thermal_plant_calibration(calibration, manual_pps, error);
+            return false;
+        }
+        calibration.pps_enabled = true;
+        calibration.pps_mv = Some(FAN_WORKING_CONTRACT_MV);
+        calibration.pps_ma = Some(job.source_current_ma);
+        calibration.job.next_request_mv = Some(FAN_WORKING_CONTRACT_MV);
+    }
     let cooling_complete = thermal_plant_cooling_complete(input.latest_temp_c, recorded_temp_c);
     let timed_out =
         job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_COOL_TIMEOUT_TICKS;
@@ -2599,12 +2806,16 @@ pub(crate) fn complete_thermal_plant_calibration(
         );
         return false;
     };
-    compact_supply_calibration_trace(job);
     let transaction_id = (u32::from(job.ambient_raw_rtd_adc_mv) << 16)
         ^ u32::from(latest_rtd_raw_adc_mv)
         ^ job.elapsed_ticks
         ^ 0x5452_4e53;
-    let fitted = fit_thermal_plant_transient(
+    // The five-minute 3A path reaches the minimum 100C coverage before
+    // cooling. At that span convection and radiation are not separately
+    // identifiable, so try the physically constrained convection-only fit
+    // first. The full three-coefficient fit remains available as a host-side
+    // fallback for richer traces, but is needlessly expensive on the MCU.
+    let fitted = fit_thermal_plant_transient_without_radiation(
         transaction_id,
         job.ambient_raw_rtd_adc_mv,
         &job.samples,
@@ -2613,11 +2824,7 @@ pub(crate) fn complete_thermal_plant_calibration(
         memory_config,
     )
     .or_else(|| {
-        // The five-minute 3A path reaches the minimum 100C coverage before
-        // cooling. At that span convection and radiation are not separately
-        // identifiable, so accept the physically constrained convection-only
-        // fit instead of inventing a radiation coefficient.
-        fit_thermal_plant_transient_without_radiation(
+        fit_thermal_plant_transient(
             transaction_id,
             job.ambient_raw_rtd_adc_mv,
             &job.samples,
@@ -2626,7 +2833,7 @@ pub(crate) fn complete_thermal_plant_calibration(
             memory_config,
         )
     });
-    let Some((transaction, _residual)) = fitted else {
+    let Some((mut transaction, _residual)) = fitted else {
         fail_thermal_plant_calibration(
             calibration,
             manual_pps,
@@ -2634,6 +2841,16 @@ pub(crate) fn complete_thermal_plant_calibration(
         );
         return false;
     };
+    compact_transient_trace(&mut transaction.samples, &mut transaction.sample_count);
+    if !flux_purr_firmware::memory::thermal_plant_transient_transaction_is_complete(&transaction) {
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+        );
+        return false;
+    }
+    compact_supply_calibration_trace(job);
     memory_config.active_heater_curve = HeaterCurveConfig::default();
     memory_config.heater_curve_raw_observations = HeaterCurveRawObservations::default();
     memory_config.heater_curve_transaction_id = None;

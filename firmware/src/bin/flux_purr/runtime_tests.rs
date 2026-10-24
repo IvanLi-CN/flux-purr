@@ -959,7 +959,7 @@ fn fusb302b_vbus_restore_requires_a_bounded_confirmation_window() {
 }
 
 #[test]
-fn vin_sampling_has_no_pd_or_heater_authority() {
+fn vin_sampling_has_no_pd_authority_and_keeps_calibration_conducting() {
     let boot = include_str!("boot.rs");
     let runtime = include_str!("runtime_loop.rs");
     let initial_sample = boot
@@ -978,18 +978,15 @@ fn vin_sampling_has_no_pd_or_heater_authority() {
         .expect("runtime sensor sampler must remain present");
 
     for sampler in [initial_sample, runtime_sample] {
-        for authority in [
-            "pd_port",
-            "pd_contract_ready",
-            "last_pd_observation",
-            "heater_pwm",
-        ] {
+        for authority in ["pd_port", "pd_contract_ready", "last_pd_observation"] {
             assert!(
                 !sampler.contains(authority),
-                "VIN sampling must not access PD or heater authority: {authority}"
+                "VIN sampling must not access PD authority: {authority}"
             );
         }
     }
+    assert!(!runtime_sample.contains("calibration_quiet_duty"));
+    assert!(!runtime_sample.contains("apply_heater_duty"));
 }
 
 #[test]
@@ -5629,7 +5626,7 @@ fn synthetic_trace(
 }
 
 fn synthetic_trace_with_delay(
-    memory_config: &MemoryConfig,
+    _memory_config: &MemoryConfig,
     ambient_temp_c: f32,
     delay_ticks: usize,
 ) -> (
@@ -5692,12 +5689,7 @@ fn synthetic_trace_with_delay(
         {
             break;
         }
-        let resistance_ohms = estimated_heater_resistance_ohms(temperature_c, None, memory_config);
-        let power_mw = if heating {
-            20.0 * 20.0 / resistance_ohms * 1_000.0
-        } else {
-            0.0
-        };
+        let power_mw = if heating { 20.0 * 3_000.0 } else { 0.0 };
         input_history[usize::from(tick) % input_history.len()] = power_mw;
         let delayed_power_mw = input_history
             [(usize::from(tick) + input_history.len() - delay_ticks) % input_history.len()];
@@ -6127,6 +6119,41 @@ fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
 }
 
 #[test]
+fn transient_temperature_acceptance_rejects_a_cutoff_boundary_offset() {
+    let temperatures = [
+        25.0, 45.0, 75.0, 110.0, 150.0, 190.0, 220.0, 289.0, 287.0, 270.0, 240.0, 200.0, 160.0,
+        120.0, 79.0,
+    ];
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, temperature_c) in temperatures.into_iter().enumerate() {
+        let cooling = index >= 9;
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: (index as u32) * 100,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
+            heater_voltage_125mv: if cooling {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                160
+            },
+            duty_percent: u8::from(index <= 7) * 100,
+        };
+    }
+    let accepted = transient_temperature_acceptance(&samples[..temperatures.len()], &temperatures);
+    assert!(!accepted[7], "the cutoff jump must be rejected");
+    assert!(
+        accepted[8..temperatures.len()]
+            .iter()
+            .all(|accepted| !accepted),
+        "a later cooling sample must not re-anchor an invalid trace"
+    );
+}
+
+#[test]
 fn transient_thermal_fit_excludes_sub_slew_heating_contact_peaks() {
     let memory = synthetic_memory_config();
     let (mut samples, count) = synthetic_trace(&memory, 25.0);
@@ -6462,18 +6489,17 @@ fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
         projected_rtd_temperature_c(&memory, runtime_test_raw_rtd_adc_mv_for_temp(25.0)).unwrap();
     for delay in [0, 1, 20, 99, 200] {
         for index in 1..count {
-            let direct = transient_fit_row(
-                &samples[..count],
-                &temperatures,
-                &powers,
-                index,
-                delay,
-                ambient,
-            );
             let cached = data.row(index, delay);
-            assert_eq!(direct.is_some(), cached.is_some());
-            if let (Some((values, energy)), Some((cached_values, cached_energy))) = (direct, cached)
-            {
+            if let Some((cached_values, cached_energy)) = cached {
+                let (values, energy) = transient_fit_row(
+                    &samples[..count],
+                    &temperatures,
+                    &powers,
+                    index,
+                    delay,
+                    ambient,
+                )
+                .expect("an accepted cached row has a direct balance");
                 assert_eq!(values, cached_values);
                 assert!(
                     (energy - cached_energy).abs() <= 1.0 + energy.abs() * 0.0001,
@@ -6885,6 +6911,66 @@ fn transient_thermal_fit_accepts_physical_3a_stage_transitions() {
     )
     .expect("physical 3A trace should produce a model");
     assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_fit_excludes_fan_assisted_cooling_from_energy_balance() {
+    let memory = synthetic_memory_config();
+    let (mut samples, count) = synthetic_trace(&memory, 25.0);
+    for sample in &mut samples[..count] {
+        if flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample) {
+            sample.heater_voltage_125mv =
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL;
+        }
+    }
+    let (_, residual) = fit_thermal_plant_transient(
+        0x4641_4e53,
+        samples[0].raw_rtd_adc_mv,
+        &samples,
+        count as u8,
+        None,
+        &memory,
+    )
+    .expect("fan-assisted cooling remains terminal evidence, not heater input");
+    assert!(residual <= 0.20);
+}
+
+#[test]
+fn transient_fit_accepts_a_zero_duty_cutoff_sample_in_heating_phase() {
+    let memory = synthetic_memory_config();
+    let temperatures = [
+        25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0,
+        95.0, 100.5, 96.0, 91.0, 86.0, 82.0, 79.0, 77.0, 75.0,
+    ];
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, temperature_c) in temperatures.into_iter().enumerate() {
+        let cooling = index >= 17;
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: (index as u32) * 100,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
+            heater_voltage_125mv: if cooling {
+                flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+            } else {
+                160
+            },
+            duty_percent: u8::from(!cooling && index != 16) * 100,
+        };
+    }
+    assert!(
+        prepare_transient_fit(
+            &samples,
+            temperatures.len() as u8,
+            None,
+            &memory,
+            samples[0].raw_rtd_adc_mv,
+        )
+        .is_some()
+    );
 }
 
 #[test]
@@ -7336,7 +7422,7 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     ));
     assert_eq!(
         job.samples[25].heater_voltage_125mv,
-        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+        flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
     );
 }
 
@@ -7895,10 +7981,13 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
         config.thermal_plant_transient_active.unwrap().samples,
         raw_samples
     );
-    assert_eq!(
-        config.thermal_plant_transient_active.unwrap().projection,
-        transaction.projection
-    );
+    let rebuilt_projection =
+        thermal_plant_projection_from_transient(&config.thermal_plant_transient_active.unwrap())
+            .expect("compressed trace can rebuild a valid projection");
+    assert!(rebuilt_projection.convection_mw_per_c.is_finite());
+    assert!(rebuilt_projection.convection_mw_per_c > 0.0);
+    assert!(rebuilt_projection.thermal_capacity_mj_per_c.is_finite());
+    assert!(rebuilt_projection.thermal_capacity_mj_per_c > 0.0);
     assert!(
         config
             .heater_supply_boundary
@@ -8201,6 +8290,16 @@ fn raw_eeprom_maintenance_yields_between_bounded_transactions() {
     assert!(!source.contains("service_pd_during_eeprom_operation"));
     assert!(!source.contains("EepromMaintenancePdServiceSchedule"));
     assert!(source.contains("EmbassyTimer::after_millis(0).await;"));
+}
+
+#[test]
+fn deferred_memory_commit_waits_until_all_heater_outputs_are_off() {
+    assert!(!runtime_memory_commit_permitted(true, false, false, 0, 0));
+    assert!(!runtime_memory_commit_permitted(false, true, false, 0, 0));
+    assert!(!runtime_memory_commit_permitted(false, false, true, 0, 0));
+    assert!(!runtime_memory_commit_permitted(false, false, false, 1, 0));
+    assert!(!runtime_memory_commit_permitted(false, false, false, 0, 1));
+    assert!(runtime_memory_commit_permitted(false, false, false, 0, 0));
 }
 
 #[test]
@@ -18816,6 +18915,501 @@ fn automatic_pps_contract_safety_uses_its_own_apdo_and_current_budget() {
         manual
             .automatic_heater_pps_for_contract(20.0, &config, 12_000, 3_000, Some(actual_range))
             .is_none()
+    );
+}
+
+fn automatic_boundary_request_mv(
+    boundary: &flux_purr_firmware::heater_supply::SupplyBoundary,
+    config: &MemoryConfig,
+    current_rtd_mv: Option<u16>,
+    current_request_mv: Option<u16>,
+) -> Option<u16> {
+    boundary
+        .safe_point(
+            flux_purr_firmware::heater_supply::BoundaryQuery {
+                temperature_centi_c: 8_200,
+                current_rtd_mv,
+                current_request_mv,
+                current_ma: 3_000,
+                wifi_started: false,
+                source_min_mv: 3_300,
+                source_max_mv: 21_000,
+                source_max_ma: 3_000,
+            },
+            |raw| {
+                projected_rtd_temperature_c(config, raw)
+                    .map(|temperature| round_to_i16(temperature * 100.0))
+            },
+        )
+        .map(|point| point.tracking_request_mv)
+}
+
+#[test]
+fn automatic_voltage_response_uses_the_confirmed_warm_boundary_point() {
+    use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
+
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    let mut boundary = SupplyBoundary {
+        adc: BoundaryAdcMetadata {
+            divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
+            ..Default::default()
+        },
+        wifi_started: false,
+        source_min_mv: 5_500,
+        source_max_mv: 20_000,
+        source_max_ma: 3_000,
+        advertised_min_mv: 3_300,
+        advertised_max_mv: 21_000,
+        point_count: 2,
+        ..Default::default()
+    };
+    boundary.points[0] = BoundaryPoint {
+        elapsed_ms: 1_000,
+        rtd_code: 1_500,
+        rtd_mv: runtime_test_raw_rtd_adc_mv_for_temp(70.0),
+        vin_code: 1_100,
+        vin_mv: 1_113,
+        request_current_ma: 3_000,
+        tracking_request_mv: 13_900,
+        tracking_only: true,
+        ..Default::default()
+    };
+    boundary.points[1] = BoundaryPoint {
+        elapsed_ms: 2_000,
+        rtd_code: 1_600,
+        rtd_mv: runtime_test_raw_rtd_adc_mv_for_temp(85.0),
+        vin_code: 1_250,
+        vin_mv: 1_250,
+        request_current_ma: 3_000,
+        tracking_request_mv: 16_500,
+        tracking_only: true,
+        ..Default::default()
+    };
+    assert!(boundary.is_valid());
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+
+    let confirmed_range = Some(PpsAdjustmentRange {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_current_ma: 3_000,
+    });
+    let current_rtd_mv = Some(runtime_test_raw_rtd_adc_mv_for_temp(82.0));
+    assert_eq!(
+        automatic_boundary_request_mv(&boundary, &config, current_rtd_mv, None),
+        Some(13_900)
+    );
+    assert_eq!(
+        automatic_boundary_request_mv(&boundary, &config, current_rtd_mv, Some(16_500)),
+        Some(16_500)
+    );
+    assert!(manual.automatic_voltage_response_matches_with_rtd(
+        &config,
+        82.0,
+        16_500,
+        3_000,
+        1_190,
+        AutomaticVoltageResponseContext {
+            confirmed_range,
+            current_rtd_mv,
+        },
+    ));
+}
+
+#[test]
+fn live_boundary_points_keep_a_confirmed_high_voltage_request_authorized() {
+    use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
+
+    let mut boundary = SupplyBoundary {
+        adc: BoundaryAdcMetadata {
+            divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
+            ..Default::default()
+        },
+        wifi_started: false,
+        source_min_mv: 5_500,
+        source_max_mv: 20_000,
+        source_max_ma: 3_000,
+        advertised_min_mv: 3_300,
+        advertised_max_mv: 21_000,
+        point_count: 9,
+        ..Default::default()
+    };
+    for (slot, (rtd_mv, vin_mv, request_mv)) in [
+        (1_030, 997, 10_300),
+        (1_141, 1_136, 13_900),
+        (1_089, 1_089, 13_900),
+        (1_111, 1_111, 13_900),
+        (1_111, 1_111, 13_900),
+        (1_112, 1_112, 13_900),
+        (1_113, 1_113, 13_900),
+        (1_361, 1_361, 16_500),
+        (1_330, 1_330, 16_500),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        boundary.points[slot] = BoundaryPoint {
+            elapsed_ms: (slot as u32 + 1) * 50,
+            rtd_code: 1_000,
+            rtd_mv,
+            vin_code: 1_000,
+            vin_mv,
+            request_current_ma: 3_000,
+            tracking_request_mv: request_mv,
+            tracking_only: true,
+            ..Default::default()
+        };
+    }
+    assert!(boundary.is_valid());
+    let config = MemoryConfig {
+        heater_supply_boundary: Some(boundary),
+        ..MemoryConfig::default()
+    };
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 5_500,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    println!(
+        "live candidate 79.88C/req13.9: {:?}",
+        manual.automatic_heater_pps_candidate_with_rtd(
+            79.88,
+            None,
+            &config,
+            Some(13_900),
+            Some(1_146),
+        )
+    );
+    println!(
+        "live candidate 79.88C/req15.4: {:?}",
+        manual.automatic_heater_pps_candidate_with_rtd(
+            79.88,
+            None,
+            &config,
+            Some(15_400),
+            Some(1_146),
+        )
+    );
+    let query = |temperature_centi_c, current_rtd_mv, current_request_mv| {
+        boundary
+            .safe_point(
+                flux_purr_firmware::heater_supply::BoundaryQuery {
+                    temperature_centi_c,
+                    current_rtd_mv: Some(current_rtd_mv),
+                    current_request_mv: Some(current_request_mv),
+                    current_ma: 3_000,
+                    wifi_started: false,
+                    source_min_mv: 3_300,
+                    source_max_mv: 21_000,
+                    source_max_ma: 3_000,
+                },
+                |raw| {
+                    projected_rtd_temperature_c(&config, raw)
+                        .map(|temperature| round_to_i16(temperature * 100.0))
+                },
+            )
+            .map(|point| point.tracking_request_mv)
+    };
+    assert_eq!(query(7_722, 1_141, 13_900), Some(13_900));
+    assert_eq!(query(7_988, 1_146, 15_400), None);
+    assert_eq!(query(8_200, 1_150, 15_400), None);
+}
+
+#[test]
+fn diagnose_real_failed_thermal_plant_trace_fit() {
+    let trace = [
+        (3500, 25.39, 19_750, 0),
+        (4950, 26.20, 5_375, 100),
+        (8000, 24.19, 5_750, 100),
+        (13_100, 26.60, 6_250, 100),
+        (19_800, 27.00, 7_250, 100),
+        (25_000, 27.81, 7_875, 100),
+        (30_550, 28.21, 8_500, 100),
+        (33_600, 28.61, 8_625, 100),
+        (35_500, 28.61, 9_125, 100),
+        (39_000, 28.61, 9_250, 100),
+        (43_300, 29.02, 10_125, 100),
+        (56_100, 31.04, 11_500, 100),
+        (69_400, 33.49, 12_875, 100),
+        (74_150, 38.42, 13_000, 100),
+        (74_400, 38.84, 12_875, 100),
+        (77_200, 43.00, 13_000, 100),
+        (80_600, 47.20, 13_000, 100),
+        (84_300, 51.45, 13_000, 100),
+        (87_400, 55.74, 13_000, 100),
+        (91_450, 60.07, 13_000, 100),
+        (95_500, 64.45, 13_000, 100),
+        (99_600, 68.88, 13_000, 100),
+        (103_700, 72.90, 13_000, 100),
+        (107_300, 76.96, 13_000, 100),
+        (112_200, 81.05, 13_000, 100),
+        (116_600, 85.19, 13_000, 100),
+        (121_800, 89.37, 13_000, 100),
+        (127_700, 93.59, 13_000, 100),
+        (134_000, 97.84, 13_000, 100),
+        (171_950, 104.07, 16_000, 100),
+        (173_400, 105.52, 16_000, 0),
+        (173_500, 105.52, 0, 0),
+        (174_050, 105.52, 0, 0),
+        (174_550, 105.52, 0, 0),
+        (175_100, 105.52, 0, 0),
+        (175_650, 105.52, 0, 0),
+        (176_200, 104.55, 0, 0),
+        (176_750, 104.07, 0, 0),
+        (177_300, 103.59, 0, 0),
+        (177_800, 103.11, 0, 0),
+        (178_300, 102.63, 0, 0),
+        (178_850, 101.66, 0, 0),
+        (179_400, 101.19, 0, 0),
+        (179_950, 100.71, 0, 0),
+        (180_450, 99.75, 0, 0),
+        (180_950, 99.27, 0, 0),
+        (181_450, 98.80, 0, 0),
+        (181_950, 97.84, 0, 0),
+        (182_500, 97.37, 0, 0),
+        (183_000, 96.89, 0, 0),
+        (186_450, 92.65, 0, 0),
+        (189_800, 88.44, 0, 0),
+        (193_750, 84.27, 0, 0),
+        (197_750, 80.14, 0, 0),
+        (198_300, 79.68, 0, 0),
+    ];
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, (elapsed_ms, temperature_c, voltage_mv, duty_percent)) in
+        trace.into_iter().enumerate()
+    {
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: elapsed_ms / HEATER_CONTROL_INTERVAL_MS as u32,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
+            heater_voltage_125mv: if index >= 31 {
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (voltage_mv / 125) as u8
+            },
+            duty_percent,
+        };
+    }
+    let memory = MemoryConfig::default();
+    let prepared = prepare_transient_fit(
+        &samples,
+        trace.len() as u8,
+        None,
+        &memory,
+        runtime_test_raw_rtd_adc_mv_for_temp(25.39),
+    );
+    let data = prepared.expect("the captured trace must pass structural preparation");
+    let (_, full_residual) =
+        best_transient_projection(&data).expect("stable powered windows must fit the trace");
+    let (_, convection_residual) = best_transient_projection_without_radiation(&data)
+        .expect("stable powered windows must fit without a radiation term");
+    assert!(full_residual <= 0.20, "full residual={full_residual}");
+    assert!(
+        convection_residual <= 0.20,
+        "convection-only residual={convection_residual}"
+    );
+}
+
+#[test]
+fn transient_fit_replays_a_real_failed_hil_trace_after_quantized_voltage_filter() {
+    let points: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../testdata/thermal-plant-a-repaired-hil-trace.json"
+    ))
+    .expect("HIL fixture is JSON");
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, point) in points.iter().enumerate() {
+        let phase = point["phase"].as_str().unwrap_or_default();
+        let voltage_mv = point["heaterVoltageMv"].as_u64().unwrap_or_default() as u16;
+        let temperature_c = point["temperatureCentiC"].as_f64().unwrap_or_default() as f32 / 100.0;
+        let raw_rtd_adc_mv = point["rawRtdAdcMv"]
+            .as_u64()
+            .map(|value| value as u16)
+            .unwrap_or_else(|| runtime_test_raw_rtd_adc_mv_for_temp(temperature_c));
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: point["elapsedMs"].as_u64().unwrap_or_default() as u32
+                / HEATER_CONTROL_INTERVAL_MS as u32,
+            raw_rtd_adc_mv,
+            heater_voltage_125mv: if phase == "cooling" {
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (voltage_mv / 125) as u8
+            },
+            duty_percent: point["dutyPercent"].as_u64().unwrap_or_default() as u8,
+        };
+    }
+    let memory = MemoryConfig::default();
+    let data = prepare_transient_fit(
+        &samples,
+        points.len() as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("HIL fixture passes structural preparation");
+    let (_, full_residual) =
+        best_transient_projection(&data).expect("HIL fixture produces a physical model");
+    let (_, convection_residual) = best_transient_projection_without_radiation(&data)
+        .expect("HIL fixture produces a convection-only model");
+    assert!(full_residual <= 0.20, "full residual={full_residual}");
+    assert!(
+        convection_residual <= 0.20,
+        "convection-only residual={convection_residual}"
+    );
+}
+
+#[test]
+fn transient_fit_replays_the_latest_failed_hil_trace() {
+    let points: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+        "../../../testdata/thermal-plant-latest-hil-trace.json"
+    ))
+    .expect("HIL fixture is JSON");
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, point) in points.iter().enumerate() {
+        let phase = point["phase"].as_str().unwrap_or_default();
+        let voltage_mv = point["heaterVoltageMv"].as_u64().unwrap_or_default() as u16;
+        let temperature_c = point["temperatureCentiC"].as_f64().unwrap_or_default() as f32 / 100.0;
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: point["elapsedMs"].as_u64().unwrap_or_default() as u32
+                / HEATER_CONTROL_INTERVAL_MS as u32,
+            raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature_c),
+            heater_voltage_125mv: if phase == "cooling" {
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (voltage_mv / 125) as u8
+            },
+            duty_percent: point["dutyPercent"].as_u64().unwrap_or_default() as u8,
+        };
+    }
+    let memory = MemoryConfig::default();
+    let data = prepare_transient_fit(
+        &samples,
+        points.len() as u8,
+        None,
+        &memory,
+        samples[0].raw_rtd_adc_mv,
+    )
+    .expect("latest HIL fixture passes structural preparation");
+    let full = best_transient_projection(&data);
+    let convection_only = best_transient_projection_without_radiation(&data);
+    assert!(full.is_some(), "latest HIL fixture must fit physically");
+    assert!(
+        convection_only.is_some(),
+        "latest HIL fixture must fit without radiation"
+    );
+    assert!(full.is_some_and(|(_, residual)| residual <= 0.20));
+    assert!(convection_only.is_some_and(|(_, residual)| residual <= 0.20));
+}
+
+#[test]
+fn transient_fit_replays_the_completed_final_hil_trace() {
+    let snapshot: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../testdata/thermal-plant-final-hil-replay.json"
+    ))
+    .expect("HIL fixture is JSON");
+    let points = snapshot["tracePage"]["points"]
+        .as_array()
+        .expect("HIL fixture contains trace points");
+    let ambient_raw_rtd_adc_mv = snapshot["attempt"]["ambientRawRtdAdcMv"]
+        .as_u64()
+        .expect("HIL fixture contains the ambient raw ADC baseline")
+        as u16;
+    let mut samples = [ThermalPlantTransientSample {
+        elapsed_ticks: 0,
+        raw_rtd_adc_mv: 0,
+        heater_voltage_125mv: 0,
+        duty_percent: 0,
+    }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
+    for (index, point) in points.iter().enumerate() {
+        let phase = point["phase"].as_str().unwrap_or_default();
+        let voltage_mv = point["heaterVoltageMv"].as_u64().unwrap_or_default() as u16;
+        let temperature_c = point["temperatureCentiC"].as_f64().unwrap_or_default() as f32 / 100.0;
+        let raw_rtd_adc_mv = point["rawRtdAdcMv"]
+            .as_u64()
+            .map(|value| value as u16)
+            .unwrap_or_else(|| runtime_test_raw_rtd_adc_mv_for_temp(temperature_c));
+        samples[index] = ThermalPlantTransientSample {
+            elapsed_ticks: point["elapsedMs"].as_u64().unwrap_or_default() as u32
+                / HEATER_CONTROL_INTERVAL_MS as u32,
+            raw_rtd_adc_mv,
+            heater_voltage_125mv: if phase == "cooling" {
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+            } else {
+                (voltage_mv / 125) as u8
+            },
+            duty_percent: point["dutyPercent"].as_u64().unwrap_or_default() as u8,
+        };
+    }
+    let memory = MemoryConfig::default();
+    let data = prepare_transient_fit(
+        &samples,
+        points.len() as u8,
+        None,
+        &memory,
+        ambient_raw_rtd_adc_mv,
+    )
+    .expect("completed HIL fixture passes structural preparation");
+    let (projection, residual) = best_transient_projection_without_radiation(&data)
+        .or_else(|| best_transient_projection(&data))
+        .expect("completed HIL fixture produces a model");
+    eprintln!(
+        "completed HIL replay candidate: residual={residual:.6}, capacity={:.3}, convection={:.3}, radiation={:.3}, delay_ms={}",
+        projection.thermal_capacity_mj_per_c,
+        projection.convection_mw_per_c,
+        projection.radiation_mw_per_k4,
+        projection.transport_delay_ms
+    );
+    assert!(residual <= 0.20, "completed HIL residual={residual}");
+    assert!((500..=2_000).contains(&projection.transport_delay_ms));
+    assert!((20_000.0..=40_000.0).contains(&projection.thermal_capacity_mj_per_c));
+    assert!((0.0..=1_000.0).contains(&projection.convection_mw_per_c));
+    let device_projection = &snapshot["activeResult"];
+    assert_eq!(device_projection["transportDelayMs"].as_u64(), Some(1_750));
+    assert!(
+        (device_projection["thermalCapacityMjPerC"]
+            .as_f64()
+            .unwrap_or_default()
+            - 34_750.246)
+            .abs()
+            < 2_000.0
+    );
+    assert!(
+        (device_projection["convectionMwPerC"]
+            .as_f64()
+            .unwrap_or_default()
+            - 79.986046)
+            .abs()
+            < 100.0
+    );
+    eprintln!(
+        "completed HIL replay: residual={residual:.6}, capacity={:.3}, convection={:.3}, radiation={:.3}, delay_ms={}",
+        projection.thermal_capacity_mj_per_c,
+        projection.convection_mw_per_c,
+        projection.radiation_mw_per_k4,
+        projection.transport_delay_ms
     );
 }
 

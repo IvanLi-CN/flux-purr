@@ -44,6 +44,9 @@ pub(super) struct ThermalLegacyReportInput {
 pub(super) struct ThermalSelfTestReportInput {
     pub(super) run_dirs: Vec<PathBuf>,
     pub(super) output_dir: Option<PathBuf>,
+    pub(super) port_path: Option<String>,
+    pub(super) firmware_sha: Option<String>,
+    pub(super) source_path: Option<String>,
 }
 
 pub(super) fn rerender_legacy_preliminary_review_bundle(
@@ -106,6 +109,11 @@ pub(super) fn rerender_legacy_preliminary_review_bundle(
         tuning_execution_order_c: &tuning_execution_order_c,
         source_preset: &metadata.source_preset,
         provider: &metadata.provider,
+        source_url: UNKNOWN_LEGACY_METADATA,
+        source_current_limit_ma: None,
+        firmware_sha: UNKNOWN_LEGACY_METADATA,
+        source_path: UNKNOWN_LEGACY_METADATA,
+        thermal_transaction_id: None,
     })?;
 
     Ok(json!({
@@ -223,6 +231,8 @@ pub(super) fn render_self_test_evidence_bundle(
         .iter()
         .map(|run_dir| read_json(&run_dir.join("run.json")))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut summaries = summaries;
+    apply_port_metadata(&mut summaries, input.port_path.as_deref());
     let summary = summaries.first().expect("non-empty raw run directories");
     if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
         return Err(io::Error::new(
@@ -243,35 +253,29 @@ pub(super) fn render_self_test_evidence_bundle(
     )?;
 
     let metadata = self_test_report_metadata(summary);
+    let transaction_id = self_test_transaction_id(&run_dirs);
+    let source_current_limit_ma = self_test_source_current_limit_ma(summary);
+    let source_url = self_test_source_url(summary);
     let active_model = thermal_plant_model_snapshot(&evidence.all_samples);
-    let accepted_profile = json!({
-        "kind": "thermal_plant_model_evidence",
-        "role": "runtime_model_snapshot",
-        "profileCompatibility": "not_a_point_local_profile",
-        "runIds": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
-        "model": active_model,
-    });
-
-    let bundle = write_preliminary_review_bundle(PreliminaryReviewBundleInput {
-        bundle_dir: &output_dir,
+    let accepted_profile = self_test_accepted_profile(&run_dirs, active_model);
+    let bundle = write_self_test_bundle(SelfTestBundleInput {
+        output_dir: &output_dir,
         accepted_profile: &accepted_profile,
         entries,
-        source_id: &metadata.source_id,
-        device_id: &metadata.device_id,
-        port_path: &metadata.port_path,
-        tuning_budget_seconds: 0,
-        generated_at: summary
-            .get("generatedAt")
-            .or_else(|| summary.get("capturedAtUnixMs"))
-            .cloned()
-            .unwrap_or_else(|| json!(current_unix_millis())),
-        selected_mode: &metadata.selected_mode,
-        resolved_bank: &metadata.resolved_bank,
-        detected_source_class: &metadata.detected_source_class,
-        tuning_targets_c: &evidence.target_temps_c,
-        tuning_execution_order_c: &evidence.target_temps_c,
-        source_preset: &metadata.source_preset,
-        provider: &metadata.provider,
+        metadata: &metadata,
+        summary,
+        target_temps_c: &evidence.target_temps_c,
+        source_url: &source_url,
+        source_current_limit_ma,
+        firmware_sha: input
+            .firmware_sha
+            .as_deref()
+            .unwrap_or(UNKNOWN_LEGACY_METADATA),
+        source_path: input
+            .source_path
+            .as_deref()
+            .unwrap_or(UNKNOWN_LEGACY_METADATA),
+        transaction_id,
     })?;
 
     Ok(json!({
@@ -287,6 +291,73 @@ pub(super) fn render_self_test_evidence_bundle(
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "targetsC": evidence.target_temps_c,
     }))
+}
+
+fn apply_port_metadata(summaries: &mut [Value], port_path: Option<&str>) {
+    if let Some(port_path) = port_path
+        && let Some(target) = summaries
+            .first_mut()
+            .and_then(|summary| summary.get_mut("target"))
+            .and_then(Value::as_object_mut)
+    {
+        target.insert("port".to_string(), json!(port_path));
+    }
+}
+
+fn self_test_accepted_profile(run_dirs: &[PathBuf], active_model: Value) -> Value {
+    json!({
+        "kind": "thermal_plant_model_evidence",
+        "role": "runtime_model_snapshot",
+        "profileCompatibility": "not_a_point_local_profile",
+        "runIds": run_dirs.iter().map(|path| display_path(path)).collect::<Vec<_>>(),
+        "model": active_model,
+    })
+}
+
+struct SelfTestBundleInput<'a> {
+    output_dir: &'a Path,
+    accepted_profile: &'a Value,
+    entries: Vec<Value>,
+    metadata: &'a SelfTestReportMetadata,
+    summary: &'a Value,
+    target_temps_c: &'a [i16],
+    source_url: &'a str,
+    source_current_limit_ma: Option<u64>,
+    firmware_sha: &'a str,
+    source_path: &'a str,
+    transaction_id: Option<u64>,
+}
+
+fn write_self_test_bundle(
+    input: SelfTestBundleInput<'_>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    write_preliminary_review_bundle(PreliminaryReviewBundleInput {
+        bundle_dir: input.output_dir,
+        accepted_profile: input.accepted_profile,
+        entries: input.entries,
+        source_id: &input.metadata.source_id,
+        device_id: &input.metadata.device_id,
+        port_path: &input.metadata.port_path,
+        tuning_budget_seconds: 0,
+        generated_at: input
+            .summary
+            .get("generatedAt")
+            .or_else(|| input.summary.get("capturedAtUnixMs"))
+            .cloned()
+            .unwrap_or_else(|| json!(current_unix_millis())),
+        selected_mode: &input.metadata.selected_mode,
+        resolved_bank: &input.metadata.resolved_bank,
+        detected_source_class: &input.metadata.detected_source_class,
+        tuning_targets_c: input.target_temps_c,
+        tuning_execution_order_c: input.target_temps_c,
+        source_preset: &input.metadata.source_preset,
+        provider: &input.metadata.provider,
+        source_url: input.source_url,
+        source_current_limit_ma: input.source_current_limit_ma,
+        firmware_sha: input.firmware_sha,
+        source_path: input.source_path,
+        thermal_transaction_id: input.transaction_id,
+    })
 }
 
 type SelfTestStageSource = (Value, String, Value, Vec<Value>);
@@ -331,14 +402,26 @@ fn collect_self_test_evidence(
             }) else {
                 continue;
             };
-            if stage.get("stopReason").and_then(Value::as_str) == Some("completed") {
+            // Keep incomplete stages when they have raw samples. The canonical
+            // report is also the failure report: it must expose the measured
+            // temperature, request voltage, source telemetry, and stop reason
+            // instead of dropping the only evidence that explains a failed HIL.
+            let active_samples = samples
+                .get(&target)
+                .map(|values| {
+                    split_samples_on_time_reset(values)
+                        .pop()
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            if !active_samples.is_empty() {
                 stage_sources.insert(
                     target,
                     (
                         summary.clone(),
                         run_id.clone(),
                         stage.clone(),
-                        samples.get(&target).cloned().unwrap_or_default(),
+                        active_samples,
                     ),
                 );
             }
@@ -380,6 +463,9 @@ fn build_self_test_report_entries(
             let replay_samples = super::thermal_replay_stage_samples(raw_samples, *target_temp_c)?;
             let replay_analysis =
                 super::thermal_replay_full_speed_to_stable(&replay_samples, *target_temp_c);
+            let replay_source_analysis =
+                super::thermal_replay_stage_source_analysis(&replay_samples, *target_temp_c);
+            let report_stage = stage_with_replay_source_analysis(stage, &replay_source_analysis);
             let full_speed_to_stable = json!({
                 "limitMs": if *target_temp_c > 150 { 5_000 } else { 10_000 },
                 "stableBandC": 1.5,
@@ -395,7 +481,7 @@ fn build_self_test_report_entries(
                 stage_summary,
                 run_id,
                 *target_temp_c,
-                stage,
+                &report_stage,
                 samples,
                 hold_seconds,
                 full_speed_to_stable,
@@ -413,6 +499,39 @@ struct SelfTestReportMetadata {
     detected_source_class: String,
     source_preset: String,
     provider: String,
+}
+
+fn self_test_source_url(summary: &Value) -> String {
+    summary
+        .pointer("/source/url")
+        .or_else(|| summary.pointer("/source/endpoint"))
+        .and_then(Value::as_str)
+        .unwrap_or(UNKNOWN_LEGACY_METADATA)
+        .to_string()
+}
+
+fn self_test_source_current_limit_ma(summary: &Value) -> Option<u64> {
+    summary
+        .pointer("/source/preset/currentLimitMa")
+        .or_else(|| summary.pointer("/source/currentLimitMa"))
+        .and_then(Value::as_u64)
+}
+
+fn self_test_transaction_id(run_dirs: &[PathBuf]) -> Option<u64> {
+    run_dirs.iter().find_map(|run_dir| {
+        grouped_samples(&run_dir.join("samples.ndjson"))
+            .ok()?
+            .into_values()
+            .flatten()
+            .find_map(|sample| {
+                sample
+                    .pointer("/status/thermalPlantModel/activeTransactionId")
+                    .or_else(|| {
+                        sample.pointer("/heaterTelemetry/thermalPlantModel/activeTransactionId")
+                    })
+                    .and_then(Value::as_u64)
+            })
+    })
 }
 
 fn self_test_report_metadata(summary: &Value) -> SelfTestReportMetadata {
@@ -495,6 +614,25 @@ fn self_test_targets(
         .into());
     }
     Ok(unique_i16_preserve_order(targets))
+}
+
+fn stage_with_replay_source_analysis(stage: &Value, replay_source_analysis: &Value) -> Value {
+    let mut stage = stage.clone();
+    let Some(stage_object) = stage.as_object_mut() else {
+        return stage;
+    };
+    let analysis = stage_object.entry("analysis").or_insert_with(|| json!({}));
+    let Some(analysis_object) = analysis.as_object_mut() else {
+        return stage;
+    };
+    for key in ["approachSource", "holdSource"] {
+        if analysis_object.get(key).is_none_or(Value::is_null)
+            && let Some(value) = replay_source_analysis.get(key)
+        {
+            analysis_object.insert(key.to_string(), value.clone());
+        }
+    }
+    stage
 }
 
 fn self_test_report_entry(
@@ -882,10 +1020,24 @@ fn normalized_sample(sample: &Value) -> Value {
         "command": status.and_then(|payload| payload.get("heaterOutputPercent")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterOutputPercent")).cloned()).unwrap_or(Value::Null),
         "output": status.and_then(|payload| payload.get("heaterPhysicalOutputPercent")).cloned().or_else(|| heater.and_then(|payload| payload.get("heaterPhysicalOutputPercent")).cloned()).unwrap_or(Value::Null),
         "requestV": round_decimal(request_mv / 1000.0, 3),
+        "contractV": number_to_json(status.and_then(|payload| payload.get("pdContractMv").and_then(Value::as_f64)).or_else(|| heater.and_then(|payload| payload.get("ppsContractMv").and_then(Value::as_f64))).map(|value| round_decimal(value / 1000.0, 3))),
+        "boardV": number_to_json(heater.and_then(|payload| payload.get("hotplateVoltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
+        "transactionId": status.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("activeTransactionId")).cloned().or_else(|| heater.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("activeTransactionId")).cloned()).unwrap_or(Value::Null),
+        "projectionValid": status.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("projectionValid")).cloned().or_else(|| heater.and_then(|payload| payload.get("thermalPlantModel")).and_then(|model| model.get("projectionValid")).cloned()).unwrap_or(Value::Null),
+        "sampleIntervalMs": sample.pointer("/sampling/intervalMs").cloned().unwrap_or(Value::Null),
+        "rollingRateHz": sample.pointer("/sampling/rollingRateHz").cloned().unwrap_or(Value::Null),
+        "rateViolation": sample.pointer("/sampling/rateViolation").cloned().unwrap_or(Value::Null),
         "phase": sample.get("phase").cloned().unwrap_or(Value::Null),
         "sourceVoltageV": number_to_json(source.and_then(|payload| payload.get("voltageMv").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
         "sourceCurrentA": number_to_json(source.and_then(|payload| payload.get("currentMa").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
         "sourcePowerW": number_to_json(source.and_then(|payload| payload.get("powerMw").and_then(Value::as_f64)).map(|value| round_decimal(value / 1000.0, 3))),
+        "rtdRawAdcMv": status.and_then(|payload| payload.get("rtdRawAdcMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcMinMv": status.and_then(|payload| payload.get("rtdRawAdcMinMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcMaxMv": status.and_then(|payload| payload.get("rtdRawAdcMaxMv")).cloned().unwrap_or(Value::Null),
+        "rtdRawAdcSpreadMv": status.and_then(|payload| payload.get("rtdRawAdcSpreadMv")).cloned().unwrap_or(Value::Null),
+        "vinRawAdcMv": status.and_then(|payload| payload.get("vinRawAdcMv")).cloned().unwrap_or(Value::Null),
+        "rtdDividerSupplyMv": status.and_then(|payload| payload.get("rtdDividerSupplyMv")).cloned().unwrap_or(Value::Null),
+        "adcDiagnostics": status.and_then(|payload| payload.get("adcDiagnostics")).cloned().unwrap_or(Value::Null),
         "parameters": sample.get("heaterParameters").cloned().unwrap_or(Value::Null),
     })
 }
@@ -1689,6 +1841,11 @@ pub(super) struct PreliminaryReviewBundleInput<'a> {
     pub(super) tuning_execution_order_c: &'a [i16],
     pub(super) source_preset: &'a str,
     pub(super) provider: &'a str,
+    pub(super) source_url: &'a str,
+    pub(super) source_current_limit_ma: Option<u64>,
+    pub(super) firmware_sha: &'a str,
+    pub(super) source_path: &'a str,
+    pub(super) thermal_transaction_id: Option<u64>,
 }
 
 struct PreliminaryBundlePaths {
@@ -1861,6 +2018,11 @@ fn build_preliminary_bundle(
         "candidateReadyTargetsC": set_to_vec(candidate_ready_targets_c),
         "sourcePreset": input.source_preset,
         "provider": input.provider,
+        "sourceUrl": input.source_url,
+        "sourceCurrentLimitMa": input.source_current_limit_ma,
+        "firmwareSha": input.firmware_sha,
+        "sourcePath": input.source_path,
+        "thermalTransactionId": input.thermal_transaction_id,
         "sourceDeviceId": input.source_id,
         "deviceId": input.device_id,
         "port": input.port_path,
@@ -1895,7 +2057,7 @@ fn write_preliminary_index(
     let html_data = json!({
         "generatedAt": bundle.get("generatedAt").cloned().unwrap_or(Value::Null),
         "title": format!("Flux Purr {identity} {target_label} preliminary review"),
-        "subtitle": format!("展示本次 {identity} full-batch 调优目标：{target_label}。主卡显示稳定窗口建立用时，稳定窗口门槛作为判定依据；轮次详情展示全部有效调优尝试、预算结果与 hold confirm。"),
+        "subtitle": format!("展示本次 {identity} HIL 的完整证据：供电合同、实际电流、申请/合同/板端电压、PWM、温度、采样门禁与原始 ADC。只有 review outcome=passed 才能作为验收通过证据。目标：{target_label}。"),
         "bundleDisposition": bundle.get("bundleDisposition").cloned().unwrap_or(Value::Null),
         "acceptedProfileRole": bundle.get("acceptedProfileRole").cloned().unwrap_or(Value::Null),
         "selectedMode": bundle.get("selectedMode").cloned().unwrap_or(Value::Null),
@@ -1903,9 +2065,31 @@ fn write_preliminary_index(
         "detectedSourceClass": bundle.get("detectedSourceClass").cloned().unwrap_or(Value::Null),
         "sourcePreset": bundle.get("sourcePreset").cloned().unwrap_or(Value::Null),
         "provider": bundle.get("provider").cloned().unwrap_or(Value::Null),
+        "sourceUrl": bundle.get("sourceUrl").cloned().unwrap_or(Value::Null),
+        "sourceCurrentLimitMa": bundle
+            .get("sourceCurrentLimitMa")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "firmwareSha": bundle.get("firmwareSha").cloned().unwrap_or(Value::Null),
+        "sourcePath": bundle.get("sourcePath").cloned().unwrap_or(Value::Null),
+        "thermalTransactionId": bundle
+            .get("thermalTransactionId")
+            .cloned()
+            .unwrap_or(Value::Null),
         "sourceDeviceId": bundle.get("sourceDeviceId").cloned().unwrap_or(Value::Null),
+        "sourceUrl": bundle.get("sourceUrl").cloned().unwrap_or(Value::Null),
+        "sourceCurrentLimitMa": bundle
+            .get("sourceCurrentLimitMa")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "sourcePath": bundle.get("sourcePath").cloned().unwrap_or(Value::Null),
         "deviceId": bundle.get("deviceId").cloned().unwrap_or(Value::Null),
         "port": bundle.get("port").cloned().unwrap_or(Value::Null),
+        "firmwareSha": bundle.get("firmwareSha").cloned().unwrap_or(Value::Null),
+        "thermalTransactionId": bundle
+            .get("thermalTransactionId")
+            .cloned()
+            .unwrap_or(Value::Null),
         "tuningBudgetSeconds": bundle.get("tuningBudgetSeconds").cloned().unwrap_or(Value::Null),
         "tuningTargetsC": bundle.get("tuningTargetsC").cloned().unwrap_or(Value::Null),
         "tuningExecutionOrderC": bundle.get("tuningExecutionOrderC").cloned().unwrap_or(Value::Null),
@@ -2075,10 +2259,11 @@ fn escape_report_html_value(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        PreliminaryReviewBundleInput, ThermalLegacyReportInput, ThermalSelfTestReportInput,
-        render_baseline_html, render_self_test_evidence_bundle, report_identity,
-        rerender_legacy_preliminary_review_bundle, sanitize_non_finite_json_numbers,
-        sanitize_point, tuning_workflow, write_preliminary_review_bundle,
+        PreliminaryReviewBundleInput, REPORT_TEMPLATE, ThermalLegacyReportInput,
+        ThermalSelfTestReportInput, render_baseline_html, render_self_test_evidence_bundle,
+        report_identity, rerender_legacy_preliminary_review_bundle,
+        sanitize_non_finite_json_numbers, sanitize_point, tuning_workflow,
+        write_preliminary_review_bundle,
     };
     use serde_json::{Value, json};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2100,6 +2285,74 @@ mod tests {
     fn embedded_report_data(bundle_dir: &Path) -> serde_json::Value {
         let html = fs::read_to_string(bundle_dir.join("index.html")).expect("index html");
         parse_embedded_report_data(&html)
+    }
+
+    #[test]
+    fn safety_evidence_fixture_requires_all_four_aligned_raw_signals() {
+        let complete = vec![
+            json!({
+                "t": 0.0,
+                "temp": 28.4,
+                "requestV": 6.5,
+                "sourceVoltageV": 6.49,
+                "sourceCurrentA": 2.91
+            }),
+            json!({
+                "t": 0.5,
+                "temp": 31.2,
+                "requestV": 9.5,
+                "sourceVoltageV": 9.43,
+                "sourceCurrentA": 2.92
+            }),
+        ];
+        let incomplete = vec![
+            complete[0].clone(),
+            json!({
+                "t": 0.5,
+                "temp": 31.2,
+                "requestV": 9.5,
+                "sourceVoltageV": 9.43
+            }),
+        ];
+        let out_of_order = vec![complete[1].clone(), complete[0].clone()];
+        let has_all_signals = |sample: &Value| {
+            ["t", "temp", "requestV", "sourceVoltageV", "sourceCurrentA"]
+                .into_iter()
+                .all(|field| {
+                    sample
+                        .get(field)
+                        .and_then(Value::as_f64)
+                        .is_some_and(f64::is_finite)
+                })
+        };
+        let status = |samples: &[Value]| {
+            let count = samples
+                .iter()
+                .filter(|sample| has_all_signals(sample))
+                .count();
+            let keys = samples
+                .iter()
+                .map(|sample| sample.get("t").and_then(Value::as_f64))
+                .collect::<Vec<_>>();
+            let key_aligned = keys.iter().enumerate().all(|(index, key)| {
+                key.is_some_and(f64::is_finite) && (index == 0 || key >= &keys[index - 1])
+            });
+            (
+                count,
+                samples.len(),
+                count == samples.len() && !samples.is_empty() && key_aligned,
+            )
+        };
+
+        assert_eq!(status(&complete), (2, 2, true));
+        assert_eq!(status(&incomplete), (1, 2, false));
+        assert_eq!(status(&out_of_order), (2, 2, false));
+
+        assert!(REPORT_TEMPLATE.contains("safety_evidence_incomplete"));
+        assert!(REPORT_TEMPLATE.contains("safetyThermalVoltage"));
+        assert!(REPORT_TEMPLATE.contains("safetySource"));
+        assert!(!REPORT_TEMPLATE.contains("sourceCurrentA*4"));
+        assert!(!REPORT_TEMPLATE.contains("sourcePowerW/4"));
     }
 
     #[test]
@@ -2182,6 +2435,9 @@ mod tests {
         let result = render_self_test_evidence_bundle(ThermalSelfTestReportInput {
             run_dirs: vec![run_dir],
             output_dir: Some(output_dir.clone()),
+            port_path: Some("/dev/cu.usbmodem21141401".to_string()),
+            firmware_sha: Some("test-firmware-sha".to_string()),
+            source_path: Some("C".to_string()),
         })
         .expect("render self-test evidence");
         let bundle: Value = serde_json::from_slice(
@@ -2197,6 +2453,9 @@ mod tests {
         assert_eq!(bundle["detectedSourceClass"], "pps3a");
         assert_eq!(bundle["sourceDeviceId"], "f293cc9c139e");
         assert_eq!(bundle["sourcePreset"], "20V / 3.25A PPS auto-follow");
+        assert_eq!(bundle["port"], "/dev/cu.usbmodem21141401");
+        assert_eq!(bundle["firmwareSha"], "test-firmware-sha");
+        assert_eq!(bundle["sourcePath"], "C");
         assert_eq!(bundle["reportRuns"][0]["target"], 240);
         assert_eq!(bundle["reportRuns"][0]["targetRole"], "validation");
         assert_eq!(bundle["reportRuns"][0]["reviewPassed"], true);
@@ -2225,6 +2484,135 @@ mod tests {
                 .count(),
             4
         );
+    }
+
+    #[test]
+    fn self_test_renderer_uses_the_final_attempt_after_an_elapsed_time_reset() {
+        let (_dir, run_dir, output_dir) =
+            self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence_fixture();
+        let summary_path = run_dir.join("run.json");
+        let mut summary = super::read_json(&summary_path).expect("read summary");
+        summary["applied"][0]["analysis"]["approachSource"] = Value::Null;
+        summary["applied"][0]["analysis"]["holdSource"] = Value::Null;
+        fs::write(
+            summary_path,
+            serde_json::to_vec_pretty(&summary).expect("serialize summary"),
+        )
+        .expect("write summary");
+        let retry_samples = [
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied_environment_retry",
+                "elapsedMs": 0,
+                "phase": "warmup",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 31.0, "heaterControlTempC": 31.0, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 100, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20000, "currentMa": 2700, "powerMw": 54000}
+            }),
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied_environment_retry",
+                "elapsedMs": 1000,
+                "phase": "approach",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 231.0, "heaterControlTempC": 231.0, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 100, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20000, "currentMa": 2700, "powerMw": 54000}
+            }),
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied_environment_retry",
+                "elapsedMs": 2000,
+                "phase": "hold",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 239.2, "heaterControlTempC": 239.2, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 93, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20008, "currentMa": 2859, "powerMw": 57199}
+            }),
+            json!({
+                "targetTempC": 240,
+                "testPhase": "applied_environment_retry",
+                "elapsedMs": 12000,
+                "phase": "hold",
+                "heaterTelemetry": {"heaterOutputPercent": 100},
+                "status": {"currentTempC": 240.2, "heaterControlTempC": 240.2, "heaterOutputPercent": 100, "heaterPhysicalOutputPercent": 93, "pdRequestMv": 20000, "thermalPlantModel": {"state": "active", "projectionValid": true}},
+                "sourceTelemetry": {"voltageMv": 20008, "currentMa": 2859, "powerMw": 57199}
+            }),
+        ];
+        let mut samples = fs::read_to_string(run_dir.join("samples.ndjson")).expect("read samples");
+        samples.push_str(
+            &retry_samples
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("serialize retry samples")
+                .join("\n"),
+        );
+        samples.push('\n');
+        fs::write(run_dir.join("samples.ndjson"), samples).expect("write retry samples");
+
+        render_self_test_evidence_bundle(ThermalSelfTestReportInput {
+            run_dirs: vec![run_dir],
+            output_dir: Some(output_dir.clone()),
+            port_path: None,
+            firmware_sha: None,
+            source_path: None,
+        })
+        .expect("render retry self-test evidence");
+        let bundle: Value = serde_json::from_slice(
+            &fs::read(output_dir.join("run.bundle.json")).expect("read retry bundle"),
+        )
+        .expect("parse retry bundle");
+        let run = &bundle["reportRuns"][0];
+        assert_eq!(run["reviewPassed"], true);
+        assert_eq!(run["samples"].as_array().unwrap().len(), 4);
+        assert_eq!(run["samples"][0]["temp"], json!(31.0));
+        assert_eq!(
+            run["result"]["fullSpeedToStable"]["settleTimeMs"],
+            json!(1_000)
+        );
+        assert_eq!(run["holdCheck"]["holdSource"]["sampleCount"], json!(2));
+    }
+
+    #[test]
+    fn self_test_renderer_keeps_incomplete_samples_as_failed_evidence() {
+        let (_dir, run_dir, output_dir) =
+            self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence_fixture();
+        let summary_path = run_dir.join("run.json");
+        let mut summary = super::read_json(&summary_path).expect("read summary");
+        summary["ok"] = json!(false);
+        summary["complete"] = json!(false);
+        summary["validation"] = json!({
+            "expectedTargetsC": [240],
+            "passed": false,
+            "failures": [{
+                "targetTempC": 240,
+                "reason": "incomplete_stage",
+                "stopReason": "sample_rate_below_3hz"
+            }]
+        });
+        summary["applied"][0]["stopReason"] = json!("sample_rate_below_3hz");
+        fs::write(
+            summary_path,
+            serde_json::to_vec_pretty(&summary).expect("serialize incomplete summary"),
+        )
+        .expect("write incomplete summary");
+
+        render_self_test_evidence_bundle(ThermalSelfTestReportInput {
+            run_dirs: vec![run_dir],
+            output_dir: Some(output_dir.clone()),
+            port_path: None,
+            firmware_sha: None,
+            source_path: None,
+        })
+        .expect("render incomplete self-test evidence");
+        let bundle: Value = serde_json::from_slice(
+            &fs::read(output_dir.join("run.bundle.json")).expect("read incomplete bundle"),
+        )
+        .expect("parse incomplete bundle");
+        let run = &bundle["reportRuns"][0];
+        assert_eq!(run["reviewPassed"], false);
+        assert_eq!(run["result"]["stopReason"], "sample_rate_below_3hz");
+        assert_eq!(run["samples"].as_array().unwrap().len(), 4);
+        assert_eq!(run["samples"][2]["sourceCurrentA"], 2.859);
     }
 
     fn self_test_renderer_preserves_completed_pps3a_thermal_plant_evidence_fixture()
@@ -2504,6 +2892,11 @@ mod tests {
             tuning_execution_order_c: &[80],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
         (bundle_dir, bundle)
@@ -2682,6 +3075,11 @@ mod tests {
             tuning_execution_order_c: &[120],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
         (bundle_dir, bundle)
@@ -2808,6 +3206,11 @@ mod tests {
             tuning_execution_order_c: &[60, 100, 80],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
         (bundle_dir, bundle)
@@ -2872,6 +3275,11 @@ mod tests {
             tuning_execution_order_c: &[60, 140],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
 
@@ -2962,6 +3370,11 @@ mod tests {
             tuning_execution_order_c: &[100],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
 
@@ -3050,6 +3463,11 @@ mod tests {
             tuning_execution_order_c: &[60],
             source_preset: "21V / 5.0A",
             provider: "IsolaPurr",
+            source_url: "http://source.test",
+            source_current_limit_ma: Some(5000),
+            firmware_sha: "test-sha",
+            source_path: "C",
+            thermal_transaction_id: Some(7),
         })
         .expect("bundle");
 

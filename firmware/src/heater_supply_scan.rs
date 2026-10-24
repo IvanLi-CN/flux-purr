@@ -5,11 +5,17 @@ const RAPID_SETTLE_MS: u32 = 500;
 const STAGE_TIMEOUT_MS: u32 = 15 * 60 * 1_000;
 const MIN_THERMAL_COVERAGE_CENTI_C: i16 = 22_000;
 const RAPID_MIN_COVERAGE_CENTI_C: i16 = 10_000;
+const RAPID_REPROBE_STEP_CENTI_C: i16 = 1_000;
 const PROBE_RECOVERY_STEP_MV: u16 = 500;
 const NORMAL_PROBE_FLAT_CONFIRMATIONS: u8 = 5;
 const NORMAL_PROBE_AMBIGUOUS_CONFIRMATIONS: u8 = 8;
 const NORMAL_PROBE_TIMEOUT_MS: u32 = 10_000;
 const NORMAL_PROBE_MIN_TEMPERATURE_STEP_CENTI_C: i16 = 1_000;
+// A 100 mV PPS step is within the combined ADC quantization, cable drop, and
+// converter regulation error at the low end of the scan. Do not classify one
+// such step as a source current boundary unless the relative sag guard also
+// fails. This keeps a cold, low-power load from being locked at the PPS floor.
+const RAPID_MIN_BOUNDARY_SPAN_MV: u16 = 500;
 // Start measured 3 A coverage before the lower-current warm-up boundary can
 // become a thermal dead end. Subsequent probes are spaced by ten degrees.
 const THREE_AMP_COVERAGE_START_CENTI_C: i16 = 6_000;
@@ -20,6 +26,7 @@ pub enum ScanPhase {
     Preflight,
     PreflightRecovery,
     Sweep,
+    SourceBoundaryRecovery,
     RapidWarmup,
     TemperatureSettle,
     Equilibrium,
@@ -35,6 +42,7 @@ impl ScanPhase {
             Self::Preflight => "preflight",
             Self::PreflightRecovery => "preflight_recovery",
             Self::Sweep => "sweep",
+            Self::SourceBoundaryRecovery => "source_boundary_recovery",
             Self::RapidWarmup => "rapid_warmup",
             Self::TemperatureSettle => "temperature_settle",
             Self::Equilibrium => "equilibrium",
@@ -117,6 +125,10 @@ pub struct SupplyScan {
     return_current_ma: u16,
     return_request_mv: u16,
     normal_bins: [Option<BoundaryPoint>; 20],
+    rapid_tracking_confirmations: u8,
+    last_rapid_probe_temperature_centi_c: Option<i16>,
+    rapid_boundary_reached: bool,
+    rapid_boundary_reprobe_done: bool,
     mode: ScanMode,
 }
 
@@ -171,6 +183,10 @@ impl SupplyScan {
             return_current_ma: 3_000,
             return_request_mv: boundary.source_min_mv,
             normal_bins: [None; 20],
+            rapid_tracking_confirmations: 0,
+            last_rapid_probe_temperature_centi_c: None,
+            rapid_boundary_reached: false,
+            rapid_boundary_reprobe_done: false,
             mode,
         })
     }
@@ -305,6 +321,7 @@ impl SupplyScan {
                 | ScanPhase::Preflight
                 | ScanPhase::PreflightRecovery
                 | ScanPhase::ProbeRecovery
+                | ScanPhase::SourceBoundaryRecovery
         ) && input.physical_percent != 100
         {
             self.changed_at_ms = input.now_ms;
@@ -349,6 +366,7 @@ impl SupplyScan {
                     );
                 }
             }
+            ScanPhase::SourceBoundaryRecovery => self.source_boundary_recovery(input),
             ScanPhase::Sweep => self.sweep(input),
             ScanPhase::RapidWarmup => self.rapid_warmup(input),
             ScanPhase::TemperatureSettle => {
@@ -485,6 +503,33 @@ impl SupplyScan {
             self.probe_next_voltage(input);
             return;
         };
+        if self.is_rapid() && !self.voltage_tracks_request(input) {
+            // The source current loop can begin before the advertised ceiling
+            // and leave an intermediate PPS request with a large VIN sag. It
+            // is already outside the measured tracking envelope; do not wait
+            // for a flat-response counter or retain this request as a thermal
+            // boundary point.
+            self.begin_source_boundary_recovery(input);
+            return;
+        }
+        // The rapid product scan must not treat the first sample at the
+        // advertised ceiling as proof that the source can sustain the load.
+        // A 3 A source may briefly report the requested voltage before its
+        // current loop pulls VBUS down. Defer that ceiling sample to the
+        // warm-up phase, where two consecutive tracking observations are
+        // required and a sag immediately returns to the last safe point.
+        if self.is_rapid() && self.request_mv >= self.boundary.source_max_mv {
+            if self.voltage_tracks_request(input) {
+                self.phase = ScanPhase::RapidWarmup;
+                self.previous = Some(input);
+                self.rapid_tracking_confirmations = 0;
+                self.last_rapid_probe_temperature_centi_c = None;
+                self.changed_at_ms = input.now_ms;
+            } else {
+                self.begin_source_boundary_recovery(input);
+            }
+            return;
+        }
         // Keep the electrical sweep moving while the plate warms. A low
         // voltage/current pair can take minutes to approach equilibrium, and
         // waiting here would prevent the scan from reaching a higher PPS
@@ -534,8 +579,7 @@ impl SupplyScan {
                 // exactly on either threshold; retaining it as a flat point
                 // cannot raise the usable voltage, while aborting the whole
                 // calibration would discard all earlier safe observations.
-                self.flat_request_mv = self.request_mv;
-                self.begin_equilibrium(input);
+                self.handle_ambiguous_confirmation(input);
             }
             return;
         }
@@ -546,14 +590,37 @@ impl SupplyScan {
             2
         };
         if self.flat_count >= flat_confirmations {
-            self.flat_request_mv = self.request_mv;
-            if let Some(point) = self.last_tracking.as_mut() {
-                point.flat_request_mv = self.flat_request_mv;
-            }
-            self.begin_equilibrium(input);
+            self.handle_flat_confirmation(input);
         } else {
             self.probe_next_voltage(input);
         }
+    }
+
+    fn handle_ambiguous_confirmation(&mut self, input: ScanInput) {
+        if self.rapid_flat_boundary_ready(input) {
+            self.flat_request_mv = self.request_mv;
+            self.begin_equilibrium(input);
+            return;
+        }
+        // At the low end, a flat 100 mV response can be ordinary quantization
+        // or cable/converter drop. Continue the bounded voltage sweep until
+        // the relative sag guard or a meaningful request span confirms a
+        // boundary.
+        self.ambiguous_count = 0;
+        self.probe_next_voltage(input);
+    }
+
+    fn handle_flat_confirmation(&mut self, input: ScanInput) {
+        if !self.rapid_flat_boundary_ready(input) {
+            self.flat_count = 0;
+            self.probe_next_voltage(input);
+            return;
+        }
+        self.flat_request_mv = self.request_mv;
+        if let Some(point) = self.last_tracking.as_mut() {
+            point.flat_request_mv = self.flat_request_mv;
+        }
+        self.begin_equilibrium(input);
     }
 
     fn probe_next_voltage(&mut self, input: ScanInput) {
@@ -561,6 +628,7 @@ impl SupplyScan {
             if self.is_rapid() {
                 self.phase = ScanPhase::RapidWarmup;
                 self.previous = None;
+                self.last_rapid_probe_temperature_centi_c = None;
                 self.changed_at_ms = input.now_ms;
             } else {
                 self.begin_equilibrium(input);
@@ -586,6 +654,7 @@ impl SupplyScan {
         if self.is_rapid() {
             self.phase = ScanPhase::RapidWarmup;
             self.previous = None;
+            self.last_rapid_probe_temperature_centi_c = None;
             self.changed_at_ms = input.now_ms;
             self.request_mv = point.tracking_request_mv;
             return;
@@ -610,12 +679,79 @@ impl SupplyScan {
             self.changed_at_ms = input.now_ms;
             return;
         }
-        self.retain_normal_tracking(input);
-        if input.temperature_centi_c >= RAPID_MIN_COVERAGE_CENTI_C {
-            self.phase = ScanPhase::Complete;
+        if !self.voltage_tracks_request(input) {
+            self.begin_source_boundary_recovery(input);
+            return;
+        }
+        self.last_rapid_probe_temperature_centi_c
+            .get_or_insert(input.temperature_centi_c);
+        self.rapid_tracking_confirmations = self.rapid_tracking_confirmations.saturating_add(1);
+        if self.rapid_tracking_confirmations >= 2 {
+            self.retain_normal_tracking(input);
+            let rapid_hot_hold_ready =
+                self.last_rapid_probe_temperature_centi_c
+                    .is_some_and(|previous| {
+                        input.temperature_centi_c.saturating_sub(previous)
+                            >= RAPID_REPROBE_STEP_CENTI_C
+                    });
+            if input.temperature_centi_c >= RAPID_MIN_COVERAGE_CENTI_C
+                && self.rapid_boundary_reached
+                && !self.rapid_boundary_reprobe_done
+                && self.request_mv < self.boundary.source_max_mv
+            {
+                // A cold CC boundary is not the hot-end boundary: the plate
+                // resistance rises while warming, so the same voltage can
+                // become safe again. Make one bounded hot re-probe before
+                // accepting the cold point as the final operating ceiling.
+                self.rapid_boundary_reprobe_done = true;
+                self.begin_rapid_voltage_reprobe(input);
+            } else if input.temperature_centi_c >= RAPID_MIN_COVERAGE_CENTI_C
+                && (self.request_mv >= self.boundary.source_max_mv
+                    || self.rapid_boundary_reprobe_done)
+                && rapid_hot_hold_ready
+            {
+                self.phase = ScanPhase::Complete;
+            } else if !self.rapid_boundary_reached
+                && self.request_mv < self.boundary.source_max_mv
+                && self
+                    .last_rapid_probe_temperature_centi_c
+                    .is_some_and(|previous| {
+                        input.temperature_centi_c.saturating_sub(previous)
+                            >= RAPID_REPROBE_STEP_CENTI_C
+                    })
+            {
+                self.begin_rapid_voltage_reprobe(input);
+            } else {
+                self.changed_at_ms = input.now_ms;
+            }
         } else {
             self.changed_at_ms = input.now_ms;
         }
+    }
+
+    fn begin_rapid_voltage_reprobe(&mut self, input: ScanInput) {
+        let next_request_mv = self
+            .request_mv
+            .saturating_add(100)
+            .min(self.boundary.source_max_mv);
+        if next_request_mv <= self.request_mv {
+            self.phase = ScanPhase::Complete;
+            return;
+        }
+        // Preserve the last confirmed 3 A point as the comparison baseline,
+        // then advance by one PPS step. A later CC response can therefore
+        // return to this exact request without lowering the measured envelope.
+        self.phase = ScanPhase::Sweep;
+        self.normal_probe = false;
+        self.previous = Some(input);
+        self.last_tracking = Some(self.point(input));
+        self.flat_request_mv = 0;
+        self.flat_count = 0;
+        self.ambiguous_count = 0;
+        self.equilibrium.reset();
+        self.stage_started_ms = input.now_ms;
+        self.rapid_tracking_confirmations = 0;
+        self.change(input, next_request_mv, 3_000);
     }
 
     fn handle_stage_timeout(&mut self, input: ScanInput) {
@@ -712,6 +848,74 @@ impl SupplyScan {
         // already off. Only then step the unloaded contract down toward the
         // prior safe voltage; never request a 20 V/3 A loaded dwell.
         self.change(input, self.request_mv, self.return_current_ma);
+    }
+
+    fn voltage_tracks_request(&self, input: ScanInput) -> bool {
+        self.last_tracking.is_none_or(|point| {
+            SupplyBoundary::voltage_response_matches(point, self.request_mv, input.vin_mv)
+        })
+    }
+
+    fn rapid_flat_boundary_ready(&self, input: ScanInput) -> bool {
+        if !self.is_rapid() {
+            return true;
+        }
+        let Some(last_tracking) = self.last_tracking else {
+            return false;
+        };
+        self.request_mv
+            .saturating_sub(last_tracking.tracking_request_mv)
+            >= RAPID_MIN_BOUNDARY_SPAN_MV
+            || !SupplyBoundary::voltage_response_matches(
+                last_tracking,
+                self.request_mv,
+                input.vin_mv,
+            )
+    }
+
+    fn begin_source_boundary_recovery(&mut self, input: ScanInput) {
+        let Some(last_safe) = self.last_tracking else {
+            self.fail(ScanFailure::SupplyUnstable);
+            return;
+        };
+        self.return_request_mv = last_safe
+            .tracking_request_mv
+            .max(self.boundary.source_min_mv);
+        self.return_current_ma = self.request_ma;
+        self.normal_probe = false;
+        if self.is_rapid() {
+            // A loaded request that no longer tracks has bracketed the
+            // source CC boundary. Keep the last safe point and finish once
+            // the required hot coverage is confirmed instead of retrying the
+            // same unsafe request at every ten-degree window.
+            self.rapid_boundary_reached = true;
+        }
+        self.rapid_tracking_confirmations = 0;
+        self.phase = ScanPhase::SourceBoundaryRecovery;
+        self.previous = None;
+        self.flat_count = 0;
+        self.ambiguous_count = 0;
+        self.flat_request_mv = self.request_mv;
+        // Turn the heater off in this same update and request the last
+        // confirmed safe voltage directly. The next phase waits for a settled
+        // confirmed contract before resuming the 3 A warm-up.
+        self.change(input, self.return_request_mv, self.return_current_ma);
+    }
+
+    fn source_boundary_recovery(&mut self, input: ScanInput) {
+        if !input.confirmed || input.physical_percent != 0 {
+            self.changed_at_ms = input.now_ms;
+            return;
+        }
+        if input.now_ms.saturating_sub(self.changed_at_ms) < self.settle_ms() {
+            return;
+        }
+        self.phase = ScanPhase::RapidWarmup;
+        self.previous = None;
+        self.flat_request_mv = 0;
+        self.rapid_tracking_confirmations = 0;
+        self.last_rapid_probe_temperature_centi_c = None;
+        self.changed_at_ms = input.now_ms;
     }
 
     fn retain_normal_tracking(&mut self, input: ScanInput) {
@@ -870,6 +1074,379 @@ mod tests {
             }
         }
         panic!("rapid scan did not terminate within its bounded warm-up");
+    }
+
+    #[test]
+    fn rapid_scan_reprobes_the_boundary_after_temperature_rises() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
+        scan.phase = ScanPhase::RapidWarmup;
+        scan.request_mv = 13_900;
+        scan.request_ma = 3_000;
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 13_700,
+            tracking_request_mv: 13_900,
+            request_current_ma: 3_000,
+            ..BoundaryPoint::default()
+        });
+        scan.changed_at_ms = 0;
+
+        let first = scan.update(ScanInput {
+            now_ms: 500,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_700,
+        });
+        assert_eq!(scan.phase, ScanPhase::RapidWarmup);
+        assert_eq!(first.request_mv, 13_900);
+
+        let second = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 10_050,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_700,
+        });
+        assert_eq!(scan.phase, ScanPhase::RapidWarmup);
+        assert_eq!(second.request_mv, 13_900);
+
+        let reprobe = scan.update(ScanInput {
+            now_ms: 2_000,
+            temperature_centi_c: 20_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_700,
+        });
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(reprobe.request_mv, 14_000);
+        assert_eq!(reprobe.request_ma, 3_000);
+        assert!(reprobe.heater_enabled);
+    }
+
+    #[test]
+    fn rapid_scan_does_not_call_a_single_low_voltage_flat_step_a_boundary() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
+        scan.phase = ScanPhase::Sweep;
+        scan.request_mv = 5_700;
+        scan.request_ma = 3_000;
+        scan.baseline_vin_mv = 19_800;
+        scan.baseline_request_mv = 20_000;
+        scan.changed_at_ms = 0;
+        scan.previous = Some(probe_input(0, 5_594, 100));
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 5_594,
+            tracking_request_mv: 5_600,
+            request_current_ma: 3_000,
+            ..BoundaryPoint::default()
+        });
+
+        let first = scan.update(probe_input(1_000, 5_594, 100));
+        assert!(first.heater_enabled);
+        let second = scan.update(probe_input(2_000, 5_594, 100));
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(second.request_mv, 5_900);
+        assert!(second.heater_enabled);
+        assert_eq!(scan.boundary.point_count, 0);
+    }
+
+    #[test]
+    fn rapid_scan_returns_to_last_safe_voltage_when_source_ceiling_sags() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::RapidWarmup;
+        scan.request_mv = 20_000;
+        scan.request_ma = 3_000;
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 13_160,
+            request_current_ma: 3_000,
+            tracking_request_mv: 13_400,
+            ..BoundaryPoint::default()
+        });
+        scan.changed_at_ms = 0;
+
+        let recovery = scan.update(ScanInput {
+            now_ms: 500,
+            temperature_centi_c: 6_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_000,
+        });
+        assert_eq!(scan.phase, ScanPhase::SourceBoundaryRecovery);
+        assert_eq!(recovery.request_mv, 13_400);
+        assert!(!recovery.heater_enabled);
+        assert_eq!(scan.boundary.point_count, 0);
+
+        let resumed = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 6_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 0,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_400,
+        });
+        assert_eq!(scan.phase, ScanPhase::RapidWarmup);
+        assert_eq!(resumed.request_mv, 13_400);
+        assert!(resumed.heater_enabled);
+
+        let first_safe = scan.update(ScanInput {
+            now_ms: 1_500,
+            temperature_centi_c: 6_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_200,
+        });
+        assert_eq!(scan.boundary.point_count, 0);
+        assert!(first_safe.heater_enabled);
+
+        scan.update(ScanInput {
+            now_ms: 2_000,
+            temperature_centi_c: 6_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_200,
+        });
+        assert_eq!(scan.boundary.point_count, 1);
+        assert_eq!(scan.boundary.points[0].tracking_request_mv, 13_400);
+    }
+
+    #[test]
+    fn rapid_scan_finishes_after_recovering_from_source_boundary_with_hot_coverage() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid scan boundary");
+        scan.phase = ScanPhase::RapidWarmup;
+        scan.request_mv = 20_000;
+        scan.request_ma = 3_000;
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 13_160,
+            request_current_ma: 3_000,
+            tracking_request_mv: 13_400,
+            ..BoundaryPoint::default()
+        });
+        scan.changed_at_ms = 0;
+
+        let recovery = scan.update(ScanInput {
+            now_ms: 500,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_000,
+        });
+        assert_eq!(scan.phase, ScanPhase::SourceBoundaryRecovery);
+        assert_eq!(recovery.request_mv, 13_400);
+        assert!(!recovery.heater_enabled);
+
+        let resumed = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 0,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_400,
+        });
+        assert_eq!(scan.phase, ScanPhase::RapidWarmup);
+        assert_eq!(resumed.request_mv, 13_400);
+        assert!(resumed.heater_enabled);
+
+        scan.update(ScanInput {
+            now_ms: 1_500,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_200,
+        });
+        let reprobe = scan.update(ScanInput {
+            now_ms: 2_000,
+            temperature_centi_c: 10_050,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_200,
+        });
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(reprobe.request_mv, 13_500);
+        assert_eq!(reprobe.request_ma, 3_000);
+        assert!(reprobe.heater_enabled);
+        assert_eq!(scan.boundary.point_count, 1);
+        assert_eq!(scan.boundary.points[0].tracking_request_mv, 13_400);
+    }
+
+    #[test]
+    fn rapid_scan_reprobes_hot_voltage_after_cold_boundary() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
+        scan.phase = ScanPhase::RapidWarmup;
+        scan.request_mv = 13_900;
+        scan.request_ma = 3_000;
+        scan.rapid_boundary_reached = true;
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 13_700,
+            request_current_ma: 3_000,
+            tracking_request_mv: 13_900,
+            ..BoundaryPoint::default()
+        });
+        scan.changed_at_ms = 0;
+
+        scan.update(ScanInput {
+            now_ms: 500,
+            temperature_centi_c: 10_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_700,
+        });
+        let reprobe = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 10_050,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_700,
+        });
+
+        assert_eq!(scan.phase, ScanPhase::Sweep);
+        assert_eq!(reprobe.request_mv, 14_000);
+        assert_eq!(reprobe.request_ma, 3_000);
+        assert!(reprobe.heater_enabled);
+    }
+
+    #[test]
+    fn rapid_scan_keeps_a_hot_hold_after_the_final_boundary() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 20_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..SupplyBoundary::default()
+        };
+        let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
+        scan.phase = ScanPhase::RapidWarmup;
+        scan.request_mv = 14_000;
+        scan.request_ma = 3_000;
+        scan.rapid_boundary_reached = true;
+        scan.rapid_boundary_reprobe_done = true;
+        scan.rapid_tracking_confirmations = 1;
+        scan.last_rapid_probe_temperature_centi_c = Some(10_000);
+        scan.last_tracking = Some(BoundaryPoint {
+            vin_mv: 13_800,
+            request_current_ma: 3_000,
+            tracking_request_mv: 14_000,
+            ..BoundaryPoint::default()
+        });
+        scan.changed_at_ms = 0;
+
+        let first = scan.update(ScanInput {
+            now_ms: 500,
+            temperature_centi_c: 10_050,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_800,
+        });
+        assert_eq!(scan.phase, ScanPhase::RapidWarmup);
+        assert!(first.heater_enabled);
+
+        let held = scan.update(ScanInput {
+            now_ms: 1_000,
+            temperature_centi_c: 14_000,
+            wifi_started: false,
+            confirmed: true,
+            physical_percent: 100,
+            rtd_code: 1_000,
+            rtd_mv: 1_000,
+            vin_code: 1_000,
+            vin_mv: 13_800,
+        });
+        assert_eq!(scan.phase, ScanPhase::Complete);
+        assert!(!held.heater_enabled);
     }
 
     #[test]

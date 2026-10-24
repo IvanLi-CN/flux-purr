@@ -1478,6 +1478,11 @@ pub(crate) async fn runtime_read_heater_sensors(
     state: &mut RuntimeLoopState,
     current_request_mv: u16,
 ) -> (RtdSample, bool) {
+    // The RTD input shares the heater's analog return path. The ADC sampler
+    // already spans PWM phases and discards the channel-switch prefix, so
+    // keep the heater conducting while the batch is acquired. Blanking the
+    // MOS for the whole batch turns the nominal 3 A calibration into a low-
+    // duty thermal test and can make the five-minute run time out.
     let mut needs_redraw = false;
     let previous_vin_raw_adc_mv = state.latest_vin_raw_adc_mv;
     let mut rtd_sample = read_rtd_sample(
@@ -2659,6 +2664,21 @@ pub(crate) fn runtime_log_heater_cycle(
     );
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const fn runtime_memory_commit_permitted(
+    heater_enabled: bool,
+    calibration_heater_enabled: bool,
+    manual_pps_enabled: bool,
+    requested_duty_percent: u8,
+    applied_duty_percent: u8,
+) -> bool {
+    !heater_enabled
+        && !calibration_heater_enabled
+        && !manual_pps_enabled
+        && requested_duty_percent == 0
+        && applied_duty_percent == 0
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState, elapsed_ms: u64) {
     discard_deferred_memory_commit_for_incompatible_eeprom(
@@ -2674,6 +2694,15 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
             .memory_commit_due_ms
             .is_none_or(|due_ms| elapsed_ms < due_ms)
     {
+        return;
+    }
+    if !runtime_memory_commit_permitted(
+        state.ui_state.heater_enabled,
+        state.calibration_runtime_state.heater_enabled,
+        state.manual_pps_state.enabled,
+        state.ui_state.heater_output_percent,
+        state.last_heater_duty,
+    ) {
         return;
     }
     state.memory_commit_due_ms = None;
@@ -2849,28 +2878,52 @@ fn runtime_confirm_fan_power(
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
-    let mut fan_decision = fan_policy_decision_with_modes(
-        state.latest_display_temp_i16,
-        elapsed_ms,
-        state.ui_state.heater_enabled,
-        state.heater_enabled_last_cycle && !state.ui_state.heater_enabled,
-        state.ui_state.post_heat_cooling_mode,
-        state.ui_state.heating_fan_guard_mode,
-        (
-            state.fan_policy_state,
-            is_sensor_fault(state.current_rtd_fault),
-        ),
-    );
+fn runtime_override_fan_decision(
+    state: &RuntimeLoopState,
+    mut fan_decision: FanPolicyDecision,
+    elapsed_ms: u64,
+) -> FanPolicyDecision {
+    let thermal_plant_cooling = state.calibration_runtime_state.mode
+        == CalibrationMode::ThermalPlant
+        && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
+        && state
+            .thermal_plant_workspace
+            .job
+            .as_ref()
+            .is_some_and(|job| job.phase == ThermalPlantAutoPhase::Cooling);
     if state.calibration_runtime_state.mode == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
     {
+        if thermal_plant_cooling {
+            let command = FanPolicyState::ActiveCooling.command(elapsed_ms);
+            fan_decision = FanPolicyDecision {
+                state: FanPolicyState::ActiveCooling,
+                command,
+                display_state: FanDisplayState::Safe,
+                source: FanPolicySource::Safety,
+                output_level: FanOutputLevel::High,
+            };
+        } else {
+            fan_decision = FanPolicyDecision {
+                state: FanPolicyState::Disabled,
+                command: FanHardwareCommand::disabled(),
+                display_state: FanDisplayState::Off,
+                source: FanPolicySource::Idle,
+                output_level: FanOutputLevel::Off,
+            };
+        }
+    }
+    if state.calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
+        && state.calibration_runtime_state.job.status == CalibrationJobStatus::Failed
+        && state.latest_display_temp_i16 > 40
+    {
+        let command = FanPolicyState::ActiveCooling.command(elapsed_ms);
         fan_decision = FanPolicyDecision {
-            state: FanPolicyState::Disabled,
-            command: FanHardwareCommand::disabled(),
-            display_state: FanDisplayState::Off,
-            source: FanPolicySource::Idle,
-            output_level: FanOutputLevel::Off,
+            state: FanPolicyState::ActiveCooling,
+            command,
+            display_state: FanDisplayState::Safe,
+            source: FanPolicySource::Safety,
+            output_level: FanOutputLevel::High,
         };
     }
     if let Some(forced_fan_state) = overtemp_forced_fan_state(
@@ -2902,6 +2955,24 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
             output_level: FanOutputLevel::Medium,
         };
     }
+    fan_decision
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+    let fan_decision = fan_policy_decision_with_modes(
+        state.latest_display_temp_i16,
+        elapsed_ms,
+        state.ui_state.heater_enabled,
+        state.heater_enabled_last_cycle && !state.ui_state.heater_enabled,
+        state.ui_state.post_heat_cooling_mode,
+        state.ui_state.heating_fan_guard_mode,
+        (
+            state.fan_policy_state,
+            is_sensor_fault(state.current_rtd_fault),
+        ),
+    );
+    let mut fan_decision = runtime_override_fan_decision(state, fan_decision, elapsed_ms);
     runtime_update_tuning_cooling_latch(state);
     fan_decision = tuning_cooldown_fan_decision(fan_decision, state.tuning_cooling_latched);
     runtime_confirm_fan_power(state, &mut fan_decision, elapsed_ms);

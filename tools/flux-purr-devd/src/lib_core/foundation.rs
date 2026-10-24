@@ -551,6 +551,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         .map(|(index, temperature)| ThermalPlantTracePoint {
             sample_index: index as u8,
             elapsed_ms: index as u32 * 30_000,
+            raw_rtd_adc_mv: 0,
             temperature_centi_c: temperature * 100,
             heater_voltage_mv: if (1..9).contains(&index) { 9_500 } else { 0 },
             duty_percent: if (1..9).contains(&index) { 100 } else { 0 },
@@ -572,6 +573,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
             phase: Some(ThermalPlantRunPhase::Cooling),
             progress_percent: 100,
             elapsed_ms: 420_000,
+            ambient_raw_rtd_adc_mv: 0,
             current_temp_centi_c: 8000,
             heater_voltage_mv: 0,
             duty_percent: 0,

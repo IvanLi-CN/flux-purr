@@ -6,7 +6,7 @@ Superseded in its resistance-curve projection, voltage interpretation and raw-ob
 
 ## Context
 
-The automatic thermal-model calibration already owns the complete transient run: it records the heater curve while heating to `220C`, disarms in that control cycle, records passive cooling to `80C`, fits locally, and atomically commits valid results. The generic calibration job state is intentionally small and must remain compatible with existing USB, LAN, devd, and Web clients. A page that only reads that generic state cannot show useful evidence of the run or distinguish a provisional fit from a persisted model.
+The automatic thermal-model calibration already owns the complete transient run: it records the heater curve while heating to `220C`, disarms in that control cycle, records cooling to `80C`, fits locally, and atomically commits valid results. The generic calibration job state is intentionally small and must remain compatible with existing USB, LAN, devd, and Web clients. A page that only reads that generic state cannot show useful evidence of the run or distinguish a provisional fit from a persisted model.
 
 ## Decision
 

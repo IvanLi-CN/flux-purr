@@ -104,6 +104,9 @@ fn render_thermal_report(
                 thermal_report::ThermalSelfTestReportInput {
                     run_dirs: args.run_dir,
                     output_dir: args.output_dir,
+                    port_path: args.port_path,
+                    firmware_sha: args.firmware_sha,
+                    source_path: args.source_path,
                 },
             )
         }
@@ -319,8 +322,12 @@ pub(crate) struct BenchSourceLiveTelemetry {
 pub(crate) const THERMAL_SOURCE_65W_POWER_WATTS: u64 = 65;
 pub(crate) const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
 pub(crate) const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
-pub(crate) const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 1_000;
-pub(crate) const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 8;
+// devd keeps a serial worker exclusive for up to its 12s RPC deadline. A
+// shorter client timeout would cancel the HTTP wait while the worker still
+// owns the serial mutex, and repeated retries would queue behind it and block
+// the eventual safety shutdown. Keep one bounded wait at or above that limit.
+pub(crate) const THERMAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 15_000;
+pub(crate) const THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS: usize = 1;
 pub(crate) const THERMAL_STATUS_REQUEST_RETRY_BACKOFF_MS: u64 = 250;
 pub(crate) const THERMAL_RUNTIME_READBACK_TIMEOUT_MS: u64 = 3_000;
 pub(crate) const THERMAL_RUNTIME_READBACK_POLL_MS: u64 = 100;
@@ -1036,7 +1043,6 @@ pub(crate) fn thermal_stage_stop_reason_is_environment_fault(stop_reason: &str) 
             | "wrong_mode"
             | "wrong_target"
             | "sample_rate_below_minimum"
-            | "sample_rate_below_3hz"
             | "status_request_failed"
             | "source_telemetry_stale"
             | "source_fault"
@@ -1241,7 +1247,7 @@ pub(crate) fn thermal_stage_result_from_value(
         "heater_disarmed" => "heater_disarmed",
         "wrong_mode" => "wrong_mode",
         "wrong_target" => "wrong_target",
-        "sample_rate_below_3hz" => "sample_rate_below_3hz",
+        "sample_rate_below_minimum" => "sample_rate_below_minimum",
         "status_request_failed" => "status_request_failed",
         "temperature_sample_glitch" => "temperature_sample_glitch",
         "heater_no_output" => "heater_no_output",
@@ -1400,7 +1406,10 @@ pub(crate) fn thermal_replay_stage_samples(
 ) -> Result<Vec<ThermalReplayStageSample>, Box<dyn std::error::Error + Send + Sync>> {
     let mut stage_samples = Vec::new();
     for sample in samples {
-        if sample.get("testPhase").and_then(Value::as_str) != Some("applied") {
+        if !matches!(
+            sample.get("testPhase").and_then(Value::as_str),
+            Some("applied" | "applied_environment_retry")
+        ) {
             continue;
         }
         if sample.get("targetTempC").and_then(Value::as_i64) != Some(i64::from(target_temp_c)) {

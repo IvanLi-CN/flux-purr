@@ -1161,8 +1161,7 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
         if !temperature_c.is_finite() {
             return false;
         }
-        if sample.duty_percent > 0
-            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+        if !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
             && temperature_c > powered_max_temp_c
         {
             powered_max_temp_c = temperature_c;
@@ -1648,11 +1647,12 @@ impl ManualPpsState {
                 flux_purr_firmware::heater_supply::BoundaryQuery {
                     temperature_centi_c: round_to_i16(temp_c * 100.0),
                     current_rtd_mv: response.current_rtd_mv,
-                    // Response validation checks the point that authorized the
-                    // confirmed contract. Promotion is only for constructing
-                    // the next request; using it here would compare the
-                    // current contract against the next point's VIN ratio.
-                    current_request_mv: None,
+                    // The confirmed contract may have been authorized by the
+                    // measured next point in a compacted warm-up staircase.
+                    // Select that point here as well; validating a higher
+                    // contract against the colder point's VIN ratio can turn
+                    // ADC quantization into a false safety recovery.
+                    current_request_mv: Some(contract_mv),
                     current_ma: contract_ma,
                     wifi_started,
                     source_min_mv: apdo.min_mv,
@@ -2272,6 +2272,7 @@ pub(crate) fn thermal_plant_trace_page(
             elapsed_ms: sample
                 .elapsed_ticks
                 .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+            raw_rtd_adc_mv: sample.raw_rtd_adc_mv,
             temperature_centi_c,
             heater_voltage_mv: thermal_plant_heater_voltage_mv(
                 flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(*sample),
@@ -2343,6 +2344,7 @@ pub(crate) fn thermal_plant_run_attempt(
         elapsed_ms: job
             .elapsed_ticks
             .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+        ambient_raw_rtd_adc_mv: job.ambient_raw_rtd_adc_mv,
         current_temp_centi_c,
         heater_voltage_mv: current_voltage_mv,
         duty_percent: duty_percent.min(100),
