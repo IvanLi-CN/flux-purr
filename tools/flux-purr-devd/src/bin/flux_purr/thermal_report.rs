@@ -232,7 +232,6 @@ pub(super) fn render_self_test_evidence_bundle(
         .iter()
         .map(|run_dir| read_json(&run_dir.join("run.json")))
         .collect::<Result<Vec<_>, _>>()?;
-    let summaries = summaries;
     let provenance_complete = validate_self_test_run_set(&summaries, input.port_path.as_deref())?;
     let summary = summaries.first().expect("non-empty raw run directories");
     if summary.get("kind").and_then(Value::as_str) != Some("thermal_self_test") {
@@ -626,22 +625,23 @@ fn self_test_transaction_id(
             .into_values()
             .flatten()
         {
-            let sample_id = sample
+            let Some(sample_id) = sample
                 .pointer("/status/thermalPlantModel/activeTransactionId")
                 .or_else(|| {
                     sample.pointer("/heaterTelemetry/thermalPlantModel/activeTransactionId")
                 })
-                .and_then(Value::as_u64);
-            if let Some(sample_id) = sample_id {
-                if transaction_id.is_some_and(|expected| expected != sample_id) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "self-test report mixes thermal transaction ids",
-                    )
-                    .into());
-                }
-                transaction_id = Some(sample_id);
+                .and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            if transaction_id.is_some_and(|expected| expected != sample_id) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "self-test report mixes thermal transaction ids",
+                )
+                .into());
             }
+            transaction_id = Some(sample_id);
         }
     }
     Ok(transaction_id)
