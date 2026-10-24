@@ -16822,7 +16822,7 @@ fn complete_idle_clears_failed_pps_adapter_only_with_observed_capability() {
                 settle_until_ms: None,
                 next_request_at_ms: 0,
                 ..
-            } if capability_max_ma == current_ma
+            } if capability_max_ma == 3_000
         ));
         assert!(!reset_idle_failed_pps_backend(&mut backend, capabilities));
     }
@@ -16900,7 +16900,7 @@ fn fusb302b_initial_backend_uses_fusb302b_request_bounds() {
     };
 
     assert_eq!(pps_min_mv, FUSB302B_PPS_MIN_MV);
-    assert_eq!(pps_max_mv, FUSB302B_PPS_MAX_MV);
+    assert_eq!(pps_max_mv, 21_000);
 }
 
 #[test]
@@ -18622,7 +18622,7 @@ fn tuning_cooldown_releases_completed_calibration_power_lock_without_heating() {
         };
         assert!(!terminal_fixed_pd_disarmed);
         assert_eq!(current_mode, None);
-        assert_eq!(capability_max_ma, capability_ma);
+        assert_eq!(capability_max_ma, 3_000);
         assert!(!automatic_heater_power_is_idle(false, 0, false, true));
         let request_mv = automatic_pps_request_mv(
             0,

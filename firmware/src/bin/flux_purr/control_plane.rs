@@ -1536,11 +1536,28 @@ pub(crate) fn transient_mean_delayed_power_mw(
     let start = start_ticks - f32::from(delay_ticks);
     let end = end_ticks - f32::from(delay_ticks);
     let mut energy_mw_ticks = 0.0;
-    for index in 1..samples.len() {
+    // Fit completion evaluates this interval for every retained sample and
+    // every candidate transport delay. Locate the first overlapping segment
+    // and stop after the window; scanning the whole trace here can starve the
+    // Xtensa watchdog during the final calibration fit.
+    let mut first_index = 1usize;
+    let mut high = samples.len();
+    while first_index < high {
+        let middle = first_index + (high - first_index) / 2;
+        if samples[middle].elapsed_ticks as f32 <= start {
+            first_index = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    for index in first_index..samples.len() {
         let left = samples[index - 1].elapsed_ticks as f32;
         let right = samples[index].elapsed_ticks as f32;
         if right <= left {
             return None;
+        }
+        if left >= end {
+            break;
         }
         let overlap_start = start.max(left);
         let overlap_end = end.min(right);
