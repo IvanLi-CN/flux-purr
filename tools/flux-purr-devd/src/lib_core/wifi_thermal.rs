@@ -1710,13 +1710,20 @@ pub(crate) fn mock_thermal_plant_job_running(status: &ControlPlaneStatus) -> boo
 pub(crate) fn thermal_plant_start_request_for_device(
     device: &DeviceRecord,
 ) -> Result<(MockPpsApdo, u16), HttpError> {
+    if device.status.pd_controller.as_deref() != Some("fusb302b") {
+        return Err(HttpError::bad_request(
+            "thermal_plant_source_unsupported",
+            "Supply-boundary calibration requires programmable PPS voltage and current.",
+        ));
+    }
     let source = mock_thermal_plant_source_limits(device).ok_or_else(|| {
         HttpError::bad_request(
             "thermal_plant_source_unsupported",
             "Thermal-plant calibration requires a PPS capability covering 20V at 3A or more.",
         )
     })?;
-    Ok((source, source.max_mv))
+    let request_mv = source.min_mv.max(5_500).div_ceil(100) * 100;
+    Ok((source, request_mv))
 }
 
 pub(crate) fn mock_thermal_plant_source_limits(device: &DeviceRecord) -> Option<MockPpsApdo> {

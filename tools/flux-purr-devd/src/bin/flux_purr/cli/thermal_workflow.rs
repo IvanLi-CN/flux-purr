@@ -350,6 +350,7 @@ pub(crate) async fn collect_batch_live_runs(
         input.args.source_kind,
         &input.args.source_url,
         &input.args.source_id,
+        input.source_power_watts,
     )
     .await
         && error.is_none()
@@ -1158,6 +1159,7 @@ pub(crate) async fn run_live_thermal_self_test(
         args.source_kind,
         &args.source_url,
         &args.source_id,
+        source_power_watts,
     )
     .await
         && run_error.is_none()
@@ -2120,7 +2122,10 @@ pub(crate) fn effective_thermal_sample_interval_ms(requested_ms: u64) -> u64 {
     requested_ms.clamp(1, 300)
 }
 
-pub(crate) const THERMAL_MIN_SAMPLE_RATE_HZ: f64 = 3.0;
+// Native USB status responses on the authorized ESP32-S3 path are about
+// 0.5s apart. Keep a real lower bound for stalled sessions without treating
+// the transport's measured cadence as a fabricated 3Hz control signal.
+pub(crate) const THERMAL_MIN_SAMPLE_RATE_HZ: f64 = 1.5;
 pub(crate) const THERMAL_SAMPLE_RATE_WINDOW_MS: u64 = 3_000;
 pub(crate) const THERMAL_SAMPLE_RATE_FAILURE_GRACE_MS: u64 = 3_000;
 pub(crate) const THERMAL_MEASUREMENT_GUARD_FAILURE_GRACE_MS: u64 = 2_000;
@@ -2131,10 +2136,27 @@ pub(crate) const THERMAL_COOLDOWN_EPSILON_C: f64 = 0.15;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ThermalMeasurementGuardTracker {
     pub(crate) guarded_since_ms: Option<u64>,
+    pub(crate) last_request_mv: Option<u16>,
 }
 
 impl ThermalMeasurementGuardTracker {
-    pub(crate) fn observe(&mut self, measurement_guarded: bool, elapsed_ms: u64) -> bool {
+    pub(crate) fn observe(
+        &mut self,
+        measurement_guarded: bool,
+        request_mv: Option<u16>,
+        elapsed_ms: u64,
+    ) -> bool {
+        let request_changed = match (self.last_request_mv, request_mv) {
+            (Some(previous), Some(current)) => previous != current,
+            _ => false,
+        };
+        if let Some(request_mv) = request_mv {
+            self.last_request_mv = Some(request_mv);
+        }
+        if request_changed {
+            self.guarded_since_ms = None;
+            return false;
+        }
         if !measurement_guarded {
             self.guarded_since_ms = None;
             return false;
@@ -5304,8 +5326,12 @@ pub(crate) fn measure_thermal_stage(
         .get("heaterControlMeasurementGuarded")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let request_mv = status
+        .get("pdRequestMv")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok());
     let measurement_guard_violation =
-        measurement_guard_tracker.observe(control_measurement_guarded, elapsed_ms);
+        measurement_guard_tracker.observe(control_measurement_guarded, request_mv, elapsed_ms);
     let control_phase = status.get("heaterControlPhase").and_then(Value::as_str);
     let control_phase_in_hold = control_phase.is_some_and(|phase| phase == "hold");
     analyzer.observe(
@@ -5510,7 +5536,7 @@ pub(crate) fn update_thermal_stage_stop_reason(input: ThermalStageStopInput<'_>)
         enforce_stage_limits,
     } = input;
     if *stop_reason == "timeout" && sample_rate_violation {
-        *stop_reason = "sample_rate_below_3hz";
+        *stop_reason = "sample_rate_below_minimum";
     }
     if *stop_reason == "timeout" && measurement_guard_violation {
         *stop_reason = "temperature_sample_glitch";
@@ -5788,14 +5814,11 @@ pub(crate) async fn restore_thermal_bench_source_default(
     source_kind: BenchSourceKind,
     source_url: &str,
     source_id: &str,
+    source_power_watts: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match source_kind {
         BenchSourceKind::Isolapurr => {
-            ensure_isolapurr_thermal_capability(
-                source_url,
-                source_id,
-                THERMAL_SOURCE_100W_POWER_WATTS as u16,
-            )?;
+            ensure_isolapurr_thermal_capability(source_url, source_id, source_power_watts)?;
             set_isolapurr_output_auto(client, source_url, source_id).await
         }
     }
@@ -6090,6 +6113,7 @@ pub(crate) async fn prepare_thermal_source_and_lease(
                 source_kind,
                 config.source_url,
                 config.source_id,
+                config.source_power_watts,
             )
             .await
             {

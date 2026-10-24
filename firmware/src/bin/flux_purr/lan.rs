@@ -49,17 +49,28 @@ pub(crate) struct ControlLineContext<'a, 'i, 'e> {
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn process_control_line(
-    line: &str,
-    mut context: ControlLineContext<'_, '_, '_>,
-) -> (bool, UsbFrame) {
-    let active_profile = active_thermal_control_profile(
-        context.memory_config,
-        *context.thermal_control_profile_preview,
-        context.manual_pps,
-    );
-    let (needs_redraw, response) = dispatch_control_frame(&mut context, line, active_profile).await;
-    (needs_redraw, response)
+type ControlLineFuture<'a> =
+    core::pin::Pin<Box<dyn core::future::Future<Output = (bool, Box<UsbFrame>)> + 'a>>;
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+#[inline(never)]
+pub(crate) fn process_control_line<'a, 'i: 'a, 'e: 'a>(
+    line: &'a str,
+    mut context: ControlLineContext<'a, 'i, 'e>,
+) -> ControlLineFuture<'a> {
+    // Keep the request state machine out of the caller's input future. The
+    // calibration payload makes embedding both futures exhaust CPU0's stack,
+    // even for a small read-only request such as get_identity.
+    Box::pin(async move {
+        let active_profile = active_thermal_control_profile(
+            context.memory_config,
+            *context.thermal_control_profile_preview,
+            context.manual_pps,
+        );
+        let (needs_redraw, response) =
+            dispatch_control_frame(&mut context, line, active_profile).await;
+        (needs_redraw, Box::new(response))
+    })
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1007,25 +1018,20 @@ pub(crate) fn process_calibration_job_frame(
             ),
         );
     }
-    let thermal_plant_can_establish_contract = matches!(
-        (command.op, command.kind),
-        (
-            CalibrationJobOpWire::Start,
-            Some(CalibrationJobKindWire::ThermalPlantAuto)
-        )
-    ) && context.pd_controller
-        == ControllerKind::Fusb302b
-        && context.manual_pps.thermal_plant_source_limits().is_some();
     if matches!(command.op, CalibrationJobOpWire::Start)
-        && !pd_contract_allows_calibration(context.pd_controller, context.last_pd_observation)
-        && !thermal_plant_can_establish_contract
+        && !pd_allows_calibration_job_start(
+            context.pd_controller,
+            context.last_pd_observation,
+            command.kind,
+            context.manual_pps,
+        )
     {
         return (
             false,
             usb_error_response(
                 request_id,
                 "pd_performance_not_guaranteed",
-                "Calibration requires a performance-guaranteed PPS contract.",
+                "Calibration requires a supported PPS source and controller.",
             ),
         );
     }
@@ -1637,118 +1643,15 @@ pub(crate) async fn process_heater_curve_save_frame(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> (bool, UsbFrame) {
-    if flash_preparation::is_active() {
-        return (
-            false,
-            flash_preparation_blocked_response(
-                request_id,
-                "Heater curve writes are locked while flash preparation is active.",
-            ),
-        );
-    }
-    if context.ui_state.persistence_locked() {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "eeprom_required",
-                "EEPROM_REQUIRED: persistent configuration is unavailable; heating and calibration are locked.",
-            ),
-        );
-    }
-    if thermal_plant_calibration_job_running(*context.calibration_runtime_state) {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                ManualPpsError::CalibrationInProgress.code(),
-                "Automatic thermal-model calibration is running; calibration inputs are locked.",
-            ),
-        );
-    }
-    let Some(preview) = *context.preview_heater_curve else {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                "heater_curve_preview_required",
-                "Heater curve save requires an active preview package.",
-            ),
-        );
-    };
-    let previous_memory_config = context.memory_config.clone();
-    context.memory_config.active_heater_curve = preview.curve;
-    if let Some(raw_observations) = preview.raw_observations {
-        context.memory_config.heater_curve_raw_observations = raw_observations;
-    }
-    context.memory_config.sanitize();
-    if context.memory_config.heater_curve_raw_observations
-        != previous_memory_config.heater_curve_raw_observations
-        && previous_memory_config
-            .thermal_plant_transient_active
-            .is_some()
-    {
-        context.memory_config.heater_curve_transaction_id = None;
-        invalidate_transient_thermal_plant(context.memory_config);
-        disarm_calibration_after_transient_input_change(
-            context.calibration_runtime_state,
-            context.manual_pps,
-        );
-    }
-    if let Err(error) = persist_heater_curve(context).await {
-        let code = error.code();
-        let message = error.message();
-        restore_persisted_memory_domains(
-            context.memory_config,
-            context.ui_state,
-            context.last_persisted_memory_config,
-            PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-        );
-        mark_eeprom_required(
-            context.ui_state,
-            context.calibration_runtime_state,
-            context.manual_pps,
-            context.memory_commit_due_ms,
-            Some(persistence_fault_from_commit(error)),
-        );
-        return (false, usb_error_response(request_id, code, message));
-    }
-    copy_persisted_domains(
-        context.last_persisted_memory_config,
-        context.memory_config,
-        PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-    );
-    *context.memory_commit_due_ms = None;
+    *context.preview_heater_curve = None;
     (
         false,
-        usb_response(
+        usb_error_response(
             request_id,
-            UsbResponsePayload::HeaterCurve(heater_curve_state_from_memory(
-                context.memory_config,
-                context
-                    .preview_heater_curve
-                    .as_ref()
-                    .map(|preview| (&preview.curve, preview.raw_observations.as_ref())),
-            )),
+            "heater_curve_format_obsolete",
+            "Legacy resistance calibration cannot be saved. Run thermal_plant_auto.",
         ),
     )
-}
-
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-pub(crate) async fn persist_heater_curve(
-    context: &mut ControlLineContext<'_, '_, '_>,
-) -> Result<(), MemoryCommitFailure> {
-    commit_memory_config_now(
-        context.eeprom_i2c,
-        CommitMemoryConfigInput {
-            memory_sequence: context.memory_sequence,
-            memory_config: context.memory_config,
-            domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-            persistence_log_sink: context.persistence_log_sink,
-            record_staging: context.record_staging,
-        },
-    )
-    .await
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1839,9 +1742,10 @@ pub(crate) fn lan_pairing_code_payload(code: Option<[u8; 4]>) -> LanPairingCode 
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
+#[inline(never)]
 pub(crate) fn lan_command_to_control_line(
     command: &ControlMailboxCommand,
-) -> Result<heapless::String<USB_CONTROL_LINE_CAPACITY>, &'static str> {
+) -> Result<Box<heapless::String<USB_CONTROL_LINE_CAPACITY>>, &'static str> {
     let request_op = match (command.endpoint, command.method) {
         (LanEndpoint::Identity, HttpMethod::Get) => Some("get_identity"),
         (LanEndpoint::Network, HttpMethod::Get) => Some("get_network"),
@@ -1858,7 +1762,7 @@ pub(crate) fn lan_command_to_control_line(
             r#"{{"type":"request","requestId":"lan","op":"{op}"}}"#
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     if command.endpoint == LanEndpoint::ThermalPlantRun && command.method == HttpMethod::Get {
@@ -1868,7 +1772,7 @@ pub(crate) fn lan_command_to_control_line(
             command.after_sample.unwrap_or(0)
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     if command.endpoint == LanEndpoint::ThermalTuning {
@@ -1884,7 +1788,7 @@ pub(crate) fn lan_command_to_control_line(
                     .map_err(|_| "LAN request is too large")?;
             }
             line.push('}').map_err(|_| "LAN request is too large")?;
-            return Ok(line);
+            return Ok(Box::new(line));
         }
         if !body.starts_with('{') || !body.ends_with('}') {
             return Err("LAN command body must be a JSON object");
@@ -1895,7 +1799,7 @@ pub(crate) fn lan_command_to_control_line(
             &body[1..body.len() - 1]
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     // Saving the current heater-curve preview has no payload in the shared
@@ -1903,7 +1807,7 @@ pub(crate) fn lan_command_to_control_line(
     if command.endpoint == LanEndpoint::HeaterCurveSave {
         write!(line, r#"{{"type":"heater_curve_save","requestId":"lan"}}"#)
             .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     // The LAN API keeps a thermal-profile payload focused on the profile
@@ -1919,7 +1823,7 @@ pub(crate) fn lan_command_to_control_line(
             r#"{{"type":"runtime_config","requestId":"lan","thermalControlProfile":{body}}}"#
         )
         .map_err(|_| "LAN request is too large")?;
-        return Ok(line);
+        return Ok(Box::new(line));
     }
 
     let frame_type = match command.endpoint {
@@ -1945,7 +1849,7 @@ pub(crate) fn lan_command_to_control_line(
             .map_err(|_| "LAN request is too large")?;
     }
     line.push('}').map_err(|_| "LAN request is too large")?;
-    Ok(line)
+    Ok(Box::new(line))
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]

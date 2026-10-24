@@ -979,7 +979,7 @@ pub(crate) enum ThermalTuneEngine {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ThermalModelCommand {
     #[command(
-        about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
+        about = "Scan a whole-device PPS supply boundary with an unloaded high-voltage 3A preflight, a rapid 3A voltage scan, 500ms observations, raw ADC capture, and a five-minute 220C-bounded thermal fit."
     )]
     Calibrate(TargetSelector),
 }
@@ -1331,6 +1331,21 @@ pub(crate) struct ThermalSelfTestReportArgs {
         help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
     )]
     pub(crate) output_dir: Option<PathBuf>,
+    #[arg(
+        long = "port-path",
+        help = "Authorized Flux Purr MCU port to record in the report context."
+    )]
+    pub(crate) port_path: Option<String>,
+    #[arg(
+        long = "firmware-sha",
+        help = "Firmware source SHA to bind to the report context."
+    )]
+    pub(crate) firmware_sha: Option<String>,
+    #[arg(
+        long = "source-path",
+        help = "Physical source output path or port label, for example C."
+    )]
+    pub(crate) source_path: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -81,13 +81,12 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) manual_pps_state: ManualPpsState,
     pub(crate) calibration_runtime_state: CalibrationRuntimeState,
     pub(crate) thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
-    pub(crate) calibration_elapsed_clock: CalibrationElapsedClock,
     pub(crate) thermal_control_profile_preview: Option<ThermalControlProfile>,
     pub(crate) thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
     pub(crate) tuning_pd_wait_started_ms: Option<u64>,
     pub(crate) tuning_heater_rearm_pending: bool,
-    pub(crate) pending_automatic_pps: Option<PendingAutomaticPpsTransition>,
     pub(crate) heater_power_backend: HeaterPowerBackend,
+    pub(crate) pending_automatic_power_request: Option<PendingAutomaticPowerRequest>,
     pub(crate) hold_pps_governor: HoldPpsGovernor,
     pub(crate) heater_controller: HeaterController,
     pub(crate) ui_state: FrontPanelUiState,
@@ -96,6 +95,8 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) latest_temp_i16: i16,
     pub(crate) latest_display_temp_c: f32,
     pub(crate) latest_display_temp_i16: i16,
+    pub(crate) latest_rtd_raw_code: u16,
+    pub(crate) latest_vin_raw_code: u16,
     pub(crate) latest_rtd_raw_adc_mv: u16,
     pub(crate) latest_rtd_raw_adc_min_mv: u16,
     pub(crate) latest_rtd_raw_adc_max_mv: u16,
@@ -111,6 +112,8 @@ pub(crate) struct RuntimeLoopState {
     pub(crate) active_thermal_settings: ThermalControlProfileSettings,
     pub(crate) last_pid_snapshot: HeaterPidSnapshot,
     pub(crate) last_heater_duty: u8,
+    pub(crate) automatic_heater_recovery_started_ms: Option<u64>,
+    pub(crate) automatic_supply_response_latched: bool,
     pub(crate) cooling_disabled_lock_latched: bool,
     pub(crate) cooling_disabled_lock_armed: bool,
     pub(crate) fan_policy_state: FanPolicyState,
@@ -306,7 +309,7 @@ pub(crate) struct BootKeyTestContext<'a> {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootMemoryReady {
-    system: BootSystem,
+    system: Box<BootSystem>,
     tokens: BootAdcTokens,
     display: RuntimeDisplay,
     canvas: &'static mut DisplayCanvas,
@@ -381,8 +384,8 @@ pub(crate) struct BootRuntimeState {
     thermal_plant_workspace: &'static mut CalibrationThermalPlantWorkspace,
     thermal_control_profile_preview: Option<ThermalControlProfile>,
     thermal_tuning: Box<flux_purr_firmware::thermal_tuning::ThermalTuningRuntime>,
-    pending_automatic_pps: Option<PendingAutomaticPpsTransition>,
     heater_power_backend: HeaterPowerBackend,
+    pending_automatic_power_request: Option<PendingAutomaticPowerRequest>,
     hold_pps_governor: HoldPpsGovernor,
     heater_controller: HeaterController,
     ui_state: FrontPanelUiState,
@@ -391,6 +394,8 @@ pub(crate) struct BootRuntimeState {
     latest_temp_i16: i16,
     latest_display_temp_c: f32,
     latest_display_temp_i16: i16,
+    latest_rtd_raw_code: u16,
+    latest_vin_raw_code: u16,
     latest_rtd_raw_adc_mv: u16,
     latest_rtd_raw_adc_min_mv: u16,
     latest_rtd_raw_adc_max_mv: u16,
@@ -401,6 +406,8 @@ pub(crate) struct BootRuntimeState {
     control_measurement_guarded: bool,
     last_rtd_sample_request_mv: u16,
     last_pid_snapshot: HeaterPidSnapshot,
+    automatic_heater_recovery_started_ms: Option<u64>,
+    automatic_supply_response_latched: bool,
     cooling_disabled_lock_latched: bool,
     cooling_disabled_lock_armed: bool,
     fan_policy_state: FanPolicyState,
@@ -555,13 +562,27 @@ impl From<BootMemoryState> for BootMemoryRuntimeParts {
 }
 
 #[cfg(target_arch = "xtensa")]
+fn initial_heater_pid_snapshot() -> HeaterPidSnapshot {
+    HeaterPidSnapshot {
+        duty_percent: 0,
+        warmup_soft_start_percent: 0,
+        error_c: 0.0,
+        control_error_c: 0.0,
+        filtered_temp_c: 0.0,
+        filtered_slope_c_per_s: 0.0,
+        coast_active: false,
+        phase: HeaterControlPhase::Warmup,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 impl BootRuntimeState {
     fn from_ready(ready: Box<BootMemoryReady>, storage: Box<MaybeUninit<Self>>) -> Box<Self> {
         let runtime_mode = ready.system.runtime_mode;
         Box::write(
             storage,
             Self {
-                system: ready.system,
+                system: *ready.system,
                 tokens: Some(ready.tokens),
                 #[cfg(feature = "net_http")]
                 wifi: None,
@@ -596,13 +617,13 @@ impl BootRuntimeState {
                 thermal_plant_workspace: new_thermal_plant_workspace(),
                 thermal_control_profile_preview: None,
                 thermal_tuning: new_thermal_tuning_runtime(),
-                pending_automatic_pps: None,
                 heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
                     reason: HeaterPowerBackendReason::CapabilityReadFailed,
                     fixed_request: DEFAULT_PD_VOLTAGE_REQUEST,
                     fixed_request_confirmed: false,
                     terminal_fixed_pd_disarmed: false,
                 },
+                pending_automatic_power_request: None,
                 hold_pps_governor: HoldPpsGovernor::new(),
                 heater_controller: HeaterController::new(),
                 ui_state: FrontPanelUiState::new_startup(runtime_mode),
@@ -611,6 +632,8 @@ impl BootRuntimeState {
                 latest_temp_i16: 0,
                 latest_display_temp_c: 0.0,
                 latest_display_temp_i16: 0,
+                latest_rtd_raw_code: 0,
+                latest_vin_raw_code: 0,
                 latest_rtd_raw_adc_mv: 0,
                 latest_rtd_raw_adc_min_mv: 0,
                 latest_rtd_raw_adc_max_mv: 0,
@@ -620,16 +643,9 @@ impl BootRuntimeState {
                 rtd_control_measurement_guard: RtdControlMeasurementGuard::default(),
                 control_measurement_guarded: false,
                 last_rtd_sample_request_mv: 0,
-                last_pid_snapshot: HeaterPidSnapshot {
-                    duty_percent: 0,
-                    warmup_soft_start_percent: 0,
-                    error_c: 0.0,
-                    control_error_c: 0.0,
-                    filtered_temp_c: 0.0,
-                    filtered_slope_c_per_s: 0.0,
-                    coast_active: false,
-                    phase: HeaterControlPhase::Warmup,
-                },
+                last_pid_snapshot: initial_heater_pid_snapshot(),
+                automatic_heater_recovery_started_ms: None,
+                automatic_supply_response_latched: false,
                 cooling_disabled_lock_latched: false,
                 cooling_disabled_lock_armed: true,
                 fan_policy_state: FanPolicyState::Disabled,
@@ -705,14 +721,21 @@ impl BootRuntimeState {
             pd_port: &self.system.pd_port,
             heater_pwm: &mut self.heater_pwm,
             backend: &mut self.heater_power_backend,
-            pending_automatic_pps: &mut self.pending_automatic_pps,
+            pending_automatic_power_request: &mut self.pending_automatic_power_request,
             hold_pps_governor: &mut self.hold_pps_governor,
             manual_pps: &mut self.manual_pps_state,
             pd_observation: self.last_pd_observation,
             measured_heater_mv: 0,
+            vin_raw_adc_mv: 0,
+            rtd_raw_adc_mv: 0,
             current_temp_c: 0.0,
+            source_capabilities: SourceCapabilitiesView::default(),
+            requested_power_mw: 0,
             duty_percent: 0,
             heater_enabled: false,
+            normal_auto: false,
+            supply_scan: false,
+            automatic_supply_response_latched: &mut self.automatic_supply_response_latched,
             tuning_power_stage: false,
             control_phase: HeaterControlPhase::Warmup,
             initial_profile_approach: false,
@@ -811,6 +834,7 @@ impl BootRuntimeState {
     fn apply_initial_rtd_sample(&mut self, sample: RtdSample) {
         match sample {
             RtdSample::Valid(measurement) => {
+                self.latest_rtd_raw_code = measurement.raw_adc_code;
                 self.latest_rtd_raw_adc_mv = measurement.raw_adc_mv;
                 self.latest_rtd_raw_adc_min_mv = measurement.raw_adc_min_mv;
                 self.latest_rtd_raw_adc_max_mv = measurement.raw_adc_max_mv;
@@ -889,6 +913,7 @@ impl BootRuntimeState {
         )
         .await
         {
+            self.latest_vin_raw_code = raw_code;
             self.latest_vin_raw_adc_mv = raw_adc_mv;
             self.latest_vin_mv = vin_mv;
             info!(
@@ -986,6 +1011,7 @@ impl BootRuntimeState {
                 Some(
                     HeaterLockReason::PdContractUnavailable
                         | HeaterLockReason::ThermalModelMissingForSourceClass
+                        | HeaterLockReason::NoSafeHeaterPower
                 )
             ),
             heater_enabled: self.ui_state.heater_enabled,
@@ -2593,7 +2619,7 @@ pub(crate) async fn initialize_boot_memory_from_display(
         output_state,
         boot_memory_io_scratch,
     } = *boot;
-    let mut system = *system;
+    let mut system = system;
     debug_assert!(output_tokens.is_none());
     let BootOutputState {
         fan_enable,

@@ -1672,12 +1672,12 @@ fn thermal_sample_rate_accepts_measured_four_hz_sequence_with_one_jitter_gap() {
 }
 
 #[test]
-fn thermal_sample_rate_rejects_sustained_sub_three_hz_sampling() {
+fn thermal_sample_rate_rejects_sustained_sub_minimum_sampling() {
     let mut tracker = ThermalSampleRateTracker::new();
     let mut observation = tracker.observe(0);
     for elapsed_ms in [
-        350, 700, 1_050, 1_400, 1_750, 2_100, 2_450, 2_800, 3_150, 3_500, 3_850, 4_200, 4_550,
-        4_900, 5_250, 5_600, 5_950, 6_300,
+        700, 1_400, 2_100, 2_800, 3_500, 4_200, 4_900, 5_600, 6_300, 7_000, 7_700, 8_400, 9_100,
+        9_800, 10_500, 11_200, 11_900, 12_600,
     ] {
         observation = tracker.observe(elapsed_ms);
     }
@@ -1697,7 +1697,7 @@ fn thermal_sample_rate_tolerates_recorded_single_serial_stall() {
         observation = tracker.observe(elapsed_ms);
     }
     assert!(!observation.violation);
-    assert!(observation.rolling_rate_hz.unwrap() < THERMAL_MIN_SAMPLE_RATE_HZ);
+    assert!(observation.rolling_rate_hz.unwrap() >= THERMAL_MIN_SAMPLE_RATE_HZ);
 }
 
 #[test]
@@ -1731,12 +1731,24 @@ fn thermal_sample_rate_tolerates_one_isolated_sampling_stall() {
 fn thermal_measurement_guard_rejects_sustained_guarded_samples() {
     let mut tracker = ThermalMeasurementGuardTracker::default();
 
-    assert!(!tracker.observe(false, 0));
-    assert!(!tracker.observe(true, 1_000));
-    assert!(!tracker.observe(true, 2_999));
-    assert!(tracker.observe(true, 3_000));
-    assert!(!tracker.observe(false, 3_100));
-    assert!(!tracker.observe(true, 4_000));
+    assert!(!tracker.observe(false, Some(8_000), 0));
+    assert!(!tracker.observe(true, Some(8_000), 1_000));
+    assert!(!tracker.observe(true, Some(8_000), 2_999));
+    assert!(tracker.observe(true, Some(8_000), 3_000));
+    assert!(!tracker.observe(false, Some(8_000), 3_100));
+    assert!(!tracker.observe(true, Some(8_000), 4_000));
+}
+
+#[test]
+fn thermal_measurement_guard_resets_across_pps_request_steps() {
+    let mut tracker = ThermalMeasurementGuardTracker::default();
+
+    assert!(!tracker.observe(true, Some(8_000), 0));
+    assert!(!tracker.observe(true, Some(8_000), 1_000));
+    assert!(!tracker.observe(true, Some(8_500), 1_500));
+    assert!(!tracker.observe(true, Some(9_000), 3_500));
+    assert!(!tracker.observe(true, Some(9_000), 5_499));
+    assert!(tracker.observe(true, Some(9_000), 7_499));
 }
 
 #[test]

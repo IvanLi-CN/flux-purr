@@ -17,6 +17,8 @@ macro_rules! build_runtime_loop_state {
             fan_pwm,
             heater_pwm,
             last_heater_duty,
+            automatic_heater_recovery_started_ms,
+            automatic_supply_response_latched,
             boot_memory_io_scratch,
             #[cfg(feature = "web_serial")]
             eeprom_snapshot_session,
@@ -38,8 +40,8 @@ macro_rules! build_runtime_loop_state {
             thermal_plant_workspace,
             thermal_control_profile_preview,
             thermal_tuning,
-            pending_automatic_pps,
             heater_power_backend,
+            pending_automatic_power_request,
             hold_pps_governor,
             heater_controller,
             ui_state,
@@ -48,6 +50,8 @@ macro_rules! build_runtime_loop_state {
             latest_temp_i16,
             latest_display_temp_c,
             latest_display_temp_i16,
+            latest_rtd_raw_code,
+            latest_vin_raw_code,
             latest_rtd_raw_adc_mv,
             latest_rtd_raw_adc_min_mv,
             latest_rtd_raw_adc_max_mv,
@@ -130,7 +134,6 @@ macro_rules! build_runtime_loop_state {
             .try_get()
             .unwrap_or_else(PowerState::unavailable);
         let last_control_ms = 0;
-        let calibration_elapsed_clock = CalibrationElapsedClock::default();
         let next_control_deadline_ms = HEATER_CONTROL_INTERVAL_MS;
         let heater_control_timing = HeaterControlTiming::default();
         let tuning_pd_wait_started_ms = None;
@@ -204,8 +207,8 @@ macro_rules! build_runtime_loop_state {
             thermal_tuning,
             tuning_pd_wait_started_ms,
             tuning_heater_rearm_pending,
-            pending_automatic_pps,
             heater_power_backend,
+            pending_automatic_power_request,
             hold_pps_governor,
             heater_controller,
             ui_state,
@@ -214,6 +217,8 @@ macro_rules! build_runtime_loop_state {
             latest_temp_i16,
             latest_display_temp_c,
             latest_display_temp_i16,
+            latest_rtd_raw_code,
+            latest_vin_raw_code,
             latest_rtd_raw_adc_mv,
             latest_rtd_raw_adc_min_mv,
             latest_rtd_raw_adc_max_mv,
@@ -229,6 +234,8 @@ macro_rules! build_runtime_loop_state {
             active_thermal_settings,
             last_pid_snapshot,
             last_heater_duty,
+            automatic_heater_recovery_started_ms,
+            automatic_supply_response_latched,
             cooling_disabled_lock_latched,
             cooling_disabled_lock_armed,
             fan_policy_state,
@@ -257,7 +264,6 @@ macro_rules! build_runtime_loop_state {
             status_light_started_ms,
             runtime_started_ms,
             last_control_ms,
-            calibration_elapsed_clock,
             next_control_deadline_ms,
             heater_control_timing,
             ui_refresh_pending,

@@ -522,26 +522,26 @@ pub(crate) struct MockPpsApdo {
 }
 
 pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
-    let curve_points = [
-        (25, 5_674),
-        (61, 6_089),
-        (102, 6_583),
-        (162, 7_307),
-        (220, 8_011),
-    ]
-    .into_iter()
-    .map(|(temp_c, resistance_ohms)| {
-        Some(HeaterCurvePoint {
-            temp_centi_c: temp_c * 100,
-            resistance_milliohms: resistance_ohms,
-        })
-    })
-    .chain(std::iter::repeat(None))
-    .take(HEATER_CURVE_MAX_POINTS)
-    .collect::<Vec<_>>();
-    let curve = HeaterCurvePackage {
-        points: curve_points,
-        raw_observations: None,
+    // Synthetic contract fixture; no resistance or auxiliary-power measurement is implied.
+    let boundary = SupplyBoundary {
+        format_version: 1,
+        adc: SupplyBoundaryAdc {
+            divider_supply_mv: 3_328,
+            reference_mv: 850,
+            reference_code: 2_000,
+            init_code: 100,
+            efuse_version: 1,
+            attenuation_db: 6,
+        },
+        wifi_started: true,
+        cutoff_reached: true,
+        source_min_mv: 5_500,
+        source_max_mv: 21_000,
+        source_max_ma: 3_000,
+        source_power_limit_mw: 0,
+        advertised_min_mv: 5_000,
+        advertised_max_mv: 21_000,
+        points: vec![[30_000, 2_500, 750, 1_900, 600, 3_000, 9_500, 9_600, 1]],
     };
     let temperatures = [
         25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80,
@@ -552,9 +552,10 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         .map(|(index, temperature)| ThermalPlantTracePoint {
             sample_index: index as u8,
             elapsed_ms: index as u32 * 30_000,
+            raw_rtd_adc_mv: 0,
             temperature_centi_c: temperature * 100,
-            heater_voltage_mv: if index < 9 { 21_000 } else { 0 },
-            duty_percent: if index < 9 { 100 } else { 0 },
+            heater_voltage_mv: if (1..9).contains(&index) { 9_500 } else { 0 },
+            duty_percent: if (1..9).contains(&index) { 100 } else { 0 },
             phase: if index == 0 {
                 ThermalPlantRunPhase::Ambient
             } else if index < 9 {
@@ -565,13 +566,15 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         })
         .collect();
     ThermalPlantRunSnapshot {
-        version: 1,
+        supply_boundary: Some(boundary),
+        version: 2,
         attempt: Some(ThermalPlantRunAttempt {
             run_id: 7,
             status: CalibrationJobStatus::Completed,
             phase: Some(ThermalPlantRunPhase::Cooling),
             progress_percent: 100,
             elapsed_ms: 420_000,
+            ambient_raw_rtd_adc_mv: 0,
             current_temp_centi_c: 8000,
             heater_voltage_mv: 0,
             duty_percent: 0,
@@ -588,7 +591,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         provisional_curve: None,
         active_result: Some(ThermalPlantActiveResult {
             transaction_id: 7,
-            curve,
+            curve: HeaterCurvePackage::default(),
             convection_mw_per_c: Some(120.0),
             radiation_mw_per_k4: Some(0.0002),
             thermal_capacity_mj_per_c: Some(42_000.0),
@@ -688,7 +691,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pd_request_mv: DEFAULT_PD_REQUEST_MV,
         pd_contract_mv: DEFAULT_PD_REQUEST_MV,
         pd_state: "ready".to_string(),
-        pd_controller: Some("ch224q".to_string()),
+        pd_controller: Some("fusb302b".to_string()),
         pd_contract_kind: Some("pps".to_string()),
         pd_contract_current_ma: Some(3_000),
         pd_contract_power_mw: Some(60_000),
@@ -858,6 +861,7 @@ impl DeviceRecord {
         let identity = mock_identity(id);
         let network = mock_network();
         let status = mock_status(&network);
+        let thermal_plant_run = mock_thermal_plant_snapshot();
 
         Self {
             id: id.to_string(),
@@ -877,8 +881,11 @@ impl DeviceRecord {
             saved_thermal_control_profile: None,
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
-            heater_curve: HeaterCurveState::default(),
-            thermal_plant_run: mock_thermal_plant_snapshot(),
+            heater_curve: HeaterCurveState {
+                supply_boundary: thermal_plant_run.supply_boundary.clone(),
+                ..HeaterCurveState::default()
+            },
+            thermal_plant_run,
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),

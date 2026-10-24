@@ -1,5 +1,7 @@
 # Heater PID frontpanel runtime history
 
+The supply-boundary implementation preserves the unified production controller and continuous Hold behavior from main. Its new scan may equilibrate below the independent 220°C cutoff, so model admission uses the accepted 100°C minimum powered coverage with rounded-ADC endpoint handling. Startup spikes remain excluded from fit rows; they cannot supply missing coverage. Nested USB/LAN dispatch, tuning-page export and priority-3 PD interruption share one stack budget, while the boot system remains heap-owned through EEPROM initialization.
+
 The owner separates preservation from the continuous-Hold repair: [PR #124](https://github.com/IvanLi-CN/flux-purr/pull/124) preserves the controller and original evidence. The A220°C confirmation exposes a qualification clock shared across recovery segments and a host projection that trusts the device flag. The first repair reset the qualification clock on Hold exit but retained the old production recovery transition. The owner rejected that boundary: Hold must recover against its constant target without borrowing Approach. Production now keeps Hold, and firmware/CLI/Web reject any observed Hold-to-Approach/Warmup regression even if a later segment reaches 60 seconds. Search feedback retains a separate longest observed scout segment. CLI and Web independently verify raw-sample continuity before confirmation or save admission. Regression and historical-sample audit do not establish new-artifact hardware qualification.
 
 A组d33daa68的两次启动调优重启定位为嵌套事件导出栈溢出，而非热控参数失败。提交1a691894将状态逐字段写入独占堆目标，分页直接填入最终存储，并把完整嵌套调用链纳入栈检查。该精确产物以有效物理标定初始化独立运行firmware-pps5a-1792222845647，不导入历史调优候选；八目标均在原期限内建立稳定窗口，并分别完成连续60秒Hold。pps5a revision74原子保存及读回验证完成，历史违规轨迹仍拒绝；实测与身份凭据见[HIL-CONTINUOUS-HOLD-A.md](HIL-CONTINUOUS-HOLD-A.md)。
@@ -86,6 +88,10 @@ The owner removed240°C from tuning to avoid repeated high-temperature attempts.
 ## Partial replacement
 
 - It locally supersedes older heater/fan runtime wording in `frontpanel-ui-contract` and `frontpanel-input-interaction`; those topics retain their visual and input contracts.
+
+## Calibration boundary
+
+- ADR 0019 supersedes resistance-from-contract-current calibration and the fixed auxiliary-current reserve. Current calibration retains whole-device supply observations and an estimated thermal-model trace; obsolete heater/model records are absent.
 
 ## Braking-first model Approach
 

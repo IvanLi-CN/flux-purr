@@ -337,6 +337,9 @@ pub(crate) fn request_matches_active(
         active.mode == request.mode()
             && active.voltage_mv == request.voltage_mv()
             && active.operating_current_ma == request.operating_current_ma()
+            && request
+                .pps_range()
+                .is_none_or(|range| active.pps_range == Some(range))
     })
 }
 
@@ -731,19 +734,29 @@ fn ticket_key(ticket: PowerTicket) -> u32 {
 
 #[cfg(target_arch = "xtensa")]
 fn cancel_pd_service_ticket(ticket: PowerTicket) {
-    PD_SERVICE_CANCELLED_TICKET.store(ticket_key(ticket), Ordering::Release);
+    let cancelled_key = ticket_key(ticket);
+    let mut observed = PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire);
+    while cancelled_key > observed {
+        match PD_SERVICE_CANCELLED_TICKET.compare_exchange_weak(
+            observed,
+            cancelled_key,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(current) => observed = current,
+        }
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn take_pd_service_ticket_cancelled(ticket: PowerTicket) -> bool {
+    ticket_key(ticket) <= PD_SERVICE_CANCELLED_TICKET.load(Ordering::Acquire)
 }
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn take_pd_service_command_cancelled(command: PdServiceCommand) -> bool {
-    PD_SERVICE_CANCELLED_TICKET
-        .compare_exchange(
-            ticket_key(pd_service_command_ticket(command)),
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        )
-        .is_ok()
+    take_pd_service_ticket_cancelled(pd_service_command_ticket(command))
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1511,7 +1524,8 @@ mod tests {
         assert!(!manual.enabled);
         assert!(!working_fixed_contract_confirmed(
             port.snapshot().settled_observation(),
-            20_000
+            20_000,
+            MIN_HEATER_CONTRACT_MA
         ));
         match backend {
             HeaterPowerBackend::FixedPdPwmFallback {
@@ -1726,6 +1740,14 @@ mod tests {
         let active =
             ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
         assert!(request_matches_active(request, Some(active)));
+        let pinned = request
+            .within_pps_range(PpsAdjustmentRange {
+                min_mv: 5_000,
+                max_mv: 21_000,
+                max_current_ma: 3_000,
+            })
+            .unwrap();
+        assert!(!request_matches_active(pinned, Some(active)));
         assert!(!request_matches_active(
             PdContractRequest::fixed(20_000, 3_000).unwrap(),
             Some(active),

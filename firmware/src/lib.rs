@@ -13,6 +13,7 @@ pub mod display;
 pub mod fan_policy;
 pub mod frontpanel;
 pub mod heater_phase;
+pub mod heater_supply;
 pub mod lan;
 pub mod mdns;
 pub mod memory;

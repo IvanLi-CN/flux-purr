@@ -826,6 +826,7 @@ pub(crate) struct ThermalPlantRuntimeInput {
     pub(crate) heater_enabled: bool,
     pub(crate) model: flux_purr_firmware::memory::ThermalPlantProjection,
     pub(crate) max_power_mw: f32,
+    pub(crate) allow_integral: bool,
     pub(crate) now_ms: u64,
 }
 
@@ -1566,7 +1567,12 @@ impl HeaterController {
         } else {
             0.0
         };
-        self.hold_integral_c = if frame.hold_ki > 0.0 && self.control_measurement_accepted() {
+        self.hold_integral_c = if frame.hold_ki > 0.0
+            && self.control_measurement_accepted()
+            && self
+                .natural_cooling_input
+                .is_none_or(|input| input.allow_integral || frame.hold_guard_error_c <= 0.0)
+        {
             let elapsed_cycles = frame.elapsed_ms as f32 / HEATER_CONTROL_INTERVAL_MS as f32;
             (self.hold_integral_c + frame.hold_guard_error_c * elapsed_cycles)
                 .clamp(0.0, integral_limit)

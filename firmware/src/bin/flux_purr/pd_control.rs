@@ -30,6 +30,17 @@ pub(crate) fn fusb302b_degraded_reason() -> &'static str {
 }
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+#[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
+pub(crate) fn fusb302b_capability_refresh_is_transient() -> bool {
+    matches!(
+        fusb302b_degraded_reason(),
+        "pd_fusb_source_caps_gcrc_seen"
+            | "pd_fusb_source_caps_requested"
+            | "pd_fusb_phy_recovering"
+    )
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn fusb302b_identity_degraded_reason()
 -> heapless::String<{ flux_purr_firmware::control_plane::ERROR_CODE_MAX_LEN }> {
     let diagnostic = FUSB302B_IDENTITY_DIAGNOSTIC.load(Ordering::Acquire);
@@ -211,6 +222,22 @@ pub(crate) fn pd_contract_allows_calibration(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn pd_allows_calibration_job_start(
+    controller: ControllerKind,
+    observation: Option<PdStatusObservation>,
+    kind: Option<CalibrationJobKindWire>,
+    manual_pps: &ManualPpsState,
+) -> bool {
+    if kind == Some(CalibrationJobKindWire::ThermalPlantAuto) {
+        // This scan programs both PPS voltage and current. A prior high-voltage
+        // contract is unnecessary; acquisition stays off until its own confirms.
+        return controller == ControllerKind::Fusb302b
+            && manual_pps.thermal_plant_source_limits().is_some();
+    }
+    pd_contract_allows_calibration(controller, observation)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeaterPowerBackendReason {
@@ -298,15 +325,16 @@ impl HoldPpsGovernor {
         control_floor_mv: u16,
         safe_max_mv: u16,
     ) -> u16 {
-        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        if safe_max_mv < control_floor_mv {
+            return safe_max_mv;
+        }
+        let bounded_safe_max_mv = safe_max_mv;
         if current_request_mv < control_floor_mv {
             current_request_mv
                 .saturating_add(HEATER_PPS_REQUEST_STEP_MV)
                 .min(control_floor_mv)
         } else if current_request_mv > bounded_safe_max_mv {
-            current_request_mv
-                .saturating_sub(HEATER_PPS_REQUEST_STEP_MV)
-                .max(bounded_safe_max_mv)
+            bounded_safe_max_mv
         } else {
             current_request_mv
         }
@@ -337,7 +365,10 @@ impl HoldPpsGovernor {
 
         // A nonzero command below the working floor is handled by the fixed-PWM safety
         // fallback before this governor. Keep the idle path well-defined too.
-        let bounded_safe_max_mv = safe_max_mv.max(control_floor_mv);
+        if safe_max_mv < control_floor_mv {
+            return Some(safe_max_mv);
+        }
+        let bounded_safe_max_mv = safe_max_mv;
         let bounded_request_mv = Self::step_request_into_bounds(
             current_request_mv,
             control_floor_mv,
@@ -385,6 +416,8 @@ pub(crate) enum ManualPpsError {
     HeaterCurveCoverageInsufficient,
     ThermalPlantSourceUnsupported,
     ThermalPlantProjectionInvalid,
+    ThermalPlantTimeout,
+    SupplyScan(flux_purr_firmware::heater_supply::scan::ScanFailure),
     PdNotReady,
     WriteFailed,
 }
@@ -409,6 +442,24 @@ impl ManualPpsError {
             Self::HeaterCurveCoverageInsufficient => "heater_curve_coverage_insufficient",
             Self::ThermalPlantSourceUnsupported => "thermal_plant_source_unsupported",
             Self::ThermalPlantProjectionInvalid => "thermal_plant_projection_invalid",
+            Self::ThermalPlantTimeout => "thermal_plant_timeout",
+            Self::SupplyScan(reason) => match reason {
+                flux_purr_firmware::heater_supply::scan::ScanFailure::WifiChanged => {
+                    "supply_scan_wifi_changed"
+                }
+                flux_purr_firmware::heater_supply::scan::ScanFailure::SupplyUnstable => {
+                    "supply_scan_supply_unstable"
+                }
+                flux_purr_firmware::heater_supply::scan::ScanFailure::AmbiguousResponse => {
+                    "supply_scan_ambiguous_response"
+                }
+                flux_purr_firmware::heater_supply::scan::ScanFailure::StageTimeout => {
+                    "supply_scan_stage_timeout"
+                }
+                flux_purr_firmware::heater_supply::scan::ScanFailure::InvalidSample => {
+                    "supply_scan_invalid_sample"
+                }
+            },
             Self::PdNotReady => "manual_pps_pd_not_ready",
             Self::WriteFailed => "manual_pps_write_failed",
         }
@@ -433,13 +484,19 @@ impl ManualPpsError {
                 "Automatic thermal-model calibration is managed by thermal_plant_auto."
             }
             Self::HeaterCurveCoverageInsufficient => {
-                "The transient thermal-model run did not collect enough heater-curve samples."
+                "The calibration did not collect a usable whole-device supply boundary."
             }
             Self::ThermalPlantSourceUnsupported => {
                 "Thermal plant calibration requires a PPS APDO covering 20V at 3A or more."
             }
             Self::ThermalPlantProjectionInvalid => {
                 "Thermal plant observations did not produce a physical model."
+            }
+            Self::ThermalPlantTimeout => {
+                "Thermal plant calibration exceeded its five-minute time budget."
+            }
+            Self::SupplyScan(_) => {
+                "Whole-device supply scanning stopped; inspect the scan error code."
             }
             Self::PdNotReady => "PD contract is not ready for manual PPS.",
             Self::WriteFailed => "Manual PPS write failed.",
@@ -461,6 +518,8 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_max_mv: Option<u16>,
     pub(crate) capability_max_ma: Option<u16>,
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
+    pub(crate) source_power_limit_mw: Option<u32>,
+    pub(crate) source_power_limit_ma: Option<u16>,
     pub(crate) error: Option<ManualPpsError>,
     pub(crate) automatic_restore_pending: bool,
     pub(crate) automatic_restore_ticket: Option<PowerTicket>,
@@ -468,6 +527,7 @@ pub(crate) struct ManualPpsState {
     pub(crate) allow_pending_refresh: bool,
     pub(crate) pending_power_ticket: Option<PowerTicket>,
     pub(crate) pending_power_request_mv: Option<u16>,
+    pub(crate) supply_scan_range: Option<PpsAdjustmentRange>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -485,6 +545,8 @@ impl Default for ManualPpsState {
             capability_max_mv: None,
             capability_max_ma: None,
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
+            source_power_limit_mw: None,
+            source_power_limit_ma: None,
             error: None,
             automatic_restore_pending: false,
             automatic_restore_ticket: None,
@@ -492,6 +554,7 @@ impl Default for ManualPpsState {
             allow_pending_refresh: false,
             pending_power_ticket: None,
             pending_power_request_mv: None,
+            supply_scan_range: None,
         }
     }
 }
@@ -620,13 +683,13 @@ impl Default for CalibrationJobState {
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES: usize = 24;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_CURVE_MIN_SAMPLES_PER_BIN: u16 = 20;
-#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_AMBIENT_TICKS: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 24_000;
+pub(crate) const THERMAL_PLANT_TOTAL_TIMEOUT_TICKS: u32 = 6_000;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 432_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_COOL_TIMEOUT_TICKS: u32 = 24_000;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -635,6 +698,8 @@ pub(crate) const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
 pub(crate) const THERMAL_PLANT_COOL_COMPLETE_TEMP_C: f32 = 80.0;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_TRACE_MIN_TEMP_STEP_C: f32 = 4.0;
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) const THERMAL_PLANT_TRACE_INTERVAL_TICKS: u32 = 200;
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -648,97 +713,6 @@ pub(crate) struct CalibrationVinAutoJob {
     pub(crate) last_observed_mv: Option<u16>,
     pub(crate) sample_count: u8,
     pub(crate) samples: [Option<AdcCalibrationSample>; CALIBRATION_VIN_AUTO_MAX_SWEEP_SAMPLES],
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ThermalPlantCurveBin {
-    pub(crate) min_temp_c: f32,
-    pub(crate) max_temp_c: f32,
-    pub(crate) samples: u16,
-    pub(crate) temp_sum_c: f32,
-    pub(crate) resistance_sum_ohms: f32,
-    pub(crate) raw_adc_sum_mv: u32,
-    pub(crate) voltage_sum_mv: u64,
-    pub(crate) current_sum_ma: u64,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl ThermalPlantCurveBin {
-    pub(crate) const fn new(min_temp_c: f32, max_temp_c: f32) -> Self {
-        Self {
-            min_temp_c,
-            max_temp_c,
-            samples: 0,
-            temp_sum_c: 0.0,
-            resistance_sum_ohms: 0.0,
-            raw_adc_sum_mv: 0,
-            voltage_sum_mv: 0,
-            current_sum_ma: 0,
-        }
-    }
-
-    pub(crate) fn contains(self, temp_c: f32) -> bool {
-        temp_c >= self.min_temp_c && temp_c < self.max_temp_c
-    }
-
-    pub(crate) fn observe(&mut self, temp_c: f32, resistance_ohms: f32) {
-        self.samples = self.samples.saturating_add(1);
-        self.temp_sum_c += temp_c;
-        self.resistance_sum_ohms += resistance_ohms;
-    }
-
-    pub(crate) fn observe_electrical(
-        &mut self,
-        temp_c: f32,
-        raw_rtd_adc_mv: u16,
-        heater_voltage_mv: u32,
-        heater_current_ma: u16,
-    ) {
-        self.observe(
-            temp_c,
-            heater_voltage_mv as f32 / f32::from(heater_current_ma),
-        );
-        self.raw_adc_sum_mv = self
-            .raw_adc_sum_mv
-            .saturating_add(u32::from(raw_rtd_adc_mv));
-        self.voltage_sum_mv = self
-            .voltage_sum_mv
-            .saturating_add(u64::from(heater_voltage_mv));
-        self.current_sum_ma = self
-            .current_sum_ma
-            .saturating_add(u64::from(heater_current_ma));
-    }
-
-    pub(crate) fn averaged_raw_observation(self) -> Option<HeaterCurveRawObservation> {
-        if self.samples == 0 || self.raw_adc_sum_mv == 0 || self.current_sum_ma == 0 {
-            return None;
-        }
-        let samples = u64::from(self.samples);
-        let voltage_mv = (self.voltage_sum_mv / samples).min(u64::from(u16::MAX)) as u16;
-        let current_ma = (self.current_sum_ma / samples).min(u64::from(u16::MAX)) as u16;
-        Some(HeaterCurveRawObservation {
-            raw_rtd_adc_mv: (u64::from(self.raw_adc_sum_mv) / samples).min(u64::from(u16::MAX))
-                as u16,
-            heater_voltage_mv: voltage_mv,
-            heater_current_ma: current_ma,
-            resistance_milliohms: ((u32::from(voltage_mv) * 1_000) / u32::from(current_ma))
-                .min(u32::from(u16::MAX)) as u16,
-        })
-    }
-
-    pub(crate) fn averaged_point(self) -> Option<(i16, u16)> {
-        if self.samples == 0 {
-            return None;
-        }
-        let temp_c = self.temp_sum_c / f32::from(self.samples);
-        let measured_resistance_ohms = self.resistance_sum_ohms / f32::from(self.samples);
-        let resistance_ohms =
-            measured_resistance_ohms.max(default_estimated_heater_resistance_ohms(temp_c));
-        let temp_centi_c = round_to_i16(temp_c * 100.0);
-        let resistance_milliohms = round_to_u16_nonnegative(resistance_ohms * 1000.0);
-        Some((temp_centi_c, resistance_milliohms))
-    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -764,13 +738,6 @@ pub(crate) fn round_to_u16_nonnegative(value: f32) -> u16 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ThermalPlantCurveSampler {
-    pub(crate) cold_bin: ThermalPlantCurveBin,
-    pub(crate) bins: [ThermalPlantCurveBin; 4],
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ThermalPlantAutoPhase {
     Ambient,
     Heating,
@@ -783,16 +750,16 @@ pub(crate) enum ThermalPlantAutoPhase {
 pub(crate) struct CalibrationThermalPlantAutoJob {
     pub(crate) run_id: u32,
     pub(crate) phase: ThermalPlantAutoPhase,
-    pub(crate) source_max_mv: u16,
     pub(crate) source_current_ma: u16,
     pub(crate) ambient_raw_rtd_adc_mv: u16,
     pub(crate) idle_samples: u16,
-    pub(crate) heater_curve: ThermalPlantCurveSampler,
+    pub(crate) supply_scan: Option<flux_purr_firmware::heater_supply::scan::SupplyScan>,
+    pub(crate) started_at_ms: Option<u64>,
     pub(crate) elapsed_ticks: u32,
     pub(crate) phase_started_tick: u32,
     pub(crate) sample_count: u8,
     pub(crate) last_saved_temp_c: f32,
-    pub(crate) last_saved_tick: u16,
+    pub(crate) last_saved_tick: u32,
     pub(crate) samples: [ThermalPlantTransientSample; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
 }
 
@@ -804,21 +771,6 @@ pub(crate) struct CalibrationThermalPlantAutoJob {
 pub(crate) struct CalibrationThermalPlantWorkspace {
     pub(crate) job: Option<CalibrationThermalPlantAutoJob>,
     pub(crate) next_run_id: u32,
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-impl Default for ThermalPlantCurveSampler {
-    fn default() -> Self {
-        Self {
-            cold_bin: ThermalPlantCurveBin::new(0.0, 80.0),
-            bins: [
-                ThermalPlantCurveBin::new(80.0, 120.0),
-                ThermalPlantCurveBin::new(120.0, 160.0),
-                ThermalPlantCurveBin::new(160.0, 190.0),
-                ThermalPlantCurveBin::new(190.0, 221.0),
-            ],
-        }
-    }
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -856,6 +808,9 @@ pub(crate) struct CalibrationRuntimeState {
     pub(crate) stable: bool,
     pub(crate) stability_error_mv: Option<i16>,
     pub(crate) error: Option<ManualPpsError>,
+    pub(crate) scan_phase: Option<flux_purr_firmware::heater_supply::scan::ScanPhase>,
+    pub(crate) scan_failure: Option<flux_purr_firmware::heater_supply::scan::ScanFailure>,
+    pub(crate) scan_contract_confirmed: bool,
     pub(crate) job: CalibrationJobState,
     pub(crate) job_data: Option<CalibrationJobData>,
     pub(crate) model_target_temp_c: Option<i16>,
@@ -876,6 +831,9 @@ impl Default for CalibrationRuntimeState {
             stable: false,
             stability_error_mv: None,
             error: None,
+            scan_phase: None,
+            scan_failure: None,
+            scan_contract_confirmed: false,
             job: CalibrationJobState::default(),
             job_data: None,
             model_target_temp_c: None,
@@ -899,6 +857,17 @@ pub(crate) fn calibration_runtime_state_to_wire(
         stable: state.stable,
         stability_error_mv: state.stability_error_mv,
         error: state.error.map(manual_pps_error_code),
+        scan_phase: state.scan_phase.map(|phase| {
+            let mut value = heapless::String::new();
+            let _ = value.push_str(phase.label());
+            value
+        }),
+        scan_failure: state.scan_failure.map(|failure| {
+            let mut value = heapless::String::new();
+            let _ = value.push_str(failure.code());
+            value
+        }),
+        scan_contract_confirmed: state.scan_phase.map(|_| state.scan_contract_confirmed),
         job: CalibrationJobStateWire {
             kind: state.job.kind.map(CalibrationJobKind::to_wire),
             status: state.job.status.to_wire(),
@@ -1149,22 +1118,12 @@ pub(crate) fn thermal_model_heater_allowed(
             .is_some_and(|transaction| {
                 thermal_plant_projection_from_transient(&transaction).is_some()
                     && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-                    && thermal_plant_curve_is_bound(memory_config, transaction)
             });
     if !plant_is_available {
         return false;
     }
 
     manual_pps.has_matching_pps_apdo(20_000, 3_000)
-        && has_persisted_heater_resistance_curve(memory_config)
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn thermal_plant_curve_is_bound(
-    memory_config: &MemoryConfig,
-    transaction: ThermalPlantTransientTransaction,
-) -> bool {
-    memory_config.heater_curve_transaction_id == Some(transaction.transaction_id)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1172,7 +1131,12 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
     transaction: &ThermalPlantTransientTransaction,
     memory_config: &MemoryConfig,
 ) -> bool {
-    if !flux_purr_firmware::memory::thermal_plant_transient_transaction_is_complete(transaction) {
+    if !memory_config
+        .heater_supply_boundary
+        .as_ref()
+        .is_some_and(flux_purr_firmware::heater_supply::SupplyBoundary::is_valid)
+        || !flux_purr_firmware::memory::thermal_plant_transient_transaction_is_complete(transaction)
+    {
         return false;
     }
     let count = usize::from(transaction.sample_count);
@@ -1197,7 +1161,9 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
         if !temperature_c.is_finite() {
             return false;
         }
-        if sample.duty_percent > 0 && temperature_c > powered_max_temp_c {
+        if !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+            && temperature_c > powered_max_temp_c
+        {
             powered_max_temp_c = temperature_c;
             powered_peak_index = Some(index);
         }
@@ -1209,13 +1175,27 @@ pub(crate) fn thermal_plant_transient_trace_reaches_targets(
     };
     let final_sample = samples.last().copied();
     let final_temp_c = temperatures_c[count - 1];
-    thermal_plant_heating_sample_covers_target(
+    thermal_plant_heating_sample_covers_minimum(
         memory_config,
         samples[powered_peak_index].raw_rtd_adc_mv,
     ) && (temperatures_c[0] - ambient_temp_c).abs() <= 8.0
         && powered_peak_index + 1 < count
-        && final_sample.is_some_and(|sample| sample.duty_percent == 0)
+        && final_sample.is_some_and(flux_purr_firmware::memory::thermal_plant_sample_is_cooling)
         && final_temp_c <= THERMAL_PLANT_COOL_COMPLETE_TEMP_C
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticHeaterLookupContext {
+    current_request_mv: Option<u16>,
+    current_rtd_mv: Option<u16>,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AutomaticVoltageResponseContext {
+    pub(crate) confirmed_range: Option<PpsAdjustmentRange>,
+    pub(crate) current_rtd_mv: Option<u16>,
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1273,6 +1253,8 @@ impl ManualPpsState {
         state.capability_max_mv = Some(bounded_max_mv);
         state.capability_max_ma = Some(max_ma);
         state.capability_apdos = capabilities.pps_apdos;
+        state.source_power_limit_mw = capabilities.source_power_limit_mw;
+        state.source_power_limit_ma = capabilities.source_power_limit_ma;
         if state.capability_apdos.iter().all(Option::is_none) {
             state.capability_apdos[0] = Some(ch224q::PpsApdo {
                 min_mv: bounded_min_mv,
@@ -1311,7 +1293,9 @@ impl ManualPpsState {
         self.capability_apdos.iter().flatten().any(|apdo| {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
             let max_mv = apdo.max_mv.min(self.request_max_mv);
-            target_mv >= min_mv && target_mv <= max_mv && target_ma <= apdo.max_ma
+            target_mv >= min_mv
+                && target_mv <= max_mv
+                && target_ma <= apdo.max_ma.min(MAX_HEATER_CONTRACT_MA)
         })
     }
 
@@ -1322,20 +1306,384 @@ impl ManualPpsState {
             .filter_map(|apdo| {
                 let min_mv = apdo.min_mv.max(self.request_min_mv);
                 let max_mv = apdo.max_mv.min(self.request_max_mv);
-                (target_mv >= min_mv && target_mv <= max_mv).then_some(apdo.max_ma)
+                (target_mv >= min_mv && target_mv <= max_mv)
+                    .then_some(apdo.max_ma.min(MAX_HEATER_CONTRACT_MA))
             })
             .max()
     }
 
     pub(crate) fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
-        self.single_pps_source_limits(20_000)
+        let range = self.thermal_plant_pps_range()?;
+        let scan_current_ma = 3_000;
+        let bounded_min_mv = range.min_mv.max(self.request_min_mv);
+        let bounded_max_mv = range.max_mv.min(self.request_max_mv).min(21_000);
+        let operational_max_mv = self
+            .source_power_limit_mw
+            .zip(self.source_power_limit_ma)
+            .filter(|(_, envelope_ma)| scan_current_ma <= *envelope_ma)
+            .map(|(power_mw, _)| (power_mw * 1_000 / u32::from(scan_current_ma)) as u16)
+            .map(|mv| mv / 100 * 100)
+            .map_or(bounded_max_mv, |mv| mv.min(bounded_max_mv));
+        if operational_max_mv < bounded_min_mv {
+            return None;
+        }
+        Some((bounded_min_mv, operational_max_mv, scan_current_ma))
+    }
+
+    pub(crate) fn thermal_plant_source_power_limit_mw(&self) -> u32 {
+        self.source_power_limit_mw
+            .zip(self.source_power_limit_ma)
+            .filter(|(_, current_ma)| *current_ma >= 3_000)
+            .map_or(0, |(power_mw, _)| power_mw)
     }
 
     pub(crate) fn heater_source_limits(&self) -> Option<(u16, u16, u16)> {
         self.contiguous_pps_source_limits(HEATER_ADJUSTABLE_MIN_MV)
     }
 
-    fn single_pps_source_limits(&self, anchor_mv: u16) -> Option<(u16, u16, u16)> {
+    #[cfg(test)]
+    pub(crate) fn automatic_heater_pps_candidate(
+        &self,
+        current_temp_c: f32,
+        preview_heater_curve: Option<&HeaterCurveConfig>,
+        memory_config: &MemoryConfig,
+        current_request_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_pps_candidate_with_rtd(
+            current_temp_c,
+            preview_heater_curve,
+            memory_config,
+            current_request_mv,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_pps_candidate_with_rtd(
+        &self,
+        current_temp_c: f32,
+        preview_heater_curve: Option<&HeaterCurveConfig>,
+        memory_config: &MemoryConfig,
+        current_request_mv: Option<u16>,
+        current_rtd_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        let _ = preview_heater_curve;
+        self.capability_apdos
+            .iter()
+            .enumerate()
+            .filter_map(|(index, apdo)| {
+                let apdo = (*apdo)?;
+                self.automatic_heater_pps_for_apdo(
+                    apdo,
+                    index,
+                    current_temp_c,
+                    memory_config,
+                    apdo.max_ma,
+                    AutomaticHeaterLookupContext {
+                        current_request_mv,
+                        current_rtd_mv,
+                    },
+                )
+            })
+            .max_by_key(|candidate| {
+                (
+                    candidate.power_mw,
+                    current_request_mv
+                        .is_some_and(|mv| (candidate.min_mv..=candidate.max_mv).contains(&mv)),
+                    core::cmp::Reverse(candidate.allowed_mv),
+                    core::cmp::Reverse(candidate.advertisement_index),
+                )
+            })
+    }
+
+    fn automatic_heater_pps_for_apdo(
+        &self,
+        apdo: ch224q::PpsApdo,
+        index: usize,
+        temp_c: f32,
+        memory_config: &MemoryConfig,
+        budget_ma: u16,
+        lookup: AutomaticHeaterLookupContext,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()?;
+        let current_ma = encode_automatic_pps_current_ma(budget_ma.min(apdo.max_ma));
+        // Boundary records are keyed to the product's encoded automatic
+        // current budget. The raw APDO may advertise 5 A even when this
+        // product intentionally caps automatic heating at 3 A; comparing the
+        // raw advertisement with a 3 A calibration would discard the valid
+        // whole-device boundary and fall back to the theoretical model.
+        let boundary_source_max_ma = current_ma;
+        let observed_limit_mv =
+            memory_config
+                .heater_supply_boundary
+                .as_ref()
+                .and_then(|boundary| {
+                    boundary.safe_request_mv_or_cold_start(
+                        flux_purr_firmware::heater_supply::BoundaryQuery {
+                            temperature_centi_c: round_to_i16(temp_c * 100.0),
+                            current_rtd_mv: lookup.current_rtd_mv,
+                            current_request_mv: lookup.current_request_mv,
+                            current_ma,
+                            wifi_started,
+                            source_min_mv: apdo.min_mv,
+                            source_max_mv: apdo.max_mv,
+                            source_max_ma: boundary_source_max_ma,
+                            source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
+                        },
+                        |raw| {
+                            projected_rtd_temperature_c(memory_config, raw)
+                                .map(|temp| round_to_i16(temp * 100.0))
+                        },
+                    )
+                });
+        automatic_heater_pps_candidate_with_limit(
+            ch224q::PpsApdo {
+                max_ma: current_ma,
+                ..apdo
+            },
+            self.request_min_mv,
+            self.request_max_mv,
+            HEATER_ADJUSTABLE_MAX_MV,
+            default_estimated_heater_resistance_ohms(temp_c),
+            index,
+            observed_limit_mv,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn automatic_heater_request_contract(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        previous_mv: Option<u16>,
+    ) -> Option<PdContractRequest> {
+        self.automatic_heater_request_contract_with_rtd(
+            temp_c,
+            config,
+            voltage_mv,
+            current_ma,
+            previous_mv,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_request_contract_with_rtd(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        previous_mv: Option<u16>,
+        current_rtd_mv: Option<u16>,
+    ) -> Option<PdContractRequest> {
+        let candidate = self.automatic_heater_pps_candidate_with_rtd(
+            temp_c,
+            None,
+            config,
+            previous_mv,
+            current_rtd_mv,
+        )?;
+        if candidate.current_ma != current_ma
+            || !(candidate.min_mv..=candidate.allowed_mv).contains(&voltage_mv)
+        {
+            return None;
+        }
+        let apdo = self.capability_apdos[candidate.advertisement_index]?;
+        PdContractRequest::pps(voltage_mv, current_ma)
+            .ok()?
+            .within_pps_range(PpsAdjustmentRange {
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_current_ma: apdo.max_ma,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn automatic_heater_confirmed_pps_candidate(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        snapshot: PdServiceSnapshot,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_confirmed_pps_candidate_with_rtd(temp_c, config, snapshot, None)
+    }
+
+    pub(crate) fn automatic_heater_confirmed_pps_candidate_with_rtd(
+        &self,
+        temp_c: f32,
+        config: &MemoryConfig,
+        snapshot: PdServiceSnapshot,
+        current_rtd_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        let observed = snapshot.conducting_observation()?;
+        let active = snapshot.active?;
+        if !observed.status.pd_active
+            || observed.contract.kind != ContractKind::Pps
+            || active.mode != PdContractRequestMode::Pps
+            || active.voltage_mv != observed.contract.voltage_mv
+            || active.operating_current_ma != observed.contract.current_ma
+        {
+            return None;
+        }
+        let range = active.pps_range?;
+        let candidate = self.automatic_heater_pps_for_contract_with_rtd(
+            temp_c,
+            config,
+            active.voltage_mv,
+            observed.current_ma.min(active.operating_current_ma),
+            Some(range),
+            current_rtd_mv,
+        )?;
+        (candidate.min_mv..=candidate.allowed_mv)
+            .contains(&active.voltage_mv)
+            .then_some(candidate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn automatic_heater_pps_for_contract(
+        &self,
+        temp_c: f32,
+        memory_config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        confirmed_range: Option<PpsAdjustmentRange>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.automatic_heater_pps_for_contract_with_rtd(
+            temp_c,
+            memory_config,
+            voltage_mv,
+            current_ma,
+            confirmed_range,
+            None,
+        )
+    }
+
+    pub(crate) fn automatic_heater_pps_for_contract_with_rtd(
+        &self,
+        temp_c: f32,
+        memory_config: &MemoryConfig,
+        voltage_mv: u16,
+        current_ma: u16,
+        confirmed_range: Option<PpsAdjustmentRange>,
+        current_rtd_mv: Option<u16>,
+    ) -> Option<AutomaticHeaterPpsCandidate> {
+        self.capability_apdos
+            .iter()
+            .enumerate()
+            .find_map(|(index, apdo)| {
+                let apdo = (*apdo)?;
+                if confirmed_range.is_some_and(|range| {
+                    range.min_mv != apdo.min_mv
+                        || range.max_mv != apdo.max_mv
+                        || range.max_current_ma != apdo.max_ma
+                }) || !(apdo.min_mv..=apdo.max_mv).contains(&voltage_mv)
+                    || current_ma > apdo.max_ma
+                {
+                    return None;
+                }
+                self.automatic_heater_pps_for_apdo(
+                    apdo,
+                    index,
+                    temp_c,
+                    memory_config,
+                    current_ma,
+                    AutomaticHeaterLookupContext {
+                        current_request_mv: Some(voltage_mv),
+                        current_rtd_mv,
+                    },
+                )
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn automatic_voltage_response_matches(
+        &self,
+        memory_config: &MemoryConfig,
+        temp_c: f32,
+        contract_mv: u16,
+        contract_ma: u16,
+        vin_raw_adc_mv: u16,
+        confirmed_range: Option<PpsAdjustmentRange>,
+    ) -> bool {
+        self.automatic_voltage_response_matches_with_rtd(
+            memory_config,
+            temp_c,
+            contract_mv,
+            contract_ma,
+            vin_raw_adc_mv,
+            AutomaticVoltageResponseContext {
+                confirmed_range,
+                current_rtd_mv: None,
+            },
+        )
+    }
+
+    pub(crate) fn automatic_voltage_response_matches_with_rtd(
+        &self,
+        memory_config: &MemoryConfig,
+        temp_c: f32,
+        contract_mv: u16,
+        contract_ma: u16,
+        vin_raw_adc_mv: u16,
+        response: AutomaticVoltageResponseContext,
+    ) -> bool {
+        let Some(wifi_started) = flux_purr_firmware::heater_supply::wifi_hardware_started() else {
+            return false;
+        };
+        let Some(boundary) = memory_config.heater_supply_boundary.as_ref() else {
+            return true;
+        };
+        let point = self.capability_apdos.iter().flatten().find_map(|apdo| {
+            if response.confirmed_range.is_some_and(|range| {
+                range.min_mv != apdo.min_mv
+                    || range.max_mv != apdo.max_mv
+                    || range.max_current_ma != apdo.max_ma
+            }) {
+                return None;
+            }
+            let min_mv = apdo.min_mv.max(self.request_min_mv);
+            let max_mv = apdo
+                .max_mv
+                .min(self.request_max_mv)
+                .min(HEATER_ADJUSTABLE_MAX_MV);
+            if !(min_mv..=max_mv).contains(&contract_mv) || contract_ma > apdo.max_ma {
+                return None;
+            }
+            boundary.safe_point(
+                flux_purr_firmware::heater_supply::BoundaryQuery {
+                    temperature_centi_c: round_to_i16(temp_c * 100.0),
+                    current_rtd_mv: response.current_rtd_mv,
+                    // The confirmed contract may have been authorized by the
+                    // measured next point in a compacted warm-up staircase.
+                    // Select that point here as well; validating a higher
+                    // contract against the colder point's VIN ratio can turn
+                    // ADC quantization into a false safety recovery.
+                    current_request_mv: Some(contract_mv),
+                    current_ma: contract_ma,
+                    wifi_started,
+                    source_min_mv: apdo.min_mv,
+                    source_max_mv: apdo.max_mv,
+                    source_max_ma: apdo.max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA),
+                    source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
+                },
+                |raw| {
+                    projected_rtd_temperature_c(memory_config, raw)
+                        .map(|temp| round_to_i16(temp * 100.0))
+                },
+            )
+        });
+        point.is_none_or(|point| {
+            flux_purr_firmware::heater_supply::SupplyBoundary::voltage_response_matches(
+                point,
+                contract_mv,
+                vin_raw_adc_mv,
+            )
+        })
+    }
+
+    pub(crate) fn thermal_plant_pps_range(&self) -> Option<PpsAdjustmentRange> {
+        let anchor_mv = 20_000;
         let mut best = None;
         for apdo in self.capability_apdos.iter().flatten() {
             let min_mv = apdo.min_mv.max(self.request_min_mv);
@@ -1343,12 +1691,21 @@ impl ManualPpsState {
             if min_mv > anchor_mv || max_mv < anchor_mv || apdo.max_ma < MIN_HEATER_CONTRACT_MA {
                 continue;
             }
-            let candidate = (min_mv, max_mv, apdo.max_ma.min(MAX_HEATER_CONTRACT_MA));
-            if best.is_none_or(|current: (u16, u16, u16)| {
-                candidate.2 > current.2
-                    || (candidate.2 == current.2
-                        && (candidate.1 > current.1
-                            || (candidate.1 == current.1 && candidate.0 < current.0)))
+            let candidate = PpsAdjustmentRange {
+                min_mv: apdo.min_mv,
+                max_mv: apdo.max_mv,
+                max_current_ma: apdo.max_ma,
+            };
+            if best.is_none_or(|current: PpsAdjustmentRange| {
+                (
+                    candidate.max_current_ma,
+                    candidate.max_mv,
+                    core::cmp::Reverse(candidate.min_mv),
+                ) > (
+                    current.max_current_ma,
+                    current.max_mv,
+                    core::cmp::Reverse(current.min_mv),
+                )
             }) {
                 best = Some(candidate);
             }
@@ -1495,6 +1852,7 @@ impl ManualPpsState {
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
         refreshed.pending_power_ticket = previous.pending_power_ticket;
         refreshed.pending_power_request_mv = previous.pending_power_request_mv;
+        refreshed.supply_scan_range = previous.supply_scan_range;
         refreshed.automatic_restore_ticket = previous.automatic_restore_ticket;
         refreshed.automatic_restore_confirmed = previous.automatic_restore_confirmed;
         refreshed.automatic_restore_pending = previous.automatic_restore_pending;
@@ -1508,6 +1866,15 @@ impl ManualPpsState {
         *self = refreshed;
     }
 
+    pub(crate) fn hold_calibration_intent_for_capability_refresh(&mut self) {
+        self.pending_power_ticket = None;
+        self.pending_power_request_mv = None;
+        self.applied_mv = None;
+        self.error = None;
+        self.automatic_restore_pending = false;
+        self.automatic_restore_confirmed = false;
+    }
+
     pub(crate) fn clear(&mut self) {
         let had_override = self.enabled
             || self.target_mv.is_some()
@@ -1515,6 +1882,7 @@ impl ManualPpsState {
             || self.applied_mv.is_some();
         self.enabled = false;
         self.owner = ManualPpsOwner::Debug;
+        self.supply_scan_range = None;
         self.target_mv = None;
         self.target_ma = None;
         self.applied_mv = None;
@@ -1528,6 +1896,7 @@ impl ManualPpsState {
     pub(crate) fn fail(&mut self, error: ManualPpsError) {
         self.enabled = false;
         self.owner = ManualPpsOwner::Debug;
+        self.supply_scan_range = None;
         self.target_mv = None;
         self.target_ma = None;
         self.applied_mv = None;
@@ -1771,15 +2140,15 @@ pub(crate) fn projected_rtd_fractional_temperature_c(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn thermal_plant_heating_sample_covers_target(
+pub(crate) fn thermal_plant_heating_sample_covers_minimum(
     memory_config: &MemoryConfig,
     raw_adc_mv: u16,
 ) -> bool {
-    // The live fractional sample cuts heat at 220C. Persisted raw millivolts
-    // are rounded, so coverage uses the upper edge of that half-mV bin;
-    // fitting and reporting still use the unchanged sample centre.
+    // Persisted raw millivolts are rounded. Minimum powered coverage uses
+    // the upper edge of that half-mV bin; fitting and reporting still use
+    // the unchanged sample centre. The independent live cutoff stays 220C.
     projected_rtd_fractional_temperature_c(memory_config, f32::from(raw_adc_mv) + 0.5)
-        .is_some_and(|temperature_c| temperature_c >= THERMAL_PLANT_TARGET_TEMP_C)
+        .is_some_and(|temperature_c| temperature_c >= 100.0)
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1787,25 +2156,30 @@ pub(crate) fn thermal_plant_runtime_wire(memory_config: &MemoryConfig) -> Therma
     let active_projection = memory_config
         .thermal_plant_transient_active
         .and_then(|transaction| {
-            (thermal_plant_curve_is_bound(memory_config, transaction)
-                && thermal_plant_transient_trace_reaches_targets(&transaction, memory_config))
-            .then(|| thermal_plant_projection_from_transient(&transaction))
-            .flatten()
+            (thermal_plant_transient_trace_reaches_targets(&transaction, memory_config))
+                .then(|| thermal_plant_projection_from_transient(&transaction))
+                .flatten()
         });
-    let state =
-        if memory_config.thermal_plant_transient_active.is_some() && active_projection.is_none() {
-            "invalid"
-        } else if active_projection.is_some() {
-            "active"
-        } else {
-            "missing"
-        };
+    let boundary_present = memory_config
+        .heater_supply_boundary
+        .is_some_and(|boundary| boundary.is_valid());
+    let state = if boundary_present
+        && memory_config.thermal_plant_transient_active.is_some()
+        && active_projection.is_none()
+    {
+        "invalid"
+    } else if active_projection.is_some() {
+        "active"
+    } else {
+        "missing"
+    };
     let mut state_wire = heapless::String::new();
     let _ = state_wire.push_str(state);
     ThermalPlantRuntimeWire {
         state: state_wire,
         active_transaction_id: memory_config
             .thermal_plant_transient_active
+            .filter(|_| boundary_present)
             .map(|transaction| transaction.transaction_id),
         projection_valid: active_projection.is_some(),
         convection_mw_per_c: active_projection.map(|projection| projection.convection_mw_per_c),
@@ -1850,7 +2224,7 @@ pub(crate) fn thermal_plant_run_snapshot_wire(
         after_sample,
         current_temp_centi_c,
     );
-    let provisional_curve = job.and_then(thermal_plant_provisional_curve);
+    let provisional_curve = None;
     let active_result =
         persisted.and_then(|transaction| thermal_plant_active_result(memory_config, transaction));
     let attempt = job.map(|job| {
@@ -1864,7 +2238,11 @@ pub(crate) fn thermal_plant_run_snapshot_wire(
         )
     });
     ThermalPlantRunSnapshotWire {
-        version: 1,
+        supply_boundary: job
+            .and_then(|job| job.supply_scan.as_ref().map(|scan| scan.boundary))
+            .or(memory_config.heater_supply_boundary)
+            .map(|value| Box::new(value.into())),
+        version: 2,
         attempt,
         trace_page,
         provisional_curve,
@@ -1882,10 +2260,10 @@ pub(crate) fn thermal_plant_trace_page(
 ) -> ThermalPlantTracePageWire {
     let start = after_sample.min(sample_count);
     let mut points = heapless::Vec::new();
-    let mut saw_heating = samples
-        .iter()
-        .take(usize::from(start))
-        .any(|sample| sample.duty_percent > 0);
+    let mut saw_heating = samples.iter().take(usize::from(start)).any(|sample| {
+        sample.duty_percent > 0
+            && !flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample)
+    });
     for (offset, sample) in samples
         .iter()
         .take(usize::from(sample_count))
@@ -1893,16 +2271,20 @@ pub(crate) fn thermal_plant_trace_page(
         .skip(usize::from(start))
         .take(flux_purr_firmware::control_plane::THERMAL_PLANT_TRACE_PAGE_MAX)
     {
-        let phase = thermal_plant_trace_phase(&mut saw_heating, sample.duty_percent);
+        let phase = thermal_plant_trace_phase(&mut saw_heating, *sample);
         let temperature_centi_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)
             .map(|value| round_to_i16(value * 100.0))
             .unwrap_or(fallback_temp_centi_c);
         let _ = points.push(ThermalPlantTracePointWire {
             sample_index: offset as u8,
-            elapsed_ms: u32::from(sample.elapsed_ticks)
+            elapsed_ms: sample
+                .elapsed_ticks
                 .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+            raw_rtd_adc_mv: sample.raw_rtd_adc_mv,
             temperature_centi_c,
-            heater_voltage_mv: thermal_plant_heater_voltage_mv(sample.heater_voltage_125mv),
+            heater_voltage_mv: thermal_plant_heater_voltage_mv(
+                flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(*sample),
+            ),
             duty_percent: sample.duty_percent.min(100),
             phase,
         });
@@ -1920,36 +2302,16 @@ pub(crate) fn thermal_plant_trace_page(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn thermal_plant_trace_phase(
     saw_heating: &mut bool,
-    duty_percent: u8,
+    sample: ThermalPlantTransientSample,
 ) -> ThermalPlantRunPhaseWire {
-    if duty_percent > 0 {
+    if flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample) {
+        ThermalPlantRunPhaseWire::Cooling
+    } else if sample.duty_percent > 0 || *saw_heating {
         *saw_heating = true;
         ThermalPlantRunPhaseWire::Heating
-    } else if *saw_heating {
-        ThermalPlantRunPhaseWire::Cooling
     } else {
         ThermalPlantRunPhaseWire::Ambient
     }
-}
-
-#[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn thermal_plant_provisional_curve(
-    job: &CalibrationThermalPlantAutoJob,
-) -> Option<ThermalPlantProvisionalCurveWire> {
-    let curve = heater_curve_from_transient_bins(&job.heater_curve.bins)?;
-    let covered = job
-        .heater_curve
-        .bins
-        .iter()
-        .filter(|bin| bin.samples > 0)
-        .count() as u8;
-    let mut state = heapless::String::new();
-    let _ = state.push_str("preview");
-    Some(ThermalPlantProvisionalCurveWire {
-        state,
-        coverage_percent: covered.saturating_mul(25),
-        curve: HeaterCurvePackageWire::from_memory(&curve, None),
-    })
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1958,13 +2320,9 @@ pub(crate) fn thermal_plant_active_result(
     transaction: &ThermalPlantTransientTransaction,
 ) -> Option<ThermalPlantActiveResultWire> {
     let (projection, _) = thermal_plant_projection_for_runtime(memory_config)?;
-    let curve = projected_heater_curve(memory_config)?;
     Some(ThermalPlantActiveResultWire {
         transaction_id: transaction.transaction_id,
-        curve: HeaterCurvePackageWire::from_memory(
-            &curve,
-            Some(&memory_config.heater_curve_raw_observations),
-        ),
+        curve: HeaterCurvePackageWire::from_memory(&HeaterCurveConfig::default(), None),
         convection_mw_per_c: Some(projection.convection_mw_per_c),
         radiation_mw_per_k4: Some(projection.radiation_mw_per_k4),
         thermal_capacity_mj_per_c: Some(projection.thermal_capacity_mj_per_c),
@@ -1994,6 +2352,7 @@ pub(crate) fn thermal_plant_run_attempt(
         elapsed_ms: job
             .elapsed_ticks
             .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
+        ambient_raw_rtd_adc_mv: job.ambient_raw_rtd_adc_mv,
         current_temp_centi_c,
         heater_voltage_mv: current_voltage_mv,
         duty_percent: duty_percent.min(100),
@@ -2011,9 +2370,7 @@ pub(crate) fn thermal_plant_projection_for_runtime(
     memory_config: &MemoryConfig,
 ) -> Option<(flux_purr_firmware::memory::ThermalPlantProjection, f32)> {
     let transaction = memory_config.thermal_plant_transient_active?;
-    if !thermal_plant_curve_is_bound(memory_config, transaction)
-        || !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config)
-    {
+    if !thermal_plant_transient_trace_reaches_targets(&transaction, memory_config) {
         return None;
     }
     let projection = thermal_plant_projection_from_transient(&transaction)?;
@@ -2029,7 +2386,6 @@ pub(crate) fn thermal_plant_heat_response(
     use flux_purr_firmware::thermal_response::{ResponseSample, fit_shutdown_response};
     let (model, ambient_c) = thermal_plant_projection_for_runtime(memory_config)?;
     let transaction = memory_config.thermal_plant_transient_active.as_ref()?;
-    let curve = projected_heater_curve(memory_config)?;
     let count = usize::from(transaction.sample_count);
     let mut samples = [ResponseSample::default(); THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut temperatures = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
@@ -2037,14 +2393,9 @@ pub(crate) fn thermal_plant_heat_response(
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
         temperatures[index] = temperature_c;
         samples[index] = ResponseSample {
-            at_ms: u32::from(sample.elapsed_ticks) * HEATER_CONTROL_INTERVAL_MS as u32,
+            at_ms: sample.elapsed_ticks * HEATER_CONTROL_INTERVAL_MS as u32,
             temperature_c,
-            power_mw: transient_sample_power_mw(
-                *sample,
-                temperature_c,
-                Some(&curve),
-                memory_config,
-            )?,
+            power_mw: transient_sample_power_mw(*sample, temperature_c, None, memory_config)?,
             accepted: true,
         };
     }

@@ -352,6 +352,12 @@ fn write_flagship_bundle(
             tuning_execution_order_c: context.tuning_execution_order_c,
             source_preset: source_preset(context.args.profile_mode),
             provider: PROVIDER_ISOLAPURR,
+            source_url: &context.args.source_url,
+            source_current_limit_ma: None,
+            provenance_complete: false,
+            firmware_sha: "unknown",
+            source_path: "unknown",
+            thermal_transaction_id: None,
         },
     )
 }
@@ -2874,7 +2880,6 @@ fn run_is_disqualified(summary: &Value, target_temp_c: i16) -> bool {
             | "profile_target_mismatch"
             | "runtime_reset"
             | "sample_rate_below_minimum"
-            | "sample_rate_below_3hz"
             | "source_telemetry_stale"
             | "source_fault"
             | "status_request_failed"
@@ -2935,7 +2940,6 @@ fn flagship_retryable_environment_failure_reason(reason: &str) -> bool {
             | "temperature_sample_glitch"
             | "runtime_reset"
             | "sample_rate_below_minimum"
-            | "sample_rate_below_3hz"
     ) || flagship_retryable_environment_error_message(reason)
 }
 

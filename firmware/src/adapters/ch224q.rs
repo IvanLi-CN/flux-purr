@@ -166,6 +166,12 @@ pub struct AdjustablePowerCapabilities {
     pub pps_max_mv: Option<u16>,
     pub pps_max_ma: Option<u16>,
     pub pps_apdos: [Option<PpsApdo>; MAX_PPS_APDOS],
+    /// Conservative source power envelope inferred from a high-voltage
+    /// Fixed PDO when the controller exposes the complete PD source list.
+    /// This is kept separate from APDO identity so exact PPS matching is
+    /// unchanged while calibration can avoid a higher-power request.
+    pub source_power_limit_mw: Option<u32>,
+    pub source_power_limit_ma: Option<u16>,
     pub avs_min_mv: Option<u16>,
     pub avs_max_mv: Option<u16>,
 }

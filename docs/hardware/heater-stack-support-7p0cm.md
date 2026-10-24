@@ -32,7 +32,7 @@ Do not merge these support boards into the heater-plate identity:
 
 - the heater plate defines `R20`, routed heater length, and source-power compatibility
 - the support boards define stack structure, interconnect geometry, and local heater/NTC path distribution
-- firmware still reasons about the heater plate as a calibrated resistive load, not about these companion boards as an additional profile dimension
+- firmware keeps the heater plate's nominal resistive model separate from these companion boards and applies the device-local supply boundary for automatic safety; the companion boards are not an additional calibration or profile dimension
 
 ## 3) Archived Gerber Packages
 

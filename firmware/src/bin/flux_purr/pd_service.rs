@@ -25,6 +25,8 @@ pub(crate) fn pd_service_delay_ms(elapsed_ms: u64, acquired_bus: bool) -> u64 {
 #[derive(Clone, Copy)]
 pub(crate) struct PdServiceSnapshot {
     pub(crate) observation: Option<PdStatusObservation>,
+    pub(crate) active: Option<ConfirmedActiveContract>,
+    pub(crate) source: SourceCapabilitiesView,
     pub(crate) transition_pending: bool,
     pub(crate) capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     pub(crate) controller: ControllerKind,
@@ -46,6 +48,11 @@ impl PdServiceSnapshot {
     pub(crate) const fn unavailable() -> Self {
         Self {
             observation: None,
+            active: None,
+            source: SourceCapabilitiesView {
+                fixed: [None; MAX_SOURCE_PDOS],
+                pps: [None; MAX_SOURCE_PDOS],
+            },
             transition_pending: false,
             capabilities: None,
             controller: ControllerKind::Unknown,
@@ -61,6 +68,7 @@ impl PdServiceSnapshot {
         {
             Self {
                 observation: None,
+                active: None,
                 ..self
             }
         } else {
@@ -74,6 +82,13 @@ impl PdServiceSnapshot {
         } else {
             self.observation
         }
+    }
+
+    /// The last confirmed contract remains observable during negotiation.
+    /// Callers must validate it against the latest load/source envelope before
+    /// permitting conduction; this never confirms the pending target.
+    pub(crate) fn conducting_observation(self) -> Option<PdStatusObservation> {
+        self.observation
     }
 }
 
@@ -218,7 +233,13 @@ impl PdServiceClient {
         owner: PowerIntentOwner,
         request: PdContractRequest,
     ) -> PdRequestState {
-        if request.mode() != PdContractRequestMode::Pps {
+        if request.mode() != PdContractRequestMode::Pps
+            || (request.is_calibration()
+                && !matches!(
+                    owner,
+                    PowerIntentOwner::Calibration | PowerIntentOwner::ThermalPlantAuto
+                ))
+        {
             return PdRequestState::Failed;
         }
         let snapshot = self.snapshot();
@@ -317,6 +338,15 @@ fn publish_pd_snapshot(runtime: &Fusb302bRuntime, observation: Option<PdStatusOb
     PD_SERVICE_SNAPSHOT.lock(|snapshot| {
         *snapshot.borrow_mut() = PdServiceSnapshot {
             observation,
+            active: observation.and_then(|observed| {
+                ConfirmedActiveContract::from_private_contract(
+                    observed.contract,
+                    runtime.source_capabilities()?,
+                )
+            }),
+            source: runtime
+                .source_capabilities()
+                .map_or_else(SourceCapabilitiesView::default, SourceCapabilities::view),
             transition_pending: runtime.source_capabilities_refresh_pending
                 || matches!(
                     runtime.policy.phase(),
@@ -628,6 +658,15 @@ async fn process_pd_service_work(
             }
         }
         None => {
+            if let Some((ticket, _)) = pending_to_retry
+                && take_pd_service_ticket_cancelled(ticket)
+            {
+                runtime
+                    .abort_pending_operation(i2c, PdTimestamp::now())
+                    .await;
+                *pending = None;
+                return Some((ticket, TicketOutcome::Superseded));
+            }
             if flash_preparation::is_active()
                 && let Some((ticket, operation)) = pending_to_retry
                 && !matches!(operation, PendingPdOperation::Idle)

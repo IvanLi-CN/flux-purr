@@ -54,7 +54,7 @@
 ## Index
 | Topic | Lifecycle | Implementation | Spec | Successor | Notes |
 | --- | --- | --- | --- | --- | --- |
-| adc-calibration-control-plane | active | `adc-calibration-control-plane/IMPLEMENTATION.md` | `adc-calibration-control-plane/SPEC.md` | - | RTD/VIN calibration state, slots, and thermal-plant calibration contract |
+| adc-calibration-control-plane | active | `adc-calibration-control-plane/IMPLEMENTATION.md` | `adc-calibration-control-plane/SPEC.md` | - | RTD/VIN slots, raw whole-device supply boundary, and thermal-model calibration |
 | buzzer-cue-arbitration | active | `buzzer-cue-arbitration/IMPLEMENTATION.md` | `buzzer-cue-arbitration/SPEC.md` | - | Single-output priority, safety suppression, and diagnostic cues |
 | dual-fan-pcb-variants | active | `dual-fan-pcb-variants/IMPLEMENTATION.md` | `dual-fan-pcb-variants/SPEC.md` | - | 5 V and 12 V board variants with a voltage-agnostic firmware contract |
 | eeprom-memory-config | active | `eeprom-memory-config/IMPLEMENTATION.md` | `eeprom-memory-config/SPEC.md` | - | M24C64 EEPROM-only persistence; MCU-internal configuration fallback and migration are unsupported |
@@ -64,7 +64,7 @@
 | frontpanel-ui-contract | active | `frontpanel-ui-contract/IMPLEMENTATION.md` | `frontpanel-ui-contract/SPEC.md` | - | 160x50 visual tokens, layout, and display-state baseline |
 | fusb302b-dual-pd-sink | active | `fusb302b-dual-pd-sink/IMPLEMENTATION.md` | `fusb302b-dual-pd-sink/SPEC.md` | - | Dual FUSB302B PD sink and PPS/fixed-PDO contract |
 | heater-7p0-3p2-variant | active | `heater-7p0-3p2-variant/IMPLEMENTATION.md` | `heater-7p0-3p2-variant/SPEC.md` | - | 7.0 cm, 3.2 ohm heater hardware variant |
-| heater-pid-frontpanel-runtime | active | `heater-pid-frontpanel-runtime/IMPLEMENTATION.md` | `heater-pid-frontpanel-runtime/SPEC.md` | - | Heater PID, fan policy, protection, and dashboard runtime truth source |
+| heater-pid-frontpanel-runtime | active | `heater-pid-frontpanel-runtime/IMPLEMENTATION.md` | `heater-pid-frontpanel-runtime/SPEC.md` | - | Heater PID, whole-device supply limits, confirmed-contract protection, and dashboard runtime |
 | mini-hotplate-doc-baseline | archived | `mini-hotplate-doc-baseline/IMPLEMENTATION.md` | `mini-hotplate-doc-baseline/SPEC.md` | - | Source-collection and evidence baseline is complete |
 | pd-sink-voltage-hil | active | `pd-sink-voltage-hil/IMPLEMENTATION.md` | `pd-sink-voltage-hil/SPEC.md` | - | Approved exact Fixed/PPS voltage HIL design with VIN hold evidence and verified reset |
 | pd-fan-test | active | `pd-fan-test/IMPLEMENTATION.md` | `pd-fan-test/SPEC.md` | - | Standalone PD-aware fan RAM image, fixed/PPS selection policy, staged fan output, and verified 5V recovery |

@@ -11,6 +11,25 @@ use std::{
     time::Instant,
 };
 
+const USB_IDENTITY_RECONNECT_GRACE: Duration = Duration::from_secs(10);
+
+fn usb_identity_guard_should_abort(
+    port_path: &str,
+    expected: &UsbSerialIdentity,
+    missing_since: &mut Option<Instant>,
+) -> bool {
+    match serial_port_usb_identity(port_path) {
+        Ok(actual) => {
+            *missing_since = None;
+            actual != *expected
+        }
+        Err(_) => {
+            let started = missing_since.get_or_insert_with(Instant::now);
+            started.elapsed() >= USB_IDENTITY_RECONNECT_GRACE
+        }
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -349,6 +368,7 @@ fn run_espflash_command_blocking_with_control(
     let stdout_reader = thread::spawn(move || read_process_pipe(stdout));
     let stderr_reader = thread::spawn(move || read_process_pipe(stderr));
     let deadline = Instant::now() + timeout;
+    let mut identity_missing_since = None;
 
     loop {
         if control.cancelled.load(Ordering::Acquire) {
@@ -384,7 +404,11 @@ fn run_espflash_command_blocking_with_control(
             }
         }
         if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
-            && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
+            && usb_identity_guard_should_abort(
+                port_path,
+                expected_usb_identity,
+                &mut identity_missing_since,
+            )
         {
             kill_controlled_child(control);
             let _ = stdout_reader.join();
@@ -556,6 +580,7 @@ fn run_espflash_command_blocking(
     let stdout_reader = thread::spawn(move || read_process_pipe(stdout));
     let stderr_reader = thread::spawn(move || read_process_pipe(stderr));
     let deadline = Instant::now() + timeout;
+    let mut identity_missing_since = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -586,7 +611,11 @@ fn run_espflash_command_blocking(
             }
         }
         if let (Some(port_path), Some(expected_usb_identity)) = (port_path, expected_usb_identity)
-            && !serial_port_usb_identity_matches(port_path, expected_usb_identity)
+            && usb_identity_guard_should_abort(
+                port_path,
+                expected_usb_identity,
+                &mut identity_missing_since,
+            )
         {
             let _ = kill_espflash_process(&mut child);
             let _ = stdout_reader.join();
