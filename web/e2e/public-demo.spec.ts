@@ -354,6 +354,26 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('heading', { name: '目标设备暂不可用' })).toHaveCount(0)
   })
 
+  test('guards scene and target changes from the active heater curve demo', async ({ page }) => {
+    await page.goto(
+      '/devices/fp-lab-01/calibration/heater-curve?demo=true&demoScene=calibration-active'
+    )
+    await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+    await page.getByRole('button', { name: 'Normal' }).click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+    await expect(page).toHaveURL(
+      /\/devices\/fp-lab-01\/calibration\/heater-curve\?demoScene=calibration-active$/
+    )
+    await page.getByRole('button', { name: '留在当前页' }).click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toHaveCount(0)
+
+    await page.getByRole('button', { name: /Field Kit SIMULATED SERIAL/ }).click()
+    await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
+    await page.getByRole('button', { name: '关闭并继续' }).click()
+    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview$/)
+  })
+
   test('serializes target and override changes behind the calibration leave guard', async ({
     page,
   }) => {
