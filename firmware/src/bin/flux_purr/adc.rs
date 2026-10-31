@@ -527,6 +527,7 @@ pub(crate) fn rtd_sample_from_batch(
         Ok(resistance_ohms) => {
             let temp_c = pt1000_temperature_c_from_resistance(resistance_ohms);
             RtdSample::Valid(RtdMeasurement {
+                raw_adc_code: batch.mean_raw_code,
                 raw_adc_mv,
                 raw_adc_min_mv: batch.min_mv,
                 raw_adc_max_mv: batch.max_mv,
@@ -2086,5 +2087,29 @@ impl Fusb302bRuntime {
             Fusb302bReceiveEvent::UnsupportedSop => self.handle_unsupported_sop(i2c, now).await,
         };
         (result, received_message)
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) fn heater_supply_adc_metadata() -> flux_purr_firmware::heater_supply::BoundaryAdcMetadata
+{
+    flux_purr_firmware::heater_supply::BoundaryAdcMetadata {
+        divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
+        reference_mv: Efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION),
+        reference_code: Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION)
+            .unwrap_or(u16::MAX),
+        init_code: Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION)
+            .unwrap_or(u16::MAX),
+        efuse_version: Efuse::rtc_calib_version(),
+        attenuation_db: 6,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn heater_supply_adc_metadata() -> flux_purr_firmware::heater_supply::BoundaryAdcMetadata
+{
+    flux_purr_firmware::heater_supply::BoundaryAdcMetadata {
+        divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
+        ..Default::default()
     }
 }

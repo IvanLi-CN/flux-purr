@@ -117,15 +117,36 @@ pub(crate) fn production_thermal_controller(
         _ => false,
     };
     let bank = resolve_thermal_profile_bank(mode, manual_pps);
-    let required_ma = match bank {
-        ThermalProfileBank::Pps3a => 3_000,
-        ThermalProfileBank::Pps5a => 5_000,
+    // Automatic supply-boundary calibration is currently a 3 A contract even
+    // when Auto selects the 5 A profile bank for its thermal parameters. The
+    // explicit 100 W mode remains the only path that requires a 5 A contract.
+    let required_ma = match (mode, bank) {
+        (ThermalProfileMode::Auto, _) | (_, ThermalProfileBank::Pps3a) => 3_000,
+        (_, ThermalProfileBank::Pps5a) => 5_000,
     };
+    let active_contract_is_safe_terminal = power_state.active.is_some_and(|active| {
+        mode != ThermalProfileMode::W100
+            && active.mode == PdContractRequestMode::Pps
+            && active.voltage_mv == AUTOMATIC_TERMINAL_VOLTAGE_MV
+            && active.operating_current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
+            && manual_pps
+                .source_power_limit_ma
+                .is_some_and(|limit| limit >= MAX_AUTOMATIC_HEATER_CONTRACT_MA)
+            && manual_pps.source_power_limit_mw.is_some_and(|limit| {
+                u32::from(active.voltage_mv) * u32::from(active.operating_current_ma) / 1_000
+                    <= limit
+            })
+    });
     if contract_continuous
         && power_state.available
         && power_state.failure.is_none()
         && power_state.active.is_some_and(|active| {
-            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= required_ma
+            active.mode == PdContractRequestMode::Pps
+                // 5.5 V is the standby PPS floor. Automatic heating may use
+                // any higher, safety-bounded PPS contract; the 12 V startup
+                // request is not a thermal-output eligibility threshold.
+                && active.voltage_mv > FUSB302B_PPS_MIN_MV
+                && (active.operating_current_ma >= required_ma || active_contract_is_safe_terminal)
         })
         && manual_pps.has_matching_pps_apdo(20_000, required_ma)
     {
@@ -826,6 +847,7 @@ pub(crate) struct ThermalPlantRuntimeInput {
     pub(crate) heater_enabled: bool,
     pub(crate) model: flux_purr_firmware::memory::ThermalPlantProjection,
     pub(crate) max_power_mw: f32,
+    pub(crate) allow_integral: bool,
     pub(crate) now_ms: u64,
 }
 
@@ -1566,7 +1588,12 @@ impl HeaterController {
         } else {
             0.0
         };
-        self.hold_integral_c = if frame.hold_ki > 0.0 && self.control_measurement_accepted() {
+        self.hold_integral_c = if frame.hold_ki > 0.0
+            && self.control_measurement_accepted()
+            && self
+                .natural_cooling_input
+                .is_none_or(|input| input.allow_integral || frame.hold_guard_error_c <= 0.0)
+        {
             let elapsed_cycles = frame.elapsed_ms as f32 / HEATER_CONTROL_INTERVAL_MS as f32;
             (self.hold_integral_c + frame.hold_guard_error_c * elapsed_cycles)
                 .clamp(0.0, integral_limit)

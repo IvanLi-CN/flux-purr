@@ -36,3 +36,8 @@
 - 自动热模型运行状态从通用 `CalibrationJobState` 分离为 `ThermalPlantRunSnapshot`，以 `runId` 区分每次尝试，以 `afterSample` 游标分页返回受限瞬态轨迹。
 - 快照明确区分 `ambient`、`heating`、`cooling` 阶段、运行中 provisional curve 与 EEPROM 提交后的 `activeResult`；自然冷却样本属于同一次运行的可见证据。
 - USB、LAN、native `devd` 和 Web 使用同一 `thermal_plant_run` v1 契约，并通过 capability 协商避免旧固件重复报错。
+
+## 2026-10-16
+
+- ADR 0019 以整机 CC/CV 边界替代合同电流反推电阻；旧电阻曲线及其热模型不兼容，独立 ADC 校准保留。
+- 运行快照使用 v2，在独立 supplyBoundary 字段公开原始 ADC、请求值和转换假设，旧电阻字段为空；边界和紧凑热轨迹共享现有 ThermalPlant 原子事务。

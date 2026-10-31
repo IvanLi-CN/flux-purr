@@ -723,6 +723,45 @@ pub(crate) async fn device_status(
     Ok(Json(target.status))
 }
 
+pub(crate) async fn device_thermal_status(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = {
+        let mut state_lock = state.lock()?;
+        if requires_lease(&state_lock, &device_id) {
+            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
+        }
+        device(&state_lock, &device_id)?.clone()
+    };
+    if target.transport == DeviceTransport::NativeSerial {
+        let status = match serial_request_payload::<ThermalStatus>(
+            &state,
+            &target,
+            "get_thermal_status",
+            "thermalStatus",
+        )
+        .await
+        {
+            Ok(status) => status.into_value(),
+            Err(error) => {
+                record_serial_bridge_error(&state, &device_id, "thermal_status", &error);
+                return Err(error);
+            }
+        };
+        return Ok(Json(status));
+    }
+    if target.transport == DeviceTransport::Lan {
+        let configured = lan_bridge_config(&target)?;
+        let status = lan_bridge_read::<Value>(&configured, "thermalStatus").await?;
+        return Ok(Json(status));
+    }
+    serde_json::to_value(target.status)
+        .map(Json)
+        .map_err(|_| HttpError::internal("failed to encode thermal status"))
+}
+
 pub(crate) async fn device_thermal_tuning(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -1148,9 +1187,9 @@ pub(crate) fn start_mock_calibration_job(
         .pps_mv
         .unwrap_or(DEFAULT_PD_REQUEST_MV);
     if kind == CalibrationJobKind::ThermalPlantAuto {
-        let (source, request_mv) = thermal_plant_start_request_for_device(device)?;
+        let (_, request_mv) = thermal_plant_start_request_for_device(device)?;
         thermal_request_mv = request_mv;
-        apply_mock_thermal_plant_start(device, source.max_ma, request_mv);
+        apply_mock_thermal_plant_start(device, 3_000, request_mv);
         next_request_mv = Some(request_mv);
     }
     device.status.calibration.job = CalibrationJobState {
@@ -1198,6 +1237,7 @@ pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, reque
         phase: Some(ThermalPlantRunPhase::Ambient),
         progress_percent: 0,
         elapsed_ms: 0,
+        ambient_raw_rtd_adc_mv: 0,
         current_temp_centi_c: 2500,
         heater_voltage_mv: request_mv,
         duty_percent: 0,
@@ -1205,6 +1245,7 @@ pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, reque
         restart_allowed: false,
         error: None,
     });
+    device.thermal_plant_run.version = 2;
     device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
     device.thermal_plant_run.provisional_curve = None;
 }
@@ -1328,14 +1369,10 @@ pub(crate) async fn configure_heater_curve(
         .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
     match payload.op {
         HeaterCurveConfigOp::Preview => {
-            let package = payload.package.clone().ok_or_else(|| {
-                HttpError::bad_request(
-                    "heater_curve_package_required",
-                    "Heater curve preview requires a package.",
-                )
-            })?;
-            validate_heater_curve_package(&package)?;
-            device.heater_curve.preview = Some(normalize_heater_curve_package(package));
+            return Err(HttpError::bad_request(
+                "heater_curve_format_obsolete",
+                "Legacy resistance calibration cannot be previewed. Run thermal_plant_auto.",
+            ));
         }
         HeaterCurveConfigOp::ClearPreview => {
             device.heater_curve.preview = None;
@@ -1392,19 +1429,10 @@ pub(crate) async fn save_heater_curve(
         return Ok(Json(heater_curve));
     }
 
-    let mut state_lock = state.lock()?;
-    let device = state_lock
-        .devices
-        .get_mut(&device_id)
-        .ok_or_else(|| HttpError::not_found("device_not_found", "Device not found."))?;
-    let preview = device.heater_curve.preview.clone().ok_or_else(|| {
-        HttpError::bad_request(
-            "heater_curve_preview_required",
-            "Heater curve save requires an active preview package.",
-        )
-    })?;
-    device.heater_curve.active = preview;
-    Ok(Json(device.heater_curve.clone()))
+    Err(HttpError::bad_request(
+        "heater_curve_format_obsolete",
+        "Legacy resistance calibration cannot be saved. Run thermal_plant_auto.",
+    ))
 }
 
 #[derive(Debug, Deserialize)]

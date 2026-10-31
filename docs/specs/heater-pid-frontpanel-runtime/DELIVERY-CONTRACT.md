@@ -13,7 +13,7 @@
 
 实施开始前必须重新确认工作树与 `origin/main` 同步。本文建立时的已验证基线为 `d86a4eddccfc9d31cbe9b9cb2f2d597b8b525278`，其中已包含 PD 模块化与恢复改动。
 
-固件主控调优按[整改合同](FIRMWARE-TUNING-REMEDIATION-CONTRACT.md)执行。Approach 使用制动优先的模型控制。Warmup 保持独立全功率和100ms物理软启动；Warmup→Approach 的首个正常控制周期立即请求 `50‰`（5%），让已经输入的余热继续传递。随后每个周期以实际/滤波误差、滤波升温率、标定自然损失、热容量及传热延迟决定补热，正常请求始终为 `50..1000‰`，不把进入 Approach 后的输出强制为单调下降，也不固定为50%默认曲线。预测余热必须允许抵扣散热补偿，不能用目标温度的完整损失形成隐含功率下限。过冲截止、传感器/电源故障等真实保护可以停热；普通 predictive coast 不能把 Approach 请求置零。brake/lead/damping 调整制动位置与响应；保留的 profile floor/ceiling 不钳制有效模型轨迹。固定物理 Hold 入口、稳定窗口和独立60秒确认保持不变。 模型制动控制使用 timing policy `4`，绑定 `modelApproachFloorPermille=50`、`allowedApproachFloorPermille=50` 和生产有效下限 `50‰`。候选配置值仍如实记录用于身份核验，不能抬高实际模型下限。原期限首次检查时仍须处于Approach、尚无期限内有效稳定窗口、期限前取得真实50‰请求且之后未提高非零请求，才可按原有限上限延长。期限、稳定窗口、热指标和独立确认均不放宽。历史policy `3` 保留100‰模型规则，policy `2` 保留100‰配置/Hold派生规则，不能以新政策重写旧报告。 固件高温高侧保守减能例外保留，外部方案冻结；模型输出不得由保留的profile floor/ceiling或Hold基线钳制。
+固件主控调优按[整改合同](FIRMWARE-TUNING-REMEDIATION-CONTRACT.md)执行。Approach 使用制动优先的模型控制。PPS Warmup 保持独立全功率，合同确认后为静态 `100%` 门控；协商或保护期间为 `0%`，不使用物理 PWM 软启动。fixed-PD fallback 等兼容 PWM 路径保留其既有 100ms 软启动。Warmup→Approach 的首个正常控制周期立即请求 `50‰`（5%），让已经输入的余热继续传递。随后每个周期以实际/滤波误差、滤波升温率、标定自然损失、热容量及传热延迟决定补热，正常请求始终为 `50..1000‰`，不把进入 Approach 后的输出强制为单调下降，也不固定为50%默认曲线。预测余热必须允许抵扣散热补偿，不能用目标温度的完整损失形成隐含功率下限。过冲截止、传感器/电源故障等真实保护可以停热；普通 predictive coast 不能把 Approach 请求置零。brake/lead/damping 调整制动位置与响应；保留的 profile floor/ceiling 不钳制有效模型轨迹。固定物理 Hold 入口、稳定窗口和独立60秒确认保持不变。模型制动控制使用 timing policy `4`，绑定 `modelApproachFloorPermille=50`、`allowedApproachFloorPermille=50` 和生产有效下限 `50‰`。候选配置值仍如实记录用于身份核验，不能抬高实际模型下限。原期限首次检查时仍须处于Approach、尚无期限内有效稳定窗口、期限前取得真实50‰请求且之后未提高非零请求，才可按原有限上限延长。期限、稳定窗口、热指标和独立确认均不放宽。历史policy `3` 保留100‰模型规则，policy `2` 保留100‰配置/Hold派生规则，不能以新政策重写旧报告。固件高温高侧保守减能例外保留，外部方案冻结；模型输出不得由保留的 profile floor/ceiling 或 Hold 基线钳制。
 
 ## 问题陈述
 
@@ -46,17 +46,17 @@
 
 `ff4bf3876f548bc4ba6ac1e2cb87259f0d132422` 仅是共用安全/执行器兼容锚点，不是“旧方案”的调优策略或报告基线。生产控制按[统一控制器决定](../../adr/0017-unified-production-thermal-controller.md)执行：3A与5A共同使用现有Warmup/Approach/Hold控制律，不保留原3A plant PI输出兼容要求。
 
-共用生产边界包含：物理thermal plant模型门禁、50ms单调控制节拍、PPS电压/PWM映射、100ms warmup软启动、传感器/过温/供电保护，以及独立的`thermal_plant_auto`受保护瞬态和原子激活。两类电源共享point-local控制器的warmup/approach/hold、有效参数和PI语义，电源类仅选择实际电流上限与独立bank。
+共用生产边界包含：物理thermal plant模型门禁、50ms单调控制节拍、PPS电压与门控映射、传感器/过温/供电保护，以及独立的`thermal_plant_auto`受保护瞬态和原子激活。PPS Warmup/全速合同确认后只允许0%或100%静态门控，禁止PWM软启动；100ms PWM软启动仅属于fixed-PD fallback等仍使用PWM的路径。两类电源共享point-local控制器的warmup/approach/hold、有效参数和PI语义，电源类仅选择实际电流上限与独立bank。
 
 生产控制兼容行为如下，调优实现必须逐项保留：
 
 | 部分 | 固定行为 |
 | --- | --- |
 | 模型与门禁 | 两类生产加热都仅在有效physical thermal plant model存在时允许，共用现有point-local profile控制器。源能力、温度相关电阻和电流安全边界限制实际可用供热。两者控制目标均为请求温度，不得使用隐藏target offset。`Pmax(T)`是建模上限而非实测功率。 |
-| 节拍与采样 | 控制循环固定为真实单调 `50 ms (20 Hz)`；每周期聚合 `64` 次 RTD conversion，采样总频率至少 `1280 Hz`。PWM 固定为 `100 Hz`，并回显控制间隔、周期耗时、滤波升温率和 coast 状态。 |
-| Warmup | 首次 arm、目标切换或 `Approach -> Warmup` 回退均执行 `100 ms` 线性软启动。warmup 内逻辑输出固定 `100%`，沿温度/电流合同允许的 PPS 上限运行；不得用 profile 中的较低功率把它变成慢爬坡。 |
+| 节拍与采样 | 控制循环固定为真实单调 `50 ms (20 Hz)`；每周期聚合 `64` 次 RTD conversion，采样总频率至少 `1280 Hz`。驱动器可使用 `100 Hz` MCPWM，但 PPS Warmup/全速的实际门控只允许静态 `0%/100%`，并回显控制间隔、周期耗时、滤波升温率和 coast 状态。 |
+| Warmup | PPS Warmup 首次 arm、目标切换或 `Approach -> Warmup` 回退均在合同确认后直接静态 `100%` 导通；协商/保护期间为 `0%`，禁止 1–99% PWM 软启动。fixed-PD fallback 保留其现有 100ms 线性软启动；warmup 内逻辑输出固定 `100%`，沿温度/电流合同允许的 PPS 上限运行，不得用 profile 中的较低功率把它变成慢爬坡。 |
 | Approach 与 Hold | 普通3A/5A与内部调优共用自然冷却模型辅助的生产profile路径，制动、预测及补热恢复按[自然冷却控制合同](NATURAL-COOLING-CONTROL.md)执行。首次进入Hold后仍锁定PPS电压，由PWM快速PI调节；Hold不主动下扫PPS。物理入口与资格门禁保持固定。 |
-| 执行器映射 | PPS 提供粗粒度功率控制；PPS 高于工作 floor 时保持 `100%` PWM，达到 floor 或 bounded down-ramp 时，PWM 按请求功率与当前电压等效功率连续补偿至 `0..100%`。持续满 PWM 且升温不足时，才允许至少间隔 `2 s`、每次最多 `500 mV` 上调 PPS。 |
+| 执行器映射 | PPS 电压提供粗粒度功率控制；Warmup/全速在确认合同后保持 `100%` 静态门控，低功率 Approach/Hold 才可按请求功率与当前电压等效功率使用 `0..100%` duty。持续 `100%` 静态门控且升温不足时，才允许至少间隔 `2 s`、每次最多 `500 mV` 上调 PPS。 |
 | 参数与 profile | 运行时按目标温区选择完整 point-local 参数：brake、warmup reentry、approach、hold、PI、blend、lead 与各阈值。`settings` 只承载规定的全局字段。任何 preview/save 必须把当前目标的 effective point 和 settings 完整、可读回地 materialize。 |
 | 物理模型标定 | `thermal_plant_auto` 是独立单次事务：选择覆盖 `20V / >=3A` 的一个 PPS APDO，使用该 APDO `max_mv` 与 `100%` PWM 加热到 `220C`，立即断开 MOS，在保持合同下被动冷却至 `80C`，由同一 trace 拟合并原子激活。它不进入 Approach/Hold，也不生成 PID candidate。 |
 | 安全边界 | PPS/AVS capability、current reserve、传感器故障、EEPROM/thermal-model lock、绝对过温、合同丢失和 terminal disarm 始终优先于控制输出；任何安全拒绝都保持 heater 停用并留下可观察原因。 |
@@ -153,8 +153,8 @@ PID/profile 调优报告是本交付的正式审查证据，不是可随意裁�
 3. `run.bundle.json` 的顶层必须包含：`schema=thermal-tuning-v2`、`runId`、`engine`、设备/固件 identity、`powerClass`、`ppsControlPolicyVersion`、`ppsVoltageBounds`（absolute min/max、policy floor、APDO min/max）、完整物理目标集、所选目标集、实际执行顺序、qualification scope、`terminalDisposition`、`reviewDisposition`、`trace`、`candidate`、`referenceComparison`、file digests 与 capability metadata。`trace` 必须给出 `firstSequence`、`lastSequence`、`complete`、`digest` 和 `gap`；候选必须给出 `candidateId`、`candidateHash` 与 promotion state。
 4. trace 是从零开始、全局单调、无重复的事件序列。`samples.ndjson` 与 `decision-ledger.ndjson` 合并后，在 `trace.complete=true` 时必须覆盖 `firstSequence..lastSequence` 的每一个 sequence。允许的事件种类固定为 `sample`、`phase_transition`、`candidate_trial`、`decision` 和 `safety`。任何 sequence 缺口、digest 不符、持久化失败或被覆盖的未确认事件必须显式成为 `trace_gap/review_incomplete`，不得由相邻样本推断、插值或静默删除。
    `trace.digest` 使用跨目标稳定的 `thermal-tuning-event-digest-v2` 规范：事件 JSON 中的 `decision.score` 不依赖平台浮点文本格式，而以固定 `1e-6` 精度的有符号整数参与链哈希；其它事件字段按固件 canonical serialization 参与哈希。主机和设备必须使用同一规范校验，不能以重新格式化的展示 JSON 替代原始事件链。
-5. 每个 sample 必须记录：`sequence`、`elapsedMs`、`kind`、`targetC`、`trialIndex`、candidate identity/reference、`temperatureCentiC`、`vinMv`、`ppsContractMv`、`ppsContractMa`、`ppsContractKind`、`ppsContractConfirmed`、`ppsRequestedMv`、`ppsPowerCeilingMv`、`heaterRequestedOutputPermille`、`heaterOutputPermille`、测量有效性和 core/PID phase。`ppsPowerCeilingMv` 虽沿用该字段名，含义仅为所选 APDO 的生产 PPS 请求电压上限，单位 mV；它不得由合同电压、电流或 `V × I` 推导，也不是实测功率。`heaterRequestedOutputPermille` 是 PPS 选择和安全限幅前的 PID 逻辑请求；`heaterOutputPermille` 是功率映射、软启动和本地安全限幅后最后写入加热 MOS 的 PWM duty。二者均为 `0..=1000`、必须来自独立 trace 来源、不得相互复制或由展示层推导。
-6. 每个 `candidate_trial` 必须携带完整 canonical candidate 参数、candidate hash、trial 起止 sequence/时间和样本范围。参数不得以默认值掩盖，必须覆盖所有影响加热输出的 point-local 字段：warmup power/re-entry、brake、approach power/floor/damping/tail、hold power/reheat、entry/exit/on/off/cutoff、PI、lead 与 blend；还必须记录 candidate seed 来源及当前 run 的上下边界。每个 `decision` 必须保留完整 score vector、全部 hard-gate 结果、freeze、interval prune、disposition 和失败原因；PPS scheduler decision 还必须能复盘稳定窗口、逻辑请求/实际 PWM 均值、调压前后请求、方向、policy version 和 `floor_limited` 事实。
+5. 每个 sample 必须记录：`sequence`、`elapsedMs`、`kind`、`targetC`、`trialIndex`、candidate identity/reference、`temperatureCentiC`、`vinMv`、`ppsContractMv`、`ppsContractMa`、`ppsContractKind`、`ppsContractConfirmed`、`ppsRequestedMv`、`ppsPowerCeilingMv`、`heaterRequestedOutputPermille`、`heaterOutputPermille`、测量有效性和 core/PID phase。`ppsPowerCeilingMv` 虽沿用该字段名，含义仅为所选 APDO 的生产 PPS 请求电压上限，单位 mV；它不得由合同电压、电流或 `V × I` 推导，也不是实测功率。`heaterRequestedOutputPermille` 是 PPS 选择和安全限幅前的 PID 逻辑请求；`heaterOutputPermille` 是最后写入加热门控的输出命令：PPS Warmup/全速仅允许 `0` 或 `1000`（分别为静态关闭/导通），低功率 Approach/Hold 与 fixed-PD fallback 才可出现中间 PWM duty。二者均为 `0..=1000`、必须来自独立 trace 来源、不得相互复制或由展示层推导。
+6. 每个 `candidate_trial` 必须携带完整 canonical candidate 参数、candidate hash、trial 起止 sequence/时间和样本范围。参数不得以默认值掩盖，必须覆盖所有影响加热输出的 point-local 字段：warmup power/re-entry、brake、approach power/floor/damping/tail、hold power/reheat、entry/exit/on/off/cutoff、PI、lead 与 blend；还必须记录 candidate seed 来源及当前 run 的上下边界。每个 `decision` 必须保留完整 score vector、全部 hard-gate 结果、freeze、interval prune、disposition 和失败原因；PPS scheduler decision 还必须能复盘稳定窗口、逻辑请求/实际 gate duty 均值、调压前后请求、方向、policy version 和 `floor_limited` 事实。PPS Warmup/全速的 gate duty 只能是静态 `0%/100%`；只有低功率 Approach/Hold 或 fixed-PD fallback 才能出现中间 duty。
 7. candidate-ready 必须同时证明：该 candidate 自己的 warmup 控制器请求为 `100%`、存在完整 `approach -> hold`、`maxOvershootC <= 3.0`、`holdPeakToPeakC <= 3.0`、满足既有 full-speed-to-stable 动态门槛并完成 `60s` hold confirm。报告必须分别显示 candidate 的 warmup、approach、hold、稳定窗口建立用时和各自门槛；前一 candidate 或 cooldown 的样本不得计入后续 candidate 的评分、预热或指标。
 8. `thermal-profile.candidate.json` 必须保存 canonical profile、bank、`runId`、candidate ID/hash、promotion state 和 post-seal receipts。preview receipt 必须含 RAM applied hash；save receipt 必须含匹配的 EEPROM bank revision/hash。preview/save 的身份必须严格绑定 `runId + candidateId + candidateHash + powerClass`；只有 seal 后成功 preview 且经第二次简单确认的同一候选可以 save。`terminalDisposition` 和 `reviewDisposition` 保留完整事实；面向操作者的资格结论只能显示 `passed` 或 `failed`，任何 incomplete、取消、预算耗尽、安全故障或保存/readback 不匹配都不得被显示为通过。
 9. 报告页面的目标卡、验收指标、candidate 详情和默认主图必须引用同一个 adopted trial，并显示试验编号/总数。其余 trial 必须可切换，显示 `rejected`、`passed` 或 `adopted`、过冲、峰峰值和 gate。主温度、控制和设备电气图随试验切换；不得叠加不同 trial 或把 rejected 轨迹归因于 adopted 卡。目标温度与试验选择器必须合并为同一吸顶选择区，滚动或截图时持续显示当前目标、试验编号及 disposition。`cooldown_wait` 保留在原始 trace 审计中，但不占用主响应图。温度、控制输出、VIN/PPS 电压和 PPS 合同电流必须使用清晰的独立量纲；控制图同时展示 `logicalHeaterOutputPercent` 与 `mosPwmDutyPercent`，两者均为 `0..100%`，不允许隐藏倍率、`0..1` 归一化值或负值坐标。
@@ -166,6 +166,7 @@ PID/profile 调优报告是本交付的正式审查证据，不是可随意裁�
 1. 先完成 host 侧 firmware、devd、Web 单元/集成、mock transport、报告和浏览器证据。
 2. 所有 UI 修改必须按项目视觉证据流程在桌面和移动视口验证，涵盖可用、锁定、运行、失败和完成状态。
 3. 软件验证通过后，才可建立独立 HIL 执行记录。HIL 前必须由主人给出精确 MCU 端口以及必要的烧录/串口授权；端口消失或重枚举时立即停止，不能自动改用新端口。
+4. A6/HIL 电气验收必须分成两个独立运行：先完成 `thermal_plant_auto` 校准并读回 active calibration transaction/model identity，再以该已应用模型启动新的正常自动加热全逻辑功率运行。验收报告只能由第二阶段的完整原始采样生成；校准扫描、校准终端探针或同一运行中校准前的样本不能充当验收证据。第二阶段 PPS Warmup/全速只能使用逻辑请求 `100%` 和确认合同后的静态物理门控 `100%`，安全重协商的 `0%` 需单独标记，`1..99%` PWM 软启动使该运行不具备通过资格。
 
 ## 验收标准
 
@@ -180,7 +181,7 @@ PID/profile 调优报告是本交付的正式审查证据，不是可随意裁�
 | AC-07 | 无有效 `PowerState`、合同过期或任一安全锁时，加热写操作被拒绝或安全停用，且控制台仍显示诊断信息。 | fault/contract-loss tests；UI locked-state evidence。 |
 | AC-08 | 取消、故障、EEPROM 写入/读回失败和 status mismatch 都不会把候选误报为已保存或已通过；报告保留可复盘的失败事实。 | negative-path tests、报告 fixture 和持久化断言。 |
 | AC-09 | 修改后的 Web、firmware 和 devd 通过与变更面匹配的质量门。 | `bun run check:web`、`bun run check:web:build`、`bun run check:storybook`、`bun run check:firmware:fmt`、相关 firmware/devd tests，以及 `git diff --check`。重型或全量验证按共享测试机流程执行。 |
-| AC-10 | 真实热端验收只在明确硬件授权后进行，并以主题 SPEC 的温度、过冲、稳定性、功率资格、故障和报告要求判定。 | 授权端口记录、HIL 原始遥测与 canonical report bundle；软件通过本身不替代此项。 |
+| AC-10 | 真实热端验收只在明确硬件授权后进行，并以主题 SPEC 的温度、过冲、稳定性、功率资格、故障和报告要求判定。验收必须先完成校准并读回 active calibration identity，再以该模型进行独立正常自动加热全逻辑功率运行；报告只能来自第二阶段原始采样，不能由校准扫描或单运行混合数据构成。 | 授权端口记录、校准 run 与 active transaction/model readback、独立 acceptance run、第二阶段原始同步遥测与 canonical report bundle；软件通过本身不替代此项。 |
 | AC-11 | 调优报告满足本合同第 6 节的五文件、数据完整性、展示、结果分类、指标和持久化语义；完整报告的 sequence/digest 覆盖全部 sample 与 decision 事件，不完整报告明确 `trace_gap/review_incomplete`，且不存在 candidate/saved profile 混淆或失败事实被隐藏。 | complete 与 review-incomplete canonical bundle fixtures、报告渲染/解析测试、schema assertions 和人工 review。 |
 | AC-12 | 3A和5A在相同模型/电源/温度输入下共用profile控制律；普通加热与调优使用同一控制器，preview/save/clear 的有效 point/settings 可改变可观测逻辑请求和最终 MOS 输出；有效模型门禁、PD/PPS、电流、传感器、过温和标定保护保持有效。5A 不要求与旧 plant PI 逐值同输出，电源类别不得在 armed 状态热切换。 | 两类电源的共享控制律fixture、正常/调优路径和候选参数差异测试、故障/合同丢失/源类别切换测试、执行器边界断言及授权 HIL。 |
 

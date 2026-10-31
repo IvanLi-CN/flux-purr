@@ -120,13 +120,13 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN | SAFE`. `postHeatCoolingMode` is `off | normal | fast` and `heatingFanGuardMode` is `off | low | medium | high`. `fanPolicySource` is `idle | post_heat | heating_guard | safety`; `fanOutputLevel` is the abstract `off | low | medium | high | limited` board output level. These fields never expose voltage, PWM, or fan tach data. `activeCoolingEnabled` remains a derived compatibility projection of `postHeatCoolingMode`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
-`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. The measured voltage does not determine Fixed/PPS contract validity; a PPS source may deliver a lower voltage during normal current limiting without canceling that contract. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot be used for performance or calibration claims. FUSB302BMPX applies the `5V..28V` PD guard before selecting its live APDO (currently `5V..21V`) and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
+`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. The measured voltage does not determine Fixed/PPS contract validity; a PPS source may deliver a lower voltage during normal current limiting without canceling that contract. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot establish the performance guarantee. Protected calibration requires an advertised APDO covering `20V / >=3A`; it first confirms an unloaded high-voltage 3A contract, then uses the product rapid path to record confirmed full-conduction 3A voltage observations with 500mV coarse movement away from a loaded boundary and 100mV final-bracket steps after a 500ms electrical observation interval, followed by powered coverage to at least 100°C and fan-assisted cooling/fitting within five minutes. FUSB302BMPX applies the `5V..28V` PD guard before selecting its live APDO (currently `5V..21V`) and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
 Fixed standby selection and the explicit USB `flash_preparation` operations use protocol-confirmed contract and applied-output facts. They do not use `voltageMv`, `vinRawAdcMv`, ADC calibration, VIN freshness, or a VIN tolerance/dwell check. Source-side VBUS measurements used in HIL are independent evidence and do not add a host flash gate.
 `rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
 
 Optional `rtdDividerSupplyMv` reports the firmware's RTD-divider excitation assumption: 3328mV in the default board image or 3208mV with `rtd-supply-3208mv`. It is a board electrical input, not an ADC reference measurement or a manual calibration sample. Missing user RTD/VIN calibration continues to use the default mapping with no fabricated user points. Older firmware may omit the field.
 `faultAttentionPending=true` only means a `temp >= 420°C` thermal-runaway event has fallen below `420°C` and still awaits acknowledgement. RTD open/short and ADC read failure do not set this field. Owner-facing temperature remains the last valid RTD value while a measurement fault is active; unavailable transport state must not synthesize `0°C`.
-`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. On a PPS/AVS backend, the selected APDO's voltage and current contract bounds production power; `R(T)` is used for heater-watt estimation but neither it nor `heaterCurrentReserveMa` lowers the adjustable-voltage request ceiling. The current-reserve field remains relevant only to the fixed-PD PWM fallback.
+`manualPps*` remains the debug-only PPS override surface. Owner-facing calibration mode control uses `status.calibration` / `runtime_config.calibration` as its semantic source of truth. `thermalControlProfilePreview=true` means the firmware is using a RAM-only thermal profile preview; `clear_preview` returns to the persistent saved profile or factory default curve. `thermalControl` is the resolved controller input for the current target, not an echo of the last request: it reports whether a profile is active and covers the target, its source (`default` / `preview` / `saved`), and the effective power, damping, PI, lead, filter, warmup-reentry, adjustable-voltage-floor, and `heaterCurrentReserveMa` parameters after interpolation, legacy-profile inflate when importing old data, and safety clamps are applied. Normal automatic heating uses an applicable whole-device supply boundary, or a labelled preset electrical model fallback for uncovered conditions. It subtracts no fixed auxiliary current. The persisted current-reserve field remains available only for historical profile contracts and legacy fixed-PD control.
 
 ### `CalibrationState`
 
@@ -183,29 +183,15 @@ Owner-facing calibration modes are fixed as:
 fourth owner-facing calibration mode and cannot be selected through the
 manual calibration control.
 
-Calibration live control requires an active adjustable PPS contract. FUSB302BMPX exposes calibration only while its selected live PPS contract (currently within `5V..21V`) meets the `>=20V @ >=3A` performance tier; its fixed-PDO fallback remains heat-only. This path remains subject to the authorized HIL interoperability gate.
+Manual calibration live control requires an active adjustable PPS contract. Protected `thermal_plant_auto` starts from an advertised APDO covering `20V / >=3A` on the FUSB302B controller, without requiring an existing 20V PPS contract. It confirms an unloaded high-voltage 3A contract with heating off, then uses a five-minute rapid path that requests exactly `3A`, advances in 500mV coarse steps away from a loaded boundary and 100mV steps for the final bracket, and records confirmed full-conduction observations after a `500ms` electrical observation interval. It retains the last safe tracking voltage until repeated hot boundary observations provide at least `100°C` powered coverage, then disables the heater for the existing fan-assisted cooling and fit sequence. CH224Q cannot program this PPS calibration and is not a source for this job. Requests below `3A` are restricted to calibration ownership; ordinary automatic heating retains its `>=3A` admission. Fixed-PDO fallback is not a calibration source. The detailed multi-current scanner remains host regression coverage and is not the product calibration entry point.
 
 ### `HeaterCurveState`
 
-```json
-{
-  "active": {
-    "points": [
-      { "tempCentiC": 13977, "resistanceMilliohms": 6033 },
-      { "tempCentiC": 18153, "resistanceMilliohms": 6522 },
-      null,
-      null,
-      null,
-      null,
-      null,
-      null
-    ]
-  },
-  "preview": null
-}
-```
+`active.points` contains only null entries and `preview` is null. Legacy resistance calibration is treated as absent; `preview` and `save` reject obsolete curve input. `supplyBoundary` exposes the versioned whole-device boundary independently of those legacy fields. External EEPROM remains the sole persistent backend; no ESP flash or NVS fallback is selected.
 
-Heater curve points store temperature in centi-Celsius and effective resistance in milliohms. `preview` is runtime-only and can be used immediately by heater power limiting logic. `save` copies the preview curve to `active`; only `active` is persisted in the safety-calibration EEPROM domain and restored after reboot. Firmware uses external EEPROM as the only memory backend; safety-domain failure enters `EEPROM_REQUIRED`, while ordinary preference/network failures remain scoped to their domain. No ESP flash or NVS fallback is selected.
+`SupplyBoundary` carries `formatVersion`, `wifiStarted`, `sourceMinMv`, `sourceMaxMv`, `sourceMaxMa`, `advertisedMinMv`, `advertisedMaxMv`, `cutoffReached`, ADC metadata (`dividerSupplyMv`, `referenceMv`, `referenceCode`, `initCode`, `efuseVersion`, `attenuationDb`), and up to 41 raw `points`. Each row is `[elapsedMs, rtdCode, rtdMv, vinCode, vinMv, requestMa, trackingMv, flatMv, trackingOnly]`; `flatMv=0` means no flat response was observed before the probe ended, and `trackingOnly=1` identifies a transient 3A probe rather than an equilibrium. ADC mV values precede user calibration and are not absolute voltage references. Requested current is a setting, not a measured load current. WiFi state describes the actual driver, independently of network association. `sourceMinMv`/`sourceMaxMv` are the usable scan bounds; `advertisedMinMv`/`advertisedMaxMv` retain the original APDO envelope used to match a later confirmed contract.
+
+The `thermal_plant_run` snapshot is version 2 and carries the same optional `supplyBoundary`; legacy provisional resistance curves remain null. Raw trace pages retain the existing `afterSample` cursor and 16-point limit.
 
 ### `ThermalPlantModel`
 
@@ -221,9 +207,9 @@ Heater curve points store temperature in centi-Celsius and effective resistance 
 }
 ```
 
-`state` is `missing`, `active`, or `invalid`. The persistent source of truth is a bounded raw transient trace: ambient RTD ADC, `50ms` timestamps, RTD ADC, measured heater voltage, and duty. `thermal_plant_auto` samples the heater-resistance curve during the same run, requests the selected APDO's maximum voltage with `100%` PWM until `220C`, then immediately disarms and records natural cooling to `80C`. The APDO must cover `20V` at `>=3A`; a `5V..21V / 3A` APDO therefore runs at `21V`, while a `5V..20V / 3A` APDO runs at `20V`. Heater-curve data and production-profile current reserve settings do not reduce the calibration request. The device fits the coefficients locally, writes a physically valid model directly to `active`, and leaves heating disarmed. There is no candidate, promotion, cross-current comparison, or user acceptance operation. Production heating requires an active model, a PPS APDO covering `20V` at at least `3A`, and the curve captured by that same transient run.
+`state` is `missing`, `active`, or `invalid`. Activation requires a new-format whole-device boundary and its complete, physically valid thermal trace committed together. Legacy resistance-derived calibrations are absent. `thermal_plant_auto` obtains an unloaded baseline, confirms a high-voltage 3A contract, records a rapid `3A` voltage scan with 500mV coarse movement away from the source boundary and 100mV final-bracket steps with confirmed `500ms` observations, and retains the safe tracking voltage until repeated hot boundary observations provide at least `100°C` coverage. At `220°C`, it disables PWM immediately. It then records fan-assisted cooling to `80°C` and fits the model within the same five-minute wall-clock budget; a timeout or invalid fit leaves the previous model intact. The device fits and activates the pair locally; no candidate promotion or user acceptance operation exists. The compact trace retains at most 48 points with `50ms` timestamps, RTD ADC, confirmed requested voltage quantized to `125mV`, physical duty, and a cooling marker (`254` fan-assisted, `255` passive). Transient fitting uses the confirmed VIN response paired with the fixed 3A contract ceiling as a bounded input proxy, never as measured load power; rows with less than `1°C` observable RTD change remain in raw evidence but do not enter the energy-balance fit, and fan-assisted cooling rows are terminal evidence rather than heater-input rows. Normal heating uses only applicable 3A observed boundaries and a labelled preset electrical fallback for uncovered conditions; no fixed current reserve, OvO telemetry, inferred MCU power, or legacy resistance curve is applied.
 
-The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the passive-cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty and physical PWM are cleared in that control cycle. The selected calibration-owned PPS contract remains unchanged through passive cooling so PD renegotiation cannot disturb the RTD trace, and is cleared only after the model transaction completes, is canceled, or fails. General sensor and absolute-overtemperature protections remain authoritative.
+The calibration state machine uses the current valid RTD measurement directly for transient sampling, the `220C` cutoff, and the fan-assisted cooling endpoint. Guarded control temperature remains a production PID input only. There is no separate `225C` calibration failure threshold; once the live measurement first reaches `220C`, logical duty and physical PWM are cleared in that control cycle. The selected calibration-owned PPS contract remains at the fan working floor through fan-assisted cooling so PD renegotiation cannot disturb the RTD trace, and is cleared only after the model transaction completes, is canceled, or fails. General sensor and absolute-overtemperature protections remain authoritative.
 
 ### Firmware thermal tuning sample fan evidence
 
@@ -486,9 +472,9 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 }
 ```
 
-`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the heater curve while heating to `220C`, turns the heater off in that same control cycle, and completes after passive cooling to `80C`. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+`op` is `start | cancel`. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`. `vin_adc_auto` writes shared `vin_adc` samples; `thermal_plant_auto` enters its internal runtime state directly and is the protected single-run transient job. It requires a PPS capability covering `20V` at `>=3A`, records the raw whole-device 3A supply boundary through the rapid voltage scan, turns the heater off after at least `100C` powered coverage or at the independent `220C` cutoff, and completes the fan-assisted cooling and fit sequence within five minutes. `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
-`GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>` returns the v1 `ThermalPlantRunSnapshot`. `after_sample` defaults to `0`; the response starts at that sample index, returns at most 16 trace points, and includes `nextSample` when more points remain. The response exposes projected temperature, measured heater voltage, duty, elapsed time, and phase only; raw ADC values are excluded. The payload is bounded below 8 KiB. `attempt` reports the live or terminal run and `activeResult` is populated only after the persisted transaction commits. Clients should stop polling after terminal `restartAllowed=true`. A missing `thermal_plant_run` identity capability is an explicit compatibility state, not a retryable endpoint error.
+`GET /api/v1/devices/:id/calibration/thermal-plant/run?lease_id=...&after_sample=<cursor>` returns the v2 `ThermalPlantRunSnapshot`. `after_sample` defaults to `0`; the response starts at that sample index, returns at most 16 trace points, and includes `nextSample` when more points remain. Trace pages expose projected temperature, measured heater voltage, duty, elapsed time, and phase. The separate optional `supplyBoundary` includes retained raw RTD/VIN ADC observations, requested voltage/current, elapsed time, WiFi driver state, advertised and usable APDO ranges, and the assumed 3V3 reference needed for later reprojection. The payload is bounded below 8 KiB. `attempt` reports the live or terminal run and `activeResult` is populated only after the persisted transaction commits. Clients should stop polling after terminal `restartAllowed=true`. A missing `thermal_plant_run` identity capability is an explicit compatibility state, not a retryable endpoint error.
 
 `POST /api/v1/devices/:id/eeprom` is the USB/devd-only advanced raw EEPROM maintenance endpoint. It requires an active lease and native USB serial transport; it is not exposed through the device LAN API or Web console. Physical heater output must already be `0%`.
 
@@ -524,7 +510,7 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 }
 ```
 
-`op` is `preview | clear_preview`. Preview updates runtime heater curve state without writing EEPROM.
+`op` is `preview | clear_preview`. The legacy `preview` request is rejected with `heater_curve_format_obsolete`; its resistance values cannot affect runtime control. `clear_preview` remains an idempotent clear operation.
 
 `POST /api/v1/devices/:id/heater-curve/save` body:
 
@@ -534,7 +520,7 @@ The diagnostic is a test session layered on the ordinary firmware runtime: it us
 }
 ```
 
-Save copies the preview curve to active curve and schedules persistent memory commit. If no preview exists, the request is rejected with `heater_curve_preview_required`.
+Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole-device supply boundary is committed atomically with the thermal model by `thermal_plant_auto`; this endpoint cannot persist a resistance curve or migrate old calibration.
 
 `GET /api/v1/artifacts` response:
 
@@ -890,7 +876,7 @@ The response payload is the same `ThermalPlantRunSnapshot` returned by the nativ
 }
 ```
 
-Supported operations are `preview` and `clear_preview`. The response returns `HeaterCurveState`.
+The legacy `preview` operation returns `heater_curve_format_obsolete`. `clear_preview` returns `HeaterCurveState` with empty legacy curve fields. The supply boundary is exposed separately as `supplyBoundary`.
 
 ### `heater_curve_save`
 
@@ -901,7 +887,7 @@ Supported operations are `preview` and `clear_preview`. The response returns `He
 }
 ```
 
-The response returns `HeaterCurveState`. Saved `active` curve is restored from persistent device memory after reboot; preview is not restored.
+The operation returns `heater_curve_format_obsolete`. Persisted legacy resistance calibration is treated as absent after reboot; only a current-format whole-device supply boundary and its associated thermal calibration can be restored.
 
 ### `error`
 

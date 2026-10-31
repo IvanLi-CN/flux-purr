@@ -788,6 +788,7 @@ async fn start_wifi_driver(
             .with_password(alloc::string::String::from(config.password.as_str())),
     );
     stack.set_config_v4(net_config(config).ipv4);
+    crate::heater_supply::publish_wifi_hardware_state(None);
     // start_async calls the synchronous radio start on its first poll. Let an
     // in-flight I2C transaction finish before that call blocks this executor;
     // release the bus before waiting for the driver's asynchronous start event.
@@ -805,6 +806,15 @@ async fn start_wifi_driver(
                 ))
     })
     .await;
+    // `start_async` has already established the driver when it returns true.
+    // A second `is_started` probe can transiently fail while the radio is
+    // settling; publishing that probe as `None` would make automatic heating
+    // fail-safe indefinitely even though the network stack is usable.
+    crate::heater_supply::publish_wifi_hardware_state(if driver_started {
+        Some(true)
+    } else {
+        controller.is_started().ok()
+    });
     if driver_started {
         return true;
     }
@@ -944,7 +954,8 @@ async fn wait_wifi_disconnect(
 }
 
 async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
-    match controller.is_started() {
+    crate::heater_supply::publish_wifi_hardware_state(None);
+    let stopped = match controller.is_started() {
         Ok(false) => true,
         Ok(true) => matches!(
             with_timeout(
@@ -955,7 +966,15 @@ async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
             Ok(Ok(()))
         ),
         Err(_) => false,
-    }
+    };
+    // A successful stop is authoritative. Do not turn a transient follow-up
+    // probe error into an unknown state that blocks the next clean start.
+    crate::heater_supply::publish_wifi_hardware_state(if stopped {
+        Some(false)
+    } else {
+        controller.is_started().ok()
+    });
+    stopped
 }
 
 async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {

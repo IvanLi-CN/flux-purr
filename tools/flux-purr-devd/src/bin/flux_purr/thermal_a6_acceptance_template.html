@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>A6 3A 电源边界验收</title>
+  <style>
+    :root { --bg:#f4f6f7; --paper:#fff; --ink:#17232b; --muted:#65737c; --line:#d8e0e4; --blue:#1769aa; --teal:#167e83; --red:#c73636; --green:#18794e; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { max-width:1480px; margin:auto; padding:24px; }
+    header { display:flex; justify-content:space-between; gap:24px; align-items:flex-start; margin-bottom:18px; }
+    h1 { margin:5px 0 7px; font-size:26px; line-height:1.2; }
+    h2 { margin:0; font-size:18px; } h3 { margin:0; font-size:14px; }
+    .eyebrow,.mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .eyebrow { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
+    .subtitle,.note { color:var(--muted); }
+    .stamp { color:var(--muted); text-align:right; font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; }
+    .status { background:var(--paper); border:1px solid var(--line); border-left:5px solid var(--red); padding:14px 16px; margin-bottom:14px; }
+    .status.pass { border-left-color:var(--green); }
+    .status strong { font-size:20px; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+    .wide { grid-column:1/-1; }
+    .panel { background:var(--paper); border:1px solid var(--line); border-radius:6px; padding:14px; }
+    .panel-head { display:flex; justify-content:space-between; gap:12px; align-items:baseline; margin-bottom:10px; }
+    .chart { height:340px; position:relative; } canvas { display:block; width:100%; height:100%; }
+    .facts { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:8px; }
+    .fact { border:1px solid var(--line); background:#fbfcfd; padding:10px; }
+    .fact label { display:block; color:var(--muted); font-size:11px; margin-bottom:3px; }
+    .fact strong { font:600 14px ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .pass-text { color:var(--green); } .fail-text { color:var(--red); }
+    .errors { margin:0; padding-left:20px; color:var(--red); }
+    .table-wrap { max-height:470px; overflow:auto; border:1px solid var(--line); }
+    table { width:100%; border-collapse:collapse; font-size:12px; }
+    th,td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:right; white-space:nowrap; }
+    th { position:sticky; top:0; background:#eef3f5; color:var(--muted); font-weight:600; }
+    th:first-child,td:first-child { text-align:left; }
+    footer { color:var(--muted); font-size:12px; margin-top:16px; }
+    @media (max-width:900px) { main { padding:14px; } header { display:block; } .stamp { text-align:left; margin-top:8px; } .grid { grid-template-columns:1fr; } .wide { grid-column:auto; } .chart { height:290px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <div class="eyebrow">Flux Purr / A6 3A automatic-heater acceptance</div>
+      <h1 id="title"></h1>
+      <div class="subtitle" id="subtitle"></div>
+    </div>
+    <div class="stamp" id="stamp"></div>
+  </header>
+  <section id="status" class="status"></section>
+  <section class="grid">
+    <article class="panel wide"><div class="panel-head"><h2>阶段二连续原始采样</h2><span class="note">横轴：阶段二 elapsed time (s)</span></div><div class="chart"><canvas id="thermalVoltage"></canvas></div></article>
+    <article class="panel"><div class="panel-head"><h3>电源实测电压 / 电流</h3><span class="note">左：V，右：A</span></div><div class="chart"><canvas id="source"></canvas></div></article>
+    <article class="panel"><div class="panel-head"><h3>电源实测功率</h3><span class="note">上限：60W</span></div><div class="chart"><canvas id="power"></canvas></div></article>
+    <article class="panel wide"><div class="panel-head"><h2>验收关键事实</h2><span class="note">Warmup/扫描仅允许 0%/100%；Approach/Hold 的中间 duty 单独展示</span></div><div id="facts" class="facts"></div></article>
+    <article class="panel wide"><div class="panel-head"><h2>失败原因</h2><span class="note">通过时为空</span></div><ul id="failures" class="errors"></ul></article>
+    <article class="panel wide"><div class="panel-head"><h2>阶段二原始样本</h2><span class="note">不省略时间、电压、电流、功率或门控字段</span></div><div class="table-wrap"><table id="samples"></table></div></article>
+  </section>
+  <footer>证据包包含 index.html、run.bundle.json、samples.ndjson 和 thermal-profile.accepted.json。此页面不使用远程资源；结论仅绑定本次阶段二 run 与阶段一 transaction。</footer>
+</main>
+<script>
+const DATA=__A6_REPORT_DATA__;
+const $=id=>document.getElementById(id);
+const fmt=(v,d=2)=>v==null?'—':Number(v).toFixed(d);
+const fmtA=v=>v==null?'—':fmt(v,3)+' A';
+const fmtV=v=>v==null?'—':fmt(v,2)+' V';
+const fmtC=v=>v==null?'—':fmt(v,2)+' °C';
+const fmtW=v=>v==null?'—':fmt(v,2)+' W';
+const samples=DATA.samples||[];
+const pass=DATA.reviewPassed===true;
+$("title").textContent=DATA.title;
+$("subtitle").textContent=DATA.subtitle;
+$("stamp").innerHTML=`DEVICE ${DATA.deviceId||'—'}<br>PORT ${DATA.port||'—'}<br>FIRMWARE ${DATA.firmwareSha||'unknown'}<br>SOURCE ${DATA.sourceDeviceId||'—'} / ${DATA.sourceUrl||'unknown'}<br>CAL TX ${DATA.calibrationTransactionId??'—'}<br>ACCEPTANCE ${DATA.acceptanceRunId||'—'}`;
+$("status").className='status '+(pass?'pass':'');
+$("status").innerHTML=`<strong class="${pass?'pass-text':'fail-text'}">${pass?'PASSED':'FAILED / INCOMPLETE'}</strong><div>${DATA.reviewOutcome||'failed'} · ${DATA.stopReason||'unknown stop reason'} · 终点温度 ${fmtC(DATA.stopTempC)}</div>`;
+const terminal=DATA.terminal||{}; const t3=DATA.t3A||{};
+const facts=[
+ ['阶段二起始温度',fmtC(DATA.startTempC)],['样本数',String(samples.length)],['样本时长',DATA.durationSeconds==null?'—':fmt(DATA.durationSeconds,1)+' s'],
+ ['近 3A 起点',`${fmtC(t3.startTempC)} / ${fmtA(t3.sourceCurrentA)}`],['近 3A 终点',`${fmtC(t3.lastTempC)} / ${fmtA(t3.lastSourceCurrentA)}`],['终端 T_21V',fmtC(terminal.tempC)],
+ ['终端申请',`${fmtV(terminal.requestV)} / ${fmtA(terminal.contractA)}`],['终端实测',`${fmtV(terminal.sourceV)} / ${fmtA(terminal.sourceI)}`],['终端功率',fmtW(terminal.sourceP)],
+    ['首次低于 2.8A',DATA.firstBelow28A?`${fmtC(DATA.firstBelow28A.tempC)} / ${fmtA(DATA.firstBelow28A.sourceI)}`:'未发生'],['模型身份',String(DATA.calibrationTransactionId??'—')],['Source 能力',`${DATA.sourcePowerWatts||'—'} W / ${fmtA((DATA.sourceCurrentLimitMa||0)/1000)}`],['Warmup 静态门控',DATA.staticGateEvidence?.complete?'通过':`${DATA.staticGateEvidence?.violationCount??'—'} 个违规`],['Approach/Hold 中间门控',`${DATA.staticGateEvidence?.approachHoldIntermediateSamples??0} 个（非全速阶段）`]
+];
+$("facts").innerHTML=facts.map(([l,v])=>`<div class="fact"><label>${l}</label><strong>${v}</strong></div>`).join('');
+$("failures").innerHTML=(DATA.failureReasons||[]).length?(DATA.failureReasons||[]).map(v=>`<li>${v}</li>`).join(''):'<li class="pass-text">无</li>';
+const rows=[['时间(s)','板温(°C)','申请(V)','板端VIN(V)','源电压(V)','源电流(A)','源功率(W)','合同(A)','逻辑(%)','物理(%)','阶段']];
+for(const s of samples) rows.push([fmt(s.t,3),fmt(s.temp),fmtV(s.requestV),fmtV(s.hotplateV),fmtV(s.sourceV),fmtA(s.sourceI),fmtW(s.sourceP),fmtA(s.contractA),String(s.logicalDuty??'—'),String(s.physicalDuty??'—'),s.phase||'—']);
+$("samples").innerHTML=rows.map((r,i)=>`<tr>${r.map((v,j)=>i===0?`<th>${v}</th>`:`<td>${v}</td>`).join('')}</tr>`).join('');
+function draw(id, series, leftLabel, rightLabel, leftColor, rightColor, refLines=[]){
+  const canvas=$(id), box=canvas.getBoundingClientRect(), ratio=window.devicePixelRatio||1, w=Math.max(320,box.width), h=Math.max(220,box.height); canvas.width=w*ratio; canvas.height=h*ratio; const c=canvas.getContext('2d'); c.scale(ratio,ratio);
+  const pad={l:52,r:52,t:18,b:30}, pw=w-pad.l-pad.r, ph=h-pad.t-pad.b; const xs=samples.map(s=>s.t); const xmin=xs[0]??0, xmax=xs.at(-1)??1; const x=v=>pad.l+(v-xmin)/Math.max(1,xmax-xmin)*pw;
+  const valuesFor=axis=>series.flatMap(q=>q.axis===axis?samples.map(s=>Number(s[q.key])).filter(Number.isFinite):[]);
+  const range=values=>({min:Math.min(0,...values),max:Math.max(1,...values)}); const left=range(valuesFor('left')), right=range(valuesFor('right'));
+  const y=(v,axis)=>{const r=axis==='right'?right:left;return pad.t+(r.max-v)/Math.max(1,r.max-r.min)*ph;};
+  c.fillStyle='#fff'; c.fillRect(0,0,w,h); c.strokeStyle='#e4eaed'; c.fillStyle='#65737c'; c.font='11px ui-monospace,monospace';
+  for(let i=0;i<5;i++){const yy=pad.t+i*ph/4;c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.textAlign='right';c.fillText(fmt(left.max-(left.max-left.min)*i/4,1),pad.l-7,yy+4);if(valuesFor('right').length){c.textAlign='left';c.fillText(fmt(right.max-(right.max-right.min)*i/4,2),w-pad.r+7,yy+4);}}
+  c.textAlign='center'; for(let i=0;i<5;i++){const xx=pad.l+i*pw/4;c.strokeStyle='#edf1f2';c.beginPath();c.moveTo(xx,pad.t);c.lineTo(xx,h-pad.b);c.stroke();c.fillStyle='#65737c';c.fillText(fmt(xmin+(xmax-xmin)*i/4,0)+'s',xx,h-9);}
+  for(const ref of refLines){const yy=y(ref.value,ref.axis||'left');c.strokeStyle=ref.color;c.setLineDash([5,4]);c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.setLineDash([]);c.fillStyle=ref.color;c.textAlign='left';c.fillText(ref.label,pad.l+4,yy-4);}
+  for(const q of series){c.strokeStyle=q.color;c.lineWidth=1.6;c.beginPath();let started=false;for(const s of samples){const v=Number(s[q.key]);if(!Number.isFinite(v)){started=false;continue;}const xx=x(s.t), yy=y(v,q.axis||'left');if(!started){c.moveTo(xx,yy);started=true;}else c.lineTo(xx,yy);}c.stroke();}
+  c.textAlign='left';c.fillStyle=leftColor;c.fillText(leftLabel,pad.l,14);c.textAlign='right';c.fillStyle=rightColor;c.fillText(rightLabel,w-pad.r,14);
+}
+function renderCharts(){
+  draw('thermalVoltage',[{key:'temp',axis:'left',color:'#c73636'},{key:'requestV',axis:'right',color:'#1769aa'}],'板温 (°C)','申请电压 (V)','#c73636','#1769aa',[{value:220,axis:'left',label:'220°C cutoff',color:'#c73636'},{value:21,axis:'right',label:'21V terminal',color:'#1769aa'}]);
+  draw('source',[{key:'sourceV',axis:'left',color:'#1769aa'},{key:'sourceI',axis:'right',color:'#167e83'}],'源端电压 (V)','源端电流 (A)','#1769aa','#167e83',[{value:3,axis:'right',label:'3.0A',color:'#c73636'},{value:2.8,axis:'right',label:'2.8A',color:'#d07b00'}]);
+  draw('power',[{key:'sourceP',axis:'left',color:'#8a4d9e'}],'源端功率 (W)','实测输入功率','#8a4d9e','#8a4d9e',[{value:60,axis:'left',label:'60W',color:'#c73636'}]);
+}
+renderCharts(); window.addEventListener('resize',renderCharts);
+</script>
+</body>
+</html>

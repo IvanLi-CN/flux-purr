@@ -30,7 +30,7 @@ const SCOUT_STAGE_TIMEOUT_SECONDS: u64 = 180;
 const SCOUT_WARMUP_TIMEOUT_SECONDS: u64 = 180;
 const FLAGSHIP_ENVIRONMENT_RETRY_LIMIT: u8 = 1;
 const SOURCE_PRESET_100W: &str = "21V / 5.0A";
-const SOURCE_PRESET_65W: &str = "20V / 3.25A";
+const SOURCE_PRESET_65W: &str = "20V / 3A PPS auto-follow";
 const PROVIDER_ISOLAPURR: &str = "IsolaPurr";
 const WARMUP_LOGICAL_FULL_OUTPUT_PERCENT: f64 = 99.5;
 const WARMUP_PHYSICAL_FULL_OUTPUT_PERCENT: f64 = 99.0;
@@ -352,6 +352,12 @@ fn write_flagship_bundle(
             tuning_execution_order_c: context.tuning_execution_order_c,
             source_preset: source_preset(context.args.profile_mode),
             provider: PROVIDER_ISOLAPURR,
+            source_url: &context.args.source_url,
+            source_current_limit_ma: None,
+            provenance_complete: false,
+            firmware_sha: "unknown",
+            source_path: "unknown",
+            thermal_transaction_id: None,
         },
     )
 }
@@ -2874,7 +2880,6 @@ fn run_is_disqualified(summary: &Value, target_temp_c: i16) -> bool {
             | "profile_target_mismatch"
             | "runtime_reset"
             | "sample_rate_below_minimum"
-            | "sample_rate_below_3hz"
             | "source_telemetry_stale"
             | "source_fault"
             | "status_request_failed"
@@ -2935,7 +2940,6 @@ fn flagship_retryable_environment_failure_reason(reason: &str) -> bool {
             | "temperature_sample_glitch"
             | "runtime_reset"
             | "sample_rate_below_minimum"
-            | "sample_rate_below_3hz"
     ) || flagship_retryable_environment_error_message(reason)
 }
 
@@ -3048,6 +3052,8 @@ fn normalized_sample(sample: Value) -> Value {
         "sourceVoltageV": source.get("voltageMv").and_then(Value::as_f64).map(|value| round_decimal(value / 1_000.0, 3)),
         "sourceCurrentA": source.get("currentMa").and_then(Value::as_f64).map(|value| round_decimal(value / 1_000.0, 3)),
         "sourcePowerW": source.get("powerMw").and_then(Value::as_f64).map(|value| round_decimal(value / 1_000.0, 3)),
+        "sourceSampleUptimeMs": source.get("sampleUptimeMs").cloned().unwrap_or(Value::Null),
+        "sourceTelemetryStaleMs": sample.get("sourceTelemetryStaleMs").cloned().unwrap_or(Value::Null),
         "parameters": sample.get("heaterParameters").cloned().unwrap_or(Value::Null),
     })
 }
@@ -3635,7 +3641,14 @@ mod tests {
                 "rtdRawAdcMinMv": 1178,
                 "rtdRawAdcMaxMv": 1184,
                 "rtdRawAdcSpreadMv": 6
-            }
+            },
+            "sourceTelemetry": {
+                "sampleUptimeMs": 1000,
+                "voltageMv": 20000,
+                "currentMa": 2700,
+                "powerMw": 54000
+            },
+            "sourceTelemetryStaleMs": 100
         }));
 
         assert_eq!(normalized["rtdRawAdcMv"], 1180);
@@ -3643,6 +3656,8 @@ mod tests {
         assert_eq!(normalized["rtdRawAdcMaxMv"], 1184);
         assert_eq!(normalized["rtdRawAdcSpreadMv"], 6);
         assert_eq!(normalized["controlGuarded"], true);
+        assert_eq!(normalized["sourceSampleUptimeMs"], 1000);
+        assert_eq!(normalized["sourceTelemetryStaleMs"], 100);
     }
 
     #[test]

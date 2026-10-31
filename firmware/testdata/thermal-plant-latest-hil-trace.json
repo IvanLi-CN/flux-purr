@@ -1,0 +1,578 @@
+[
+  {
+    "sampleIndex": 0,
+    "elapsedMs": 3450,
+    "temperatureCentiC": 2983,
+    "heaterVoltageMv": 19750,
+    "dutyPercent": 0,
+    "phase": "ambient"
+  },
+  {
+    "sampleIndex": 1,
+    "elapsedMs": 5000,
+    "temperatureCentiC": 2902,
+    "heaterVoltageMv": 5375,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 2,
+    "elapsedMs": 5650,
+    "temperatureCentiC": 3104,
+    "heaterVoltageMv": 5500,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 3,
+    "elapsedMs": 6800,
+    "temperatureCentiC": 3104,
+    "heaterVoltageMv": 5375,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 4,
+    "elapsedMs": 26900,
+    "temperatureCentiC": 3308,
+    "heaterVoltageMv": 8250,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 5,
+    "elapsedMs": 28650,
+    "temperatureCentiC": 3472,
+    "heaterVoltageMv": 8375,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 6,
+    "elapsedMs": 48550,
+    "temperatureCentiC": 3595,
+    "heaterVoltageMv": 10500,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 7,
+    "elapsedMs": 79700,
+    "temperatureCentiC": 3760,
+    "heaterVoltageMv": 12750,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 8,
+    "elapsedMs": 84950,
+    "temperatureCentiC": 4091,
+    "heaterVoltageMv": 12875,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 9,
+    "elapsedMs": 87050,
+    "temperatureCentiC": 4258,
+    "heaterVoltageMv": 13000,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 10,
+    "elapsedMs": 87650,
+    "temperatureCentiC": 4300,
+    "heaterVoltageMv": 13000,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 11,
+    "elapsedMs": 92750,
+    "temperatureCentiC": 4552,
+    "heaterVoltageMv": 13125,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 12,
+    "elapsedMs": 93250,
+    "temperatureCentiC": 4636,
+    "heaterVoltageMv": 13125,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 13,
+    "elapsedMs": 94800,
+    "temperatureCentiC": 4720,
+    "heaterVoltageMv": 13125,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 14,
+    "elapsedMs": 98050,
+    "temperatureCentiC": 4847,
+    "heaterVoltageMv": 13250,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 15,
+    "elapsedMs": 102200,
+    "temperatureCentiC": 5060,
+    "heaterVoltageMv": 13375,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 16,
+    "elapsedMs": 105400,
+    "temperatureCentiC": 5273,
+    "heaterVoltageMv": 13500,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 17,
+    "elapsedMs": 105650,
+    "temperatureCentiC": 5316,
+    "heaterVoltageMv": 13500,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 18,
+    "elapsedMs": 109700,
+    "temperatureCentiC": 5617,
+    "heaterVoltageMv": 13750,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 19,
+    "elapsedMs": 111450,
+    "temperatureCentiC": 5833,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 20,
+    "elapsedMs": 114850,
+    "temperatureCentiC": 6269,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 21,
+    "elapsedMs": 118250,
+    "temperatureCentiC": 6710,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 22,
+    "elapsedMs": 121750,
+    "temperatureCentiC": 7110,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 23,
+    "elapsedMs": 125450,
+    "temperatureCentiC": 7515,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 24,
+    "elapsedMs": 128450,
+    "temperatureCentiC": 7923,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 25,
+    "elapsedMs": 132250,
+    "temperatureCentiC": 8335,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 26,
+    "elapsedMs": 136450,
+    "temperatureCentiC": 8751,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 27,
+    "elapsedMs": 140800,
+    "temperatureCentiC": 9171,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 28,
+    "elapsedMs": 145400,
+    "temperatureCentiC": 9595,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 29,
+    "elapsedMs": 150750,
+    "temperatureCentiC": 10023,
+    "heaterVoltageMv": 13875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 30,
+    "elapsedMs": 185500,
+    "temperatureCentiC": 9642,
+    "heaterVoltageMv": 15750,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 31,
+    "elapsedMs": 188550,
+    "temperatureCentiC": 9689,
+    "heaterVoltageMv": 15750,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 32,
+    "elapsedMs": 206850,
+    "temperatureCentiC": 10359,
+    "heaterVoltageMv": 16000,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 33,
+    "elapsedMs": 214100,
+    "temperatureCentiC": 10552,
+    "heaterVoltageMv": 16125,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 34,
+    "elapsedMs": 220500,
+    "temperatureCentiC": 10746,
+    "heaterVoltageMv": 16250,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 35,
+    "elapsedMs": 220600,
+    "temperatureCentiC": 10746,
+    "heaterVoltageMv": 16375,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 36,
+    "elapsedMs": 226150,
+    "temperatureCentiC": 10940,
+    "heaterVoltageMv": 16375,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 37,
+    "elapsedMs": 237250,
+    "temperatureCentiC": 11234,
+    "heaterVoltageMv": 16500,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 38,
+    "elapsedMs": 246950,
+    "temperatureCentiC": 11481,
+    "heaterVoltageMv": 16625,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 39,
+    "elapsedMs": 250700,
+    "temperatureCentiC": 11778,
+    "heaterVoltageMv": 16875,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 40,
+    "elapsedMs": 253050,
+    "temperatureCentiC": 12027,
+    "heaterVoltageMv": 17000,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 41,
+    "elapsedMs": 255400,
+    "temperatureCentiC": 12278,
+    "heaterVoltageMv": 17125,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 42,
+    "elapsedMs": 257800,
+    "temperatureCentiC": 12530,
+    "heaterVoltageMv": 17250,
+    "dutyPercent": 100,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 43,
+    "elapsedMs": 258150,
+    "temperatureCentiC": 12530,
+    "heaterVoltageMv": 17125,
+    "dutyPercent": 0,
+    "phase": "heating"
+  },
+  {
+    "sampleIndex": 44,
+    "elapsedMs": 258250,
+    "temperatureCentiC": 12530,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 45,
+    "elapsedMs": 258800,
+    "temperatureCentiC": 12580,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 46,
+    "elapsedMs": 259350,
+    "temperatureCentiC": 12580,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 47,
+    "elapsedMs": 259850,
+    "temperatureCentiC": 12580,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 48,
+    "elapsedMs": 260400,
+    "temperatureCentiC": 12530,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 49,
+    "elapsedMs": 260950,
+    "temperatureCentiC": 12479,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 50,
+    "elapsedMs": 261450,
+    "temperatureCentiC": 12429,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 51,
+    "elapsedMs": 262000,
+    "temperatureCentiC": 12378,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 52,
+    "elapsedMs": 262500,
+    "temperatureCentiC": 12328,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 53,
+    "elapsedMs": 263050,
+    "temperatureCentiC": 12278,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 54,
+    "elapsedMs": 263600,
+    "temperatureCentiC": 12127,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 55,
+    "elapsedMs": 264100,
+    "temperatureCentiC": 12077,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 56,
+    "elapsedMs": 264650,
+    "temperatureCentiC": 12027,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 57,
+    "elapsedMs": 265200,
+    "temperatureCentiC": 11927,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 58,
+    "elapsedMs": 265750,
+    "temperatureCentiC": 11828,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 59,
+    "elapsedMs": 266300,
+    "temperatureCentiC": 11778,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 60,
+    "elapsedMs": 266850,
+    "temperatureCentiC": 11728,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 61,
+    "elapsedMs": 267350,
+    "temperatureCentiC": 11629,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 62,
+    "elapsedMs": 267850,
+    "temperatureCentiC": 11481,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 63,
+    "elapsedMs": 271300,
+    "temperatureCentiC": 11038,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 64,
+    "elapsedMs": 274300,
+    "temperatureCentiC": 10600,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 65,
+    "elapsedMs": 277550,
+    "temperatureCentiC": 10166,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 66,
+    "elapsedMs": 280850,
+    "temperatureCentiC": 9737,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 67,
+    "elapsedMs": 284300,
+    "temperatureCentiC": 9312,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 68,
+    "elapsedMs": 288150,
+    "temperatureCentiC": 8890,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 69,
+    "elapsedMs": 292400,
+    "temperatureCentiC": 8473,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 70,
+    "elapsedMs": 296600,
+    "temperatureCentiC": 8060,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  },
+  {
+    "sampleIndex": 71,
+    "elapsedMs": 297800,
+    "temperatureCentiC": 7968,
+    "heaterVoltageMv": 0,
+    "dutyPercent": 0,
+    "phase": "cooling"
+  }
+]

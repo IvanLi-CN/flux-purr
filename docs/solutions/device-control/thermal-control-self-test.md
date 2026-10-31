@@ -20,21 +20,32 @@ related_specs:
 
 Thermal control validation is a measured control workflow, not a fixed duty tweak.
 
-Production heating uses one physical thermal plant model on any PPS source that covers `20V` at `>=3A`. EEPROM retains a bounded raw transient trace of RTD ADC, heater voltage quantized to `125mV`, duty, and `50ms` time points; this compact encoding covers the complete `5V..28V` PD guard. A single protected run takes an ambient baseline, requests the selected APDO's maximum voltage with `100%` PWM to `220C`, immediately turns heat off, and records passive cooling to `80C`. Heater-curve data and production-profile current reserve settings do not reduce or vary the calibration request. The device fits and writes the physically valid model directly as `active`; the same rising trace supplies the heater-curve samples. A framed transaction with an incomplete trace or invalid physical projection is never promoted to the active heater model after decode or reboot.
+Production heating uses a thermal model paired with a valid whole-device supply boundary. The protected product calibration chooses one actual PPS APDO covering `20V` at `>=3A`, establishes an unloaded 3A contract at the highest voltage inside the source power envelope, then starts a rapid heated scan at the usable floor (at least `5.5V`). It requests exactly `3A`, advances voltage in `100mV` steps, and records confirmed full-conduction observations after `500ms` electrical settling. After a source-boundary response, it retries hot 3A probes after each `10°C` rise until the operational source ceiling is covered; it must not stop after two failures below that ceiling. A 21V terminal probe, when advertised, uses its power-safe current and is accepted only when the board VIN tracks the request; a valid v6 boundary stores raw terminal evidence, the tracking-only 3A point at the operational ceiling (20V on a 60W/3A source), and the power-safe terminal point (`21V/2.85A`). Normal automatic heating may use that terminal point at its measured covered temperature or within the bounded 18°C terminal handoff window when 3A heating thermally stalls below it, with the persisted `V × I` power check; ordinary measured points still require their covered temperature. It never uses a 21V/3A automatic contract. The complete job has a five-minute wall-clock budget; timeout, ambiguity, or invalid fitting fails closed and does not commit a partial model. The automatic runtime boundary contains confirmed 3A tracking points and the encoded terminal point. A low-voltage observation made while a 3A request is configured but the source is still delivering much less current is never promoted to a 3A runtime boundary. A changing temperature cannot be used as proof of a CC boundary. Powered observations require confirmed requests and `100%` static gate output. At `220°C`, heating stops in the same cycle. The v6 boundary stores paired raw ADC codes/mV, WiFi-driver state, conversion assumptions, and the high-voltage Fixed PDO power envelope; v5 and earlier heater boundaries are absent and rejected, and no contract current is treated as a measured heater current. Fan-assisted cooling samples use a distinct phase marker and are retained for terminal validation, not heater-input fitting. Legacy resistance and associated thermal records are absent. The detailed `2.0–3.0A` equilibrium scanner remains host regression coverage only.
 
 The production controller is:
 
 `Ctheta * dT/dt = Ph - kc * (T - Ta) - kr * (Tk^4 - TaK^4)`
 
-with loss feed-forward, predictive PI, saturation, and conditional anti-windup. `pps3a` uses the same active plant when it has a valid `20V` PPS capability and the persisted raw heater observations project to at least two `R(T)` points. Its actuator ceiling is derived at runtime as `Pmax(T) = min(Vsource^2 / R(T), Vsource * Isource)`. The production PPS request ceiling is the selected APDO maximum voltage; neither `R(T)` nor a profile current reserve lowers it. The APDO contract owns the current boundary, while fixed-PD fallback continues to enforce its negotiated current through PWM. No second thermal-loss, heat-capacity, RTD, or point-local profile calibration exists for 3A.
+with loss feed-forward, predictive PI, saturation, and conditional anti-windup. Normal automatic heating uses the applicable whole-device boundary for the current WiFi hardware state, source envelope, current class, and temperature. Uncovered conditions use the labelled preset model fallback. No fixed auxiliary current is subtracted and auxiliary watts remain unknown. The transient calibration fit uses a bounded `confirmed VIN × 3A contract × duty` input proxy and excludes cold-start observations below `50°C` plus RTD-quantized windows below `1°C` observable change; those observations remain in raw evidence and coverage checks. It does not derive plate resistance or claim measured load power. Normal-control `Pmax` is the lesser of the labelled preset plate estimate `V²/R` and the confirmed contract input envelope `V × I_contract`; voltage mapping, PWM allocation, saturation feedback, and diagnostics all use that same watt ceiling. PWM uses the confirmed contract voltage. Safe PPS changes preserve static full conduction after confirmation; unsafe changes clear the gate before requesting a safe contract, then resume after confirmation and settling. The integral freezes during pauses and output saturation. No safe PPS or Fixed candidate means paused output. A relative VIN response fault is latched until heating is stopped and explicitly restarted, preventing repeated load/unload retries.
+
+The usable scan floor and advertised APDO minimum are different facts: a source advertising 5.0V may be scanned from 5.5V. Persist both ranges, and match later contracts against the advertised range. Pin the selected APDO through capability refresh and confirmation; equal voltage/current settings do not identify an overlapping APDO. Host regressions cover both mismatches and a complete calibration followed by automatic warm-up, asserting that retained points are actually used. A full-conduction 3A tracking point applies from its projected temperature through a bounded 18°C carry window. The recorder stores one point per nominal 10°C bucket, and rounded raw-ADC projection can make the real adjacent-bucket gap wider; the point is not a resistance estimate and cannot be scaled to another current or temperature. Once the confirmed request reaches the selected tracking point, lookup may promote exactly one next warmer observed 3A point within the same bounded window, so a compacted staircase does not deadlock at a thermal bucket edge. When the live RTD code is within two rounded ADC millivolts below a persisted point and the projected lead is no more than 1°C, that point is treated as the same quantization edge; farther warmer points require the confirmed-point promotion and remain ineligible without it. Outside that bounded carry-forward window, missing coverage uses the labelled preset fallback. The promotion still passes through the VIN response guard and does not infer plate resistance or auxiliary power. Boundaries written with the prior lookup semantics are obsolete and are rejected by the versioned decoder rather than reused.
+
+The FUSB302B capability bridge retains each APDO's original advertised minimum, maximum and current. Clipping that identity to product request bounds makes exact raw-PDO selection fail, even when the requested voltage and current are legal. Apply product bounds to requests separately. A regression must start from raw source PDOs, traverse the production bridge and calibration request builder, and obtain the intended RDO from the sink policy; hand-built clipped capabilities cannot verify this path.
+
+During the unloaded 3A preflight, the source must remain above the usable floor scaled from the high-voltage baseline; a collapse fails closed before any heated boundary point is retained. Full-conduction 3A source loading is validated by the bounded high-voltage probes between thermal stages. Captured raw ADC values are sufficient to reproduce the decision without assuming calibrated VIN or deriving heater resistance.
+
+Keep live equilibrium and cutoff decisions on the unfiltered temperature converted from the fractional ADC batch mean. Reconstructing live temperature from rounded persisted millivolts can widen a valid sub-degree signal beyond the 1°C window. Persisted raw observations still retain their documented representation for replay; this does not justify rounding the independent live measurement. A regression must exercise the runtime calibration update seam, preserve the ten-second window, and reject genuine temperature drift.
+
+The equilibrium gate is a complete 1°C temperature band held for ten seconds. A 0.3°C response when returning from a boundary probe to its safe voltage fits inside the accepted band and must not restart the window. Thermal rescans require more than 1°C of warming from the probe observation; the full ten-second window independently rejects slow ramps and out-of-band movement.
+
 
 Legacy profile controls remain only for decoding historical records and rerendering historical review bundles. They must not be used to arm the current thermal plant model.
 
 Flux Purr exposes:
 
 - `thermalPlantModel` state and active transaction identity in runtime status
-- one protected `thermal_plant_auto` transient calibration, from ambient through `220C` and passive cooling to `80C`
-- heater-curve raw observations captured during that same transient run
+- one protected `thermal_plant_auto` transient calibration, from ambient through the rapid `3A` voltage scan and minimum `100°C` powered coverage, followed by fan-assisted cooling and fitting to `80°C` within five minutes; model acceptance requires a complete, physically valid fit
+- whole-device supply-boundary observations captured during that same run; legacy resistance fields remain empty
 - canonical HTML HIL bundles generated through the Rust report renderer
 
 ## Artifact model
@@ -100,6 +111,8 @@ The report and bundle must preserve source-aware metadata:
 
 Each stage summary carries `sampleCount` plus `min/max/avg/first/last` for source voltage, current, and power so a tuning failure can be separated from a source-side failure without replaying raw NDJSON by hand.
 
+Owner-facing HIL evidence has a separate safety-evidence contract. Every accepted or rejected boundary run must render two synchronized charts from the same monotonic `sampleIndex` or timestamp sequence: heater temperature with requested voltage, and measured source voltage with measured source current. The chart axes and tooltips use raw `°C`, `V`, and `A` units; scaling a current series onto a voltage axis is not sufficient evidence. The renderer must mark `safety_evidence_incomplete` and prevent an acceptance conclusion when any sample lacks one of the four values, the alignment key is missing, or the source snapshot cannot be proven to belong to the same sample sequence. The raw `samples.ndjson` remains the audit source and the chart is a view of those rows.
+
 ## Current truth that future tuning must preserve
 
 ### Warmup semantics
@@ -108,7 +121,7 @@ Warmup is no longer a profile-tunable effective output level.
 
 Current firmware truth is:
 
-- while the heater state machine remains in `warmup`, output is forced to `100%`
+- after soft start, stable PPS warmup at its safe full-power ceiling uses exact `100%` physical conduction; Fixed supply may require PWM
 - PPS request follows the current temperature-and-source safety ceiling
 - host readback, candidate import, replay, and report generation must all materialize `warmupPowerPermille=1000` as the only effective value
 
@@ -126,9 +139,9 @@ The RTD path has two distinct consumers and they must stay separated:
 Current control-path truth is:
 
 - control loop frequency: `20Hz`
-- RTD oversampling per control cycle: `64` kept conversions
-- settle discard per cycle: `24`
-- minimum valid samples: `48`
+- RTD oversampling per control cycle: `80` kept conversions across all ten PWM phases
+- channel-switch settling: `5ms`, followed by `96` discarded conversions
+- minimum valid samples: `60`
 - default `tempFilterAlphaPermille`: `750`
 
 The control-side plausibility gate is deliberately narrower than a smoothing filter: it only rejects a single sample whose change exceeds `35°C/s` at the actual control-cycle interval. It does not modify `currentTempC`, raw ADC telemetry, front-panel display, or formal report evidence; accepted control samples still go directly through the configured EMA. Do not add a multi-sample window or median filter.
@@ -179,11 +192,11 @@ Thermal runs must evaluate the source and heater together.
 Current reusable rule set:
 
 - capability-class resolution is based on configured / advertised source capability, not live current
-- when multiple PPS APDOs cover `20V`, select one APDO by highest maximum current, then highest maximum voltage, then lowest minimum voltage; never combine fields from separate APDOs
+- calibration selects one `20V / >=3A` APDO by current, ceiling and floor; normal heating selects the safe PPS candidate with the largest estimated usable power, then safe Fixed if none exists
 - explicit `65w` / `100w` are forced mode selections
-- safety limiting still uses live current plus `heaterCurrentReserveMa`
+- normal automatic PPS limiting uses the whole-device observed boundary for the matching WiFi driver state and source envelope; uncovered regions use a labelled preset model, without a fixed auxiliary-current reserve
 - CH224Q `0x50` reports the active contract current and may reduce the safe current limit, but it must not promote a lower advertised capability into `pps5a`
-- current reserve remains part of the persisted settings and protects the board from consuming the full advertised source budget
+- `heaterCurrentReserveMa` is not applied by normal automatic heating or whole-device supply calibration; it remains outside those policy paths
 - a `20V/5A` live run requires a compliant eMarked 5A USB-C cable and both the source telemetry and CH224Q live-current readback must confirm the contract before heater arm
 
 ## Seed and baseline selection
@@ -287,7 +300,7 @@ The saved-profile acceptance contract remains:
 Sampling and recording rules remain:
 
 - default host sampling interval: `300ms`
-- acceptance floor: `3Hz`
+- acceptance floor: `1.5Hz` of real accepted samples; the report still exposes each interval and rolling rate
 - accepted comparison bundles may sample faster, including `100ms`
 - source telemetry that does not advance for `2s` must be rejected
 
@@ -301,7 +314,7 @@ Treat the run as a source-side failure, not a thermal-profile result, when any o
 
 - source capability readback does not match the intended class
 - source preparation tears down an already valid PPS contract or starts the stage before a valid PPS contract is confirmed
-- Flux Purr requests more than `5V`, but source telemetry remains near `5V`
+- a confirmed requested operating point persistently fails to track under load, supported by source/ADC and contract traces; a `5V` reading alone does not identify the failing component
 - source telemetry stops advancing
 - the source must be power-cycled before PPS negotiation recovers
 
@@ -332,16 +345,22 @@ If the source remains at a stale low-voltage state or otherwise fails to follow 
 4. Poll `isolapurr power show --url <source-url> --json` until all of the following are true again:
    - `runtime.output_enabled=true`
    - `tps_mode=auto_follow`
-   - `power_watts=100`
+   - saved power and advertised limits match the owner-authorized source and cable class
    - PD and PPS both enabled
-   - `pd_pps_5a=true`
-   - `pps3_limit_ma >= 5000`
+   - a `60W / 3A` bench retains `power_watts=60`, `pps3_limit_ma=3000`, and `pd_pps_5a=false`; a `5A` class requires its own source, cable, and owner authorization
+   - source capability readback matches the saved limits
    - USB-C sample uptime keeps advancing
 5. Confirm the exact owner-authorized Flux Purr serial path still exists. If it disappeared or re-enumerated, stop; do not switch ports.
 6. Retry only the same failed sub-step, and only once. A second environment failure for the same target becomes `environment_blocked`.
 7. Count the recovery time inside the same per-target `20min` budget.
 
 Use this procedure only when source telemetry proves the source is stuck or stale. Do not use it to mask a controller, sensor, or runtime defect.
+
+### Diagnosing periodic source interruptions
+
+Correlate device uptime, host USB disconnect timestamps, and source-side VBUS telemetry before attributing a reset. A low idle voltage or a USB ownership warning alone does not identify the cause. A controlled USB-C data disconnect with power retained can test whether the host data path is necessary for the interruption; preserve the authorized port boundary when restoring data.
+
+An unapplied source profile can trigger repeated configuration attempts. Check that every saved capability field is actually written before its readback is compared: an omitted PPS3 current-limit write leaves `pps3_limit_ma=3000` unmatched against a `5000` readback, so a source retry loop can repeatedly disturb VBUS. Fix the missing register write and verify sustained source continuity; do not raise the saved limit to `5000` merely to make the comparison pass. Source-firmware changes and source-MCU flashing require their own authorization and exact target port, independently of the Flux Purr port.
 
 ### Recovering a transient measurement fault
 

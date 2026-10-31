@@ -77,6 +77,13 @@
   the job must request the selected APDO's `max_mv` for the complete powered trace. Heater-curve
   data, nominal `R20/TCR`, and production-profile current reserve settings must not reduce or vary
   that request.
+- During a PPS calibration or full-speed heating voltage step that keeps the same APDO and contract
+  current, the confirmed heater contract MUST remain conducting while the new voltage request is
+  pending. The PD service MUST NOT clear the global heater permit merely because the protocol is in
+  `Accept`/`PS_RDY` negotiation; it MUST clear conduction for an APDO/current change, capability
+  refresh, request rejection or timeout, source fault, sensor fault, or safety interlock. PPS
+  full-speed output MUST remain a static `100%` gate; intermediate PWM is reserved for the existing
+  low-power Approach/Hold paths.
 
 - 所有 transport 暴露同一领域模型：`Identity`、`NetworkSummary`、`Status`、`FirmwareArtifact`、`ApiError`。
 - USB serial frame 使用 newline-delimited JSON；需要响应的 request 必须带 `request_id`。
@@ -245,7 +252,7 @@
 - Web 与 CLI 使用同一 `thermal-tuning-event-digest-v2` 设备事件链：结构字段按固件序列化顺序编码，可选 timing 缺失时省略；decision 的 score 在 JSON 中归零，真实十一维 score 以 `score-micros` 和逐项微单位量化 little-endian i64 参与摘要。设备链与报告两类 NDJSON 的文件链分开核验，不能用二者之一代替另一种完整性证明。条件延长的页面同时展示实际允许下限、Hold 基线来源、下限观测、原期限、触发时间、有限上限、稳定窗口证据和最终处置。
 - `thermal report render-v2 --input-dir` MUST 同时支持已整理的采样/结果输入和未完成整理的 firmware 原始设备 journal。journal 转换必须核验同一 run/candidate、5A power class、冻结目标执行顺序及设备报告的 candidate hash，复用相同结果投影和 HTML 渲染器。未观察到设备终态时以 `host_process_stopped` 生成 failed/review_incomplete，不得补造缺失的终止、安全或采样事件；原始 journal 不得被覆盖。
 - `thermal report` 的文件生成操作 MUST 可离线执行，不得启动 managed devd、获取设备 lease 或要求控制 socket；传入的设备连接配置不参与纯文件报告生成。
-- sample 固定记录 sequence、elapsed、目标/trial/candidate、温度、设备 VIN、PPS 合同 mV/mA/kind/confirmed、请求电压、所选可调电压上限 `ppsPowerCeilingMv`、PID 逻辑请求 `heaterRequestedOutputPermille`、最终 MOS PWM `heaterOutputPermille`、测量有效性与 phase。`ppsPowerCeilingMv` 单位为 mV，不是功率；PPS 合同电流只能称安全 ceiling。外部 VBUS、物理电流/功率不得作为本报告必需项、缺失提示或推断值。缺失设备本地必需事实须结构化标记 unavailable。
+- sample 固定记录 sequence、elapsed、目标/trial/candidate、温度、设备 VIN、PPS 合同 mV/mA/kind/confirmed、请求电压、所选可调电压上限 `ppsPowerCeilingMv`、PID 逻辑请求 `heaterRequestedOutputPermille`、最终输出 `heaterOutputPermille`、测量有效性与 phase。对 PPS Warmup/全速，`heaterOutputPermille` 的语义是 GPIO47 gate duty，只有 `0`（未确认/安全关断）或 `1000`（静态全导通）合法；同一 APDO 且同一电流的连续校准电压调整可以在旧合同仍安全时保持 `1000`，不得把这段连续导通误报为 PWM；跨 APDO/电流变化、能力刷新、失败和安全故障必须记录 `0`。Approach/Hold 的中间 duty 和 Fixed-PD fallback 的既有 PWM duty 必须在 phase/backend 中明确标记，不能统称为 PPS 软启动 PWM。`ppsPowerCeilingMv` 单位为 mV，不是功率；PPS 合同电流只能称安全 ceiling。产品校准不得把外部 VBUS、物理电流或功率遥测作为输入；真实 HIL 报告则必须在同一 `elapsed` 时间轴记录并绘制授权 bench source 的实测 VBUS 电压、电流和功率，且与温度、请求电压、GPIO47 gate duty 对齐。源端遥测缺失、过期或无法对齐时，HIL 证据必须标记 `review_incomplete`，不得用合同上限、设备 VIN 或估算值替代。缺失设备本地必需事实须结构化标记 unavailable。
 - 非 sample ledger 固定保留 `phase_transition`、`candidate_trial`、`decision`、`safety`；trial 保留起止 sequence/时间/样本范围、完整 point-local candidate、hash、seed 和 bounds，decision 保留全部 score、hard gates、freeze/prune、disposition、stop reason 与 PPS scheduler 的本地决策证据。合并两类 NDJSON 后必须覆盖设备声明的全局零基 sequence，校验 digest；缺口、不一致、保存/readback 失败或未确认事件覆盖均为 `trace_gap/review_incomplete`，操作者结果只允许 `passed` 或 `failed`。
 - 设备事件分页必须能持续排空默认 `300ms` 调优样本。若终态 trace 已声明缺口且所有仍可读取的事件已排空，主机须保留已收到的原始事件并生成 `failed/review_incomplete` 五文件报告，不得无限等待设备未保留的末尾 sequence，也不得确认完整 trace 或保存候选。
 - HTML 的目标卡、指标、候选详情和默认主图须指向同一 adopted trial，显示 trial 序号/总数；其余 trial 可切换，温度、逻辑请求/实际 PWM、VIN/PPS 电压和 PPS 合同电流图同步切换并使用独立量纲。报告显示 warmup/approach/hold、稳定窗口建立时间、full-speed-to-stable、过冲、hold p2p 与 `60s` 确认；cooldown 只留原始审计。Mock 示例必须只替换数据，并通过同一正式生成命令与渲染代码。

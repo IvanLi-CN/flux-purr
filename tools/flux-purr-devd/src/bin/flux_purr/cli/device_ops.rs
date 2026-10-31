@@ -1731,8 +1731,7 @@ pub(crate) async fn request_leased(
         // Lease-bearing control endpoints can be GET, POST, or DELETE. A
         // body-less DELETE still needs the same query lease as a body-less
         // read, otherwise the daemon correctly rejects the operation.
-        path.push_str("?lease_id=");
-        path.push_str(lease_id);
+        append_lease_query(&mut path, lease_id);
     }
     let mut body = body;
     if let Some(body_value) = body.as_mut()
@@ -1741,6 +1740,15 @@ pub(crate) async fn request_leased(
         object.insert("leaseId".to_string(), Value::String(lease_id.to_string()));
     }
     request_json(client, method, &resolved.devd, &path, body).await
+}
+
+pub(crate) fn append_lease_query(path: &mut String, lease_id: &str) {
+    path.push_str(if path.contains('?') {
+        "&lease_id="
+    } else {
+        "?lease_id="
+    });
+    path.push_str(lease_id);
 }
 
 pub(crate) async fn request_thermal_status_with_retry(
@@ -1765,20 +1773,55 @@ pub(crate) async fn request_thermal_status_with_retry_config(
     timeout: Duration,
     max_attempts: usize,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_thermal_status_with_retry_path_config(
+        client,
+        resolved,
+        lease_id,
+        "/status",
+        timeout,
+        max_attempts,
+    )
+    .await
+}
+
+pub(crate) async fn request_thermal_sampling_status_with_retry(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_thermal_status_with_retry_path_config(
+        client,
+        resolved,
+        lease_id,
+        "/thermal-status",
+        Duration::from_millis(THERMAL_STATUS_REQUEST_TIMEOUT_MS),
+        THERMAL_STATUS_REQUEST_RETRY_ATTEMPTS,
+    )
+    .await
+}
+
+async fn request_thermal_status_with_retry_path_config(
+    client: &Client,
+    resolved: &ResolvedUsbTarget,
+    lease_id: &str,
+    path: &str,
+    timeout: Duration,
+    max_attempts: usize,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let attempts = max_attempts.max(1);
     let timeout_ms = timeout.as_millis();
     let mut last_error = "thermal status read did not start".to_string();
     for attempt in 0..attempts {
         match tokio::time::timeout(
             timeout,
-            request_leased(client, resolved, lease_id, Method::GET, "/status", None),
+            request_leased(client, resolved, lease_id, Method::GET, path, None),
         )
         .await
         {
             Ok(Ok(status)) => return Ok(status),
             Ok(Err(error)) => last_error = error.to_string(),
             Err(_) => {
-                last_error = format!("thermal /status timed out after {timeout_ms}ms");
+                last_error = format!("thermal {path} timed out after {timeout_ms}ms");
             }
         }
         if attempt + 1 < attempts {
@@ -1788,7 +1831,7 @@ pub(crate) async fn request_thermal_status_with_retry_config(
             .await;
         }
     }
-    Err(format!("thermal /status failed after {attempts} attempt(s): {last_error}").into())
+    Err(format!("thermal {path} failed after {attempts} attempt(s): {last_error}").into())
 }
 
 pub(crate) const THERMAL_RUNTIME_WRITE_RETRY_ATTEMPTS: usize = 2;

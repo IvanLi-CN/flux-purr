@@ -1672,12 +1672,12 @@ fn thermal_sample_rate_accepts_measured_four_hz_sequence_with_one_jitter_gap() {
 }
 
 #[test]
-fn thermal_sample_rate_rejects_sustained_sub_three_hz_sampling() {
+fn thermal_sample_rate_rejects_sustained_sub_minimum_sampling() {
     let mut tracker = ThermalSampleRateTracker::new();
     let mut observation = tracker.observe(0);
     for elapsed_ms in [
-        350, 700, 1_050, 1_400, 1_750, 2_100, 2_450, 2_800, 3_150, 3_500, 3_850, 4_200, 4_550,
-        4_900, 5_250, 5_600, 5_950, 6_300,
+        700, 1_400, 2_100, 2_800, 3_500, 4_200, 4_900, 5_600, 6_300, 7_000, 7_700, 8_400, 9_100,
+        9_800, 10_500, 11_200, 11_900, 12_600,
     ] {
         observation = tracker.observe(elapsed_ms);
     }
@@ -1697,7 +1697,7 @@ fn thermal_sample_rate_tolerates_recorded_single_serial_stall() {
         observation = tracker.observe(elapsed_ms);
     }
     assert!(!observation.violation);
-    assert!(observation.rolling_rate_hz.unwrap() < THERMAL_MIN_SAMPLE_RATE_HZ);
+    assert!(observation.rolling_rate_hz.unwrap() >= THERMAL_MIN_SAMPLE_RATE_HZ);
 }
 
 #[test]
@@ -1731,12 +1731,24 @@ fn thermal_sample_rate_tolerates_one_isolated_sampling_stall() {
 fn thermal_measurement_guard_rejects_sustained_guarded_samples() {
     let mut tracker = ThermalMeasurementGuardTracker::default();
 
-    assert!(!tracker.observe(false, 0));
-    assert!(!tracker.observe(true, 1_000));
-    assert!(!tracker.observe(true, 2_999));
-    assert!(tracker.observe(true, 3_000));
-    assert!(!tracker.observe(false, 3_100));
-    assert!(!tracker.observe(true, 4_000));
+    assert!(!tracker.observe(false, Some(8_000), 0));
+    assert!(!tracker.observe(true, Some(8_000), 1_000));
+    assert!(!tracker.observe(true, Some(8_000), 2_999));
+    assert!(tracker.observe(true, Some(8_000), 3_000));
+    assert!(!tracker.observe(false, Some(8_000), 3_100));
+    assert!(!tracker.observe(true, Some(8_000), 4_000));
+}
+
+#[test]
+fn thermal_measurement_guard_resets_across_pps_request_steps() {
+    let mut tracker = ThermalMeasurementGuardTracker::default();
+
+    assert!(!tracker.observe(true, Some(8_000), 0));
+    assert!(!tracker.observe(true, Some(8_000), 1_000));
+    assert!(!tracker.observe(true, Some(8_500), 1_500));
+    assert!(!tracker.observe(true, Some(9_000), 3_500));
+    assert!(!tracker.observe(true, Some(9_000), 5_499));
+    assert!(tracker.observe(true, Some(9_000), 7_499));
 }
 
 #[test]
@@ -2972,8 +2984,9 @@ fn parses_thermal_self_test_targets_subset_command() {
         args.evaluation_mode,
         ThermalSelfTestEvaluationMode::HoldConfirm
     );
-    assert_eq!(args.sample_interval_ms, 300);
-    assert_eq!(effective_thermal_sample_interval_ms(333), 300);
+    assert_eq!(args.sample_interval_ms, 500);
+    assert_eq!(effective_thermal_sample_interval_ms(333), 500);
+    assert_eq!(effective_thermal_sample_interval_ms(900), 650);
 }
 
 #[test]
@@ -2996,6 +3009,28 @@ fn thermal_model_cli_keeps_only_direct_calibration() {
         }
     ));
 
+    let trace = Cli::try_parse_from([
+        "flux-purr",
+        "thermal",
+        "model",
+        "trace",
+        "--device",
+        "mock-fp-lab-01",
+        "--after-sample",
+        "16",
+    ])
+    .expect("parse thermal model trace");
+    let Command::Thermal {
+        command:
+            ThermalCommand::Model {
+                command: ThermalModelCommand::Trace(args),
+            },
+    } = trace.command
+    else {
+        panic!("expected thermal model trace command");
+    };
+    assert_eq!(args.after_sample, 16);
+
     for removed in [
         "validate-candidate",
         "save-candidate",
@@ -3014,6 +3049,20 @@ fn thermal_model_cli_keeps_only_direct_calibration() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn lease_query_joins_existing_read_query_parameters() {
+    let mut plain = "/status".to_string();
+    append_lease_query(&mut plain, "lease-1");
+    assert_eq!(plain, "/status?lease_id=lease-1");
+
+    let mut paged = "/calibration/thermal-plant/run?after_sample=16".to_string();
+    append_lease_query(&mut paged, "lease-1");
+    assert_eq!(
+        paged,
+        "/calibration/thermal-plant/run?after_sample=16&lease_id=lease-1"
+    );
 }
 
 #[test]
@@ -3946,17 +3995,18 @@ fn preserves_an_already_ready_isolapurr_pps_contract() {
 fn validates_isolapurr_thermal_capability_and_ready_voltage() {
     let config = json!({
         "capability": {
-            "power_watts": 65,
+            "power_watts": 60,
             "protocols": { "pd": true },
             "pd": {
                 "pps": true,
                 "fixed_voltages_mv": [9000, 12000, 15000, 20000]
-            }
+            },
+            "current": { "pps3_limit_ma": 3000, "pd_pps_5a": false }
         }
     });
     assert!(isolapurr_power_config_has_thermal_capability(
         &config,
-        THERMAL_SOURCE_65W_POWER_WATTS,
+        THERMAL_SOURCE_3A_POWER_WATTS,
         false,
     ));
     assert!(!isolapurr_power_config_has_thermal_capability(
@@ -4016,12 +4066,14 @@ fn validates_isolapurr_thermal_capability_and_ready_voltage() {
         ..ready.clone()
     };
     assert!(validate_isolapurr_ready_voltage(&undervoltage).is_err());
+    assert!(validate_isolapurr_source_telemetry(&undervoltage).is_ok());
 
     let disconnected = BenchSourceLiveTelemetry {
         status: "not_inserted".into(),
         ..ready
     };
     assert!(validate_isolapurr_ready_voltage(&disconnected).is_err());
+    assert!(validate_isolapurr_source_telemetry(&disconnected).is_err());
 }
 
 #[test]
@@ -4243,14 +4295,14 @@ fn preview_activation_retry_classifier_accepts_profile_fallback_readback_errors(
 fn isolapurr_configured_thermal_source_class_detects_3a_and_5a_modes() {
     let three_amp_config = json!({
         "capability": {
-            "power_watts": 65,
+            "power_watts": 60,
             "protocols": { "pd": true },
             "pd": {
                 "pps": true,
                 "fixed_voltages_mv": [9000, 12000, 15000, 20000]
             },
             "current": {
-                "pps3_limit_ma": 3250
+                "pps3_limit_ma": 3000
             }
         }
     });
@@ -4296,28 +4348,91 @@ fn isolapurr_configured_thermal_source_class_detects_3a_and_5a_modes() {
 }
 
 #[test]
-fn isolapurr_3a_setup_does_not_retain_a_repeatedly_reapplied_pps_register_limit() {
+fn isolapurr_3a_setup_rejects_a_repeatedly_reapplied_pps_register_limit() {
     let mut config = json!({
         "capability": {
-            "power_watts": 65,
+            "power_watts": 60,
             "protocols": { "pd": true },
             "pd": { "pps": true, "fixed_voltages_mv": [9000, 12000, 15000, 20000] },
             "current": { "pps3_limit_ma": 3000, "pd_pps_5a": false }
         }
     });
-    assert!(!isolapurr_power_config_has_thermal_capability(
-        &config, 65, false
-    ));
-    // The existing setup command selects 5000 for this register and disables
-    // the independent 5A advertisement. The MCU still enforces the 3A bank.
-    config["capability"]["current"]["pps3_limit_ma"] = json!(5000);
     assert!(isolapurr_power_config_has_thermal_capability(
-        &config, 65, false
+        &config, 60, false
+    ));
+    // A 60W/3A source must not be accepted after the register is re-applied
+    // as a 5A limit, even if the independent 5A advertisement is disabled.
+    config["capability"]["current"]["pps3_limit_ma"] = json!(5000);
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &config, 60, false
     ));
     assert_eq!(
         isolapurr_configured_thermal_source_class(&config),
         Some("pps3a")
     );
+}
+
+#[test]
+fn isolapurr_60w_setup_requires_a_three_amp_pps_limit() {
+    let mut config = json!({
+        "capability": {
+            "power_watts": 60,
+            "protocols": { "pd": true },
+            "pd": { "pps": true, "fixed_voltages_mv": [9000, 12000, 15000, 20000] },
+            "current": { "pps3_limit_ma": 5000, "pd_pps_5a": false }
+        }
+    });
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &config, 60, false
+    ));
+    config["capability"]["current"]["pps3_limit_ma"] = json!(3000);
+    assert!(isolapurr_power_config_has_thermal_capability(
+        &config, 60, false
+    ));
+    config["capability"]["current"]["pps3_limit_ma"] = json!(2900);
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &config, 60, false
+    ));
+}
+
+#[test]
+fn validates_isolapurr_60w_manual_current_limit() {
+    let config = json!({
+        "capability": {
+            "power_watts": 60,
+            "protocols": { "pd": true },
+            "pd": {
+                "pps": true,
+                "fixed_voltages_mv": [9000, 12000, 15000, 20000]
+            },
+            "current": { "pps3_limit_ma": 3000, "pd_pps_5a": false }
+        },
+        "manual": { "current_limit_ma": 3000 }
+    });
+    assert!(isolapurr_power_config_has_thermal_capability(
+        &config, 60, false
+    ));
+    assert_eq!(
+        isolapurr_power_config_manual_current_limit_ma(&config),
+        Some(3000)
+    );
+
+    let five_amp_config = json!({
+        "capability": {
+            "power_watts": 60,
+            "protocols": { "pd": true },
+            "pd": {
+                "pps": true,
+                "fixed_voltages_mv": [9000, 12000, 15000, 20000]
+            },
+            "current": { "pps3_limit_ma": 5000, "pd_pps_5a": true }
+        }
+    });
+    assert!(!isolapurr_power_config_has_thermal_capability(
+        &five_amp_config,
+        60,
+        false
+    ));
 }
 
 #[test]
@@ -4465,10 +4580,10 @@ fn parses_pps_amps_as_50ma_steps() {
 }
 
 #[test]
-fn thermal_profile_modes_preserve_65w_and_define_100w_defaults() {
+fn thermal_profile_modes_use_safe_3a_and_100w_defaults() {
     assert_eq!(
         ThermalProfileMode::W65.explicit_source_defaults(),
-        Some((20_000, 3_250))
+        Some((20_000, 3_000))
     );
     assert_eq!(
         ThermalProfileMode::W100.explicit_source_defaults(),
@@ -4591,7 +4706,7 @@ fn thermal_profile_preview_readback_requires_the_requested_bank() {
 
 #[test]
 fn thermal_source_class_uses_the_configured_capability_not_selected_mode() {
-    assert_eq!(thermal_source_class(20_000, 3_250), "pps3a");
+    assert_eq!(thermal_source_class(20_000, 3_000), "pps3a");
     assert_eq!(thermal_source_class(21_000, 5_000), "pps5a");
 }
 
@@ -4705,7 +4820,7 @@ fn write_retune_fixture(run_dir: &Path) {
             "targetsC": [60],
             "optimizeTargetsC": [],
             "sampleIntervalMs": 300,
-            "effectiveSampleIntervalMs": 300,
+            "effectiveSampleIntervalMs": 500,
             "holdSeconds": 60,
             "stageTimeoutSeconds": 300,
             "runtimeRearmAttempts": 1,
@@ -5046,8 +5161,10 @@ fn thermal_report_rerender_preserves_nine_point_pps5a_plant_evidence_fixture() -
                 "sourceTelemetry": {
                     "voltageMv": 21_000,
                     "currentMa": 700,
-                    "powerMw": 14_700
-                }
+                    "powerMw": 14_700,
+                    "sampleUptimeMs": 1000
+                },
+                "sourceTelemetryStaleMs": 0
             })
         })
         .collect::<Vec<_>>();
@@ -5337,6 +5454,10 @@ async fn spawn_flaky_thermal_status_server(
             "/api/v1/devices/{device_id}/status",
             get(flaky_thermal_status_readback),
         )
+        .route(
+            "/api/v1/devices/{device_id}/thermal-status",
+            get(flaky_thermal_status_readback),
+        )
         .with_state(state);
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
@@ -5400,6 +5521,20 @@ async fn thermal_status_retry_recovers_after_transient_usb_burst() {
 
     assert_eq!(status["attempt"], 5);
     assert_eq!(attempts.load(Ordering::SeqCst), 5);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn thermal_sampling_status_uses_compact_endpoint() {
+    let (resolved, attempts, server) = spawn_flaky_thermal_status_server(0, 0).await;
+    let status =
+        request_thermal_sampling_status_with_retry(&Client::new(), &resolved, "lease-test")
+            .await
+            .unwrap();
+
+    assert_eq!(status["currentTempC"], 25.0);
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
 
     server.abort();
 }
