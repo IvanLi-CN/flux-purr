@@ -32,6 +32,8 @@ test.describe('thermal plant result layout', () => {
 
     await page.setViewportSize({ width: 1440, height: 900 })
     await expect.poll(chartAspectDifference).toBeLessThan(0.03)
+    const chartHeight = await boundaryChart.evaluate((svg) => svg.getBoundingClientRect().height)
+    expect(chartHeight).toBeLessThan(600)
 
     const samples = [] as Array<{
       documentHeight: number

@@ -361,7 +361,7 @@ function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string;
 function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
   const width = 440
   const initialHeight = 152
-  const { svgRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
+  const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length < 2)
     return (
       <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--trace">
@@ -403,99 +403,100 @@ function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
   const tickLabel = (temperature: number) =>
     Math.round(plotBottom - ((temperature - minT) / Math.max(maxT - minT, 1)) * plotHeight)
   return (
-    <svg
-      ref={svgRef}
-      className="thermal-plant-run-card__svg thermal-plant-run-card__svg--trace"
-      preserveAspectRatio="xMidYMid meet"
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label="加热和自然冷却温度曲线"
-    >
-      <line
-        x1={inset.left}
-        y1={inset.top}
-        x2={inset.left}
-        y2={plotBottom}
-        className="thermal-plant-run-card__axis"
-      />
-      <line
-        x1={inset.left}
-        y1={plotBottom}
-        x2={width - inset.right}
-        y2={plotBottom}
-        className="thermal-plant-run-card__axis"
-      />
-      <line
-        x1={inset.left}
-        y1={tickLabel(80)}
-        x2={width - inset.right}
-        y2={tickLabel(80)}
-        className="thermal-plant-run-card__guide"
-      />
-      {cutoffPoint ? (
+    <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
+      <svg
+        className="thermal-plant-run-card__svg thermal-plant-run-card__svg--trace"
+        preserveAspectRatio="xMidYMid meet"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="加热和自然冷却温度曲线"
+      >
         <line
-          x1={cutoffPoint.x}
+          x1={inset.left}
           y1={inset.top}
-          x2={cutoffPoint.x}
+          x2={inset.left}
           y2={plotBottom}
-          className="thermal-plant-run-card__cutoff"
+          className="thermal-plant-run-card__axis"
         />
-      ) : null}
-      {ambient.length > 1 ? (
-        <polyline
-          points={toPolyline(ambient)}
-          className="thermal-plant-run-card__trace thermal-plant-run-card__trace--ambient"
+        <line
+          x1={inset.left}
+          y1={plotBottom}
+          x2={width - inset.right}
+          y2={plotBottom}
+          className="thermal-plant-run-card__axis"
         />
-      ) : null}
-      {heating.length > 1 ? (
-        <polyline
-          points={toPolyline(heating)}
-          className="thermal-plant-run-card__trace thermal-plant-run-card__trace--heating"
+        <line
+          x1={inset.left}
+          y1={tickLabel(80)}
+          x2={width - inset.right}
+          y2={tickLabel(80)}
+          className="thermal-plant-run-card__guide"
         />
-      ) : null}
-      {cooling.length > 1 ? (
-        <polyline
-          points={toPolyline(cooling)}
-          className="thermal-plant-run-card__trace thermal-plant-run-card__trace--cooling"
-        />
-      ) : null}
-      {cutoffPoint ? (
-        <circle
-          cx={cutoffPoint.x}
-          cy={cutoffPoint.y}
-          r="3.5"
-          className="thermal-plant-run-card__point thermal-plant-run-card__point--heating"
-        />
-      ) : null}
-      {completionPoint ? (
-        <circle
-          cx={completionPoint.x}
-          cy={completionPoint.y}
-          r="3.5"
-          className="thermal-plant-run-card__point thermal-plant-run-card__point--cooling"
-        />
-      ) : null}
-      <text x={inset.left - 8} y={tickLabel(maxT) + 3} textAnchor="end">
-        {Math.round(maxT)}
-      </text>
-      <text x={inset.left - 8} y={tickLabel(80) + 3} textAnchor="end">
-        80
-      </text>
-      <text x={inset.left - 8} y={plotBottom + 3} textAnchor="end">
-        {Math.round(minT)}
-      </text>
-      <text x={inset.left} y={height - 5}>
-        {formatElapsed(0)}
-      </text>
-      {cutoffPoint ? (
-        <text x={cutoffPoint.x} y={height - 5} textAnchor="middle">
-          {formatElapsed(points[cutoffIndex]?.elapsedMs ?? 0)}
+        {cutoffPoint ? (
+          <line
+            x1={cutoffPoint.x}
+            y1={inset.top}
+            x2={cutoffPoint.x}
+            y2={plotBottom}
+            className="thermal-plant-run-card__cutoff"
+          />
+        ) : null}
+        {ambient.length > 1 ? (
+          <polyline
+            points={toPolyline(ambient)}
+            className="thermal-plant-run-card__trace thermal-plant-run-card__trace--ambient"
+          />
+        ) : null}
+        {heating.length > 1 ? (
+          <polyline
+            points={toPolyline(heating)}
+            className="thermal-plant-run-card__trace thermal-plant-run-card__trace--heating"
+          />
+        ) : null}
+        {cooling.length > 1 ? (
+          <polyline
+            points={toPolyline(cooling)}
+            className="thermal-plant-run-card__trace thermal-plant-run-card__trace--cooling"
+          />
+        ) : null}
+        {cutoffPoint ? (
+          <circle
+            cx={cutoffPoint.x}
+            cy={cutoffPoint.y}
+            r="3.5"
+            className="thermal-plant-run-card__point thermal-plant-run-card__point--heating"
+          />
+        ) : null}
+        {completionPoint ? (
+          <circle
+            cx={completionPoint.x}
+            cy={completionPoint.y}
+            r="3.5"
+            className="thermal-plant-run-card__point thermal-plant-run-card__point--cooling"
+          />
+        ) : null}
+        <text x={inset.left - 8} y={tickLabel(maxT) + 3} textAnchor="end">
+          {Math.round(maxT)}
         </text>
-      ) : null}
-      <text x={width - inset.right} y={height - 5} textAnchor="end">
-        {formatElapsed(maxElapsed)}
-      </text>
-    </svg>
+        <text x={inset.left - 8} y={tickLabel(80) + 3} textAnchor="end">
+          80
+        </text>
+        <text x={inset.left - 8} y={plotBottom + 3} textAnchor="end">
+          {Math.round(minT)}
+        </text>
+        <text x={inset.left} y={height - 5}>
+          {formatElapsed(0)}
+        </text>
+        {cutoffPoint ? (
+          <text x={cutoffPoint.x} y={height - 5} textAnchor="middle">
+            {formatElapsed(points[cutoffIndex]?.elapsedMs ?? 0)}
+          </text>
+        ) : null}
+        <text x={width - inset.right} y={height - 5} textAnchor="end">
+          {formatElapsed(maxElapsed)}
+        </text>
+      </svg>
+    </div>
   )
 }
 
@@ -506,7 +507,7 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
   }))
   const width = 600
   const initialHeight = 340
-  const { svgRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
+  const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length === 0)
     return (
       <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--boundary">
@@ -541,85 +542,86 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
     .join(' ')
   const tickIndices = selectBoundaryTickIndices(points)
   return (
-    <svg
-      ref={svgRef}
-      className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
-      preserveAspectRatio="xMidYMid meet"
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label="供电边界曲线"
-    >
-      <line
-        x1={inset.left}
-        y1={inset.top}
-        x2={inset.left}
-        y2={plotBottom}
-        className="thermal-plant-run-card__axis"
-      />
-      <line
-        x1={inset.left}
-        y1={plotBottom}
-        x2={width - inset.right}
-        y2={plotBottom}
-        className="thermal-plant-run-card__axis"
-      />
-      <line
-        x1={inset.left}
-        y1={inset.top + plotHeight / 3}
-        x2={width - inset.right}
-        y2={inset.top + plotHeight / 3}
-        className="thermal-plant-run-card__guide"
-      />
-      <line
-        x1={inset.left}
-        y1={inset.top + (plotHeight * 2) / 3}
-        x2={width - inset.right}
-        y2={inset.top + (plotHeight * 2) / 3}
-        className="thermal-plant-run-card__guide"
-      />
-      <polyline points={path} className="thermal-plant-run-card__boundary" />
-      {points.map((point, index) => (
-        <circle
-          key={`${point.requestVoltageMv}-${point.requestCurrentMa}-${index}`}
-          cx={positions[index]?.x}
-          cy={positions[index]?.y}
-          r="4"
-          className="thermal-plant-run-card__point thermal-plant-run-card__point--boundary"
+    <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
+      <svg
+        className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
+        preserveAspectRatio="xMidYMid meet"
+        viewBox={`0 0 ${width} ${height}`}
+        role="img"
+        aria-label="供电边界曲线"
+      >
+        <line
+          x1={inset.left}
+          y1={inset.top}
+          x2={inset.left}
+          y2={plotBottom}
+          className="thermal-plant-run-card__axis"
         />
-      ))}
-      {tickIndices.map((index) => {
-        const point = points[index]
-        return (
-          <text
-            key={`${point.requestVoltageMv}-label-${index}`}
-            x={positions[index]?.x}
-            y={height - 8}
-            textAnchor="middle"
-          >
-            {formatBoundaryVoltageMv(point.requestVoltageMv)}V
-          </text>
-        )
-      })}
-      <text x={inset.left - 16} y={inset.top + 5}>
-        {formatBoundaryCurrentMa(maxY)}A
-      </text>
-      <text x={inset.left - 16} y={plotBottom + 3}>
-        0A
-      </text>
-    </svg>
+        <line
+          x1={inset.left}
+          y1={plotBottom}
+          x2={width - inset.right}
+          y2={plotBottom}
+          className="thermal-plant-run-card__axis"
+        />
+        <line
+          x1={inset.left}
+          y1={inset.top + plotHeight / 3}
+          x2={width - inset.right}
+          y2={inset.top + plotHeight / 3}
+          className="thermal-plant-run-card__guide"
+        />
+        <line
+          x1={inset.left}
+          y1={inset.top + (plotHeight * 2) / 3}
+          x2={width - inset.right}
+          y2={inset.top + (plotHeight * 2) / 3}
+          className="thermal-plant-run-card__guide"
+        />
+        <polyline points={path} className="thermal-plant-run-card__boundary" />
+        {points.map((point, index) => (
+          <circle
+            key={`${point.requestVoltageMv}-${point.requestCurrentMa}-${index}`}
+            cx={positions[index]?.x}
+            cy={positions[index]?.y}
+            r="4"
+            className="thermal-plant-run-card__point thermal-plant-run-card__point--boundary"
+          />
+        ))}
+        {tickIndices.map((index) => {
+          const point = points[index]
+          return (
+            <text
+              key={`${point.requestVoltageMv}-label-${index}`}
+              x={positions[index]?.x}
+              y={height - 8}
+              textAnchor="middle"
+            >
+              {formatBoundaryVoltageMv(point.requestVoltageMv)}V
+            </text>
+          )
+        })}
+        <text x={inset.left - 16} y={inset.top + 5}>
+          {formatBoundaryCurrentMa(maxY)}A
+        </text>
+        <text x={inset.left - 16} y={plotBottom + 3}>
+          0A
+        </text>
+      </svg>
+    </div>
   )
 }
 
 function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
-  const [svg, setSvg] = useState<SVGSVGElement | null>(null)
+  const [container, setContainer] = useState<HTMLDivElement | null>(null)
   const [viewBoxHeight, setViewBoxHeight] = useState(initialHeight)
-  const svgRef = useCallback((node: SVGSVGElement | null) => setSvg(node), [])
+  const containerRef = useCallback((node: HTMLDivElement | null) => setContainer(node), [])
 
   useEffect(() => {
-    if (!svg || typeof ResizeObserver === 'undefined') return
+    if (!container || typeof ResizeObserver === 'undefined') return
 
     const updateViewBox = () => {
-      const { width, height } = svg.getBoundingClientRect()
+      const { width, height } = container.getBoundingClientRect()
       if (width <= 0 || height <= 0) return
       const nextHeight = (viewBoxWidth * height) / width
       setViewBoxHeight((currentHeight) =>
@@ -629,15 +631,15 @@ function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
 
     updateViewBox()
     const observer = new ResizeObserver(updateViewBox)
-    observer.observe(svg)
+    observer.observe(container)
     window.addEventListener('resize', updateViewBox)
     return () => {
       observer.disconnect()
       window.removeEventListener('resize', updateViewBox)
     }
-  }, [svg, viewBoxWidth])
+  }, [container, viewBoxWidth])
 
-  return { svgRef, viewBoxHeight }
+  return { containerRef, viewBoxHeight }
 }
 
 function selectBoundaryTickIndices(points: Array<{ requestVoltageMv: number }>, maxTicks = 6) {
