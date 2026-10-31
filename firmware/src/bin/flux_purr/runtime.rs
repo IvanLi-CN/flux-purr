@@ -2,6 +2,8 @@
 // re-exports preserve the existing private runtime namespace for the binary.
 #[path = "adc.rs"]
 pub(crate) mod adc;
+#[path = "automatic_heater.rs"]
+pub(crate) mod automatic_heater;
 #[path = "boot.rs"]
 pub(crate) mod boot;
 #[path = "control_plane.rs"]
@@ -43,6 +45,8 @@ pub(crate) mod watchdog;
 
 #[allow(unused_imports)]
 pub(crate) use adc::*;
+#[allow(unused_imports)]
+pub(crate) use automatic_heater::*;
 #[allow(unused_imports)]
 pub(crate) use boot::*;
 #[allow(unused_imports)]

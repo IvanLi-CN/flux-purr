@@ -22,7 +22,7 @@ where
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const AUTOMATIC_PPS_TICKET_WAIT_MS: u64 = FUSB302B_CONTRACT_REQUEST_TIMEOUT_MS + 500;
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn live_pps_gate_duty_percent(
     duty_percent: u8,
     heater_enabled: bool,
@@ -42,7 +42,7 @@ pub(crate) fn live_pps_gate_duty_percent(
     )
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AutomaticPpsTicketDecision {
     Wait,
@@ -50,7 +50,7 @@ pub(crate) enum AutomaticPpsTicketDecision {
     Failed,
 }
 
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) fn automatic_pps_ticket_decision(
     outcome: Option<TicketOutcome>,
     started_at_ms: u64,
@@ -75,29 +75,25 @@ pub(crate) fn automatic_pps_ticket_decision(
 }
 
 #[cfg(target_arch = "xtensa")]
-#[derive(Clone, Copy)]
-pub(crate) struct PendingAutomaticPpsTransition {
-    pub(crate) ticket: PowerTicket,
-    pub(crate) request_mv: u16,
-    pub(crate) request_mode: ch224q::AdjustableVoltageMode,
-    pub(crate) mode_changed: bool,
-    pub(crate) blank_heater: bool,
-    pub(crate) started_at_ms: u64,
-}
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) struct HeaterPowerOutputContext<'a, PWM> {
     pub(crate) pd_port: &'a PdPort,
     pub(crate) heater_pwm: &'a mut PWM,
     pub(crate) backend: &'a mut HeaterPowerBackend,
-    pub(crate) pending_automatic_pps: &'a mut Option<PendingAutomaticPpsTransition>,
+    pub(crate) pending_automatic_power_request: &'a mut Option<PendingAutomaticPowerRequest>,
     pub(crate) hold_pps_governor: &'a mut HoldPpsGovernor,
     pub(crate) manual_pps: &'a mut ManualPpsState,
     pub(crate) pd_observation: Option<PdStatusObservation>,
     pub(crate) measured_heater_mv: u32,
+    pub(crate) vin_raw_adc_mv: u16,
+    pub(crate) rtd_raw_adc_mv: u16,
     pub(crate) current_temp_c: f32,
+    pub(crate) source_capabilities: SourceCapabilitiesView,
+    pub(crate) requested_power_mw: u32,
     pub(crate) duty_percent: u8,
     pub(crate) heater_enabled: bool,
+    pub(crate) normal_auto: bool,
+    pub(crate) supply_scan: bool,
+    pub(crate) automatic_supply_response_latched: &'a mut bool,
     pub(crate) tuning_power_stage: bool,
     pub(crate) control_phase: HeaterControlPhase,
     pub(crate) initial_profile_approach: bool,

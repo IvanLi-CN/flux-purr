@@ -171,6 +171,8 @@ pub struct PdContractRequest {
     pub(crate) mode: PdContractRequestMode,
     pub(crate) voltage_mv: u16,
     pub(crate) operating_current_ma: u16,
+    calibration: bool,
+    pps_range: Option<PpsAdjustmentRange>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -200,13 +202,41 @@ impl PdContractRequest {
         self.operating_current_ma
     }
 
+    pub const fn is_calibration(self) -> bool {
+        self.calibration
+    }
+
+    pub const fn pps_range(self) -> Option<PpsAdjustmentRange> {
+        self.pps_range
+    }
+
+    /// Bind selection to one advertised envelope, including overlapping APDOs.
+    pub fn within_pps_range(mut self, range: PpsAdjustmentRange) -> Option<Self> {
+        self.pps_range = Some(range);
+        self.is_well_formed().then_some(self)
+    }
+
     pub fn is_well_formed(self) -> bool {
+        if let Some(range) = self.pps_range
+            && (self.mode != PdContractRequestMode::Pps
+                || self.voltage_mv < range.min_mv
+                || self.voltage_mv > range.max_mv
+                || self.operating_current_ma > range.max_current_ma)
+        {
+            return false;
+        }
         match self.mode {
             PdContractRequestMode::Fixed => {
                 Self::fixed(self.voltage_mv, self.operating_current_ma).is_ok()
             }
             PdContractRequestMode::Pps => {
-                Self::pps(self.voltage_mv, self.operating_current_ma).is_ok()
+                if self.calibration {
+                    Self::calibration_pps(self.voltage_mv, self.operating_current_ma).is_ok()
+                } else if self.operating_current_ma < MIN_HEATER_CONTRACT_MA {
+                    Self::automatic_pps(self.voltage_mv, self.operating_current_ma).is_ok()
+                } else {
+                    Self::pps(self.voltage_mv, self.operating_current_ma).is_ok()
+                }
             }
         }
     }
@@ -237,10 +267,45 @@ impl PdContractRequest {
             mode: PdContractRequestMode::Fixed,
             voltage_mv,
             operating_current_ma,
+            calibration: false,
+            pps_range: None,
         })
     }
 
     pub fn pps(voltage_mv: u16, operating_current_ma: u16) -> Result<Self, PdContractRequestError> {
+        Self::pps_with_minimum(voltage_mv, operating_current_ma, MIN_HEATER_CONTRACT_MA)
+    }
+
+    /// Build a PPS request for normal automatic heating. The automatic
+    /// supply-boundary terminal may use a lower encoded current, but only the
+    /// boundary-selected 1-3 A envelope can reach this constructor.
+    pub fn automatic_pps(
+        voltage_mv: u16,
+        operating_current_ma: u16,
+    ) -> Result<Self, PdContractRequestError> {
+        Self::pps_with_minimum(voltage_mv, operating_current_ma, 1_000).map(|mut request| {
+            request.calibration = false;
+            request
+        })
+    }
+
+    /// Low-current PPS is restricted to the bounded calibration workflow.
+    /// Ordinary heating/debug request construction retains the 3 A contract.
+    pub fn calibration_pps(
+        voltage_mv: u16,
+        operating_current_ma: u16,
+    ) -> Result<Self, PdContractRequestError> {
+        if voltage_mv > 21_000 || operating_current_ma > 3_000 {
+            return Err(PdContractRequestError::PpsCurrentOutOfRange);
+        }
+        Self::pps_with_minimum(voltage_mv, operating_current_ma, 1_000)
+    }
+
+    fn pps_with_minimum(
+        voltage_mv: u16,
+        operating_current_ma: u16,
+        minimum_ma: u16,
+    ) -> Result<Self, PdContractRequestError> {
         if voltage_mv == 0 {
             return Err(PdContractRequestError::ZeroVoltage);
         }
@@ -250,7 +315,7 @@ impl PdContractRequest {
         if !(FUSB302B_PPS_MIN_MV..=FUSB302B_PD_ABSOLUTE_MAX_MV).contains(&voltage_mv) {
             return Err(PdContractRequestError::PpsVoltageOutOfRange);
         }
-        if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
+        if !(minimum_ma..=MAX_HEATER_CONTRACT_MA).contains(&operating_current_ma) {
             return Err(PdContractRequestError::PpsCurrentOutOfRange);
         }
         if !voltage_mv.is_multiple_of(PD_PPS_VOLTAGE_STEP_MV) {
@@ -263,6 +328,8 @@ impl PdContractRequest {
             mode: PdContractRequestMode::Pps,
             voltage_mv,
             operating_current_ma,
+            calibration: minimum_ma == 1_000,
+            pps_range: None,
         })
     }
 }
@@ -326,7 +393,37 @@ impl ConfirmedActiveContract {
         }
         let selected_index = capabilities.pps.iter().position(|range| {
             range.is_some_and(|range| {
-                range.min_mv <= request.voltage_mv
+                request.pps_range.is_none_or(|pinned| pinned == range)
+                    && range.min_mv <= request.voltage_mv
+                    && request.voltage_mv <= range.max_mv
+                    && request.operating_current_ma <= range.max_current_ma
+            })
+        });
+        selected_index.is_some_and(|index| self.pps_capability_index == Some(index as u8))
+    }
+
+    /// A calibration-only PPS handoff may lower the current limit while it
+    /// stays on the confirmed APDO. Lowering the limit cannot increase the
+    /// source load, so the already-conducting heater may remain enabled while
+    /// the new contract is confirmed. Automatic and operator requests keep
+    /// the exact-current rule above.
+    pub fn request_keeps_same_pps_apdo_or_reduces_current(
+        self,
+        capabilities: SourceCapabilitiesView,
+        request: PdContractRequest,
+    ) -> bool {
+        if !request.is_calibration()
+            || !request.is_well_formed()
+            || self.mode != PdContractRequestMode::Pps
+            || request.mode != PdContractRequestMode::Pps
+            || request.operating_current_ma > self.operating_current_ma
+        {
+            return false;
+        }
+        let selected_index = capabilities.pps.iter().position(|range| {
+            range.is_some_and(|range| {
+                request.pps_range.is_none_or(|pinned| pinned == range)
+                    && range.min_mv <= request.voltage_mv
                     && request.voltage_mv <= range.max_mv
                     && request.operating_current_ma <= range.max_current_ma
             })
@@ -383,7 +480,11 @@ impl SourceCapabilities {
                 .into_iter()
                 .flatten()
                 .find(|apdo| {
-                    apdo.min_mv <= request.voltage_mv
+                    request.pps_range.is_none_or(|range| {
+                        range.min_mv == apdo.min_mv
+                            && range.max_mv == apdo.max_mv
+                            && range.max_current_ma == apdo.max_ma
+                    }) && apdo.min_mv <= request.voltage_mv
                         && apdo.max_mv >= request.voltage_mv
                         && apdo.max_ma >= request.operating_current_ma
                 })
@@ -711,6 +812,34 @@ fn pps_capability_is_better(candidate: PpsApdo, current: PpsApdo) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn low_current_calibration_requests_preserve_the_exact_apdo_and_rdo_limit() {
+        let capabilities = SourceCapabilities::from_pdos(&[pps_pdo(5_000, 21_000, 3_000)]);
+        for current_ma in (1_000..=3_000).step_by(100) {
+            let request = PdContractRequest::calibration_pps(7_200, current_ma).unwrap();
+            assert!(request.is_calibration());
+            assert!(request.is_well_formed());
+            let contract = capabilities.select_exact_contract(request).unwrap();
+            assert_eq!(contract.current_ma, current_ma);
+            assert_eq!(contract.voltage_mv, 7_200);
+            assert_eq!(
+                u32::from_le_bytes(
+                    crate::adapters::fusb302b::request_data_object(contract).unwrap()
+                ) & 0x7f,
+                u32::from(current_ma / 50)
+            );
+            if current_ma < 3_000 {
+                assert!(PdContractRequest::pps(7_200, current_ma).is_err());
+                let automatic = PdContractRequest::automatic_pps(7_200, current_ma).unwrap();
+                assert!(!automatic.is_calibration());
+                assert!(automatic.is_well_formed());
+            }
+        }
+        assert!(PdContractRequest::calibration_pps(21_100, 3_000).is_err());
+        assert!(PdContractRequest::calibration_pps(7_200, 950).is_err());
+        assert!(PdContractRequest::calibration_pps(7_200, 3_100).is_err());
+    }
+
     fn pps_pdo(min_mv: u16, max_mv: u16, max_ma: u16) -> u32 {
         (0b11 << 30)
             | (((min_mv / 100) as u32) << 8)
@@ -1006,6 +1135,85 @@ mod tests {
     }
 
     #[test]
+    fn pinned_pps_request_selects_its_actual_overlapping_apdo() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 3_000),
+            pps_pdo(5_000, 12_000, 3_000),
+            pps_pdo(5_000, 21_000, 3_000),
+        ]);
+        let range = PpsAdjustmentRange {
+            min_mv: 5_000,
+            max_mv: 21_000,
+            max_current_ma: 3_000,
+        };
+        let request = PdContractRequest::pps(9_000, 3_000)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+        let contract = capabilities.select_exact_contract(request).unwrap();
+        assert_eq!(contract.object_position, 3);
+        let confirmed =
+            ConfirmedActiveContract::from_private_contract(contract, capabilities).unwrap();
+        assert_eq!(confirmed.pps_range, Some(range));
+        assert!(confirmed.request_keeps_same_pps_apdo(capabilities.view(), request));
+        let changed = SourceCapabilities::from_pdos(&[
+            fixed_pdo(5_000, 3_000),
+            pps_pdo(5_000, 12_000, 3_000),
+        ]);
+        assert_eq!(changed.select_exact_contract(request), None);
+        assert!(!confirmed.request_keeps_same_pps_apdo(changed.view(), request));
+    }
+
+    #[test]
+    fn calibration_can_lower_current_without_dropping_same_apdo_conduction() {
+        let capabilities = SourceCapabilities::from_pdos(&[pps_pdo(5_000, 21_000, 3_000)]);
+        let apdo = capabilities.fusb302b_pps_capability().unwrap();
+        let range = PpsAdjustmentRange {
+            min_mv: apdo.min_mv,
+            max_mv: apdo.max_mv,
+            max_current_ma: apdo.max_ma,
+        };
+        let active_request = PdContractRequest::pps(21_000, 3_000)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+        let active_contract = capabilities.select_exact_contract(active_request).unwrap();
+        let active =
+            ConfirmedActiveContract::from_private_contract(active_contract, capabilities).unwrap();
+        let lower_request = PdContractRequest::calibration_pps(21_000, 2_850)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+
+        assert!(active.request_keeps_same_pps_apdo_or_reduces_current(
+            capabilities.view(),
+            lower_request,
+        ));
+        assert!(!active.request_keeps_same_pps_apdo(capabilities.view(), lower_request,));
+
+        let lower_active_request = PdContractRequest::calibration_pps(21_000, 2_850)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+        let lower_active_contract = capabilities
+            .select_exact_contract(lower_active_request)
+            .unwrap();
+        let lower_active =
+            ConfirmedActiveContract::from_private_contract(lower_active_contract, capabilities)
+                .unwrap();
+        let higher_request = PdContractRequest::calibration_pps(21_000, 3_000)
+            .unwrap()
+            .within_pps_range(range)
+            .unwrap();
+        assert!(
+            !lower_active.request_keeps_same_pps_apdo_or_reduces_current(
+                capabilities.view(),
+                higher_request,
+            )
+        );
+    }
+
+    #[test]
     fn exact_requests_never_clamp_or_change_mode() {
         let capabilities = SourceCapabilities::from_pdos(&[
             fixed_pdo(20_000, 5_000),
@@ -1029,6 +1237,8 @@ mod tests {
             mode: PdContractRequestMode::Pps,
             voltage_mv: 20_020,
             operating_current_ma: 3_000,
+            calibration: false,
+            pps_range: None,
         };
         assert!(!malformed_internal_request.is_well_formed());
         assert_eq!(

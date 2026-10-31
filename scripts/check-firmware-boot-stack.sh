@@ -166,12 +166,71 @@ if (( control_chain_required != 3 )); then
   echo "failed to resolve the tuning dispatch/status/page stack chain" >&2
   exit 1
 fi
-control_chain_headroom_bytes=$((stack_capacity_bytes - max_frame_bytes - max_pd_interrupt_frame_bytes - control_chain_bytes))
+runtime_loop_frame_bytes="$(frame_bytes_for_symbol "${runtime_loop_symbol%% *}")"
+control_chain_headroom_bytes=$((stack_capacity_bytes - runtime_loop_frame_bytes - max_pd_interrupt_frame_bytes - control_chain_bytes))
 if (( control_chain_headroom_bytes < min_boot_stack_headroom_bytes )); then
   echo "tuning event-read call chain headroom is below budget: ${control_chain_headroom_bytes}B < ${min_boot_stack_headroom_bytes}B" >&2
   exit 1
 fi
 
 echo "CPU0 stack capacity=${stack_capacity_bytes}B largest_frame=${max_frame_bytes}B task=${max_frame_label} headroom=$((stack_capacity_bytes - max_frame_bytes))B minimum=${min_boot_stack_headroom_bytes}B"
+
+# A task poll can fit while its nested control handlers exhaust the same
+# stack. Sum emitted boundaries; inlined handlers already belong to a parent
+# frame. Keep headroom for parsing, serialization and interrupt frames.
+control_segment_frame() {
+  local handler="$1" address label frame_bytes
+  segment_frame_bytes=0
+  # A boxed future's constructor and poll run separately. Use the larger
+  # frame rather than counting both as simultaneous stack consumption.
+  while read -r address label; do
+    frame_bytes="$(frame_bytes_for_symbol "$address")"
+    if (( frame_bytes > segment_frame_bytes )); then
+      segment_frame_bytes="$frame_bytes"
+    fi
+  done < <(
+    "$nm_bin" -Sn --demangle "$elf_path" | awk -v name="flux_purr::runtime::${handler}" '
+      $3 ~ /^[tT]$/ {
+        symbol = substr($0, index($0, $4))
+        if (symbol == name || symbol == name "::{closure#0}") print $1 " " symbol
+      }
+    '
+  )
+  printf 'control stack segment=%dB handler=%s\n' "$segment_frame_bytes" "$handler"
+}
+
+for transport in USB LAN; do
+  if [[ "$transport" == LAN ]] && ! "$nm_bin" -Sn --demangle "$elf_path" | awk '
+    /[tT] flux_purr::runtime::runtime_loop::runtime_execute_lan_command$/ { found = 1 }
+    END { exit !found }
+  '; then
+    continue
+  fi
+  handlers=(runtime_loop::runtime_process_input)
+  if [[ "$transport" == USB ]]; then
+    handlers+=(runtime_loop::runtime_process_usb_input runtime_loop::runtime_drain_usb_input
+      runtime_loop::runtime_process_usb_control_line)
+  else
+    handlers+=(runtime_loop::runtime_process_lan runtime_loop::runtime_execute_lan_command
+      runtime_loop::runtime_process_lan_control)
+  fi
+  handlers+=(lan::process_control_line lan::dispatch_control_frame lan::process_request_frame)
+  control_stack_bytes="$(frame_bytes_for_symbol "${runtime_loop_symbol%% *}")"
+  for handler in "${handlers[@]}"; do
+    control_segment_frame "$handler"
+    control_stack_bytes=$((control_stack_bytes + segment_frame_bytes))
+  done
+  # Dispatch already belongs to the transport sum. Add only its tuning
+  # callees, plus the interrupt task that can preempt this same stack.
+  control_segment_frame lan::dispatch_control_frame
+  tuning_tail_bytes=$((control_chain_bytes - segment_frame_bytes))
+  control_stack_bytes=$((control_stack_bytes + tuning_tail_bytes + max_pd_interrupt_frame_bytes))
+  control_headroom_bytes=$((stack_capacity_bytes - control_stack_bytes))
+  echo "CPU0 ${transport} control stack=${control_stack_bytes}B headroom=${control_headroom_bytes}B minimum=${min_boot_stack_headroom_bytes}B"
+  if (( control_headroom_bytes < min_boot_stack_headroom_bytes )); then
+    echo "nested ${transport} control stack exceeds budget: ${control_stack_bytes}B, headroom=${control_headroom_bytes}B" >&2
+    exit 1
+  fi
+done
 echo "nested PD interrupt headroom=${pd_interrupt_headroom_bytes}B minimum=${min_pd_interrupt_headroom_bytes}B"
 echo "tuning event-read call chain headroom=${control_chain_headroom_bytes}B minimum=${min_boot_stack_headroom_bytes}B"

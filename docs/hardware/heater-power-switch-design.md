@@ -6,7 +6,7 @@ This document freezes the current heater switching baseline for the `ESP32-S3FH4
 
 - Heater supply bus: `VBUS`; CH224Q retains its legacy adjustable range, while FUSB302BMPX applies the `5V..28V` PD guard before selecting its live PPS APDO (currently `5V..21V`) and falls back to fixed PDOs when necessary
 - FUSB302BMPX treats a negotiated PPS `>=20V` and `>=3A` contract as performance-guaranteed. A lower-voltage PPS or fixed contract may run the heater in degraded mode but cannot run performance or calibration procedures.
-- Contract current is a source-negotiated upper bound used to cap PWM-derived heater power: `20V @ 3A = 60W`, `20V @ 5A = 100W`. It is not a live VBUS-current measurement or physical over-current protection.
+- Contract current is a source-negotiated upper bound used to cap normal automatic heater power: `20V @ 3A = 60W`, `20V @ 5A = 100W`. Automatic PPS heating uses an observed whole-device boundary for its WiFi hardware group, with a labelled preset-model fallback in uncovered regions; no fixed auxiliary-current reserve is subtracted. It is not a live VBUS-current measurement or physical over-current protection.
 - Load type: resistive hotplate heater
 - Heater plate baseline: [heater-plate-design.md](heater-plate-design.md)
 - Switch topology: low-side N-channel MOSFET
@@ -103,7 +103,7 @@ Preferred runtime mode:
 - CH224Q keeps its legacy adjustable-PD path; FUSB302BMPX applies the `5V..28V` PD guard before using its live PPS APDO (currently `5V..21V`) and fixed PDO fallback
 - `GPIO47` drives the low-side MOSFET through MCPWM at `100 Hz`; fixed-PD operation uses PWM for continuous power control
 - firmware enables heating only after the selected controller confirms a contract. The FUSB302B policy requires SourceCaps selection followed by `Accept` and `PS_RDY`; reset, detach, I2C fault, reject, or wait clears heater authority. `PdPort` dispatch prevents the FUSB302B path from receiving CH224Q register writes.
-- with the `3.2 ohm` heater plate, PD 65 W cold start is not valid at static `12 V`; firmware must request a lower available voltage or use a validated current-limit fallback until the estimated heater resistance keeps full-on current inside the negotiated contract
+- with the `3.2 ohm` heater plate, normal automatic heating uses the device-local PPS boundary for the matching WiFi state and source envelope, with the preset electrical model only for watt allocation and uncovered regions. Product calibration uses one confirmed 3A PPS contract for preflight and boundary probes, `2.0–3.0A` equilibrium stages, full conduction, raw RTD/VIN observations, and a hard 220°C cutoff as specified in [ADR 0019](../adr/0019-heater-supply-boundary-calibration.md); manual PPS debug remains separate.
 
 Fallback mode:
 
@@ -154,19 +154,21 @@ Fuse and TVS baseline:
 
 The PD source and the hotplate switch stage must be checked against the heater current when the MOSFET is fully on.
 
-Supported heater-plate profiles currently target `R_HEATER_COLD ~= 3.2 ohm` and `R_HEATER_COLD ~= 4.5 ohm`; each plate must still be measured and calibrated during bring-up.
+Supported heater-plate profiles currently target `R_HEATER_COLD ~= 3.2 ohm` and `R_HEATER_COLD ~= 4.5 ohm`. These are nominal profile inputs for the preset electrical model; bring-up calibrates the complete-device supply boundary rather than claiming an independently measured trace resistance.
 
-Hard check:
+Hard check for normal automatic heating:
 
-- `I_ON ~= VIN / R_HEATER_COLD`
+- the device-local calibration establishes `VIN <= V_boundary(T_board, WiFi, APDO)` from the board's raw VIN response while a confirmed 3A PPS contract is fully conducting; lower-current equilibrium stages feed the thermal model only
+- automatic PPS requests are quantized downward to `100mV` and remain inside the APDO and hardware ceilings; a fixed PDO is eligible only when the preset model's full-on current fits the advertised Fixed limit
+- PWM duty is a power allocator after the voltage/contract check and cannot legalize an unsafe Fixed voltage; no fixed auxiliary-current reserve is subtracted because the complete-device boundary already includes the board load
 
-The design is only valid if the worst-case on-state current remains inside the negotiated PD current budget with margin for the rest of the board.
+The design is only valid if the selected device-local boundary keeps the complete powered device inside the negotiated PD operating envelope. The boundary is a safety envelope, not a measurement of heater-branch current or a proof of physical trace resistance.
 
 First-order full-on power estimate in `pps-mos`:
 
 - `P_ON ~= VIN^2 / R_HEATER`
 
-Firmware maps the controller output to a requested `VIN` instead of treating one PWM duty as equivalent power at every PD voltage. The requested voltage must stay inside the source capability discovered through CH224Q.
+Firmware maps the normal automatic controller's estimated watt request to a requested `VIN` and confirmed-contract PWM instead of treating one duty as equivalent power at every PD voltage. The requested voltage must stay inside the source capability discovered through CH224Q/FUSB302B and the device-local boundary. Calibration and manual PPS debug retain their existing electrical path.
 
 ## 8) Layout baseline
 

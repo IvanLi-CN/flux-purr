@@ -127,10 +127,10 @@ pub(crate) fn scan_serial_devices_from_available(
 fn preferred_flux_purr_port_path(port_name: &str) -> String {
     #[cfg(target_os = "macos")]
     if let Some(suffix) = port_name.strip_prefix("/dev/tty.usbmodem") {
-        let callout = format!("/dev/cu.usbmodem{suffix}");
-        if Path::new(&callout).exists() {
-            return callout;
-        }
+        // macOS exposes the same USB serial endpoint as a dial-in tty and a
+        // callout cu device. Native serial sessions must use the callout
+        // alias even when enumeration reports only the tty path.
+        return format!("/dev/cu.usbmodem{suffix}");
     }
 
     port_name.to_string()

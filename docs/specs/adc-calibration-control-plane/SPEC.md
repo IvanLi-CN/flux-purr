@@ -4,9 +4,9 @@
 
 ## Related ADRs
 
-- [`0001-thermal-plant-run-snapshot`](../../adr/0001-thermal-plant-run-snapshot.md)
+- [`0019-heater-supply-boundary-calibration`](../../adr/0019-heater-supply-boundary-calibration.md)
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - Flux Purr S3 硬件把 `VIN_ADC` 接到 `GPIO1 / ADC1_CH0`，把 `RTD_ADC` 接到 `GPIO2 / ADC1_CH1`。
 - RTD 温度与 VIN 输入电压都依赖 MCU ADC 读数；仅在显示层做偏移无法修正控制逻辑，也无法让状态契约表达真实测量值。
@@ -52,14 +52,17 @@
 - 校准数据加密或设备证书绑定。
 - AVS 或超出 PPS 的可调控制路径。
 
-## 需求（Requirements）
+## Requirements
 
 ### MUST
 
-- RTD calibration owns only the raw-ADC-to-temperature projection. Heater resistance and thermal
-  plant calibration MUST store their raw ADC observations independently. Activating another RTD
-  calibration slot MUST trigger projection rebuild and MUST NOT clear, rewrite, or mark those raw
-  observations stale.
+- REQ-ADC-STATE: RTD/VIN 样本、拟合建议、A/B 槽位、激活槽位和原始物理参考值 MUST 遵循下述独立持久化及立即生效规则。
+- REQ-ADC-CONVERSION: 采样 MUST 保留同次转换的 raw code/mV 配对和 eFuse 元数据，独立保留原始故障检查；缺少有效转换依据时 MUST 明确失败。
+- REQ-ADC-CONTROL: USB、LAN、devd、CLI 与 Web MUST 共享下述 live 校准模式、操作和拒绝语义；硬件状态为实际输出真相源。
+- REQ-ADC-BOUNDARY: `thermal_plant_auto` MUST 使用可控制 PPS 电压及电流的 FUSB302B 和实际 APDO 能力启动，不依赖预先存在的 20V PPS 合同；MUST 先关热申请起始合同，采集带 WiFi 状态和 ADC 假设的整机供电边界，执行下述扫描、截止、冷却及原子提交规则；旧电阻及关联热模型 MUST 视为不存在。
+- REQ-ADC-SNAPSHOT: 只读运行快照 MUST 使用 v2、受限分页及独立原始边界字段，重启后恢复同一已提交结果，不得将请求值报告为实测值。
+
+- RTD calibration owns only the raw-ADC-to-temperature projection. Whole-device supply-boundary and thermal calibration MUST store their raw ADC observations independently. Activating another RTD calibration slot MUST trigger projection rebuild and MUST NOT clear, rewrite, or mark those raw observations stale.
 
 - 每个 channel 最多保存 `8` 个 user samples；样本结构必须保存 ADC 域点位 `{ observedMv, expectedMv }`，并在 RTD/VIN channel 上分别原样保存操作者输入的 `referenceTempC` / `referenceVinMv`。RTD 温度标定样本还必须保存 capture 当下的硬件目标 `targetAdcMv`。
 - Channel 名称固定为 `rtd_adc` 与 `vin_adc`。
@@ -104,7 +107,7 @@
 - 样本变化只允许更新拟合建议值，不得自动覆盖 `A/B` 槽位。
 - `标定温度` 输入必须是纯手动 value；硬件上报温度只能作为 placeholder/辅助提示，不得自动写入 value。
 - 当 RTD/VIN calibration state 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
-- `thermal_plant_auto` 必须在同一次选中 APDO `max_mv`、`100%` PWM 的瞬态运行中采集 heater-curve 温区样本和热模型轨迹：测温达到 `220°C` 的同一控制周期断热，风扇关闭并自然冷却到 `80°C` 后在固件内拟合；物理有效时直接写入 active，不产生 preview、candidate、promotion 或用户验收。自动生成的每个温阻点不得低于硬件名义 `R20 + TCR` 模型对应阻值；手动曲线编辑继续保留当前最终结果填写形态。
+- `thermal_plant_auto` MUST 按 ADR 0019 扫描整机 CC/CV 安全边界：单 APDO，先以加热关闭的高压请求确认 3A 合同，再按 2.0–3.0A / 100mA 电流档和 100mV 电压步进采集热平衡，并在档间做受限 3A 温度覆盖探测；平衡窗口为 10 秒 / 1°C，达到 220°C 同周期断热并记录 80°C 冷却。原始 ADC、3V3 假设与实际 WiFi 硬件状态必须保留。普通低于 3A 的热平衡点只用于热模型，不得授权自动加热限压；唯一例外是独立确认且满足整机功率边界的终点对（60W/21V 源为原始 `21V/2.85A`），自动模式只能按该原始电压/电流对使用，不能把它当作 3A 观测、推导其它点或合成 `21V/3A`。不得使用 OvO 遥测，不反推出 MCU 功耗，不再以合同电流计算加热板电阻；旧曲线及其热模型视为不存在。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
 ### SHOULD
@@ -147,7 +150,7 @@ Arrays normalize to length `8`; empty slots are `null`.
 - `GET /api/v1/devices/:id/calibration?lease_id=...` returns `CalibrationState`.
 - `PUT /api/v1/devices/:id/calibration` mutates shared samples or slots. Body includes `leaseId`, `op=capture|delete|clear|import|set_active_slot|set_slot_fit`, optional `channel`, references, explicit ADC values, `sampleIndex`, `state`, `slot`, or `fit`.
 - `GET /api/v1/devices/:id/calibration/job?lease_id=...` returns the current calibration auto-job state.
-- `POST /api/v1/devices/:id/calibration/job` starts or cancels first-class auto jobs. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`; `thermal_plant_auto` owns the combined transient heater-curve and thermal-model capture; `cancel` stops the running job and clears calibration-owned live PPS / heater state.
+- `POST /api/v1/devices/:id/calibration/job` starts or cancels first-class auto jobs. `start` accepts `kind=vin_adc_auto|thermal_plant_auto`; `thermal_plant_auto` owns the whole-device supply-boundary and estimated thermal-model capture; `cancel` stops the running job and clears calibration-owned live PPS / heater state.
 
 ### USB JSONL
 
@@ -179,7 +182,7 @@ The protected `thermal_plant_auto` job publishes a read-only run projection for 
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "attempt": {
     "runId": 7,
     "status": "running",
@@ -208,16 +211,25 @@ The protected `thermal_plant_auto` job publishes a read-only run projection for 
       }
     ]
   },
+  "supplyBoundary": null,
   "provisionalCurve": null,
   "activeResult": null
 }
 ```
 
-`runId` increments for each automatic attempt and is independent of the persisted `transactionId`. `attempt` describes the live or terminal run; `activeResult` is populated only from a valid EEPROM transaction after the commit and readback succeed. A provisional curve may be shown while sampling, but it is never labeled or returned as active. `phase` is one of `ambient`, `heating`, or `cooling`; cooling points remain in the trace after the same-run `220C` heater cutoff and through the passive `80C` endpoint. A subsequent firmware restart must restore the same active transaction, projection, and bounded trace from EEPROM.
+`runId` increments for each automatic attempt and is independent of the persisted `transactionId`. `attempt` describes the live or terminal run; `activeResult` is populated only from a valid EEPROM transaction after the commit and readback succeed. `version=2` carries `supplyBoundary` with raw observations and conversion metadata; legacy `provisionalCurve` remains null and `activeResult.curve.points` remain empty. `phase` is one of `ambient`, `heating`, or `cooling`; cooling points remain in the trace after the same-run `220C` heater cutoff and through the passive `80C` endpoint. A subsequent firmware restart must restore the same active transaction, projection, and bounded trace from EEPROM.
 
-`tracePage` is cursor based: the request supplies `afterSample`, the response starts at that sample index (the initial cursor is `0`), and each page contains at most `16` points. The `nextSample` value is the next cursor and is absent at the end. A page is an ordered projection of `sampleIndex`, `elapsedMs`, `temperatureCentiC`, `heaterVoltageMv`, `dutyPercent`, and `phase`; raw ADC values and internal transaction records are never exposed. Each response is bounded to `8 KiB`. Clients merge by `runId` and `sampleIndex`, drain the final pages, and stop polling when the terminal attempt has `restartAllowed=true`.
+`tracePage` is cursor based: the request supplies `afterSample`, the response starts at that sample index (the initial cursor is `0`), and each page contains at most `16` points. The `nextSample` value is the next cursor and is absent at the end. A page is an ordered projection of `sampleIndex`, `elapsedMs`, `temperatureCentiC`, `heaterVoltageMv`, `dutyPercent`, and `phase`; the separate `supplyBoundary` carries paired raw ADC rows and acquisition metadata as specified in `docs/interfaces/http-api.md`. Each response is bounded to `8 KiB`. Clients merge by `runId` and `sampleIndex`, drain the final pages, and stop polling when the terminal attempt has `restartAllowed=true`.
 
-When a device does not advertise the `thermal_plant_run` capability, clients display an explicit compatibility state and retain the existing `get_calibration_job` behavior without repeatedly requesting the unsupported endpoint. USB, direct LAN, and native `devd` expose this same v1 projection and cursor contract.
+When a device does not advertise the `thermal_plant_run` capability, clients display an explicit compatibility state and retain the existing `get_calibration_job` behavior without repeatedly requesting the unsupported endpoint. USB, direct LAN, and native `devd` expose this same version 2 projection and cursor contract.
+
+## Verification
+
+- VER-ADC-STATE covers: REQ-ADC-STATE. Firmware persistence/fit tests and devd/Web contract tests verify zero/one/multiple samples, physical references, slot activation, import/export and fault preservation.
+- VER-ADC-CONVERSION covers: REQ-ADC-CONVERSION. Firmware ADC projection and raw replay tests verify paired code/mV, conversion metadata, 3V3 reprojection and missing-calibration rejection; target Clippy/build checks cover the production sampler.
+- VER-ADC-CONTROL covers: REQ-ADC-CONTROL. Firmware runtime and devd mock tests verify ownership, source capability, safe start/cancel, obsolete preview/save rejection and the common transport schema.
+- VER-ADC-BOUNDARY covers: REQ-ADC-BOUNDARY. Host simulated-source/thermal tests exercise sustainable current selection, equilibrium, transient coverage, same-cycle cutoff, cooling, replay, legacy absence and maximum EEPROM capacity. Authorized 3A hardware acceptance verifies actual source behavior separately.
+- VER-ADC-SNAPSHOT covers: REQ-ADC-SNAPSHOT. Firmware bounded-serialization tests, devd paging/roundtrip tests and Web type checks verify version 2, raw rows, empty resistance fields and the 8KiB response bound.
 
 ## 验收标准（Acceptance Criteria）
 
@@ -241,11 +253,10 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - Given `温度标定` mode is armed, When the operator toggles `开启加热`, Then Web must accept the action without imposing extra ADC-comparison gates and leave actual heating behavior to hardware feedback.
 - Given any calibration mode is armed, When the operator uses the heating control, Then Web presents that control as a Toggle switch rather than a text command button.
 - Given `温度标定` mode is armed, When hardware reports `heaterOutputPercent`, Then the status card must reflect that percentage through an energy-intensity visualization even if the heater switch is already on.
-- Given `thermal_plant_auto` is started from `加热曲线标定`, When its single transient run reaches `220C` and then passively cools to `80C`, Then it collects every heater-curve temperature band in that same run, adds low-temperature hardware-model anchors, clamps each generated point to at least the nominal `R20 + TCR` resistance floor, monotonic-smooths the result, and atomically writes the curve and thermal model directly to active. It never starts a separate heater-curve heating run and does not require preview or `Save`.
+- Given `thermal_plant_auto` starts, When each current stage reaches equilibrium, Then firmware records a classified raw boundary point, performs the bounded 3A coverage probe, and advances by 100mA; a 220°C sample disables the MOS immediately and records cutoff. Completion fits and atomically persists the current-format boundary/model pair after cooling.
 - Given `thermal_plant_auto` completes with a physically valid result, When EEPROM commit and readback succeed, Then a firmware restart restores the active result and its transaction identity; if the commit fails, the result is not admitted for heating.
-- Given the automatic run has cut heater power, When temperature remains near its peak without a 4°C change, Then the bounded trace still records the first zero-duty edge and 500ms recording opportunities through the first 10 seconds of passive cooling. Startup uses 16 dense observations to reserve capacity within the existing 128-sample trace; missing post-cut response cannot be treated as an observed flat temperature curve.
-- Given automatic thermal calibration runs with a delayed control cadence, When it timestamps a sample or checks a phase deadline, Then it accumulates observed monotonic elapsed time, carrying fractional 50ms cells instead of counting one cell per call. The stored cell format stays unchanged, timestamps stay strictly increasing, and cutoff capture rounds only within one cell. A physical plant simulated at 50ms and 75ms must retain the same capacity units for both current classes; a prior job's remainder cannot carry into a new run.
-- Given the active curve was generated by `thermal_plant_auto`, When firmware estimates resistance below the first measured high-temperature bin, Then the estimate must be bounded by the same-run low-temperature anchors instead of clamping the whole low-temperature range to the first high-temperature measurement.
+- Given a legacy heater curve or resistance-derived thermal model, When boot/preview/save/normal heating reads it, Then it is absent or rejected and cannot restore heating. Independent ADC calibration and user/network preferences remain available.
+- The bounded trace retains electrical edges and 500ms opportunities during the first 10s after cutoff. Sample times derive from the job’s monotonic start on the 50ms storage grid; delayed control frames cannot distort model units or create duplicate cells. Legacy resistance anchors are not used.
 - Given any calibration mode switch is still on, When the operator attempts a page-internal view/device/calibration-tab change, Then Web blocks that navigation and shows an inline prompt near the switch to close calibration mode first before continuing.
 
 ## 非功能性验收 / 质量门槛
@@ -291,7 +302,7 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - viewport_strategy: `devtools-emulate`
 - sensitive_exclusion: `N/A`
 
-`assets/thermal-plant-run-card-1440x900.png` shows the completed desktop thermal-model result card: the fitted R(T) curve is the primary view, while the same run's heating-to-natural-cooling trace and natural-height representative-point register remain visible in the evidence column.
+The thermal-model result card retains the coefficient metrics and run trace. Its historical resistance plot is empty for supply-boundary calibration; it must not infer or display an R(T) curve from PPS contract currents. Raw supply-boundary observations are available through the version 2 run snapshot. The image below documents the historical resistance presentation and is not evidence for supply-boundary calibration.
 
 ![Thermal plant run result card](./assets/thermal-plant-run-card-1440x900.png)
 

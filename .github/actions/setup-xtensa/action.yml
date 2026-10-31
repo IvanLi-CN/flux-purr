@@ -48,6 +48,8 @@ runs:
           echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
         fi
 
+        cargo install espflash --version 4.5.0 --locked
+
         # Fail setup when the Espressif toolchain cannot provide Clippy. The
         # target lint is a required check for Xtensa-only firmware sources.
         cargo +esp clippy --version

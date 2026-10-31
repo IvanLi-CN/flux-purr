@@ -1262,7 +1262,7 @@ describe('control-plane transport client', () => {
             status: 'running',
             progressPercent: 0,
             samplesCollected: 0,
-            nextRequestMv: 21000,
+            nextRequestMv: 5500,
             message: null,
           }),
         }
@@ -1290,14 +1290,34 @@ describe('control-plane transport client', () => {
     expect(started).toMatchObject({
       kind: 'thermal_plant_auto',
       status: 'running',
-      nextRequestMv: 21000,
+      nextRequestMv: 5500,
     })
   })
 
   it('reads a paged thermal plant run snapshot through the devd route', async () => {
     const fetcher = vi.fn().mockResolvedValue(
       jsonResponse({
-        version: 1,
+        version: 2,
+        supplyBoundary: {
+          formatVersion: 1,
+          adc: {
+            dividerSupplyMv: 3328,
+            referenceMv: 850,
+            referenceCode: 2000,
+            initCode: 100,
+            efuseVersion: 1,
+            attenuationDb: 6,
+          },
+          wifiStarted: true,
+          cutoffReached: true,
+          sourceMinMv: 5500,
+          sourceMaxMv: 21000,
+          sourceMaxMa: 3000,
+          sourcePowerLimitMw: 60000,
+          advertisedMinMv: 5000,
+          advertisedMaxMv: 21000,
+          points: [[30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1]],
+        },
         attempt: null,
         tracePage: {
           startSample: 16,
@@ -1327,6 +1347,11 @@ describe('control-plane transport client', () => {
       16
     )
 
+    expect(snapshot.version).toBe(2)
+    expect(snapshot.supplyBoundary?.adc.dividerSupplyMv).toBe(3328)
+    expect(snapshot.supplyBoundary?.points[0]).toEqual([
+      30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1,
+    ])
     expect(snapshot.tracePage.points[0]?.phase).toBe('cooling')
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:30080/api/v1/devices/mock-fp-lab-01/calibration/thermal-plant/run?lease_id=lease-1&after_sample=16',

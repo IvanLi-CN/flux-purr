@@ -381,7 +381,9 @@ impl ThermalProfileMode {
     pub(crate) fn explicit_source_defaults(self) -> Option<(u16, u16)> {
         match self {
             Self::Auto => None,
-            Self::W65 => Some((20_000, 3_250)),
+            // `65w` is the historical 3A parameter-bank name. The current
+            // authorized bench is 60W/3A, so the bank must not request 3.25A.
+            Self::W65 => Some((20_000, 3_000)),
             Self::W100 => Some((21_000, 5_000)),
         }
     }
@@ -979,9 +981,23 @@ pub(crate) enum ThermalTuneEngine {
 #[derive(Debug, Subcommand)]
 pub(crate) enum ThermalModelCommand {
     #[command(
-        about = "Start one selected-APDO full-voltage transient calibration run to 220C, including heater-curve sampling."
+        about = "Scan a whole-device PPS supply boundary with an unloaded high-voltage 3A preflight, a rapid 3A voltage scan, 500ms observations, raw ADC capture, and a five-minute 220C-bounded thermal fit."
     )]
     Calibrate(TargetSelector),
+    #[command(about = "Read the persisted raw thermal-plant trace without changing device state.")]
+    Trace(ThermalPlantTraceArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct ThermalPlantTraceArgs {
+    #[command(flatten)]
+    pub(crate) target: TargetSelector,
+    #[arg(
+        long = "after-sample",
+        default_value_t = 0,
+        help = "Return samples at or after this zero-based trace index."
+    )]
+    pub(crate) after_sample: u8,
 }
 
 #[derive(Debug, Subcommand)]
@@ -990,6 +1006,11 @@ pub(crate) enum ThermalReportCommand {
         about = "Render a completed raw thermal self-test as the canonical four-file HTML evidence bundle."
     )]
     RenderSelfTest(ThermalSelfTestReportArgs),
+    #[command(
+        name = "render-a6",
+        about = "Validate and render the two-stage 3A automatic-heater boundary acceptance bundle."
+    )]
+    RenderA6(ThermalA6ReportArgs),
     #[command(
         about = "Rerender a legacy preliminary thermal review bundle into the canonical compliant HTML bundle."
     )]
@@ -1074,7 +1095,7 @@ pub(crate) struct ThermalSelfTestArgs {
         help = "Bench source mode. The default isolapurr provider supports auto-follow or manual-forced."
     )]
     pub(crate) source_mode: String,
-    #[arg(long = "sample-interval-ms", default_value_t = 300)]
+    #[arg(long = "sample-interval-ms", default_value_t = 500)]
     pub(crate) sample_interval_ms: u64,
     #[arg(
         long = "evaluation-mode",
@@ -1331,6 +1352,59 @@ pub(crate) struct ThermalSelfTestReportArgs {
         help = "Output directory for the canonical HTML bundle. Defaults to a sibling <run-dir>-html-report directory."
     )]
     pub(crate) output_dir: Option<PathBuf>,
+    #[arg(
+        long = "port-path",
+        help = "Authorized Flux Purr MCU port to record in the report context."
+    )]
+    pub(crate) port_path: Option<String>,
+    #[arg(
+        long = "firmware-sha",
+        help = "Firmware source SHA to bind to the report context."
+    )]
+    pub(crate) firmware_sha: Option<String>,
+    #[arg(
+        long = "source-path",
+        help = "Physical source output path or port label, for example C."
+    )]
+    pub(crate) source_path: Option<String>,
+}
+
+#[derive(Debug, Args, Clone)]
+pub(crate) struct ThermalA6ReportArgs {
+    #[arg(
+        long = "run-dir",
+        help = "Stage-two raw thermal self-test directory containing run.json and samples.ndjson."
+    )]
+    pub(crate) run_dir: PathBuf,
+    #[arg(
+        long = "output-dir",
+        help = "Output directory for the A6 acceptance evidence bundle."
+    )]
+    pub(crate) output_dir: Option<PathBuf>,
+    #[arg(long = "port-path", help = "Authorized Flux Purr MCU port.")]
+    pub(crate) port_path: Option<String>,
+    #[arg(long = "firmware-sha", help = "Firmware ELF SHA-256 bound to the run.")]
+    pub(crate) firmware_sha: Option<String>,
+    #[arg(
+        long = "source-path",
+        help = "Physical source output path, for example C."
+    )]
+    pub(crate) source_path: Option<String>,
+    #[arg(
+        long = "calibration-transaction-id",
+        help = "Active thermal-plant transaction read back after stage-one calibration."
+    )]
+    pub(crate) calibration_transaction_id: u64,
+    #[arg(
+        long = "calibration-run-id",
+        help = "Stage-one calibration run identity bound to the active model."
+    )]
+    pub(crate) calibration_run_id: Option<String>,
+    #[arg(
+        long = "active-model-digest",
+        help = "Digest of the active thermal-plant model read back after calibration."
+    )]
+    pub(crate) active_model_digest: Option<String>,
 }
 
 #[derive(Debug, Args)]

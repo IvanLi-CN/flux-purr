@@ -312,6 +312,19 @@ pub struct ControlPlaneStatus {
     pub pps_capability_min_mv: Option<u16>,
     pub pps_capability_max_mv: Option<u16>,
     pub pps_capability_max_ma: Option<u16>,
+    /// Source envelope used to match the persisted automatic-heater boundary.
+    /// This is capability metadata, not a live input-current measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_mw: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_ma: Option<u16>,
+    /// Runtime automatic-heater ceiling selected from the current source and
+    /// persisted whole-device boundary. This is a control diagnostic, not a
+    /// live source-current measurement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_safe_mv: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_boundary_applied: Option<bool>,
     pub manual_pps_error: Option<String<ERROR_CODE_MAX_LEN>>,
     #[serde(default)]
     pub heater_fault_reason: Option<String<ERROR_CODE_MAX_LEN>>,
@@ -353,6 +366,100 @@ pub struct ControlPlaneStatus {
     pub thermal_plant_model: ThermalPlantRuntimeWire,
     pub frontpanel_key: Option<FrontPanelKeyWire>,
     pub network: NetworkSummary,
+}
+
+/// Compact read-only status used by the high-rate thermal sampler.
+///
+/// The normal control-plane status intentionally carries UI, network, ADC,
+/// profile, and persistence context. Returning that snapshot over USB can
+/// take seconds because the USB Serial/JTAG transport is packetized. The
+/// thermal sampler only needs the fields below; the short wire names keep the
+/// response within a few packets while the devd endpoint expands them back to
+/// the stable camelCase host shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThermalStatusWire {
+    #[serde(rename = "m")]
+    pub mode: DeviceModeWire,
+    #[serde(rename = "u")]
+    pub uptime_seconds: u32,
+    #[serde(rename = "t")]
+    pub current_temp_c: f32,
+    #[serde(rename = "tt")]
+    pub target_temp_c: i16,
+    #[serde(rename = "he")]
+    pub heater_enabled: bool,
+    #[serde(rename = "ho")]
+    pub heater_output_percent: u8,
+    #[serde(rename = "hp")]
+    pub heater_physical_output_percent: u8,
+    #[serde(rename = "v")]
+    pub voltage_mv: u32,
+    #[serde(rename = "i")]
+    pub current_ma: u32,
+    #[serde(rename = "r")]
+    pub rtd_raw_adc_mv: u16,
+    #[serde(rename = "vin")]
+    pub vin_raw_adc_mv: u16,
+    #[serde(rename = "pr")]
+    pub pd_request_mv: u16,
+    #[serde(rename = "pc")]
+    pub pd_contract_mv: u16,
+    #[serde(rename = "ps")]
+    pub pd_state: PdStateWire,
+    #[serde(rename = "pk")]
+    pub pd_contract_kind: String<ERROR_CODE_MAX_LEN>,
+    #[serde(rename = "ci")]
+    pub pd_contract_current_ma: u16,
+    #[serde(rename = "cp")]
+    pub pd_contract_power_mw: u32,
+    #[serde(rename = "sp", default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_mw: Option<u32>,
+    #[serde(rename = "sa", default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_ma: Option<u16>,
+    #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+    pub automatic_safe_mv: Option<u16>,
+    #[serde(rename = "ab", default, skip_serializing_if = "Option::is_none")]
+    pub automatic_boundary_applied: Option<bool>,
+    #[serde(rename = "ph")]
+    pub heater_control_phase: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(rename = "g")]
+    pub heater_control_measurement_guarded: bool,
+    #[serde(rename = "ct")]
+    pub heater_control_temp_c: Option<f32>,
+    #[serde(rename = "ft")]
+    pub heater_fault_reason: Option<String<ERROR_CODE_MAX_LEN>>,
+}
+
+impl ThermalStatusWire {
+    pub fn from_control_plane_status(status: &ControlPlaneStatus) -> Self {
+        Self {
+            mode: status.mode,
+            uptime_seconds: status.uptime_seconds,
+            current_temp_c: status.current_temp_c,
+            target_temp_c: status.target_temp_c,
+            heater_enabled: status.heater_enabled,
+            heater_output_percent: status.heater_output_percent,
+            heater_physical_output_percent: status.heater_physical_output_percent,
+            voltage_mv: status.voltage_mv,
+            current_ma: status.current_ma,
+            rtd_raw_adc_mv: status.rtd_raw_adc_mv,
+            vin_raw_adc_mv: status.vin_raw_adc_mv,
+            pd_request_mv: status.pd_request_mv,
+            pd_contract_mv: status.pd_contract_mv,
+            pd_state: status.pd_state,
+            pd_contract_kind: status.pd_contract_kind.clone(),
+            pd_contract_current_ma: status.pd_contract_current_ma,
+            pd_contract_power_mw: status.pd_contract_power_mw,
+            source_power_limit_mw: status.source_power_limit_mw,
+            source_power_limit_ma: status.source_power_limit_ma,
+            automatic_safe_mv: status.automatic_safe_mv,
+            automatic_boundary_applied: status.automatic_boundary_applied,
+            heater_control_phase: status.heater_control_phase.clone(),
+            heater_control_measurement_guarded: status.heater_control_measurement_guarded,
+            heater_control_temp_c: status.heater_control_temp_c,
+            heater_fault_reason: status.heater_fault_reason.clone(),
+        }
+    }
 }
 
 /// Snapshot returned by the flash-preparation admission protocol. The fields
@@ -443,6 +550,8 @@ pub enum ThermalPlantRunPhaseWire {
 pub struct ThermalPlantTracePointWire {
     pub sample_index: u8,
     pub elapsed_ms: u32,
+    #[serde(default)]
+    pub raw_rtd_adc_mv: u16,
     pub temperature_centi_c: i16,
     pub heater_voltage_mv: u16,
     pub duty_percent: u8,
@@ -474,6 +583,8 @@ pub struct ThermalPlantRunAttemptWire {
     pub phase: Option<ThermalPlantRunPhaseWire>,
     pub progress_percent: u8,
     pub elapsed_ms: u32,
+    #[serde(default)]
+    pub ambient_raw_rtd_adc_mv: u16,
     pub current_temp_centi_c: i16,
     pub heater_voltage_mv: u16,
     pub duty_percent: u8,
@@ -498,6 +609,8 @@ pub struct ThermalPlantActiveResultWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunSnapshotWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<Box<SupplyBoundaryWire>>,
     pub version: u8,
     pub attempt: Option<ThermalPlantRunAttemptWire>,
     pub trace_page: ThermalPlantTracePageWire,
@@ -625,6 +738,10 @@ impl ControlPlaneStatus {
                 pps_capability_min_mv: None,
                 pps_capability_max_mv: None,
                 pps_capability_max_ma: None,
+                source_power_limit_mw: None,
+                source_power_limit_ma: None,
+                automatic_safe_mv: None,
+                automatic_boundary_applied: None,
                 manual_pps_error: None,
                 heater_fault_reason: None,
                 fault_attention_pending: false,
@@ -779,6 +896,12 @@ pub struct CalibrationRuntimeStateWire {
     pub stable: bool,
     pub stability_error_mv: Option<i16>,
     pub error: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_phase: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_failure: Option<String<ERROR_CODE_MAX_LEN>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan_contract_confirmed: Option<bool>,
     pub job: CalibrationJobStateWire,
 }
 
@@ -794,6 +917,9 @@ impl Default for CalibrationRuntimeStateWire {
             stable: false,
             stability_error_mv: None,
             error: None,
+            scan_phase: None,
+            scan_failure: None,
+            scan_contract_confirmed: None,
             job: CalibrationJobStateWire::default(),
         }
     }
@@ -1646,7 +1772,59 @@ pub struct HeaterCurveRawObservationsWire {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SupplyBoundaryWire {
+    pub format_version: u8,
+    pub adc: crate::heater_supply::BoundaryAdcMetadata,
+    pub wifi_started: bool,
+    pub cutoff_reached: bool,
+    pub source_min_mv: u16,
+    pub source_max_mv: u16,
+    pub source_max_ma: u16,
+    #[serde(default)]
+    pub source_power_limit_mw: u32,
+    pub advertised_min_mv: u16,
+    pub advertised_max_mv: u16,
+    /// [ms, RTD code, RTD mV, VIN code, VIN mV, request mA, tracking mV, flat mV, tracking-only].
+    pub points: Vec<[u32; 9], { crate::heater_supply::MAX_BOUNDARY_POINTS }>,
+}
+
+impl From<crate::heater_supply::SupplyBoundary> for SupplyBoundaryWire {
+    fn from(value: crate::heater_supply::SupplyBoundary) -> Self {
+        let mut points = Vec::new();
+        for point in &value.points[..usize::from(value.point_count)] {
+            let _ = points.push([
+                point.elapsed_ms,
+                u32::from(point.rtd_code),
+                u32::from(point.rtd_mv),
+                u32::from(point.vin_code),
+                u32::from(point.vin_mv),
+                u32::from(point.request_current_ma),
+                u32::from(point.tracking_request_mv),
+                u32::from(point.flat_request_mv),
+                u32::from(point.tracking_only),
+            ]);
+        }
+        Self {
+            format_version: crate::heater_supply::BOUNDARY_FORMAT_VERSION,
+            adc: value.adc,
+            wifi_started: value.wifi_started,
+            cutoff_reached: value.cutoff_reached,
+            source_min_mv: value.source_min_mv,
+            source_max_mv: value.source_max_mv,
+            source_max_ma: value.source_max_ma,
+            source_power_limit_mw: value.source_power_limit_mw,
+            advertised_min_mv: value.advertised_min_mv,
+            advertised_max_mv: value.advertised_max_mv,
+            points,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HeaterCurveStateWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary: Option<Box<SupplyBoundaryWire>>,
     pub active: HeaterCurvePackageWire,
     pub preview: Option<HeaterCurvePackageWire>,
     #[serde(default)]
@@ -1770,14 +1948,14 @@ pub fn heater_curve_state_from_memory(
     config: &MemoryConfig,
     preview: Option<(&HeaterCurveConfig, Option<&HeaterCurveRawObservations>)>,
 ) -> HeaterCurveStateWire {
+    let _ = preview;
     HeaterCurveStateWire {
-        active: HeaterCurvePackageWire::from_memory(
-            &config.active_heater_curve,
-            Some(&config.heater_curve_raw_observations),
-        ),
-        preview: preview.map(|(curve, raw_observations)| {
-            HeaterCurvePackageWire::from_memory(curve, raw_observations)
-        }),
+        supply_boundary: config
+            .heater_supply_boundary
+            .filter(crate::heater_supply::SupplyBoundary::is_valid)
+            .map(|value| Box::new(value.into())),
+        active: HeaterCurvePackageWire::from_memory(&HeaterCurveConfig::default(), None),
+        preview: None,
         eeprom_probe: None,
     }
 }
@@ -2824,6 +3002,7 @@ pub enum UsbRequestOp {
     ResetPersistence,
     GetNetwork,
     GetStatus,
+    GetThermalStatus,
     GetLanPairingCode,
     OpenLanPairingWindow,
     CloseLanPairingWindow,
@@ -2847,6 +3026,7 @@ impl UsbRequestOp {
             Self::ResetPersistence => "reset_persistence",
             Self::GetNetwork => "get_network",
             Self::GetStatus => "get_status",
+            Self::GetThermalStatus => "get_thermal_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
             Self::OpenLanPairingWindow => "open_lan_pairing_window",
             Self::CloseLanPairingWindow => "close_lan_pairing_window",
@@ -2912,6 +3092,8 @@ pub enum UsbResponsePayload {
     InstallStatus(InstallStatus),
     Network(NetworkSummary),
     Status(Box<ControlPlaneStatus>),
+    #[serde(rename = "thermalStatus")]
+    ThermalStatus(ThermalStatusWire),
     LanPairingCode(LanPairingCode),
     Wifi(WifiConfigReceipt),
     Calibration(CalibrationStateWire),
@@ -3418,6 +3600,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("reset_persistence") => Ok(UsbRequestOp::ResetPersistence),
         Some("get_network") => Ok(UsbRequestOp::GetNetwork),
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
+        Some("get_thermal_status") => Ok(UsbRequestOp::GetThermalStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
         Some("open_lan_pairing_window") => Ok(UsbRequestOp::OpenLanPairingWindow),
         Some("close_lan_pairing_window") => Ok(UsbRequestOp::CloseLanPairingWindow),
@@ -3883,6 +4066,34 @@ mod tests {
         assert!(json.contains(r#""thermalControl":{"profileActive":true"#));
         assert!(json.contains(r#""autoAdjustableWorkingFloorMv":6100"#));
         assert!(json.contains(r#""fanPadObservation":{"enablePadHigh":true,"pwmPadHigh":false}"#));
+    }
+
+    #[test]
+    fn compact_thermal_status_response_round_trips_under_sampling_budget() {
+        let memory = MemoryConfig {
+            target_temp_c: 180,
+            ..MemoryConfig::default()
+        };
+        let status = ControlPlaneStatus::from_device_status(
+            snapshot_at(180, 0),
+            &memory,
+            12,
+            NetworkSummary::default(),
+        );
+        let compact = ThermalStatusWire::from_control_plane_status(&status);
+        let frame = UsbFrame::Response {
+            request_id: string("thermal-compact"),
+            ok: true,
+            result: Some(UsbResponsePayload::ThermalStatus(compact)),
+            error: None,
+        };
+        let mut out = [0u8; USB_LINE_MAX_LEN];
+        let json = write_usb_frame(&frame, &mut out).expect("compact thermal status fits");
+
+        assert!(json.contains(r#""thermalStatus":{"m":"sampling""#));
+        assert!(json.contains(r#""tt":180"#));
+        assert!(json.len() < 512, "compact status is {} bytes", json.len());
+        assert_eq!(parse_usb_frame(json).expect("compact status parses"), frame);
     }
 
     #[test]
@@ -4352,6 +4563,22 @@ mod tests {
             UsbFrame::Request {
                 request_id: string("req-001"),
                 op: UsbRequestOp::GetStatus,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_usb_thermal_status_request_with_request_id() {
+        let frame = parse_usb_frame(
+            r#"{"type":"request","requestId":"thermal-001","op":"get_thermal_status"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            frame,
+            UsbFrame::Request {
+                request_id: string("thermal-001"),
+                op: UsbRequestOp::GetThermalStatus,
             }
         );
     }
@@ -4871,22 +5098,45 @@ mod tests {
             }
         );
 
+        let mut boundary = crate::heater_supply::SupplyBoundary {
+            point_count: 41,
+            source_min_mv: 5_500,
+            source_max_mv: 21_000,
+            source_max_ma: 3_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            ..Default::default()
+        };
+        boundary.points.fill(crate::heater_supply::BoundaryPoint {
+            elapsed_ms: 26_000_000,
+            rtd_code: 4_095,
+            rtd_mv: 4_095,
+            vin_code: 4_095,
+            vin_mv: 4_095,
+            request_current_ma: 3_000,
+            tracking_request_mv: 21_000,
+            flat_request_mv: 21_000,
+            tracking_only: true,
+        });
         let snapshot = ThermalPlantRunSnapshotWire {
-            version: 1,
+            supply_boundary: Some(Box::new(boundary.into())),
+            version: 2,
             attempt: None,
             trace_page: ThermalPlantTracePageWire {
                 start_sample: 32,
-                next_sample: None,
-                total_samples: 33,
-                points: heapless::Vec::from_slice(&[ThermalPlantTracePointWire {
-                    sample_index: 32,
-                    elapsed_ms: 1_600,
-                    temperature_centi_c: 8_000,
-                    heater_voltage_mv: 0,
-                    duty_percent: 0,
-                    phase: ThermalPlantRunPhaseWire::Cooling,
-                }])
-                .unwrap(),
+                next_sample: Some(48),
+                total_samples: 128,
+                points: (0..THERMAL_PLANT_TRACE_PAGE_MAX)
+                    .map(|_| ThermalPlantTracePointWire {
+                        sample_index: 32,
+                        elapsed_ms: 26_000_000,
+                        raw_rtd_adc_mv: 0,
+                        temperature_centi_c: 8_000,
+                        heater_voltage_mv: 0,
+                        duty_percent: 0,
+                        phase: ThermalPlantRunPhaseWire::Cooling,
+                    })
+                    .collect(),
             },
             provisional_curve: None,
             active_result: None,
@@ -4901,6 +5151,8 @@ mod tests {
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
+        assert!(json.contains(r#""formatVersion":6"#));
+        assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
     }
 

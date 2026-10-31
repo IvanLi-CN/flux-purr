@@ -574,6 +574,10 @@ pub(crate) fn thermal_profile_preview_runtime_body(
     })
 }
 
+pub(crate) fn thermal_profile_mode_runtime_body(mode: ThermalProfileMode) -> Value {
+    json!({"thermalProfileMode": mode.as_str()})
+}
+
 pub(crate) fn expected_thermal_profile_mode_bank(
     status: &Value,
     expected_mode: ThermalProfileMode,

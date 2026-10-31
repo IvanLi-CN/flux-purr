@@ -1,5 +1,7 @@
 # Firmware Runtime Module Boundaries Implementation
 
+自动供电仅持有一份带完整请求、起始时间和停热标记的 pending ticket；每次非零输出都重新核对最新安全合同。普通安全换压使用已确认电压计算 PWM，安全降压先关输出，确认及稳定后重新软启动。USB/LAN、调优导出及 PD 中断的嵌套栈检查覆盖实际运行时路径，启动系统在 EEPROM 初始化期间保持装箱；运行时回归和严格主机 Clippy 已通过。
+
 ## Current Status
 
 - Implementation: source-backed individual module documents are maintained in `modules/`; `contracts/module-control-matrix.md` is the cross-module index and ownership map.
@@ -10,6 +12,7 @@
 
 - `REQ-FRM-001` and `REQ-FRM-002`: each file in `modules/` records responsibility, read inputs, command inputs, published state, communication mechanism, authority, physical writer, safety behavior, and source references; the matrix links the complete module set and retains cross-boundary tables.
 - `REQ-FRM-003`: the runtime-loop section records the actual `run_runtime_loop` order and the mailbox/USB execution boundary.
+- USB and LAN control execution retain their serialized owner while heap-owning large dispatch futures and responses. The LAN executor is allocated only for an actual mailbox command. The product stack gate includes nested control frames instead of relying only on task-local frame size.
 - `REQ-FRM-004`: the LAN/HTTP sections cover `NetHttpState`, `HttpGate`, `CONTROL_MAILBOX`, `CONTROL_RESPONSES`, lease and revision revalidation, and snapshot reads.
 - `REQ-FRM-005`: the Power Coordinator and PD sections cover typed
   `PowerCoordinatorClient` requests, `POWER_COMMANDS` capacity `6`, private

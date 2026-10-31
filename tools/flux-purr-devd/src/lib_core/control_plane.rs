@@ -308,7 +308,7 @@ where
 }
 
 pub fn app(state: AppState) -> Router {
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/api/v1/lan/devices", get(list_lan_devices))
         .route("/api/v1/lan/discovery/mdns", post(refresh_lan_mdns))
@@ -349,13 +349,8 @@ pub fn app(state: AppState) -> Router {
             "/api/v1/devices/{device_id}/setup/complete",
             post(complete_device_setup),
         )
-        .route("/api/v1/devices/{device_id}/network", get(device_network))
-        .route("/api/v1/devices/{device_id}/status", get(device_status))
-        .route("/api/v1/devices/{device_id}/events", get(device_events))
-        .route(
-            "/api/v1/devices/{device_id}/events/history",
-            get(device_event_history),
-        )
+        .route("/api/v1/devices/{device_id}/network", get(device_network));
+    let mut router = add_device_observation_routes(router)
         .route("/api/v1/devices/{device_id}/wifi", put(configure_wifi))
         .route(
             "/api/v1/devices/{device_id}/runtime",
@@ -409,6 +404,20 @@ pub fn app(state: AppState) -> Router {
 
     router = apply_dev_cors(router, state.config.allow_dev_cors);
     router
+}
+
+fn add_device_observation_routes(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route("/api/v1/devices/{device_id}/status", get(device_status))
+        .route(
+            "/api/v1/devices/{device_id}/thermal-status",
+            get(device_thermal_status),
+        )
+        .route("/api/v1/devices/{device_id}/events", get(device_events))
+        .route(
+            "/api/v1/devices/{device_id}/events/history",
+            get(device_event_history),
+        )
 }
 
 fn apply_dev_cors(mut router: Router, allow_dev_cors: bool) -> Router {

@@ -522,26 +522,26 @@ pub(crate) struct MockPpsApdo {
 }
 
 pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
-    let curve_points = [
-        (25, 5_674),
-        (61, 6_089),
-        (102, 6_583),
-        (162, 7_307),
-        (220, 8_011),
-    ]
-    .into_iter()
-    .map(|(temp_c, resistance_ohms)| {
-        Some(HeaterCurvePoint {
-            temp_centi_c: temp_c * 100,
-            resistance_milliohms: resistance_ohms,
-        })
-    })
-    .chain(std::iter::repeat(None))
-    .take(HEATER_CURVE_MAX_POINTS)
-    .collect::<Vec<_>>();
-    let curve = HeaterCurvePackage {
-        points: curve_points,
-        raw_observations: None,
+    // Synthetic contract fixture; no resistance or auxiliary-power measurement is implied.
+    let boundary = SupplyBoundary {
+        format_version: 1,
+        adc: SupplyBoundaryAdc {
+            divider_supply_mv: 3_328,
+            reference_mv: 850,
+            reference_code: 2_000,
+            init_code: 100,
+            efuse_version: 1,
+            attenuation_db: 6,
+        },
+        wifi_started: true,
+        cutoff_reached: true,
+        source_min_mv: 5_500,
+        source_max_mv: 21_000,
+        source_max_ma: 3_000,
+        source_power_limit_mw: 0,
+        advertised_min_mv: 5_000,
+        advertised_max_mv: 21_000,
+        points: vec![[30_000, 2_500, 750, 1_900, 600, 3_000, 9_500, 9_600, 1]],
     };
     let temperatures = [
         25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80,
@@ -552,9 +552,10 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         .map(|(index, temperature)| ThermalPlantTracePoint {
             sample_index: index as u8,
             elapsed_ms: index as u32 * 30_000,
+            raw_rtd_adc_mv: 0,
             temperature_centi_c: temperature * 100,
-            heater_voltage_mv: if index < 9 { 21_000 } else { 0 },
-            duty_percent: if index < 9 { 100 } else { 0 },
+            heater_voltage_mv: if (1..9).contains(&index) { 9_500 } else { 0 },
+            duty_percent: if (1..9).contains(&index) { 100 } else { 0 },
             phase: if index == 0 {
                 ThermalPlantRunPhase::Ambient
             } else if index < 9 {
@@ -565,13 +566,15 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         })
         .collect();
     ThermalPlantRunSnapshot {
-        version: 1,
+        supply_boundary: Some(boundary),
+        version: 2,
         attempt: Some(ThermalPlantRunAttempt {
             run_id: 7,
             status: CalibrationJobStatus::Completed,
             phase: Some(ThermalPlantRunPhase::Cooling),
             progress_percent: 100,
             elapsed_ms: 420_000,
+            ambient_raw_rtd_adc_mv: 0,
             current_temp_centi_c: 8000,
             heater_voltage_mv: 0,
             duty_percent: 0,
@@ -588,7 +591,7 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         provisional_curve: None,
         active_result: Some(ThermalPlantActiveResult {
             transaction_id: 7,
-            curve,
+            curve: HeaterCurvePackage::default(),
             convection_mw_per_c: Some(120.0),
             radiation_mw_per_k4: Some(0.0002),
             thermal_capacity_mj_per_c: Some(42_000.0),
@@ -688,7 +691,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pd_request_mv: DEFAULT_PD_REQUEST_MV,
         pd_contract_mv: DEFAULT_PD_REQUEST_MV,
         pd_state: "ready".to_string(),
-        pd_controller: Some("ch224q".to_string()),
+        pd_controller: Some("fusb302b".to_string()),
         pd_contract_kind: Some("pps".to_string()),
         pd_contract_current_ma: Some(3_000),
         pd_contract_power_mw: Some(60_000),
@@ -702,6 +705,8 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pps_capability_min_mv: Some(5_000),
         pps_capability_max_mv: Some(21_000),
         pps_capability_max_ma: Some(3_000),
+        source_power_limit_mw: Some(60_000),
+        source_power_limit_ma: Some(3_000),
         manual_pps_error: None,
         heater_fault_reason: None,
         fault_attention_pending: false,
@@ -795,6 +800,8 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         pps_capability_min_mv: None,
         pps_capability_max_mv: None,
         pps_capability_max_ma: None,
+        source_power_limit_mw: None,
+        source_power_limit_ma: None,
         manual_pps_error: None,
         heater_fault_reason: None,
         fault_attention_pending: false,
@@ -858,6 +865,7 @@ impl DeviceRecord {
         let identity = mock_identity(id);
         let network = mock_network();
         let status = mock_status(&network);
+        let thermal_plant_run = mock_thermal_plant_snapshot();
 
         Self {
             id: id.to_string(),
@@ -877,8 +885,11 @@ impl DeviceRecord {
             saved_thermal_control_profile: None,
             saved_thermal_control_profile_pps5a: None,
             calibration: CalibrationState::default(),
-            heater_curve: HeaterCurveState::default(),
-            thermal_plant_run: mock_thermal_plant_snapshot(),
+            heater_curve: HeaterCurveState {
+                supply_boundary: thermal_plant_run.supply_boundary.clone(),
+                ..HeaterCurveState::default()
+            },
+            thermal_plant_run,
             selected_artifact_id: None,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -1156,6 +1167,10 @@ pub struct ControlPlaneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pps_capability_max_ma: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_mw: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_power_limit_ma: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_pps_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heater_fault_reason: Option<String>,
@@ -1207,6 +1222,98 @@ pub struct ControlPlaneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frontpanel_presentation_count: Option<u32>,
     pub network: NetworkSummary,
+}
+
+/// Compact USB thermal-sampling payload. The firmware uses short wire keys to
+/// keep each response within a few USB Serial/JTAG packets; this conversion
+/// restores the stable host-facing status keys used by the thermal workflow.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ThermalStatus {
+    #[serde(rename = "m")]
+    mode: String,
+    #[serde(rename = "u")]
+    uptime_seconds: u32,
+    #[serde(rename = "t")]
+    current_temp_c: f32,
+    #[serde(rename = "tt")]
+    target_temp_c: i16,
+    #[serde(rename = "he")]
+    heater_enabled: bool,
+    #[serde(rename = "ho")]
+    heater_output_percent: u8,
+    #[serde(rename = "hp")]
+    heater_physical_output_percent: u8,
+    #[serde(rename = "v")]
+    voltage_mv: u32,
+    #[serde(rename = "i")]
+    current_ma: u32,
+    #[serde(rename = "r")]
+    rtd_raw_adc_mv: u16,
+    #[serde(rename = "vin")]
+    vin_raw_adc_mv: u16,
+    #[serde(rename = "pr")]
+    pd_request_mv: u16,
+    #[serde(rename = "pc")]
+    pd_contract_mv: u16,
+    #[serde(rename = "ps")]
+    pd_state: String,
+    #[serde(rename = "pk")]
+    pd_contract_kind: String,
+    #[serde(rename = "ci")]
+    pd_contract_current_ma: u16,
+    #[serde(rename = "cp")]
+    pd_contract_power_mw: u32,
+    #[serde(rename = "sp", default)]
+    source_power_limit_mw: Option<u32>,
+    #[serde(rename = "sa", default)]
+    source_power_limit_ma: Option<u16>,
+    #[serde(rename = "as", default)]
+    automatic_safe_mv: Option<u16>,
+    #[serde(rename = "ab", default)]
+    automatic_boundary_applied: Option<bool>,
+    #[serde(rename = "ph")]
+    heater_control_phase: Option<String>,
+    #[serde(rename = "g")]
+    heater_control_measurement_guarded: bool,
+    #[serde(rename = "ct")]
+    heater_control_temp_c: Option<f32>,
+    #[serde(rename = "ft")]
+    heater_fault_reason: Option<String>,
+}
+
+impl ThermalStatus {
+    pub(crate) fn into_value(self) -> Value {
+        json!({
+            "mode": self.mode,
+            "uptimeSeconds": self.uptime_seconds,
+            "currentTempC": self.current_temp_c,
+            "targetTempC": self.target_temp_c,
+            "heaterEnabled": self.heater_enabled,
+            "heaterOutputPercent": self.heater_output_percent,
+            "heaterPhysicalOutputPercent": self.heater_physical_output_percent,
+            "voltageMv": self.voltage_mv,
+            "currentMa": self.current_ma,
+            "boardTempCenti": (self.current_temp_c * 100.0).round() as i32,
+            "rtdRawAdcMv": self.rtd_raw_adc_mv,
+            "vinRawAdcMv": self.vin_raw_adc_mv,
+            "pdRequestMv": self.pd_request_mv,
+            "pdContractMv": self.pd_contract_mv,
+            "pdState": self.pd_state,
+            "pdContractKind": self.pd_contract_kind,
+            "pdContractCurrentMa": self.pd_contract_current_ma,
+            "pdContractPowerMw": self.pd_contract_power_mw,
+            "sourcePowerLimitMw": self.source_power_limit_mw,
+            "sourcePowerLimitMa": self.source_power_limit_ma,
+            "automaticSafeMv": self.automatic_safe_mv,
+            "automaticBoundaryApplied": self.automatic_boundary_applied,
+            "heaterControlPhase": self.heater_control_phase,
+            "heaterControlMeasurementGuarded": self.heater_control_measurement_guarded,
+            "heaterControlTempC": self.heater_control_temp_c,
+            "heaterFilteredTempC": self.heater_control_temp_c,
+            "heaterFaultReason": self.heater_fault_reason,
+            "thermalControl": {},
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
