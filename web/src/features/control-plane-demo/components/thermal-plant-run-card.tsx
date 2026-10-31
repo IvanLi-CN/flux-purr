@@ -155,18 +155,18 @@ export function ThermalPlantRunCard({
       </div>
 
       <div className="thermal-plant-run-card__body">
-        <section
-          className="thermal-plant-run-card__chart thermal-plant-run-card__chart--boundary"
-          aria-label="供电边界曲线"
-        >
-          <div className="thermal-plant-run-card__section-heading">
-            <h3>供电边界曲线</h3>
-            <span>{boundaryPoints.length} 点</span>
-          </div>
-          <SupplyBoundaryChart boundary={boundary} />
-        </section>
+        <div className="thermal-plant-run-card__charts">
+          <section
+            className="thermal-plant-run-card__chart thermal-plant-run-card__chart--boundary"
+            aria-label="供电边界曲线"
+          >
+            <div className="thermal-plant-run-card__section-heading">
+              <h3>供电边界曲线</h3>
+              <span>{boundaryPoints.length} 点</span>
+            </div>
+            <SupplyBoundaryChart boundary={boundary} />
+          </section>
 
-        <aside className="thermal-plant-run-card__evidence" aria-label="瞬态与供电边界证据">
           <section className="thermal-plant-run-card__trace-panel" aria-label="温度轨迹">
             <div className="thermal-plant-run-card__section-heading">
               <h3>温度轨迹</h3>
@@ -188,72 +188,76 @@ export function ThermalPlantRunCard({
               </span>
             </div>
           </section>
+        </div>
 
+        <aside className="thermal-plant-run-card__evidence" aria-label="瞬态与供电边界证据">
           <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
             <div className="thermal-plant-run-card__section-heading">
               <h3>供电边界采样</h3>
               <span>{boundaryPoints.length} 点</span>
             </div>
-            <table aria-label="供电边界采样">
-              <thead>
-                <tr>
-                  <th>请求电压</th>
-                  <th>限流</th>
-                  <th>VIN</th>
-                  <th>RTD 原始</th>
-                  <th>类型</th>
-                </tr>
-              </thead>
-              <tbody>
-                {boundaryPoints.slice(-8).map((point, index) => (
-                  <tr key={`${point[0]}-${point[6]}-${index}`}>
-                    <td>{formatBoundaryVoltage(point)} V</td>
-                    <td>{formatBoundaryCurrent(point)} A</td>
-                    <td>{formatBoundaryVoltageMv(point[4])} V</td>
-                    <td>{point[2]} mV</td>
-                    <td>
-                      <span className="thermal-plant-run-card__valid">
-                        {point[8] ? '跟踪' : '边界'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-                {boundaryPoints.length === 0 ? (
+            <div className="thermal-plant-run-card__table-scroll">
+              <table aria-label="供电边界采样">
+                <thead>
                   <tr>
-                    <td colSpan={5} className="thermal-plant-run-card__empty">
-                      {presentation.isRunning ? '等待供电边界扫描' : '暂无供电边界采样'}
-                    </td>
+                    <th>请求电压</th>
+                    <th>限流</th>
+                    <th>VIN</th>
+                    <th>RTD 原始</th>
+                    <th>类型</th>
                   </tr>
-                ) : null}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {boundaryPoints.slice(-8).map((point, index) => (
+                    <tr key={`${point[0]}-${point[6]}-${index}`}>
+                      <td>{formatBoundaryVoltage(point)} V</td>
+                      <td>{formatBoundaryCurrent(point)} A</td>
+                      <td>{formatBoundaryVoltageMv(point[4])} V</td>
+                      <td>{point[2]} mV</td>
+                      <td>
+                        <span className="thermal-plant-run-card__valid">
+                          {point[8] ? '跟踪' : '边界'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                  {boundaryPoints.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="thermal-plant-run-card__empty">
+                        {presentation.isRunning ? '等待供电边界扫描' : '暂无供电边界采样'}
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
           </section>
+
+          <footer className="thermal-plant-run-card__footer">
+            <output className="thermal-plant-run-card__run-evidence" aria-live="polite">
+              <Activity size={15} aria-hidden="true" />
+              {presentation.runEvidence}
+            </output>
+            <button
+              type="button"
+              className={
+                isRunning
+                  ? 'thermal-plant-run-card__command thermal-plant-run-card__command--stop'
+                  : 'thermal-plant-run-card__command'
+              }
+              disabled={disabled || !canControl}
+              onClick={onStartStop}
+            >
+              {isRunning ? (
+                <CircleStop size={16} aria-hidden="true" />
+              ) : (
+                <RefreshCw size={16} aria-hidden="true" />
+              )}
+              {isRunning ? '停止自动校准' : attempt == null ? '开始自动校准' : '重新开始自动校准'}
+            </button>
+          </footer>
         </aside>
       </div>
-
-      <footer className="thermal-plant-run-card__footer">
-        <output className="thermal-plant-run-card__run-evidence" aria-live="polite">
-          <Activity size={15} aria-hidden="true" />
-          {presentation.runEvidence}
-        </output>
-        <button
-          type="button"
-          className={
-            isRunning
-              ? 'thermal-plant-run-card__command thermal-plant-run-card__command--stop'
-              : 'thermal-plant-run-card__command'
-          }
-          disabled={disabled || !canControl}
-          onClick={onStartStop}
-        >
-          {isRunning ? (
-            <CircleStop size={16} aria-hidden="true" />
-          ) : (
-            <RefreshCw size={16} aria-hidden="true" />
-          )}
-          {isRunning ? '停止自动校准' : attempt == null ? '开始自动校准' : '重新开始自动校准'}
-        </button>
-      </footer>
     </article>
   )
 }

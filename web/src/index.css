@@ -735,6 +735,18 @@
   scrollbar-gutter: auto;
 }
 
+.industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (min-width: 760px) {
+  .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) .simplebar-content {
+    height: 100%;
+    min-height: 100%;
+  }
+}
+
 .industrial-calibration-mode-panel:has(.thermal-plant-run-card) {
   height: 100%;
   min-height: 0;
@@ -742,12 +754,18 @@
   overflow: hidden;
 }
 
+@media (min-width: 760px) and (max-width: 1179px) {
+  .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench) {
+    grid-template-rows: minmax(0, 1fr) 10rem;
+  }
+}
+
 .thermal-plant-run-card {
   display: grid;
   min-width: 0;
   height: 100%;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0.52rem;
   border: 0;
   border-radius: 18px;
@@ -760,7 +778,7 @@
 }
 
 .thermal-plant-run-card:has(.thermal-plant-run-card__compatibility) {
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
 .thermal-plant-run-card__header,
@@ -916,9 +934,17 @@
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1.1fr) minmax(15.5rem, 0.9fr);
+  grid-template-columns: minmax(0, 1.12fr) minmax(15rem, 0.88fr);
   gap: 0.56rem;
   align-items: stretch;
+}
+
+.thermal-plant-run-card__charts {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.56rem;
 }
 
 .thermal-plant-run-card__chart,
@@ -945,7 +971,7 @@
   min-width: 0;
   min-height: 0;
   height: 100%;
-  grid-template-rows: clamp(10rem, 19.5vh, 12rem) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
   align-content: stretch;
   align-self: stretch;
   gap: 0.56rem;
@@ -965,7 +991,15 @@
   grid-template-rows: auto auto minmax(0, 1fr);
   align-self: stretch;
   align-content: start;
+  overflow: hidden;
   padding: 0.58rem 0.62rem 0.48rem;
+}
+
+.thermal-plant-run-card__table-scroll {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .thermal-plant-run-card__section-heading {
@@ -1208,7 +1242,15 @@
 }
 
 .thermal-plant-run-card__footer {
-  gap: 0.7rem;
+  display: grid;
+  align-items: stretch;
+  gap: 0.56rem;
+  padding: 0.58rem 0.62rem 0.48rem;
+  border-radius: 12px;
+  background: var(--industrial-bg);
+  box-shadow:
+    inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
+    inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
 }
 
 .thermal-plant-run-card__run-evidence {
@@ -1221,6 +1263,7 @@
   font-size: 0.64rem;
   font-weight: 780;
   line-height: 1.2;
+  white-space: normal;
 }
 
 .thermal-plant-run-card__run-evidence svg {
@@ -1260,7 +1303,7 @@
 @media (min-width: 64rem) and (max-height: 54rem) {
   .thermal-plant-run-card {
     position: relative;
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 1fr);
     gap: 0.42rem;
     padding: 0.62rem;
   }
@@ -1288,13 +1331,13 @@
   }
 
   .thermal-plant-run-card__evidence {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
   }
 
   .thermal-plant-run-card__trace-panel {
-    height: 6.5rem;
-    min-height: 6.5rem;
-    max-height: 6.5rem;
+    height: auto;
+    min-height: 0;
+    max-height: none;
     grid-template-rows: auto minmax(0, 1fr);
   }
 
@@ -1306,6 +1349,10 @@
 
   .thermal-plant-run-card__trace-panel .thermal-plant-run-card__legend {
     display: none;
+  }
+
+  .thermal-plant-run-card__footer {
+    padding: 0.5rem;
   }
 
   .thermal-plant-run-card__table-wrap th,
@@ -1354,6 +1401,10 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .thermal-plant-run-card__charts {
+    grid-template-rows: auto auto;
+  }
+
   .thermal-plant-run-card__chart {
     min-height: 11rem;
   }
@@ -1379,6 +1430,10 @@
   }
 
   .thermal-plant-run-card__table-wrap {
+    overflow: visible;
+  }
+
+  .thermal-plant-run-card__table-scroll {
     overflow: visible;
   }
 

@@ -39,6 +39,35 @@ test.describe('thermal plant result layout', () => {
     await expect.poll(traceAspectDifference).toBeLessThan(0.03)
     const chartHeight = await boundaryChart.evaluate((svg) => svg.getBoundingClientRect().height)
     expect(chartHeight).toBeLessThan(600)
+    const desktopLayout = await resultCard.evaluate((element) => {
+      const read = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector)
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.x, width: rect.width, right: rect.right }
+      }
+      const cardRect = element.getBoundingClientRect()
+      return {
+        card: { height: cardRect.height },
+        boundary: read('.thermal-plant-run-card__chart--boundary'),
+        trace: read('.thermal-plant-run-card__trace-panel'),
+        table: read('.thermal-plant-run-card__table-wrap'),
+        footer: read('.thermal-plant-run-card__footer'),
+      }
+    })
+    expect(desktopLayout.card?.height ?? 0).toBeGreaterThan(500)
+    expect(desktopLayout.boundary?.x ?? 0).toBeLessThan(desktopLayout.table?.x ?? 0)
+    expect(desktopLayout.trace?.x ?? 0).toBeLessThan(desktopLayout.table?.x ?? 0)
+    expect(Math.abs((desktopLayout.boundary?.x ?? 0) - (desktopLayout.trace?.x ?? 0))).toBeLessThan(
+      2
+    )
+    expect(
+      Math.abs((desktopLayout.boundary?.width ?? 0) - (desktopLayout.trace?.width ?? 0))
+    ).toBeLessThan(2)
+    expect(desktopLayout.footer?.x ?? 0).toBeGreaterThanOrEqual((desktopLayout.table?.x ?? 0) - 1)
+    expect(desktopLayout.footer?.right ?? 0).toBeLessThanOrEqual(
+      (desktopLayout.table?.right ?? 0) + 1
+    )
 
     await page.setViewportSize({ width: 393, height: 852 })
     await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
