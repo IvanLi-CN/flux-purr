@@ -275,6 +275,11 @@
 
 ![Current Public Demo Inspector drawer](./assets/public-demo-inspector-current-mobile.jpg)
 
+### Calibration leave guard dialog
+
+
+![Calibration leave guard dialog](./assets/calibration-leave-guard-dialog.jpg)
+
 ## Historical Visual Reference
 
 ### Unknown device recovery (auxiliary)
