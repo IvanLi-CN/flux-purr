@@ -65,8 +65,8 @@
 }
 
 /* Production automatic thermal-model result card. The grid stays within the
-   desktop calibration panel; trace and curve are fixed-format SVGs, while the
-   representative-point table keeps its natural row height. */
+   desktop calibration panel; trace and boundary are fixed-format SVGs, while
+   the raw boundary table keeps its natural row height. */
 .thermal-plant-run-card {
   display: grid;
   gap: 0.3rem;
@@ -217,7 +217,7 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.thermal-plant-run-card__curve {
+.thermal-plant-run-card__boundary {
   fill: none;
   stroke: #d92e3c;
   stroke-width: 3;
@@ -232,7 +232,7 @@
 .thermal-plant-run-card__point--cooling {
   stroke: #27384d;
 }
-.thermal-plant-run-card__point--curve {
+.thermal-plant-run-card__point--boundary {
   stroke: #d92e3c;
 }
 .thermal-plant-run-card__legend {
@@ -723,8 +723,8 @@
   }
 }
 
-/* Production C-layout: fitted R(T) leads; the transient and natural-height
-   representative-point register remain a supporting evidence column. */
+/* Production C-layout: the supply-boundary lead stays beside the transient
+   trace and raw boundary observation register. */
 .industrial-calibration-tabs__content:has(.thermal-plant-run-card) {
   display: block;
   height: 100%;
@@ -933,7 +933,7 @@
     inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
 }
 
-.thermal-plant-run-card__chart--curve {
+.thermal-plant-run-card__chart--boundary {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.32rem;
@@ -998,7 +998,7 @@
   shape-rendering: geometricPrecision;
 }
 
-.thermal-plant-run-card__svg--curve {
+.thermal-plant-run-card__svg--boundary {
   height: 100%;
   min-height: 7.4rem;
 }
@@ -1031,14 +1031,14 @@
   font-weight: 750;
 }
 
-.thermal-plant-run-card__curve,
+.thermal-plant-run-card__boundary,
 .thermal-plant-run-card__trace {
   fill: none;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-.thermal-plant-run-card__curve {
+.thermal-plant-run-card__boundary {
   stroke: var(--industrial-accent);
   stroke-width: 3;
 }
@@ -1066,7 +1066,7 @@
   stroke-width: 2.2;
 }
 
-.thermal-plant-run-card__point--curve,
+.thermal-plant-run-card__point--boundary,
 .thermal-plant-run-card__point--heating {
   stroke: var(--industrial-accent);
 }
@@ -1142,17 +1142,27 @@
 
 .thermal-plant-run-card__table-wrap th:nth-child(1),
 .thermal-plant-run-card__table-wrap td:nth-child(1) {
-  width: 26%;
+  width: 24%;
 }
 
 .thermal-plant-run-card__table-wrap th:nth-child(2),
 .thermal-plant-run-card__table-wrap td:nth-child(2) {
-  width: 46%;
+  width: 17%;
 }
 
 .thermal-plant-run-card__table-wrap th:nth-child(3),
 .thermal-plant-run-card__table-wrap td:nth-child(3) {
-  width: 28%;
+  width: 17%;
+}
+
+.thermal-plant-run-card__table-wrap th:nth-child(4),
+.thermal-plant-run-card__table-wrap td:nth-child(4) {
+  width: 24%;
+}
+
+.thermal-plant-run-card__table-wrap th:nth-child(5),
+.thermal-plant-run-card__table-wrap td:nth-child(5) {
+  width: 18%;
 }
 
 .thermal-plant-run-card__valid {
@@ -1174,7 +1184,7 @@
   min-height: 7.4rem;
 }
 
-.thermal-plant-run-card__chart-empty--curve {
+.thermal-plant-run-card__chart-empty--boundary {
   min-height: 0;
   height: 100%;
 }
@@ -1288,6 +1298,98 @@
   .thermal-plant-run-card__table-wrap th,
   .thermal-plant-run-card__table-wrap td {
     padding-block: 0.26rem;
+  }
+}
+
+@media (max-width: 759px) {
+  .industrial-calibration-tabs__content:has(.thermal-plant-run-card) {
+    overflow: hidden;
+  }
+
+  .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
+    height: 100%;
+    min-height: 0;
+  }
+
+  .industrial-calibration-mode-panel:has(.thermal-plant-run-card) {
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+
+  .thermal-plant-run-card {
+    height: auto;
+    min-height: 0;
+    grid-template-rows: auto auto auto auto;
+    overflow: visible;
+  }
+
+  .thermal-plant-run-card__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .thermal-plant-run-card__metric:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .thermal-plant-run-card__metric:nth-child(even) {
+    padding-right: 0;
+  }
+
+  .thermal-plant-run-card__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .thermal-plant-run-card__chart {
+    min-height: 11rem;
+  }
+
+  .thermal-plant-run-card__svg--boundary {
+    height: 9rem;
+    min-height: 9rem;
+  }
+
+  .thermal-plant-run-card__evidence {
+    height: auto;
+    grid-template-rows: auto auto;
+  }
+
+  .thermal-plant-run-card__trace-panel {
+    height: auto;
+    min-height: 11rem;
+  }
+
+  .thermal-plant-run-card__svg--trace {
+    height: 7rem;
+    min-height: 7rem;
+  }
+
+  .thermal-plant-run-card__table-wrap {
+    overflow: visible;
+  }
+
+  .thermal-plant-run-card__table-wrap table {
+    table-layout: fixed;
+    font-size: 0.62rem;
+  }
+
+  .thermal-plant-run-card__table-wrap th,
+  .thermal-plant-run-card__table-wrap td {
+    padding-inline: 0.18rem;
+  }
+
+  .thermal-plant-run-card__footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .thermal-plant-run-card__run-evidence {
+    white-space: normal;
+  }
+
+  .thermal-plant-run-card__command {
+    width: 100%;
   }
 }
 

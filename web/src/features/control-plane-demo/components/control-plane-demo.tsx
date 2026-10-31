@@ -2694,6 +2694,7 @@ export function ControlPlaneDemo({
           }
           snapshot = {
             ...next,
+            supplyBoundary: next.supplyBoundary ?? snapshot.supplyBoundary,
             tracePage: {
               ...next.tracePage,
               points: [...pointsByIndex.values()].sort(
@@ -8005,30 +8006,32 @@ function CalibrationView({
           </TabsList>
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
-            <section className="industrial-calibration-mode-panel" aria-label="加热曲线标定">
-              <ThermalPlantRunCard
-                snapshot={thermalPlantRun}
-                unsupported={thermalPlantRunUnsupported}
-                disabled={
-                  controlsBlocked ||
-                  pendingCalibrationAction != null ||
-                  (!jobRunning && !hasPpsCapability) ||
-                  (jobRunning && currentJob.kind !== 'thermal_plant_auto')
-                }
-                onStartStop={() =>
-                  void runCalibrationAction('thermal-plant-job-toggle', async () => {
-                    if (jobRunning) {
-                      await onCalibrationJobChange({ op: 'cancel' }, '自动热模型标定停止失败。')
-                    } else {
-                      await onCalibrationJobChange(
-                        { op: 'start', kind: 'thermal_plant_auto' },
-                        '自动热模型标定启动失败。'
-                      )
-                    }
-                  })
-                }
-              />
-            </section>
+            <ScrollArea className="industrial-calibration-tabs__scroll-area" autoHide>
+              <section className="industrial-calibration-mode-panel" aria-label="加热曲线标定">
+                <ThermalPlantRunCard
+                  snapshot={thermalPlantRun}
+                  unsupported={thermalPlantRunUnsupported}
+                  disabled={
+                    controlsBlocked ||
+                    pendingCalibrationAction != null ||
+                    (!jobRunning && !hasPpsCapability) ||
+                    (jobRunning && currentJob.kind !== 'thermal_plant_auto')
+                  }
+                  onStartStop={() =>
+                    void runCalibrationAction('thermal-plant-job-toggle', async () => {
+                      if (jobRunning) {
+                        await onCalibrationJobChange({ op: 'cancel' }, '自动热模型标定停止失败。')
+                      } else {
+                        await onCalibrationJobChange(
+                          { op: 'start', kind: 'thermal_plant_auto' },
+                          '自动热模型标定启动失败。'
+                        )
+                      }
+                    })
+                  }
+                />
+              </section>
+            </ScrollArea>
           </TabsContent>
           <TabsContent
             value="firmware_tuning"

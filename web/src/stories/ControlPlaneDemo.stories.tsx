@@ -378,18 +378,16 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
       await expect(await canvas.findByRole('article', { name: '自动热模型标定结果' })).toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: 'R(T) 加热曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '供电边界曲线' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '温度轨迹' })).toBeVisible()
       await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
       expect(canvas.queryByRole('button', { name: '导入预览' })).toBeNull()
       expect(canvas.queryByRole('button', { name: '保存曲线' })).toBeNull()
-      const representativePointTable = await canvas.findByRole('table', {
-        name: 'R(T) 代表点',
+      const boundaryTable = await canvas.findByRole('table', {
+        name: '供电边界采样',
       })
-      expect(representativePointTable.scrollWidth).toBeLessThanOrEqual(
-        representativePointTable.clientWidth + 1
-      )
+      expect(boundaryTable.scrollWidth).toBeLessThanOrEqual(boundaryTable.clientWidth + 1)
     })
 
     await step(
@@ -652,7 +650,7 @@ export const DemoCalibrationHeaterCurvePreview: Story = {
     const canvas = within(canvasElement)
 
     await step('shows the persisted automatic calibration result', async () => {
-      await expect(await canvas.findByRole('table', { name: 'R(T) 代表点' })).toBeVisible()
+      await expect(await canvas.findByRole('table', { name: '供电边界采样' })).toBeVisible()
       await expect(await canvas.findByText('active 有效')).toBeVisible()
       await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()

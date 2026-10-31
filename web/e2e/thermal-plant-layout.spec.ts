@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('thermal plant result layout', () => {
-  test('does not let the trace consume the representative-point table after a desktop re-entry', async ({
+  test('keeps the live trace and supply-boundary table readable after a desktop re-entry', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 960, height: 900 })
@@ -9,6 +9,15 @@ test.describe('thermal plant result layout', () => {
 
     const resultCard = page.getByRole('article', { name: '自动热模型标定结果' })
     await expect(resultCard).toBeVisible({ timeout: 10_000 })
+    await expect(resultCard.getByText('供电边界曲线')).toBeVisible()
+    await expect(resultCard.getByText('供电边界采样')).toBeVisible()
+    await expect(
+      resultCard
+        .getByRole('table', { name: '供电边界采样' })
+        .getByRole('cell', { name: '21.0 V' })
+        .first()
+    ).toBeVisible()
+    await expect(resultCard.getByText('R(T)', { exact: false })).toHaveCount(0)
     await page.setViewportSize({ width: 1440, height: 900 })
 
     const samples = [] as Array<{

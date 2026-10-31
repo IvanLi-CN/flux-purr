@@ -9,7 +9,7 @@ import {
   TimerReset,
   Zap,
 } from 'lucide-react'
-import type { ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
+import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
 
 const phaseLabel: Record<ThermalPlantTracePoint['phase'], string> = {
   ambient: '环境',
@@ -85,11 +85,10 @@ export function ThermalPlantRunCard({
   const attempt = snapshot.attempt
   const presentation = thermalPlantRunCardPresentation(snapshot, unsupported)
   const { isRunning, showActiveResult } = presentation
-  const result = showActiveResult ? snapshot.activeResult : snapshot.provisionalCurve
-  const curve =
-    result?.curve.points.filter((point): point is NonNullable<typeof point> => point != null) ?? []
+  const boundary = snapshot.supplyBoundary
+  const boundaryPoints = boundary?.points ?? []
   const trace = snapshot.tracePage.points
-  const canStart = !unsupported && !isRunning && (attempt == null || attempt.restartAllowed)
+  const canControl = !unsupported && (isRunning || attempt == null || attempt.restartAllowed)
 
   return (
     <article className="thermal-plant-run-card" aria-label="自动热模型标定结果">
@@ -156,17 +155,17 @@ export function ThermalPlantRunCard({
 
       <div className="thermal-plant-run-card__body">
         <section
-          className="thermal-plant-run-card__chart thermal-plant-run-card__chart--curve"
-          aria-label="电阻曲线"
+          className="thermal-plant-run-card__chart thermal-plant-run-card__chart--boundary"
+          aria-label="供电边界曲线"
         >
           <div className="thermal-plant-run-card__section-heading">
-            <h3>{presentation.preservesPriorActive ? 'R(T) 当前 active' : 'R(T) 加热曲线'}</h3>
-            <span>{presentation.preservesPriorActive ? '上次成功' : `${curve.length} 点`}</span>
+            <h3>供电边界曲线</h3>
+            <span>{boundaryPoints.length} 点</span>
           </div>
-          <ResistanceChart points={curve} />
+          <SupplyBoundaryChart boundary={boundary} />
         </section>
 
-        <aside className="thermal-plant-run-card__evidence" aria-label="瞬态与代表点证据">
+        <aside className="thermal-plant-run-card__evidence" aria-label="瞬态与供电边界证据">
           <section className="thermal-plant-run-card__trace-panel" aria-label="温度轨迹">
             <div className="thermal-plant-run-card__section-heading">
               <h3>温度轨迹</h3>
@@ -189,33 +188,39 @@ export function ThermalPlantRunCard({
             </div>
           </section>
 
-          <section className="thermal-plant-run-card__table-wrap" aria-label="代表点记录">
+          <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
             <div className="thermal-plant-run-card__section-heading">
-              <h3>R(T) 代表点</h3>
-              <span>{curve.length} / 5</span>
+              <h3>供电边界采样</h3>
+              <span>{boundaryPoints.length} 点</span>
             </div>
-            <table aria-label="R(T) 代表点">
+            <table aria-label="供电边界采样">
               <thead>
                 <tr>
-                  <th>温度</th>
-                  <th>R(T)</th>
-                  <th>状态</th>
+                  <th>请求电压</th>
+                  <th>限流</th>
+                  <th>VIN</th>
+                  <th>RTD 原始</th>
+                  <th>类型</th>
                 </tr>
               </thead>
               <tbody>
-                {curve.map((point) => (
-                  <tr key={point.tempCentiC}>
-                    <td>{formatChartTemp(point.tempCentiC)}℃</td>
-                    <td>{(point.resistanceMilliohms / 1000).toFixed(3)} Ω</td>
+                {boundaryPoints.slice(-8).map((point, index) => (
+                  <tr key={`${point[0]}-${point[6]}-${index}`}>
+                    <td>{formatBoundaryVoltage(point)} V</td>
+                    <td>{formatBoundaryCurrent(point)} A</td>
+                    <td>{formatBoundaryVoltageMv(point[4])} V</td>
+                    <td>{point[2]} mV</td>
                     <td>
-                      <span className="thermal-plant-run-card__valid">有效</span>
+                      <span className="thermal-plant-run-card__valid">
+                        {point[8] ? '跟踪' : '边界'}
+                      </span>
                     </td>
                   </tr>
                 ))}
-                {curve.length === 0 ? (
+                {boundaryPoints.length === 0 ? (
                   <tr>
-                    <td colSpan={3} className="thermal-plant-run-card__empty">
-                      等待有效采样
+                    <td colSpan={5} className="thermal-plant-run-card__empty">
+                      {presentation.isRunning ? '等待供电边界扫描' : '暂无供电边界采样'}
                     </td>
                   </tr>
                 ) : null}
@@ -237,7 +242,7 @@ export function ThermalPlantRunCard({
               ? 'thermal-plant-run-card__command thermal-plant-run-card__command--stop'
               : 'thermal-plant-run-card__command'
           }
-          disabled={disabled || !canStart}
+          disabled={disabled || !canControl}
           onClick={onStartStop}
         >
           {isRunning ? (
@@ -253,16 +258,10 @@ export function ThermalPlantRunCard({
 }
 
 export function createDefaultThermalPlantSnapshot(): ThermalPlantRunSnapshot {
-  const curve = [
-    [25, 5674],
-    [61, 6089],
-    [102, 6583],
-    [162, 7307],
-    [220, 8011],
-  ].map(([tempC, resistanceMilliohms]) => ({ tempCentiC: tempC * 100, resistanceMilliohms }))
   const temperatures = [25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80]
   return {
-    version: 1,
+    supplyBoundary: createDefaultSupplyBoundary(),
+    version: 2,
     attempt: {
       runId: 7,
       status: 'completed',
@@ -292,12 +291,42 @@ export function createDefaultThermalPlantSnapshot(): ThermalPlantRunSnapshot {
     provisionalCurve: null,
     activeResult: {
       transactionId: 7,
-      curve: { points: [...curve, null, null, null] },
+      curve: { points: [null, null, null, null, null, null, null, null] },
       convectionMwPerC: 120,
       radiationMwPerK4: 0.0002,
       thermalCapacityMjPerC: 42000,
       transportDelayMs: 500,
     },
+  }
+}
+
+function createDefaultSupplyBoundary(): SupplyBoundary {
+  const points = [
+    [0, 1050, 1050, 5000, 5002, 3000, 5000, 5000, 0],
+    [30_000, 1090, 1090, 9000, 9004, 3000, 9000, 9000, 0],
+    [60_000, 1140, 1140, 13000, 13008, 3000, 13000, 13000, 0],
+    [90_000, 1210, 1210, 17000, 17012, 3000, 17000, 17000, 0],
+    [120_000, 1290, 1290, 21000, 21018, 3000, 21000, 21000, 1],
+  ] as SupplyBoundary['points']
+  return {
+    formatVersion: 6,
+    adc: {
+      dividerSupplyMv: 3328,
+      referenceMv: 1100,
+      referenceCode: 2048,
+      initCode: 2048,
+      efuseVersion: 2,
+      attenuationDb: 6,
+    },
+    wifiStarted: false,
+    cutoffReached: true,
+    sourceMinMv: 5000,
+    sourceMaxMv: 21000,
+    sourceMaxMa: 3000,
+    sourcePowerLimitMw: 63_000,
+    advertisedMinMv: 5000,
+    advertisedMaxMv: 21000,
+    points,
   }
 }
 
@@ -466,15 +495,15 @@ function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
   )
 }
 
-function ResistanceChart({
-  points,
-}: {
-  points: Array<{ tempCentiC: number; resistanceMilliohms: number }>
-}) {
-  if (points.length < 2)
+function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null }) {
+  const points = (boundary?.points ?? []).map((point) => ({
+    requestVoltageMv: point[6] || point[7],
+    requestCurrentMa: point[5],
+  }))
+  if (points.length === 0)
     return (
-      <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--curve">
-        等待 R(T) 预览
+      <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--boundary">
+        等待供电边界采样
       </div>
     )
   const width = 600
@@ -485,19 +514,17 @@ function ResistanceChart({
     bottom: Math.max(36, height * 0.106),
     left: 38,
   }
-  const minX = Math.min(...points.map((point) => point.tempCentiC))
-  const maxX = Math.max(...points.map((point) => point.tempCentiC))
-  const rawMinY = Math.min(...points.map((point) => point.resistanceMilliohms))
-  const rawMaxY = Math.max(...points.map((point) => point.resistanceMilliohms))
-  const rangeY = Math.max(rawMaxY - rawMinY, 1)
-  const minY = rawMinY - rangeY * 0.1
-  const maxY = rawMaxY + rangeY * 0.1
+  const minX = Math.min(...points.map((point) => point.requestVoltageMv))
+  const maxX = Math.max(...points.map((point) => point.requestVoltageMv))
+  const rawMaxY = Math.max(...points.map((point) => point.requestCurrentMa))
+  const minY = 0
+  const maxY = Math.max(boundary?.sourceMaxMa ?? 0, rawMaxY, 1)
   const plotWidth = width - inset.left - inset.right
   const plotBottom = height - inset.bottom
   const plotHeight = plotBottom - inset.top
-  const positionFor = (point: { tempCentiC: number; resistanceMilliohms: number }) => ({
-    x: inset.left + ((point.tempCentiC - minX) / Math.max(maxX - minX, 1)) * plotWidth,
-    y: plotBottom - ((point.resistanceMilliohms - minY) / Math.max(maxY - minY, 1)) * plotHeight,
+  const positionFor = (point: { requestVoltageMv: number; requestCurrentMa: number }) => ({
+    x: inset.left + ((point.requestVoltageMv - minX) / Math.max(maxX - minX, 1)) * plotWidth,
+    y: plotBottom - ((point.requestCurrentMa - minY) / Math.max(maxY - minY, 1)) * plotHeight,
   })
   const positions = points.map(positionFor)
   const path = points
@@ -508,11 +535,11 @@ function ResistanceChart({
     .join(' ')
   return (
     <svg
-      className="thermal-plant-run-card__svg thermal-plant-run-card__svg--curve"
+      className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
       preserveAspectRatio="none"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
-      aria-label="电阻温度曲线"
+      aria-label="供电边界曲线"
     >
       <line
         x1={inset.left}
@@ -542,28 +569,31 @@ function ResistanceChart({
         y2={inset.top + (plotHeight * 2) / 3}
         className="thermal-plant-run-card__guide"
       />
-      <polyline points={path} className="thermal-plant-run-card__curve" />
+      <polyline points={path} className="thermal-plant-run-card__boundary" />
       {points.map((point, index) => (
         <circle
-          key={point.tempCentiC}
+          key={`${point.requestVoltageMv}-${point.requestCurrentMa}-${index}`}
           cx={positions[index]?.x}
           cy={positions[index]?.y}
           r="4"
-          className="thermal-plant-run-card__point thermal-plant-run-card__point--curve"
+          className="thermal-plant-run-card__point thermal-plant-run-card__point--boundary"
         />
       ))}
       {points.map((point, index) => (
         <text
-          key={`${point.tempCentiC}-label`}
+          key={`${point.requestVoltageMv}-label-${index}`}
           x={positions[index]?.x}
           y={height - 8}
           textAnchor="middle"
         >
-          {formatChartTemp(point.tempCentiC)}℃
+          {formatBoundaryVoltageMv(point.requestVoltageMv)}V
         </text>
       ))}
       <text x={inset.left - 16} y={inset.top + 5}>
-        Ω
+        {formatBoundaryCurrentMa(maxY)}A
+      </text>
+      <text x={inset.left - 16} y={plotBottom + 3}>
+        0A
       </text>
     </svg>
   )
@@ -573,9 +603,20 @@ function formatTemp(centiC: number | undefined) {
   return ((centiC ?? 0) / 100).toFixed(1)
 }
 
-function formatChartTemp(centiC: number) {
-  const temperature = centiC / 100
-  return Number.isInteger(temperature) ? String(temperature) : temperature.toFixed(1)
+function formatBoundaryVoltage(point: SupplyBoundary['points'][number]) {
+  return formatBoundaryVoltageMv(point[6] || point[7])
+}
+
+function formatBoundaryVoltageMv(value: number) {
+  return (value / 1000).toFixed(1)
+}
+
+function formatBoundaryCurrent(point: SupplyBoundary['points'][number]) {
+  return (point[5] / 1000).toFixed(2)
+}
+
+function formatBoundaryCurrentMa(value: number) {
+  return (value / 1000).toFixed(1)
 }
 
 function formatElapsed(elapsedMs: number) {
