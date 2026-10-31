@@ -7141,7 +7141,6 @@ function CalibrationSliderInputField({
 function CalibrationModeControlPanel({
   title,
   modeToggle,
-  leaveGuard,
   capability,
   voltageText,
   onVoltageChange,
@@ -7153,12 +7152,6 @@ function CalibrationModeControlPanel({
 }: {
   title: string
   modeToggle?: ReactNode
-  leaveGuard?: {
-    anchorId?: string
-    nextLabel: string
-    onDismiss: () => void
-    onContinue: () => void
-  } | null
   capability: ReturnType<typeof calibrationPowerCapability>
   voltageText: string
   onVoltageChange: (value: string) => void
@@ -7176,17 +7169,6 @@ function CalibrationModeControlPanel({
     <CalibrationLiveCard
       title={title}
       modeToggle={modeToggle}
-      modeToggleAnchorId={leaveGuard ? 'calibration-mode-toggle-anchor' : undefined}
-      modeToggleHint={
-        leaveGuard ? (
-          <CalibrationLeaveGuardBubble
-            anchorId="calibration-mode-toggle-anchor"
-            nextLabel={leaveGuard.nextLabel}
-            onDismiss={leaveGuard.onDismiss}
-            onContinue={leaveGuard.onContinue}
-          />
-        ) : null
-      }
       titleMeta={<CalibrationCapabilityHint capability={capability} />}
     >
       <PpsCalibrationFields
@@ -7943,8 +7925,6 @@ function CalibrationView({
         },
       }
     : null
-  const leaveGuardForTab = (tab: CalibrationWorkspaceTab) =>
-    calibrationWorkspaceTab === tab ? leaveGuardViewModel : null
 
   const adcToolbar = (
     <AdcCalibrationToolbar
@@ -7964,6 +7944,14 @@ function CalibrationView({
   return (
     <div className="industrial-view-panel industrial-view-panel--calibration-workbench">
       <div className="industrial-calibration-workbench">
+        {leaveGuardViewModel ? (
+          <CalibrationLeaveGuardBubble
+            anchorId={leaveGuardViewModel.anchorId}
+            nextLabel={leaveGuardViewModel.nextLabel}
+            onDismiss={leaveGuardViewModel.onDismiss}
+            onContinue={leaveGuardViewModel.onContinue}
+          />
+        ) : null}
         <CalibrationSlotEditOverlay
           slotEditor={slotEditor}
           fittedFit={slotEditorFittedFit}
@@ -8065,7 +8053,6 @@ function CalibrationView({
                         onDisable={() => onModeExit()}
                       />
                     }
-                    leaveGuard={leaveGuardForTab('rtd_adc')}
                     capability={powerCapability}
                     voltageText={rtdPpsMvText}
                     onVoltageChange={setRtdPpsMvText}
@@ -8203,7 +8190,6 @@ function CalibrationView({
                         onDisable={() => onModeExit()}
                       />
                     }
-                    leaveGuard={leaveGuardForTab('vin_adc')}
                     capability={powerCapability}
                     voltageText={vinPpsMvText}
                     onVoltageChange={setVinPpsMvText}
@@ -8372,8 +8358,6 @@ function CalibrationLiveCard({
   title,
   detail,
   modeToggle,
-  modeToggleHint,
-  modeToggleAnchorId,
   titleMeta,
   compact = false,
   children,
@@ -8381,8 +8365,6 @@ function CalibrationLiveCard({
   title: string
   detail?: string
   modeToggle?: ReactNode
-  modeToggleHint?: ReactNode
-  modeToggleAnchorId?: string
   titleMeta?: ReactNode
   compact?: boolean
   children: ReactNode
@@ -8411,14 +8393,10 @@ function CalibrationLiveCard({
           </div>
           <div className="industrial-calibration-live-card__mode-control">
             {modeToggle ? (
-              <div
-                id={modeToggleAnchorId}
-                className="industrial-calibration-live-card__mode-toggle-anchor"
-              >
+              <div className="industrial-calibration-live-card__mode-toggle-anchor">
                 {modeToggle}
               </div>
             ) : null}
-            {modeToggleHint ?? null}
           </div>
         </div>
       </div>

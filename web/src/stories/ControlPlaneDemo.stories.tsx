@@ -530,11 +530,11 @@ export const DemoCalibrationTab: Story = {
         const leaveGuard = canvasElement.ownerDocument.body.querySelector(
           '.industrial-calibration-leave-guard'
         ) as HTMLElement | null
-        const modeToggleAnchor = canvasElement.querySelector(
-          '#calibration-mode-toggle-anchor'
+        const leaveGuardAnchor = canvasElement.querySelector(
+          '.industrial-calibration-leave-guard-anchor'
         ) as HTMLElement | null
-        if (!leaveGuard || !modeToggleAnchor) {
-          throw new Error('Expected calibration leave guard and mode toggle to exist')
+        if (!leaveGuard || !leaveGuardAnchor) {
+          throw new Error('Expected calibration leave guard and root anchor to exist')
         }
         await expect(
           await portalCanvas.findByText('校准控制仍开着，先关闭后再切到“温度标定”。')
@@ -545,11 +545,11 @@ export const DemoCalibrationTab: Story = {
         )
 
         const leaveGuardRect = leaveGuard.getBoundingClientRect()
-        const modeToggleRect = modeToggleAnchor.getBoundingClientRect()
-        expect(leaveGuardRect.top).toBeGreaterThanOrEqual(modeToggleRect.bottom - 72)
-        expect(leaveGuardRect.top).toBeLessThan(modeToggleRect.bottom + 88)
-        expect(leaveGuardRect.left).toBeLessThan(modeToggleRect.right + 40)
-        expect(leaveGuardRect.right).toBeGreaterThan(modeToggleRect.left - 40)
+        const leaveGuardAnchorRect = leaveGuardAnchor.getBoundingClientRect()
+        expect(leaveGuardRect.top).toBeGreaterThanOrEqual(leaveGuardAnchorRect.bottom - 72)
+        expect(leaveGuardRect.top).toBeLessThan(leaveGuardAnchorRect.bottom + 88)
+        expect(leaveGuardRect.left).toBeLessThan(leaveGuardAnchorRect.right + 40)
+        expect(leaveGuardRect.right).toBeGreaterThan(leaveGuardAnchorRect.left - 40)
 
         await userEvent.click(await portalCanvas.findByRole('button', { name: '关闭并继续' }))
 
