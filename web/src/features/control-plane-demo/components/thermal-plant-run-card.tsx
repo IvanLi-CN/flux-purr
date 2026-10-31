@@ -9,7 +9,7 @@ import {
   TimerReset,
   Zap,
 } from 'lucide-react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useLayoutEffect, useState } from 'react'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
 
 const phaseLabel: Record<ThermalPlantTracePoint['phase'], string> = {
@@ -617,8 +617,8 @@ function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
   const [viewBoxHeight, setViewBoxHeight] = useState(initialHeight)
   const containerRef = useCallback((node: HTMLDivElement | null) => setContainer(node), [])
 
-  useEffect(() => {
-    if (!container || typeof ResizeObserver === 'undefined') return
+  useLayoutEffect(() => {
+    if (!container) return
 
     const updateViewBox = () => {
       const { width, height } = container.getBoundingClientRect()
@@ -629,13 +629,30 @@ function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
       )
     }
 
+    let frameId = 0
+    const scheduleUpdate = () => {
+      updateViewBox()
+      if (typeof requestAnimationFrame !== 'function') return
+      if (frameId !== 0) cancelAnimationFrame(frameId)
+      frameId = requestAnimationFrame(() => {
+        frameId = 0
+        updateViewBox()
+      })
+    }
+
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleUpdate)
+
     updateViewBox()
-    const observer = new ResizeObserver(updateViewBox)
-    observer.observe(container)
-    window.addEventListener('resize', updateViewBox)
+    scheduleUpdate()
+    observer?.observe(container)
+    window.addEventListener('resize', scheduleUpdate)
+    window.visualViewport?.addEventListener('resize', scheduleUpdate)
     return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', updateViewBox)
+      observer?.disconnect()
+      if (frameId !== 0) cancelAnimationFrame(frameId)
+      window.removeEventListener('resize', scheduleUpdate)
+      window.visualViewport?.removeEventListener('resize', scheduleUpdate)
     }
   }, [container, viewBoxWidth])
 

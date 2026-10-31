@@ -20,20 +20,38 @@ test.describe('thermal plant result layout', () => {
     await expect(resultCard.getByText('R(T)', { exact: false })).toHaveCount(0)
 
     const boundaryChart = resultCard.locator('svg[aria-label="供电边界曲线"]')
-    const chartAspectDifference = async () =>
-      boundaryChart.evaluate((svg) => {
+    const traceChart = resultCard.locator('svg[aria-label="加热和自然冷却温度曲线"]')
+    const chartAspectDifference = (chart: typeof boundaryChart) => async () =>
+      chart.evaluate((svg) => {
         const viewBox = svg.getAttribute('viewBox')?.split(/\s+/).map(Number) ?? []
         const rect = svg.getBoundingClientRect()
         return Math.abs(
           (viewBox[2] ?? 0) / (viewBox[3] ?? 1) - rect.width / Math.max(rect.height, 1)
         )
       })
-    await expect.poll(chartAspectDifference).toBeLessThan(0.03)
+    const boundaryAspectDifference = chartAspectDifference(boundaryChart)
+    const traceAspectDifference = chartAspectDifference(traceChart)
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
 
     await page.setViewportSize({ width: 1440, height: 900 })
-    await expect.poll(chartAspectDifference).toBeLessThan(0.03)
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
     const chartHeight = await boundaryChart.evaluate((svg) => svg.getBoundingClientRect().height)
     expect(chartHeight).toBeLessThan(600)
+
+    await page.setViewportSize({ width: 393, height: 852 })
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
+    const mobileChartHeight = await boundaryChart.evaluate(
+      (svg) => svg.getBoundingClientRect().height
+    )
+    expect(mobileChartHeight).toBeGreaterThan(100)
+    expect(mobileChartHeight).toBeLessThan(220)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
 
     const samples = [] as Array<{
       documentHeight: number
