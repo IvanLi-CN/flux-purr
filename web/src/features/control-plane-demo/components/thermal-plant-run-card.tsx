@@ -9,6 +9,7 @@ import {
   TimerReset,
   Zap,
 } from 'lucide-react'
+import { useCallback, useEffect, useState } from 'react'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
 
 const phaseLabel: Record<ThermalPlantTracePoint['phase'], string> = {
@@ -358,14 +359,16 @@ function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string;
 }
 
 function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
+  const width = 440
+  const initialHeight = 152
+  const { svgRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length < 2)
     return (
       <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--trace">
         等待温度轨迹
       </div>
     )
-  const width = 440
-  const height = 152
+  const height = viewBoxHeight
   const inset = {
     top: Math.max(12, height * 0.079),
     right: 18,
@@ -401,6 +404,7 @@ function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
     Math.round(plotBottom - ((temperature - minT) / Math.max(maxT - minT, 1)) * plotHeight)
   return (
     <svg
+      ref={svgRef}
       className="thermal-plant-run-card__svg thermal-plant-run-card__svg--trace"
       preserveAspectRatio="xMidYMid meet"
       viewBox={`0 0 ${width} ${height}`}
@@ -500,14 +504,16 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
     requestVoltageMv: point[6] || point[7],
     requestCurrentMa: point[5],
   }))
+  const width = 600
+  const initialHeight = 340
+  const { svgRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length === 0)
     return (
       <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--boundary">
         等待供电边界采样
       </div>
     )
-  const width = 600
-  const height = 340
+  const height = viewBoxHeight
   const inset = {
     top: Math.max(16, height * 0.047),
     right: 26,
@@ -536,6 +542,7 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
   const tickIndices = selectBoundaryTickIndices(points)
   return (
     <svg
+      ref={svgRef}
       className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
       preserveAspectRatio="xMidYMid meet"
       viewBox={`0 0 ${width} ${height}`}
@@ -601,6 +608,36 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
       </text>
     </svg>
   )
+}
+
+function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
+  const [svg, setSvg] = useState<SVGSVGElement | null>(null)
+  const [viewBoxHeight, setViewBoxHeight] = useState(initialHeight)
+  const svgRef = useCallback((node: SVGSVGElement | null) => setSvg(node), [])
+
+  useEffect(() => {
+    if (!svg || typeof ResizeObserver === 'undefined') return
+
+    const updateViewBox = () => {
+      const { width, height } = svg.getBoundingClientRect()
+      if (width <= 0 || height <= 0) return
+      const nextHeight = (viewBoxWidth * height) / width
+      setViewBoxHeight((currentHeight) =>
+        Math.abs(currentHeight - nextHeight) < 0.5 ? currentHeight : nextHeight
+      )
+    }
+
+    updateViewBox()
+    const observer = new ResizeObserver(updateViewBox)
+    observer.observe(svg)
+    window.addEventListener('resize', updateViewBox)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateViewBox)
+    }
+  }, [svg, viewBoxWidth])
+
+  return { svgRef, viewBoxHeight }
 }
 
 function selectBoundaryTickIndices(points: Array<{ requestVoltageMv: number }>, maxTicks = 6) {

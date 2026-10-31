@@ -18,7 +18,20 @@ test.describe('thermal plant result layout', () => {
         .first()
     ).toBeVisible()
     await expect(resultCard.getByText('R(T)', { exact: false })).toHaveCount(0)
+
+    const boundaryChart = resultCard.locator('svg[aria-label="供电边界曲线"]')
+    const chartAspectDifference = async () =>
+      boundaryChart.evaluate((svg) => {
+        const viewBox = svg.getAttribute('viewBox')?.split(/\s+/).map(Number) ?? []
+        const rect = svg.getBoundingClientRect()
+        return Math.abs(
+          (viewBox[2] ?? 0) / (viewBox[3] ?? 1) - rect.width / Math.max(rect.height, 1)
+        )
+      })
+    await expect.poll(chartAspectDifference).toBeLessThan(0.03)
+
     await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(chartAspectDifference).toBeLessThan(0.03)
 
     const samples = [] as Array<{
       documentHeight: number
