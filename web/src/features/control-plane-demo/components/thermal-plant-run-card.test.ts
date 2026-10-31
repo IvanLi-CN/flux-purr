@@ -23,6 +23,47 @@ describe('thermal plant run result presentation', () => {
     expect(markup).not.toContain('R(T)')
   })
 
+  it('keeps dense boundary chart labels readable without stretching the SVG text', () => {
+    const defaultSnapshot = createDefaultThermalPlantSnapshot()
+    if (!defaultSnapshot.supplyBoundary)
+      throw new Error('default fixture requires a supply boundary')
+    const points = Array.from(
+      { length: 17 },
+      (_, index) =>
+        [
+          index * 1_000,
+          1_000,
+          1_000,
+          5_000,
+          5_000,
+          3_000,
+          13_500 + index * 500,
+          13_500 + index * 500,
+          0,
+        ] as [number, number, number, number, number, number, number, number, number]
+    )
+    const snapshot = {
+      ...defaultSnapshot,
+      supplyBoundary: {
+        ...defaultSnapshot.supplyBoundary,
+        points,
+      },
+    }
+    const markup = renderToStaticMarkup(
+      createElement(ThermalPlantRunCard, { snapshot, onStartStop: () => undefined })
+    )
+    const boundarySvg = markup.match(
+      /<svg class="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"[\s\S]*?<\/svg>/
+    )?.[0]
+    if (!boundarySvg) throw new Error('boundary chart SVG is missing')
+    const axisLabels = boundarySvg.match(/>\d+\.\dV<\/text>/g) ?? []
+
+    expect(boundarySvg).toContain('preserveAspectRatio="xMidYMid meet"')
+    expect(axisLabels).toHaveLength(6)
+    expect(axisLabels[0]).toBe('>13.5V</text>')
+    expect(axisLabels.at(-1)).toBe('>21.5V</text>')
+  })
+
   it('explains that a live run is waiting for boundary data instead of showing a blank chart', () => {
     const defaultSnapshot = createDefaultThermalPlantSnapshot()
     if (!defaultSnapshot.attempt) throw new Error('default fixture requires an attempt')

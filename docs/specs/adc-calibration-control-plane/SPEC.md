@@ -302,7 +302,7 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - viewport_strategy: `devtools-emulate`
 - sensitive_exclusion: `N/A`
 
-The thermal-model result card retains the coefficient metrics and run trace. For supply-boundary calibration it renders the version 2 raw observations as a separate requested-voltage/current boundary chart and sampling table; when a live run has not received boundary data it shows an explicit waiting state. It must not infer or display an R(T) curve from PPS contract currents. The image below documents the historical resistance presentation and is not evidence for supply-boundary calibration.
+The thermal-model result card retains the coefficient metrics and run trace. For supply-boundary calibration it renders the version 2 raw observations as a separate requested-voltage/current boundary chart and sampling table; when a live run has not received boundary data it shows an explicit waiting state. The chart must preserve SVG aspect ratio for readable text, deduplicate dense voltage ticks, and cap displayed axis labels while retaining every raw point in the chart and table. It must not infer or display an R(T) curve from PPS contract currents. The image below documents the historical resistance presentation and is not evidence for supply-boundary calibration.
 
 ![Thermal plant run result card](./assets/thermal-plant-run-card-1440x900.png)
 

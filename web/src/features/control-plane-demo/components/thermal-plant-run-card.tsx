@@ -402,7 +402,7 @@ function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
   return (
     <svg
       className="thermal-plant-run-card__svg thermal-plant-run-card__svg--trace"
-      preserveAspectRatio="none"
+      preserveAspectRatio="xMidYMid meet"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
       aria-label="加热和自然冷却温度曲线"
@@ -533,10 +533,11 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
       return `${position.x},${position.y}`
     })
     .join(' ')
+  const tickIndices = selectBoundaryTickIndices(points)
   return (
     <svg
       className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
-      preserveAspectRatio="none"
+      preserveAspectRatio="xMidYMid meet"
       viewBox={`0 0 ${width} ${height}`}
       role="img"
       aria-label="供电边界曲线"
@@ -579,16 +580,19 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
           className="thermal-plant-run-card__point thermal-plant-run-card__point--boundary"
         />
       ))}
-      {points.map((point, index) => (
-        <text
-          key={`${point.requestVoltageMv}-label-${index}`}
-          x={positions[index]?.x}
-          y={height - 8}
-          textAnchor="middle"
-        >
-          {formatBoundaryVoltageMv(point.requestVoltageMv)}V
-        </text>
-      ))}
+      {tickIndices.map((index) => {
+        const point = points[index]
+        return (
+          <text
+            key={`${point.requestVoltageMv}-label-${index}`}
+            x={positions[index]?.x}
+            y={height - 8}
+            textAnchor="middle"
+          >
+            {formatBoundaryVoltageMv(point.requestVoltageMv)}V
+          </text>
+        )
+      })}
       <text x={inset.left - 16} y={inset.top + 5}>
         {formatBoundaryCurrentMa(maxY)}A
       </text>
@@ -597,6 +601,26 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
       </text>
     </svg>
   )
+}
+
+function selectBoundaryTickIndices(points: Array<{ requestVoltageMv: number }>, maxTicks = 6) {
+  const tickLimit = Math.max(2, Math.floor(maxTicks))
+  const uniqueIndices: number[] = []
+  const seenVoltages = new Set<number>()
+
+  points.forEach((point, index) => {
+    if (seenVoltages.has(point.requestVoltageMv)) return
+    seenVoltages.add(point.requestVoltageMv)
+    uniqueIndices.push(index)
+  })
+
+  if (uniqueIndices.length <= tickLimit) return uniqueIndices
+
+  const lastIndex = uniqueIndices.length - 1
+  return Array.from({ length: tickLimit }, (_, tick) => {
+    const position = Math.round((tick * lastIndex) / (tickLimit - 1))
+    return uniqueIndices[position] as number
+  })
 }
 
 function formatTemp(centiC: number | undefined) {
