@@ -90,6 +90,7 @@
 - WiFi mock 与 live 表单在 10 秒等待后必须将“取消”映射为 Device `wifi_config(op=cancel)`；只有 device-confirmed `idle` 才能显示取消成功，不能用停止本地等待代替设备操作。
 - Update 必须展示 artifact 选择、compatibility verdict、dry-check progress 与结果摘要，但不得呈现为完整 artifact 管理后台。
 - 全局日志必须支持至少 1000 条 mock trace，通过虚拟列表渲染；日志从上到下保持时间顺序，新事件追加在底部；滚动条仅在 hover/滚动时显示。
+- 全局日志的“跟随尾部”必须使用真实 switch 语义；开启后必须在日志内容变化或新增事件时持续定位最新事件，关闭后用户可停留在历史位置，且开关状态必须有清晰的视觉反馈。
 - Storybook 必须提供 default、degraded、gallery、mobile review 与交互 smoke story。
 - 所有可点击控件必须具备 hover/focus/active 视觉反馈，移动端触控目标高度不低于 48px。
 - 一级页面 tabs 与校准 workspace tabs 必须使用链接语义、支持键盘操作，并正确表达 `aria-current`。
@@ -179,6 +180,7 @@
 - Given 375px mobile viewport，When 查看 demo，Then 顶部状态栏、页签、当前页面与日志不出现不可读重叠。
 - Given 1440px desktop viewport，When 查看 demo，Then Dashboard 与全局日志同屏显示，且页面本身不依赖大段滚动。
 - Given 浏览器 Web Serial 连续产生运行时事件，When 查看全局日志，Then 较早事件位于较新事件上方，最新事件位于列表底部。
+- Given 日志内容在固定缓冲区内持续更新，When 开启“跟随尾部”，Then switch 为 checked 且视口持续保持在最新事件；关闭后滚动位置不被新事件抢回。
 - Given 在顶部状态栏选择 `Field Kit`，When 查看当前界面，Then 页面显示该 target 的 serial transport、warning severity 与 firmware 摘要。
 - Given 在 Dashboard 调整目标温度，When 点击 `+`，Then live target、mock runtime 与日志同步变化，不需要提交按钮。
 - Given 点击 `Settings`，When 查看当前界面，Then 可以看到 preset slots、preset temperature editor、preset enable switch 与 fan policy control。

@@ -209,28 +209,38 @@ export const DemoManualPpsPanel: Story = {
 export const DemoLogFollowTail: Story = {
   name: 'Demo / Runtime log follow tail',
   args: {
-    scenario: controlPlaneScenario,
-    allowDemoControls: false,
-    devd: {
-      enabled: false,
-    },
-    webSerial: {
-      enabled: false,
-    },
+    ...mockDemoStoryArgs,
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const followButton = await canvas.findByRole('button', {
+    const followSwitch = await canvas.findByRole('switch', {
       name: '跟随尾部',
     })
+    const followControl = canvasElement.querySelector('.industrial-log-follow')
+    expect(followControl).not.toBeNull()
+    expect(followControl).toHaveTextContent('跟随尾部')
+    expect(followControl).not.toHaveTextContent('开启')
+    expect(followControl).not.toHaveTextContent('关闭')
     const scrollElement = canvasElement.querySelector(
       '.industrial-log-panel__rows .simplebar-content-wrapper'
     ) as HTMLElement | null
     expect(scrollElement).not.toBeNull()
     if (!scrollElement) throw new Error('Expected runtime log scroll container')
+    const visibleLogMessages = () => {
+      const containerRect = scrollElement.getBoundingClientRect()
+      return Array.from(canvasElement.querySelectorAll('.industrial-log-panel .industrial-event'))
+        .filter((node) => {
+          const rect = node.getBoundingClientRect()
+          return rect.bottom > containerRect.top && rect.top < containerRect.bottom
+        })
+        .map((node) => node.querySelector('p')?.textContent)
+    }
 
     scrollElement.scrollTop = 0
-    await userEvent.click(followButton)
+    fireEvent.scroll(scrollElement)
+    await expect(followSwitch).toHaveAttribute('aria-checked', 'false')
+    await userEvent.click(followSwitch)
+    await expect(followSwitch).toHaveAttribute('aria-checked', 'true')
 
     await waitFor(() => {
       const distanceFromTail =
@@ -238,11 +248,37 @@ export const DemoLogFollowTail: Story = {
       expect(distanceFromTail).toBeLessThanOrEqual(2)
     })
 
-    const renderedMessages = Array.from(
-      canvasElement.querySelectorAll('.industrial-log-panel .industrial-event > p')
+    const initialTailMessage = visibleLogMessages().at(-1)
+
+    await waitFor(
+      () => {
+        const renderedMessages = Array.from(
+          canvasElement.querySelectorAll('.industrial-log-panel .industrial-event > p')
+        )
+        const distanceFromTail =
+          scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
+        expect(renderedMessages.at(-1)?.textContent).not.toBe(initialTailMessage)
+        expect(distanceFromTail).toBeLessThanOrEqual(2)
+      },
+      { timeout: 6000 }
     )
-    expect(renderedMessages.at(-1)?.textContent).toContain(
-      controlPlaneScenario.events.at(-1)?.message
+
+    await userEvent.click(followSwitch)
+    await expect(followSwitch).toHaveAttribute('aria-checked', 'false')
+    const offAtTailMessage = visibleLogMessages().at(-1)
+    const offAtTailSummary = canvasElement.querySelector(
+      '.industrial-log-panel__summary'
+    )?.textContent
+
+    await waitFor(
+      () => {
+        const renderedMessages = visibleLogMessages()
+        expect(canvasElement.querySelector('.industrial-log-panel__summary')?.textContent).not.toBe(
+          offAtTailSummary
+        )
+        expect(renderedMessages.at(-1)).toBe(offAtTailMessage)
+      },
+      { timeout: 6000 }
     )
   },
 }

@@ -18,7 +18,6 @@ import {
   Save,
   ScanSearch,
   SlidersHorizontal,
-  ToggleRight,
   Trash2,
   Upload,
   Usb,
@@ -345,6 +344,7 @@ interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
 type ConsoleWorkspace = 'device' | 'firmware'
 
 const LOG_FEED_SIZE = 1000
+const LOG_FEED_MAX_SIZE = LOG_FEED_SIZE * 2
 const FIRMWARE_ACTIVITY_FEED_SIZE = 200
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
@@ -2803,8 +2803,11 @@ export function ControlPlaneDemo({
     [activeScenario.events, allowDemoControls, streamTick]
   )
   const visibleEvents = useMemo(
-    () => [...scenarioEvents, ...actionEvents].slice(-LOG_FEED_SIZE),
-    [actionEvents, scenarioEvents]
+    () =>
+      allowDemoControls
+        ? [...scenarioEvents, ...actionEvents]
+        : [...scenarioEvents, ...actionEvents].slice(-LOG_FEED_SIZE),
+    [actionEvents, allowDemoControls, scenarioEvents]
   )
 
   const emitEvent = useCallback(
@@ -4939,17 +4942,21 @@ function createDemoEventFeed(events: EventLogEntry[], tick: number) {
     return []
   }
 
-  return Array.from({ length: LOG_FEED_SIZE }, (_, index) => {
-    const template = events[(index + tick) % events.length]
-    const cycle = Math.floor((index + tick) / events.length)
-    const totalSeconds = LOG_FEED_START_SECONDS + (index + tick) * LOG_FEED_STEP_SECONDS
+  const firstFrame = Math.max(0, tick - (LOG_FEED_MAX_SIZE - LOG_FEED_SIZE))
+  const frameCount = LOG_FEED_SIZE + tick - firstFrame
+
+  return Array.from({ length: frameCount }, (_, offset) => {
+    const frameIndex = firstFrame + offset
+    const template = events[frameIndex % events.length]
+    const cycle = Math.floor(frameIndex / events.length)
+    const totalSeconds = LOG_FEED_START_SECONDS + frameIndex * LOG_FEED_STEP_SECONDS
 
     return {
       ...template,
       time: formatLogTime(totalSeconds),
       message:
         cycle > 0
-          ? `${template.message} · 第 ${String(index + 1).padStart(4, '0')} 帧`
+          ? `${template.message} · 第 ${String(frameIndex + 1).padStart(4, '0')} 帧`
           : template.message,
     }
   })
@@ -9719,14 +9726,22 @@ function UpdateView({
   )
 }
 
+function runtimeEventKey(event: EventLogEntry) {
+  return [event.time, event.source, event.message, event.detail ?? '', event.tone].join('\u0000')
+}
+
 function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
+  const followTailAnchorKeyRef = useRef<string | null>(null)
+  const suppressAnchorResetRef = useRef(false)
   const [followTail, setFollowTail] = useState(false)
   const [logFilter, setLogFilter] = useState<LogFilter>('all')
   const filteredEvents = useMemo(
     () => (logFilter === 'all' ? events : events.filter((event) => event.tone === logFilter)),
     [events, logFilter]
   )
+  const latestEvent = filteredEvents.at(-1)
+  const latestEventKey = latestEvent ? runtimeEventKey(latestEvent) : ''
   const rowVirtualizer = useVirtualizer({
     count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
@@ -9735,16 +9750,60 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     overscan: 8,
   })
 
-  useLayoutEffect(() => {
-    if (followTail && filteredEvents.length > 0) {
+  const scrollToTail = useCallback(() => {
+    if (filteredEvents.length > 0) {
       rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
     }
-  }, [filteredEvents.length, followTail, rowVirtualizer])
+  }, [filteredEvents.length, rowVirtualizer])
+
+  const scrollToFollowTailAnchor = useCallback(() => {
+    const anchorKey = followTailAnchorKeyRef.current
+    if (!anchorKey) {
+      return
+    }
+
+    const anchorIndex = filteredEvents.findIndex((event) => runtimeEventKey(event) === anchorKey)
+    if (anchorIndex < 0) {
+      followTailAnchorKeyRef.current = null
+      return
+    }
+
+    suppressAnchorResetRef.current = true
+    rowVirtualizer.scrollToIndex(anchorIndex, { align: 'end' })
+    const frame = window.requestAnimationFrame(() => {
+      rowVirtualizer.scrollToIndex(anchorIndex, { align: 'end' })
+      suppressAnchorResetRef.current = false
+    })
+
+    return () => {
+      window.cancelAnimationFrame(frame)
+      suppressAnchorResetRef.current = false
+    }
+  }, [filteredEvents, rowVirtualizer])
+
+  useLayoutEffect(() => {
+    if (filteredEvents.length === 0 || !latestEventKey) {
+      return
+    }
+
+    if (followTail) {
+      followTailAnchorKeyRef.current = null
+      scrollToTail()
+      const frame = window.requestAnimationFrame(scrollToTail)
+      return () => window.cancelAnimationFrame(frame)
+    }
+
+    return scrollToFollowTailAnchor()
+  }, [filteredEvents.length, followTail, latestEventKey, scrollToFollowTailAnchor, scrollToTail])
 
   const handleLogScroll = () => {
     const scrollElement = scrollableNodeRef.current
 
-    if (!scrollElement || !followTail) {
+    if (!scrollElement || suppressAnchorResetRef.current) {
+      return
+    }
+
+    if (!followTail) {
       return
     }
 
@@ -9752,30 +9811,36 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
       scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
 
     if (distanceFromTail > 96) {
+      followTailAnchorKeyRef.current = null
       setFollowTail(false)
     }
   }
 
-  const handleFollowTailToggle = () => {
-    setFollowTail((current) => {
-      const next = !current
+  const handleLogInteraction = () => {
+    if (!followTail) {
+      followTailAnchorKeyRef.current = null
+    }
+  }
 
-      if (next) {
-        window.requestAnimationFrame(() => {
-          if (filteredEvents.length > 0) {
-            rowVirtualizer.scrollToIndex(filteredEvents.length - 1, {
-              align: 'end',
-            })
-          }
-        })
-      }
+  const handleLogPointerDown = () => {
+    handleLogInteraction()
+  }
 
-      return next
-    })
+  const handleFollowTailChange = (checked: boolean) => {
+    if (checked) {
+      followTailAnchorKeyRef.current = null
+    } else {
+      const scrollElement = scrollableNodeRef.current
+      const distanceFromTail = scrollElement
+        ? scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
+        : Number.POSITIVE_INFINITY
+      followTailAnchorKeyRef.current =
+        distanceFromTail <= 96 && latestEvent ? runtimeEventKey(latestEvent) : null
+    }
+    setFollowTail(checked)
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const latestEvent = filteredEvents.at(-1)
   const latestSourceLabel = latestEvent?.source
     ? (eventSourceLabels[latestEvent.source] ?? latestEvent.source.toUpperCase())
     : '追踪'
@@ -9816,17 +9881,21 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
           'aria-live': 'polite',
           'aria-atomic': 'false',
           onScroll: handleLogScroll,
+          onWheel: handleLogInteraction,
+          onPointerDown: handleLogPointerDown,
+          onKeyDown: handleLogInteraction,
         }}
       >
-        <button
-          type="button"
-          className="industrial-log-follow"
-          aria-pressed={followTail}
-          onClick={handleFollowTailToggle}
-        >
-          <ToggleRight size={16} aria-hidden="true" />
-          {followTail ? '跟随尾部' : '跟随尾部'}
-        </button>
+        <div className="industrial-log-follow">
+          <span className="industrial-log-follow__label">跟随尾部</span>
+          <Switch
+            size="industrial"
+            className="industrial-log-follow__switch"
+            checked={followTail}
+            onCheckedChange={handleFollowTailChange}
+            aria-label="跟随尾部"
+          />
+        </div>
         <div className="industrial-log-count" aria-live="polite">
           {filteredEvents.length} / {events.length} 帧
         </div>

@@ -30,7 +30,7 @@
 - Dashboard 当前温度为首要信息，目标温度 stepper 放在主操作行内；变更立即写入 mock runtime 与 trace。
 - Settings 已收敛为 heat policy：live summary、preset slot grid、preset temperature debounce autosave、preset enabled switch 与 fan policy segmented control。
 - Update 已收敛为 firmware check：artifact selector、compatibility verdict、dry-check progress 与 blocked/warning/success mock 状态。
-- 全局日志使用 `@tanstack/react-virtual` + `simplebar-react` 渲染 1000 条 deterministic trace；事件按时间从上到下保序并将新事件追加到底部，滚动条只在 hover/滚动时显示，follow-tail 由用户显式切换。
+- 全局日志使用 `@tanstack/react-virtual` + `simplebar-react` 渲染 1000 条 deterministic trace；事件按时间从上到下保序并将新事件追加到底部，滚动条只在 hover/滚动时显示。follow-tail 使用 Radix Switch，由用户显式切换，开启后以最新事件内容 key 驱动连续尾部定位，关闭后保留用户的历史滚动位置。
 - 移动端保留轻量 trace ticker 和单列内容，避免用完整日志面板挤压核心热控操作。
 
 ## Remaining Gaps
