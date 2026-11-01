@@ -1301,9 +1301,13 @@
 @media (min-width: 64rem) and (max-height: 54rem) {
   .thermal-plant-run-card {
     position: relative;
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
     gap: 0.42rem;
     padding: 0;
+  }
+
+  .thermal-plant-run-card:has(.thermal-plant-run-card__compatibility) {
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 
   .thermal-plant-run-card__header {

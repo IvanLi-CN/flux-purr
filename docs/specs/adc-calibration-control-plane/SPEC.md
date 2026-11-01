@@ -306,6 +306,10 @@ The thermal-model result surface retains the coefficient metrics and run trace w
 
 ![Thermal plant run flat surface](./assets/thermal-plant-run-flat-1440x900.png)
 
+`assets/thermal-plant-run-short-height-1440x850.png` records the running state at a short desktop height. The status pill shares the metric strip's row and no longer reserves a separate empty grid row above the calibration evidence.
+
+![Thermal plant run short-height layout](./assets/thermal-plant-run-short-height-1440x850.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。

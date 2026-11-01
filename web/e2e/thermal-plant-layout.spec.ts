@@ -101,6 +101,38 @@ test.describe('thermal plant result layout', () => {
       expect(section.boxShadow).not.toBe('none')
     }
 
+    await page.setViewportSize({ width: 1440, height: 850 })
+    const shortHeightLayout = await resultCard.evaluate((element) => {
+      const read = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector)
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { y: rect.y, bottom: rect.bottom }
+      }
+      const surface = element.getBoundingClientRect()
+      const styles = getComputedStyle(element)
+      return {
+        surface: { y: surface.y, bottom: surface.bottom },
+        header: read('.thermal-plant-run-card__header'),
+        metrics: read('.thermal-plant-run-card__metrics'),
+        body: read('.thermal-plant-run-card__body'),
+        gridTemplateRows: styles.gridTemplateRows,
+        headerPosition: getComputedStyle(
+          element.querySelector('.thermal-plant-run-card__header') ?? element
+        ).position,
+      }
+    })
+    expect(shortHeightLayout.headerPosition).toBe('absolute')
+    expect(shortHeightLayout.gridTemplateRows.split(' ').length).toBe(2)
+    expect((shortHeightLayout.metrics?.y ?? 0) - (shortHeightLayout.surface?.y ?? 0)).toBeLessThan(
+      2
+    )
+    expect(shortHeightLayout.header?.y ?? 0).toBeLessThan(shortHeightLayout.metrics?.bottom ?? 0)
+    expect(shortHeightLayout.header?.bottom ?? 0).toBeGreaterThan(shortHeightLayout.metrics?.y ?? 0)
+    expect(
+      (shortHeightLayout.body?.y ?? 0) - (shortHeightLayout.metrics?.bottom ?? 0)
+    ).toBeLessThan(16)
+
     await page.setViewportSize({ width: 393, height: 852 })
     await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
     await expect.poll(traceAspectDifference).toBeLessThan(0.03)
