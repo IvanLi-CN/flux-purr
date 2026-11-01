@@ -2086,6 +2086,7 @@
 
   .industrial-log-panel__rows .simplebar-content-wrapper {
     overscroll-behavior: contain;
+    overflow-anchor: none;
   }
 
   .industrial-log-panel__rows .simplebar-content {
@@ -2154,26 +2155,66 @@
     justify-self: end;
     gap: 0.35rem;
     margin-bottom: 0.15rem;
-    border: 1px solid rgba(255, 255, 255, 0.16);
-    border-radius: 999px;
-    background: rgba(6, 13, 22, 0.84);
-    padding: 0.32rem 0.6rem;
     color: #f3f7fb;
     font-family: "JetBrains Mono", monospace;
     font-size: 0.66rem;
     font-weight: 800;
     letter-spacing: 0.04em;
     text-transform: uppercase;
+  }
+
+  .industrial-log-follow__label {
+    color: #f3f7fb;
+  }
+
+  .industrial-log-follow__switch[data-slot="switch"] {
+    width: 2.1rem;
+    height: 1.12rem;
+    cursor: pointer;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+    background: rgba(6, 13, 22, 0.84);
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 6px 16px rgba(0, 0, 0, 0.2);
+      inset 2px 2px 4px rgba(0, 0, 0, 0.32),
+      inset -1px -1px 2px rgba(255, 255, 255, 0.12),
+      0 4px 10px rgba(0, 0, 0, 0.2);
+    transition:
+      background 180ms ease,
+      box-shadow 180ms ease;
   }
 
-  .industrial-log-follow[aria-pressed="false"] {
-    color: #c9d6e8;
+  .industrial-log-follow__switch[data-slot="switch"][data-state="checked"] {
+    background: var(--industrial-accent);
+    box-shadow:
+      inset 2px 2px 4px rgba(95, 13, 28, 0.35),
+      0 0 12px rgba(255, 71, 87, 0.42);
   }
 
-  .industrial-log-follow:focus-visible {
+  .industrial-log-follow__switch[data-slot="switch"] [data-slot="switch-thumb"] {
+    width: 0.78rem;
+    height: 0.78rem;
+    transform: translateX(0.14rem);
+    border-radius: 999px;
+    background: linear-gradient(145deg, #f3f7fb, #9fb2c9);
+    box-shadow:
+      2px 2px 4px rgba(0, 0, 0, 0.3),
+      inset 1px 1px 1px rgba(255, 255, 255, 0.7);
+    transition:
+      transform 180ms ease,
+      background 180ms ease,
+      box-shadow 180ms ease;
+  }
+
+  .industrial-log-follow__switch[data-slot="switch"][data-state="checked"]
+    [data-slot="switch-thumb"] {
+    transform: translateX(1.16rem);
+    background: #fff4f5;
+    box-shadow:
+      0 0 8px rgba(255, 255, 255, 0.5),
+      2px 2px 4px rgba(95, 13, 28, 0.32);
+  }
+
+  .industrial-log-follow__switch[data-slot="switch"]:focus-visible {
     outline: 2px solid var(--industrial-accent);
     outline-offset: 3px;
   }
@@ -5670,6 +5711,7 @@
     opacity: 0.74;
   }
 
+  .industrial-log-follow:focus-within,
   .industrial-log-panel:hover .industrial-log-follow {
     opacity: 1;
   }

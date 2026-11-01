@@ -18,7 +18,6 @@ import {
   Save,
   ScanSearch,
   SlidersHorizontal,
-  ToggleRight,
   Trash2,
   Upload,
   Usb,
@@ -345,6 +344,7 @@ interface CalibrationLeaveGuardState extends CalibrationLeaveRequest {
 type ConsoleWorkspace = 'device' | 'firmware'
 
 const LOG_FEED_SIZE = 1000
+const LOG_FEED_MAX_SIZE = LOG_FEED_SIZE * 2
 const FIRMWARE_ACTIVITY_FEED_SIZE = 200
 const LOG_FEED_STEP_SECONDS = 3
 const LOG_FEED_START_SECONDS = 20 * 3600 + 14 * 60 + 3
@@ -2803,8 +2803,11 @@ export function ControlPlaneDemo({
     [activeScenario.events, allowDemoControls, streamTick]
   )
   const visibleEvents = useMemo(
-    () => [...scenarioEvents, ...actionEvents].slice(-LOG_FEED_SIZE),
-    [actionEvents, scenarioEvents]
+    () =>
+      allowDemoControls
+        ? [...scenarioEvents, ...actionEvents]
+        : [...scenarioEvents, ...actionEvents].slice(-LOG_FEED_SIZE),
+    [actionEvents, allowDemoControls, scenarioEvents]
   )
 
   const emitEvent = useCallback(
@@ -4939,17 +4942,21 @@ function createDemoEventFeed(events: EventLogEntry[], tick: number) {
     return []
   }
 
-  return Array.from({ length: LOG_FEED_SIZE }, (_, index) => {
-    const template = events[(index + tick) % events.length]
-    const cycle = Math.floor((index + tick) / events.length)
-    const totalSeconds = LOG_FEED_START_SECONDS + (index + tick) * LOG_FEED_STEP_SECONDS
+  const firstFrame = Math.max(0, tick - (LOG_FEED_MAX_SIZE - LOG_FEED_SIZE))
+  const frameCount = LOG_FEED_SIZE + tick - firstFrame
+
+  return Array.from({ length: frameCount }, (_, offset) => {
+    const frameIndex = firstFrame + offset
+    const template = events[frameIndex % events.length]
+    const cycle = Math.floor(frameIndex / events.length)
+    const totalSeconds = LOG_FEED_START_SECONDS + frameIndex * LOG_FEED_STEP_SECONDS
 
     return {
       ...template,
       time: formatLogTime(totalSeconds),
       message:
         cycle > 0
-          ? `${template.message} · 第 ${String(index + 1).padStart(4, '0')} 帧`
+          ? `${template.message} · 第 ${String(frameIndex + 1).padStart(4, '0')} 帧`
           : template.message,
     }
   })
@@ -9719,27 +9726,86 @@ function UpdateView({
   )
 }
 
+function runtimeEventKey(event: EventLogEntry) {
+  return [event.time, event.source, event.message, event.detail ?? '', event.tone].join('\u0000')
+}
+
 function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
+  const frozenScrollTopRef = useRef<number | null>(null)
   const [followTail, setFollowTail] = useState(false)
   const [logFilter, setLogFilter] = useState<LogFilter>('all')
   const filteredEvents = useMemo(
     () => (logFilter === 'all' ? events : events.filter((event) => event.tone === logFilter)),
     [events, logFilter]
   )
+  const latestEvent = filteredEvents.at(-1)
+  const latestEventKey = latestEvent ? runtimeEventKey(latestEvent) : ''
+  const eventKeys = useMemo(() => {
+    const occurrences = new Map<string, number>()
+
+    return filteredEvents.map((event) => {
+      const baseKey = runtimeEventKey(event)
+      const occurrence = occurrences.get(baseKey) ?? 0
+      occurrences.set(baseKey, occurrence + 1)
+      return `${baseKey}\u0001${occurrence}`
+    })
+  }, [filteredEvents])
   const rowVirtualizer = useVirtualizer({
     count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
+    getItemKey: (index) => eventKeys[index] ?? index,
     estimateSize: () => 112,
     measureElement: (element) => element.getBoundingClientRect().height,
     overscan: 8,
   })
+  rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = followTail
+    ? (item, _delta, instance) => item.start < (instance.scrollOffset ?? 0)
+    : () => false
 
-  useLayoutEffect(() => {
-    if (followTail && filteredEvents.length > 0) {
+  const scrollToTail = useCallback(() => {
+    if (filteredEvents.length > 0) {
       rowVirtualizer.scrollToIndex(filteredEvents.length - 1, { align: 'end' })
     }
-  }, [filteredEvents.length, followTail, rowVirtualizer])
+  }, [filteredEvents.length, rowVirtualizer])
+
+  const restoreFrozenScrollPosition = useCallback(() => {
+    const scrollElement = scrollableNodeRef.current
+    const frozenScrollTop = frozenScrollTopRef.current
+
+    if (!scrollElement || frozenScrollTop === null) {
+      return
+    }
+
+    if (Math.abs(scrollElement.scrollTop - frozenScrollTop) > 0.5) {
+      scrollElement.scrollTop = frozenScrollTop
+    }
+  }, [])
+
+  useLayoutEffect(() => {
+    if (followTail && filteredEvents.length > 0 && latestEventKey) {
+      scrollToTail()
+      const frame = window.requestAnimationFrame(scrollToTail)
+      return () => window.cancelAnimationFrame(frame)
+    }
+
+    if (frozenScrollTopRef.current === null) {
+      return
+    }
+
+    restoreFrozenScrollPosition()
+    let secondFrame = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      restoreFrozenScrollPosition()
+      secondFrame = window.requestAnimationFrame(restoreFrozenScrollPosition)
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) {
+        window.cancelAnimationFrame(secondFrame)
+      }
+    }
+  }, [filteredEvents.length, followTail, latestEventKey, restoreFrozenScrollPosition, scrollToTail])
 
   const handleLogScroll = () => {
     const scrollElement = scrollableNodeRef.current
@@ -9756,26 +9822,27 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     }
   }
 
-  const handleFollowTailToggle = () => {
-    setFollowTail((current) => {
-      const next = !current
+  const handleFollowTailChange = (checked: boolean) => {
+    if (checked) {
+      frozenScrollTopRef.current = null
+    } else {
+      const scrollElement = scrollableNodeRef.current
+      const distanceFromTail = scrollElement
+        ? scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
+        : Number.POSITIVE_INFINITY
+      frozenScrollTopRef.current =
+        distanceFromTail <= 96 ? (scrollElement?.scrollTop ?? null) : null
+    }
+    setFollowTail(checked)
+  }
 
-      if (next) {
-        window.requestAnimationFrame(() => {
-          if (filteredEvents.length > 0) {
-            rowVirtualizer.scrollToIndex(filteredEvents.length - 1, {
-              align: 'end',
-            })
-          }
-        })
-      }
-
-      return next
-    })
+  const handleLogInteraction = () => {
+    if (!followTail) {
+      frozenScrollTopRef.current = null
+    }
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
-  const latestEvent = filteredEvents.at(-1)
   const latestSourceLabel = latestEvent?.source
     ? (eventSourceLabels[latestEvent.source] ?? latestEvent.source.toUpperCase())
     : '追踪'
@@ -9816,17 +9883,21 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
           'aria-live': 'polite',
           'aria-atomic': 'false',
           onScroll: handleLogScroll,
+          onWheel: handleLogInteraction,
+          onPointerDown: handleLogInteraction,
+          onKeyDown: handleLogInteraction,
         }}
       >
-        <button
-          type="button"
-          className="industrial-log-follow"
-          aria-pressed={followTail}
-          onClick={handleFollowTailToggle}
-        >
-          <ToggleRight size={16} aria-hidden="true" />
-          {followTail ? '跟随尾部' : '跟随尾部'}
-        </button>
+        <div className="industrial-log-follow">
+          <span className="industrial-log-follow__label">跟随尾部</span>
+          <Switch
+            size="industrial"
+            className="industrial-log-follow__switch"
+            checked={followTail}
+            onCheckedChange={handleFollowTailChange}
+            aria-label="跟随尾部"
+          />
+        </div>
         <div className="industrial-log-count" aria-live="polite">
           {filteredEvents.length} / {events.length} 帧
         </div>
