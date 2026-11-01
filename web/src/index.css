@@ -863,9 +863,12 @@
   min-width: 0;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
-  border-block: 1px solid color-mix(in oklch, var(--industrial-muted-text) 18%, transparent);
-  background: transparent;
-  padding: 0.42rem 0;
+  border-radius: 12px;
+  background: var(--industrial-bg);
+  box-shadow:
+    inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
+    inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
+  padding: 0.42rem 0.62rem;
 }
 
 .thermal-plant-run-card__metric {
@@ -940,8 +943,6 @@
   min-height: 0;
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.56rem;
-  border-right: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
-  padding-right: 0.56rem;
 }
 
 .thermal-plant-run-card__chart,
@@ -949,16 +950,18 @@
 .thermal-plant-run-card__table-wrap {
   min-width: 0;
   min-height: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  border-radius: 12px;
+  background: var(--industrial-bg);
+  box-shadow:
+    inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
+    inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
 }
 
 .thermal-plant-run-card__chart--boundary {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.32rem;
-  padding: 0.12rem 0 0.56rem;
+  padding: 0.65rem 0.68rem 0.56rem;
 }
 
 .thermal-plant-run-card__evidence {
@@ -977,7 +980,7 @@
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 0.28rem;
-  padding: 0.56rem 0 0.12rem;
+  padding: 0.62rem 0.65rem 0.54rem;
 }
 
 .thermal-plant-run-card__table-wrap {
@@ -987,7 +990,7 @@
   align-self: stretch;
   align-content: start;
   overflow: hidden;
-  padding: 0.12rem 0 0.48rem;
+  padding: 0.58rem 0.62rem 0.48rem;
 }
 
 .thermal-plant-run-card__table-scroll {
@@ -1240,11 +1243,12 @@
   display: grid;
   align-items: stretch;
   gap: 0.56rem;
-  border-top: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-  padding: 0.58rem 0 0.12rem;
+  border-radius: 12px;
+  background: var(--industrial-bg);
+  box-shadow:
+    inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
+    inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
+  padding: 0.58rem 0.62rem 0.48rem;
 }
 
 .thermal-plant-run-card__run-evidence {
@@ -1299,7 +1303,7 @@
     position: relative;
     grid-template-rows: auto auto minmax(0, 1fr);
     gap: 0.42rem;
-    padding: 0.62rem;
+    padding: 0;
   }
 
   .thermal-plant-run-card__header {
@@ -1321,7 +1325,7 @@
 
   .thermal-plant-run-card__trace-panel,
   .thermal-plant-run-card__table-wrap {
-    padding: 0.48rem 0;
+    padding: 0.54rem;
   }
 
   .thermal-plant-run-card__evidence {
@@ -1346,7 +1350,7 @@
   }
 
   .thermal-plant-run-card__footer {
-    padding: 0.5rem 0 0.12rem;
+    padding: 0.5rem;
   }
 
   .thermal-plant-run-card__table-wrap th,
@@ -1397,8 +1401,6 @@
 
   .thermal-plant-run-card__charts {
     grid-template-rows: auto auto;
-    border-right: 0;
-    padding-right: 0;
   }
 
   .thermal-plant-run-card__chart {
@@ -1427,11 +1429,6 @@
 
   .thermal-plant-run-card__table-wrap {
     overflow: visible;
-  }
-
-  .thermal-plant-run-card__evidence {
-    border-top: 1px solid color-mix(in oklch, var(--industrial-muted-text) 20%, transparent);
-    padding-top: 0.56rem;
   }
 
   .thermal-plant-run-card__table-scroll {

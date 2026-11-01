@@ -69,7 +69,7 @@ test.describe('thermal plant result layout', () => {
       (desktopLayout.table?.right ?? 0) + 1
     )
 
-    const flatSurfaceStyles = await resultCard.evaluate((element) => {
+    const surfaceStyles = await resultCard.evaluate((element) => {
       const read = (node: Element | null) => {
         const styles = getComputedStyle(node ?? element)
         return {
@@ -87,11 +87,19 @@ test.describe('thermal plant result layout', () => {
         footer: read(element.querySelector('.thermal-plant-run-card__footer')),
       }
     })
-    for (const section of Object.values(flatSurfaceStyles)) {
-      expect(section.borderRadius).toBe('0px')
-      expect(section.boxShadow).toBe('none')
+    expect(surfaceStyles.surface.borderRadius).toBe('0px')
+    expect(surfaceStyles.surface.boxShadow).toBe('none')
+    expect(surfaceStyles.surface.padding).toBe('0px')
+    for (const section of [
+      surfaceStyles.metrics,
+      surfaceStyles.boundary,
+      surfaceStyles.trace,
+      surfaceStyles.table,
+      surfaceStyles.footer,
+    ]) {
+      expect(section.borderRadius).toBe('12px')
+      expect(section.boxShadow).not.toBe('none')
     }
-    expect(flatSurfaceStyles.surface.padding).toBe('0px')
 
     await page.setViewportSize({ width: 393, height: 852 })
     await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
