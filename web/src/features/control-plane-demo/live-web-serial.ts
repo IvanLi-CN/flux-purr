@@ -33,6 +33,21 @@ const WEB_SERIAL_POLL_MS = 1_000
 const WEB_SERIAL_CONNECT_TIMEOUT_MS = 60_000
 const WEB_SERIAL_RECOVERY_WINDOW_MS = 30_000
 const WEB_SERIAL_RECOVERY_RETRY_MS = 750
+const WEB_SERIAL_EVENT_LIMIT = 1_000
+
+export function appendWebSerialEvent(
+  events: ReadonlyArray<EventLogEntry>,
+  event: EventLogEntry
+): EventLogEntry[] {
+  return [...events, event].slice(-WEB_SERIAL_EVENT_LIMIT)
+}
+
+export function appendWebSerialEvents(
+  events: ReadonlyArray<EventLogEntry>,
+  webSerialEvents: ReadonlyArray<EventLogEntry>
+): EventLogEntry[] {
+  return [...events, ...webSerialEvents]
+}
 
 export interface LiveWebSerialOptions {
   enabled?: boolean
@@ -157,15 +172,12 @@ export function useLiveWebSerialScenario(
 
   const appendEvent = useCallback((message: string, tone: EventLogEntry['tone'] = 'info') => {
     setEvents((current) =>
-      [
-        {
-          time: formatWebSerialEventTime(new Date()),
-          source: 'webserial',
-          message,
-          tone,
-        },
-        ...current,
-      ].slice(0, 1_000)
+      appendWebSerialEvent(current, {
+        time: formatWebSerialEventTime(new Date()),
+        source: 'webserial',
+        message,
+        tone,
+      })
     )
   }, [])
 
@@ -913,7 +925,7 @@ export function useLiveWebSerialScenario(
             }
           : metric
       ),
-      events: [...events, ...scenario.events],
+      events: appendWebSerialEvents(scenario.events, events),
     }
   }, [device, events, scenario])
 
