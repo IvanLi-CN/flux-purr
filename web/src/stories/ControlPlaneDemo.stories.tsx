@@ -269,10 +269,12 @@ export const DemoLogFollowTail: Story = {
     const offAtTailSummary = canvasElement.querySelector(
       '.industrial-log-panel__summary'
     )?.textContent
+    const offAtTailScrollTop = scrollElement.scrollTop
 
     await waitFor(
       () => {
         const renderedMessages = visibleLogMessages()
+        expect(scrollElement.scrollTop).toBe(offAtTailScrollTop)
         expect(canvasElement.querySelector('.industrial-log-panel__summary')?.textContent).not.toBe(
           offAtTailSummary
         )

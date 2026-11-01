@@ -2086,6 +2086,7 @@
 
   .industrial-log-panel__rows .simplebar-content-wrapper {
     overscroll-behavior: contain;
+    overflow-anchor: none;
   }
 
   .industrial-log-panel__rows .simplebar-content {

@@ -9732,8 +9732,7 @@ function runtimeEventKey(event: EventLogEntry) {
 
 function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
-  const followTailAnchorKeyRef = useRef<string | null>(null)
-  const suppressAnchorResetRef = useRef(false)
+  const frozenScrollTopRef = useRef<number | null>(null)
   const [followTail, setFollowTail] = useState(false)
   const [logFilter, setLogFilter] = useState<LogFilter>('all')
   const filteredEvents = useMemo(
@@ -9742,13 +9741,27 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   )
   const latestEvent = filteredEvents.at(-1)
   const latestEventKey = latestEvent ? runtimeEventKey(latestEvent) : ''
+  const eventKeys = useMemo(() => {
+    const occurrences = new Map<string, number>()
+
+    return filteredEvents.map((event) => {
+      const baseKey = runtimeEventKey(event)
+      const occurrence = occurrences.get(baseKey) ?? 0
+      occurrences.set(baseKey, occurrence + 1)
+      return `${baseKey}\u0001${occurrence}`
+    })
+  }, [filteredEvents])
   const rowVirtualizer = useVirtualizer({
     count: filteredEvents.length,
     getScrollElement: () => scrollableNodeRef.current,
+    getItemKey: (index) => eventKeys[index] ?? index,
     estimateSize: () => 112,
     measureElement: (element) => element.getBoundingClientRect().height,
     overscan: 8,
   })
+  rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = followTail
+    ? (item, _delta, instance) => item.start < (instance.scrollOffset ?? 0)
+    : () => false
 
   const scrollToTail = useCallback(() => {
     if (filteredEvents.length > 0) {
@@ -9756,54 +9769,48 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     }
   }, [filteredEvents.length, rowVirtualizer])
 
-  const scrollToFollowTailAnchor = useCallback(() => {
-    const anchorKey = followTailAnchorKeyRef.current
-    if (!anchorKey) {
+  const restoreFrozenScrollPosition = useCallback(() => {
+    const scrollElement = scrollableNodeRef.current
+    const frozenScrollTop = frozenScrollTopRef.current
+
+    if (!scrollElement || frozenScrollTop === null) {
       return
     }
 
-    const anchorIndex = filteredEvents.findIndex((event) => runtimeEventKey(event) === anchorKey)
-    if (anchorIndex < 0) {
-      followTailAnchorKeyRef.current = null
-      return
+    if (Math.abs(scrollElement.scrollTop - frozenScrollTop) > 0.5) {
+      scrollElement.scrollTop = frozenScrollTop
     }
-
-    suppressAnchorResetRef.current = true
-    rowVirtualizer.scrollToIndex(anchorIndex, { align: 'end' })
-    const frame = window.requestAnimationFrame(() => {
-      rowVirtualizer.scrollToIndex(anchorIndex, { align: 'end' })
-      suppressAnchorResetRef.current = false
-    })
-
-    return () => {
-      window.cancelAnimationFrame(frame)
-      suppressAnchorResetRef.current = false
-    }
-  }, [filteredEvents, rowVirtualizer])
+  }, [])
 
   useLayoutEffect(() => {
-    if (filteredEvents.length === 0 || !latestEventKey) {
-      return
-    }
-
-    if (followTail) {
-      followTailAnchorKeyRef.current = null
+    if (followTail && filteredEvents.length > 0 && latestEventKey) {
       scrollToTail()
       const frame = window.requestAnimationFrame(scrollToTail)
       return () => window.cancelAnimationFrame(frame)
     }
 
-    return scrollToFollowTailAnchor()
-  }, [filteredEvents.length, followTail, latestEventKey, scrollToFollowTailAnchor, scrollToTail])
+    if (frozenScrollTopRef.current === null) {
+      return
+    }
+
+    restoreFrozenScrollPosition()
+    let secondFrame = 0
+    const firstFrame = window.requestAnimationFrame(() => {
+      restoreFrozenScrollPosition()
+      secondFrame = window.requestAnimationFrame(restoreFrozenScrollPosition)
+    })
+    return () => {
+      window.cancelAnimationFrame(firstFrame)
+      if (secondFrame) {
+        window.cancelAnimationFrame(secondFrame)
+      }
+    }
+  }, [filteredEvents.length, followTail, latestEventKey, restoreFrozenScrollPosition, scrollToTail])
 
   const handleLogScroll = () => {
     const scrollElement = scrollableNodeRef.current
 
-    if (!scrollElement || suppressAnchorResetRef.current) {
-      return
-    }
-
-    if (!followTail) {
+    if (!scrollElement || !followTail) {
       return
     }
 
@@ -9811,33 +9818,28 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
       scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
 
     if (distanceFromTail > 96) {
-      followTailAnchorKeyRef.current = null
       setFollowTail(false)
     }
   }
 
-  const handleLogInteraction = () => {
-    if (!followTail) {
-      followTailAnchorKeyRef.current = null
-    }
-  }
-
-  const handleLogPointerDown = () => {
-    handleLogInteraction()
-  }
-
   const handleFollowTailChange = (checked: boolean) => {
     if (checked) {
-      followTailAnchorKeyRef.current = null
+      frozenScrollTopRef.current = null
     } else {
       const scrollElement = scrollableNodeRef.current
       const distanceFromTail = scrollElement
         ? scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight
         : Number.POSITIVE_INFINITY
-      followTailAnchorKeyRef.current =
-        distanceFromTail <= 96 && latestEvent ? runtimeEventKey(latestEvent) : null
+      frozenScrollTopRef.current =
+        distanceFromTail <= 96 ? (scrollElement?.scrollTop ?? null) : null
     }
     setFollowTail(checked)
+  }
+
+  const handleLogInteraction = () => {
+    if (!followTail) {
+      frozenScrollTopRef.current = null
+    }
   }
 
   const virtualItems = rowVirtualizer.getVirtualItems()
@@ -9882,7 +9884,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
           'aria-atomic': 'false',
           onScroll: handleLogScroll,
           onWheel: handleLogInteraction,
-          onPointerDown: handleLogPointerDown,
+          onPointerDown: handleLogInteraction,
           onKeyDown: handleLogInteraction,
         }}
       >
