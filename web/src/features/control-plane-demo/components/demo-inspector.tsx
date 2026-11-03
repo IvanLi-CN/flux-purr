@@ -413,6 +413,7 @@ function DemoInspectorContent({
       <div className="demo-inspector__actions">
         <button
           type="button"
+          className="demo-inspector__action--primary"
           disabled={state.demoPersona === 'observer'}
           onClick={() => onSimulate('thermal-warning')}
         >

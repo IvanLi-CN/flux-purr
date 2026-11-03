@@ -9773,21 +9773,6 @@
 
 @layer components {
   .demo-inspector {
-    --industrial-bg: oklch(0.928 0.014 248);
-    --industrial-panel: oklch(0.968 0.007 235);
-    --industrial-muted: oklch(0.89 0.018 241);
-    --industrial-text: oklch(0.302 0.026 255);
-    --industrial-muted-text: oklch(0.392 0.022 252);
-    --industrial-accent: oklch(0.58 0.209 25);
-    --industrial-shadow: oklch(0.79 0.02 248);
-    --industrial-shadow-deep: oklch(0.738 0.023 247);
-    --industrial-light: oklch(0.996 0.003 220);
-    --industrial-panel-border: oklch(0.72 0.024 247 / 0.3);
-    --industrial-panel-border-strong: oklch(0.64 0.03 247 / 0.36);
-    --industrial-panel-tint: oklch(0.982 0.004 230 / 0.56);
-    --industrial-surface-inset:
-      inset 1px 1px 2px color-mix(in oklch, var(--industrial-shadow) 36%, transparent),
-      inset -1px -1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent);
     position: fixed;
     z-index: 60;
     right: clamp(1rem, 2vw, 2rem);
@@ -9838,7 +9823,7 @@
   .demo-inspector[data-placement="bottom"].is-open .demo-inspector__surface {
     height: 100%;
     min-height: 0;
-    border-radius: 12px 12px 0 0;
+    border-radius: 22px 22px 0 0;
     border-bottom: 0;
     box-shadow:
       0 -12px 32px color-mix(in oklch, var(--industrial-shadow-deep) 30%, transparent),
@@ -9859,11 +9844,11 @@
     display: flex;
     flex-direction: column;
     border: 1px solid color-mix(in oklch, var(--industrial-light) 62%, var(--industrial-shadow) 38%);
-    border-radius: 12px;
-    background: color-mix(in oklch, var(--industrial-panel) 92%, var(--industrial-bg) 8%);
+    border-radius: 22px;
+    background: var(--industrial-panel);
     box-shadow:
-      12px 16px 32px color-mix(in oklch, var(--industrial-shadow-deep) 30%, transparent),
-      -3px -3px 9px color-mix(in oklch, var(--industrial-light) 72%, transparent);
+      8px 8px 16px var(--industrial-shadow),
+      -8px -8px 16px var(--industrial-light);
     color: var(--industrial-text);
     max-height: calc(100dvh - 2rem);
     overscroll-behavior: contain;
@@ -9904,11 +9889,15 @@
     display: inline-flex;
     align-items: center;
     gap: 0.34rem;
+    border: 1px solid color-mix(in oklch, var(--industrial-accent) 42%, var(--industrial-panel));
+    border-radius: 9999px;
+    background: color-mix(in oklch, var(--industrial-accent) 8%, var(--industrial-panel));
     color: var(--industrial-accent);
     font-family: "JetBrains Mono", monospace;
     font-size: 0.66rem;
     font-weight: 800;
     letter-spacing: 0;
+    padding: 0.34rem 0.56rem;
   }
 
   .demo-inspector__header h2 {
@@ -9932,7 +9921,7 @@
     height: 3rem;
     place-items: center;
     border: 1px solid var(--industrial-panel-border-strong);
-    border-radius: 9px;
+    border-radius: 14px;
     background: var(--industrial-panel-tint);
     color: var(--industrial-text);
     box-shadow: var(--industrial-surface-shadow);
@@ -10010,7 +9999,7 @@
     display: grid;
     gap: 0.16rem;
     margin-top: 0.45rem;
-    border-left: 2px solid color-mix(in oklch, var(--industrial-accent) 68%, transparent);
+    border-left: 1px solid color-mix(in oklch, var(--industrial-accent) 68%, transparent);
     padding-left: 0.62rem;
   }
 
@@ -10114,7 +10103,7 @@
   .demo-inspector__reset {
     min-height: 2.45rem;
     border: 1px solid var(--industrial-panel-border);
-    border-radius: 8px;
+    border-radius: 14px;
     background: var(--industrial-panel-tint);
     color: var(--industrial-text);
     padding: 0.5rem 0.58rem;
@@ -10196,12 +10185,12 @@
   }
 
   .demo-inspector__select-trigger {
-    min-height: 2.25rem;
-    height: 2.25rem;
+    min-height: 2.75rem;
+    height: 2.75rem;
     min-width: 0;
     width: 100%;
     border: 1px solid var(--industrial-panel-border-strong);
-    border-radius: 0.5rem;
+    border-radius: 14px;
     background: var(--industrial-bg);
     color: var(--industrial-text);
     box-shadow:
@@ -10239,8 +10228,8 @@
   }
 
   .demo-inspector__select-item {
-    min-height: 2.25rem;
-    border-radius: 0.42rem;
+    min-height: 2.75rem;
+    border-radius: 8px;
     color: var(--industrial-text);
     font-size: 0.68rem;
     font-weight: 750;
@@ -10296,11 +10285,11 @@
 
   .demo-inspector__help-trigger {
     display: inline-grid;
-    width: 2.1rem;
-    height: 2.1rem;
+    width: 2.75rem;
+    height: 2.75rem;
     place-items: center;
     border: 1px solid var(--industrial-panel-border-strong);
-    border-radius: 8px;
+    border-radius: 14px;
     background: var(--industrial-panel-tint);
     color: var(--industrial-muted-text);
     box-shadow: var(--industrial-surface-shadow);
@@ -10338,7 +10327,7 @@
     right: 0;
     width: min(17rem, calc(100vw - 2rem));
     border: 1px solid var(--industrial-panel-border-strong);
-    border-radius: 8px;
+    border-radius: 14px;
     background: var(--industrial-panel);
     color: var(--industrial-text);
     box-shadow:
@@ -10386,6 +10375,28 @@
     font-weight: 750;
   }
 
+  .demo-inspector__actions .demo-inspector__action--primary:not(:disabled) {
+    border-color: color-mix(in oklch, var(--industrial-accent) 72%, var(--industrial-panel));
+    background: var(--industrial-accent);
+    color: #ffffff;
+    box-shadow:
+      4px 4px 8px color-mix(in oklch, var(--industrial-accent) 42%, transparent),
+      -4px -4px 8px color-mix(in oklch, var(--industrial-accent-glow) 42%, transparent);
+  }
+
+  .demo-inspector__actions .demo-inspector__action--primary:hover:not(:disabled) {
+    border-color: var(--industrial-accent-glow);
+    color: #ffffff;
+    transform: translateY(-1px);
+  }
+
+  .demo-inspector__actions .demo-inspector__action--primary:active:not(:disabled) {
+    box-shadow:
+      inset 4px 4px 8px color-mix(in oklch, var(--industrial-accent) 54%, transparent),
+      inset -4px -4px 8px color-mix(in oklch, var(--industrial-accent-glow) 42%, transparent);
+    transform: translateY(1px);
+  }
+
   .demo-inspector__actions button:disabled {
     cursor: not-allowed;
     color: var(--industrial-muted-text);
@@ -10400,7 +10411,7 @@
   .demo-inspector__history-item {
     display: grid;
     gap: 0.16rem;
-    border-left: 2px solid color-mix(in oklch, var(--industrial-accent) 68%, transparent);
+    border-left: 1px solid color-mix(in oklch, var(--industrial-accent) 68%, transparent);
     padding: 0.15rem 0 0.15rem 0.58rem;
   }
 
@@ -10424,10 +10435,12 @@
 
   .demo-inspector__share-row input {
     min-width: 0;
+    height: 2.75rem;
     border: 1px solid var(--industrial-panel-border);
-    border-radius: 8px;
-    background: color-mix(in oklch, var(--industrial-muted) 66%, var(--industrial-panel) 34%);
+    border-radius: 14px;
+    background: var(--industrial-bg);
     color: var(--industrial-muted-text);
+    box-shadow: var(--industrial-surface-inset);
     font-family: "JetBrains Mono", monospace;
     font-size: 0.62rem;
     padding: 0.5rem;
@@ -10441,7 +10454,7 @@
   .demo-inspector__reset {
     display: flex;
     width: 100%;
-    min-height: 2.55rem;
+    min-height: 2.75rem;
     align-items: center;
     justify-content: center;
     gap: 0.42rem;
@@ -10644,4 +10657,25 @@
 
 .demo-inspector__select-content[data-slot="select-content"] {
   z-index: 70;
+}
+
+/* Shared Select utilities are layered after component styles; keep the
+   Inspector's recessed control treatment authoritative here. */
+.demo-inspector button.demo-inspector__select-trigger {
+  border-radius: 14px;
+  box-shadow:
+    inset 2px 2px 5px var(--industrial-shadow),
+    inset -2px -2px 5px var(--industrial-light);
+}
+
+[data-slot="select-content"].demo-inspector__select-content {
+  border-radius: 14px;
+  box-shadow:
+    10px 14px 26px color-mix(in oklch, var(--industrial-shadow-deep) 28%, transparent),
+    inset 1px 1px 0 color-mix(in oklch, var(--industrial-light) 74%, transparent);
+}
+
+[data-slot="select-item"].demo-inspector__select-item {
+  min-height: 2.75rem;
+  border-radius: 8px;
 }
