@@ -3,6 +3,7 @@ import {
   type DemoArtifactState,
   type DemoLeaseState,
   type DemoNetworkState,
+  type DemoPersonaId,
   type DemoSceneId,
   demoInspectorSearch,
   demoInspectorStateFromSearch,
@@ -13,6 +14,7 @@ export interface AppSearch {
   demo?: boolean
   uiDemo?: true
   demoScene?: DemoSceneId
+  demoPersona?: DemoPersonaId
   demoLease?: DemoLeaseState
   demoNetwork?: DemoNetworkState
   demoArtifact?: DemoArtifactState

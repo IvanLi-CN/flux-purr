@@ -62,7 +62,7 @@
 - `REQ-WEB-DEMO-003`：当前设备、故障和能力覆盖 MUST 只作用于路由 identity；保护状态 MUST 优先于已有操作结果。
 - `REQ-WEB-DEMO-004`：Reset MUST 原子恢复完整默认基线并丢弃迟到异步结果，校准离开取消时 URL 与模型 MUST 保持不变。
 - `REQ-WEB-DEMO-005`：WiFi 显式 null 回执 MUST 保持清空字段；分享链接 MUST 只恢复初始条件且复制失败不得提示成功。
-- `REQ-WEB-DEMO-006`：Inspector MUST 保持宽屏 dock、桌面浮层、移动 drawer/bubble、键盘可达和触控目标约束。
+- `REQ-WEB-DEMO-006`：Inspector MUST 提供 scene、persona/permissions、network fault、data toggle、simulated action 与 share state 控制，并保持宽屏 dock、桌面浮层、移动 drawer/bubble、键盘可达和触控目标约束；Inspector MUST 将会话范围的 Demo 设置与当前用例设置分组，scene 与 target MUST 使用紧凑选择器；Inspector 的布局是工具 chrome 偏好，不是 Demo 可控制参数，不得出现在上述状态分组或分享状态中；右键或触摸长按 MUST 在收起按钮上打开布局菜单，点击菜单外区域或按 Escape MUST 关闭菜单，左侧/右侧仅在产品口宽度足够时可用，底部仅在视口高度足够时可用，收起后重新打开 MUST 恢复用户上次选择的布局。
 - `REQ-WEB-DEMO-007`：Demo 初始化失败 MUST 停留在安全错误页面，正式构建 MUST 不请求 Demo 的 mock 或旧模式 API。
 
 ### MUST
@@ -75,7 +75,7 @@
 - `:deviceId` 必须使用稳定物理 `identityId`；transport target ID 只能用于本地连接候选解析。
 - `/` 必须 replace 到当前 variant 最近设备的 overview；没有有效记录时 replace 到 `/devices/new`。`/devices`、`/devices/:deviceId` 与 `/devices/:deviceId/calibration` 必须 replace 到对应规范页。
 - 正式构建必须固定 live，公开 Demo 构建必须固定 mock；URL、localStorage 和旧模式参数不得改变运行时边界。正式构建收到 `demo=true` 或 `uiDemo` 时显示入口停用页，公开 Demo 清理这些旧参数。
-- `demoScene`、`demoLease`、`demoNetwork`、`demoArtifact`、`demoWifiCapability`、`demoLogs` 与 `demoTelemetry` 必须由 router 作为 typed search 参数验证和规范化；它们只表达 Demo 的场景初始条件，不表达产品操作回放。
+- `demoScene`、`demoPersona`、`demoLease`、`demoNetwork`、`demoArtifact`、`demoWifiCapability`、`demoLogs` 与 `demoTelemetry` 必须由 router 作为 typed search 参数验证和规范化；它们只表达 Demo 的场景初始条件，不表达产品操作回放。
 - 结构无效的路径必须显示 404；结构有效但设备未知或不可连接时必须保留原 URL，并提供重试、选择设备与添加连接动作。
 - 桌面端必须提供全局日志面板，并能与 `Dashboard` / `Settings` / `Update` 当前内容同时显示。
 - 桌面端全局日志不得退化成窄侧栏；在宽桌面上应以可读 trace console 呈现，保留足够行宽阅读 message。
@@ -124,7 +124,7 @@
   - 生产 app shell 持续挂载 `ControlPlaneDemo`，leaf route 只提供类型化 `ConsoleRouteState`，切换 tabs 不得重建 transport/runtime 状态。
   - Storybook 未提供 production navigation adapter 时继续使用 `initialView` 与组件本地 state。
   - 正式构建中的 `uiDemo=true` 仅保留为旧入口停用判定；公开 Demo 忽略并清理该参数。普通正式根路径按 live 最近设备规则跳转，公开 Demo 根路径固定到 `fp-lab-01` overview。
-  - 公开 Demo build 把根路径固定到 `fp-lab-01` overview，Inspector 的 scene、目标故障、能力和数据 query 使用 client-side replace；面板布局状态不写入 URL。
+  - 公开 Demo build 把根路径固定到 `fp-lab-01` overview，Inspector 的 scene、目标故障、能力和数据 query 使用 client-side replace；Inspector 的布局偏好只作为工具 chrome 设置从收起按钮的右键/长按菜单访问，保存到本地，不写入 Demo 状态、URL 或分享链接。
   - 分享链接只恢复场景、当前设备、故障及能力/数据开关的初始条件；复制必须等待路由提交，产品操作结果、临时日志、任务、计时器与凭据不进入链接。
   - 设备偏好使用版本化本地结构，只保存 variant 对应 identity 和 identity 对应 transport kind；损坏值必须忽略。
 - `Dashboard`
@@ -196,7 +196,9 @@
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 - Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
 - Given formal build，When 打开 `/?demo=true` 或任意带 `uiDemo` 的旧入口，Then 显示入口停用页，不挂载 live 控制台。
-- Given Demo Inspector，When 切换 scene、lease/network/artifact、能力/数据覆盖或模拟动作，Then console 与全局 trace 同步更新；场景初始条件可刷新恢复，临时操作不回放；选择 Calibration active 时同一校准离开保护生效。
+- Given Demo Inspector，When 切换 scene、persona/permissions、lease/network/artifact、能力/数据覆盖或模拟动作，Then console 与全局 trace 同步更新，Inspector 通过按需帮助按钮提供当前权限说明并保留近期 simulated mutation 记录；场景初始条件可刷新恢复，临时操作不回放；选择 Calibration active 时同一校准离开保护生效。
+- Given Demo Inspector，When 查看控制项，Then 全局 Demo 设置只承载会话范围的 Persona/权限，当前 Demo 用例设置承载 scene、target、故障、能力/数据和模拟动作；布局偏好不作为 Demo 控制项出现，scene 与 target 使用紧凑选择器并显示当前摘要。
+- Given Demo Inspector，When 用户在同一个收起按钮上右键或触摸长按，Then 布局菜单显示左侧、右侧、底部、悬浮和收起；空间不足的布局不可选，点击菜单外区域或按 Escape 关闭菜单，收起后左键重新打开恢复上次可用布局。
 - Given Demo 中选定设备，When 注入 lease/network fault 或 thermal warning，Then 故障只作用于当前 URL identity，保护态覆盖已有操作值，fan recovery 不能解除有效安全锁。
 - Given Demo Reset，When 已完成温度、preset、fan、WiFi 或任务操作，Then 原子恢复 normal 与默认开关，保留当前设备和页面，并清理所有设备临时结果、日志、表单、任务、计时器及迟到回调。
 - Given WiFi clear receipt，When 设备明确返回成功且字段为 null，Then SSID、RSSI、密码长度与失败码保持空值，不被旧快照回填。
@@ -226,7 +228,7 @@
 
 - Method: DemoInspector Storybook interaction stories 与固定视口 `ui_demo` 截图证据。
 - covers: `REQ-WEB-DEMO-006`
-- Pass condition: 数据/权限/复制失败/重置状态可交互验证，1700×1000、1440×1000、1024×900 和 375×812 无横向溢出，Inspector dock/floating/drawer/bubble 均可达。
+- Pass condition: scene、persona/permissions、数据/模拟操作记录、复制失败/重置状态可交互验证；1700×1000、1440×1000、1024×900 和 375×812 无横向溢出或整体页面纵向滚动，1280px+ 底部 dock 使用四栏、1180–1279px 使用三栏且各栏独立纵向滚动，Inspector dock/bottom/floating/drawer/bubble 均可达，drawer 具备 modal 语义、Escape 关闭和焦点回收。
 
 ## 验收清单（Acceptance checklist）
 
@@ -265,7 +267,7 @@
 
 - 证据来源：独立 Vite mock-only Demo 构建，deterministic fixtures。
 - 绑定说明：当前 PR 图来自 Chrome 中的正常控制台，固定为 `fp-lab-01` normal 场景；未知 identity 恢复态只作为历史辅助证据。
-- 布局检查：1440×1000 保持 1280px 固定工作区且 Inspector 为非侵入 bubble；仅 1700px+ 在保留 1280px 工作区与 24px gutter 后 dock Inspector。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
+- 布局检查：1440×1000 保持 1280px 固定工作区，Inspector 默认以可收起 bubble 启动，打开后使用占满视口宽度、受控高度的四栏底部 dock；页面根层不得出现整体纵向滚动，只有栏内允许纵向滚动；1180–1279px 使用三栏底部 dock；左右侧栏仅在 1700px+ 且保留 1280px 工作区与 24px gutter 时可选，视口更窄时不得挤压产品口；底部布局仅在视口高度足够时可选，否则回退悬浮。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
 - Public Demo target fixtures display English names: `Bench Fixture A`, `Field Kit`, and `Offline Mock Device`.
 
 ### Current Public Demo Console with Inspector (1746×1136)
@@ -277,6 +279,16 @@
 
 
 ![Current Public Demo Inspector drawer](./assets/public-demo-inspector-current-mobile.jpg)
+
+### Demo Inspector chrome boundary (1378×1471)
+
+
+![Demo Inspector global settings keep layout out of Demo state](./assets/public-demo-inspector-chrome-boundary.png)
+
+### Demo Inspector layout context menu (1378×1471)
+
+
+![Demo Inspector layout context menu](./assets/public-demo-inspector-layout-menu.png)
 
 ### Calibration leave guard dialog
 

@@ -8,6 +8,7 @@ export const Route = createRootRoute({
     middlewares: [
       retainSearchParams([
         'demoScene',
+        'demoPersona',
         'demoLease',
         'demoNetwork',
         'demoArtifact',

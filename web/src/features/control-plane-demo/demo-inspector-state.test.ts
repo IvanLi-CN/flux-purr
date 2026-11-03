@@ -13,6 +13,7 @@ describe('Demo Inspector state', () => {
     expect(
       demoInspectorStateFromSearch({
         demoScene: 'unknown',
+        demoPersona: 'guest',
         demoLease: 'busy',
         demoNetwork: 'offline',
         demoArtifact: 'invalid',
@@ -28,6 +29,7 @@ describe('Demo Inspector state', () => {
       demoInspectorSearch({
         ...defaultDemoInspectorState,
         demoScene: 'degraded',
+        demoPersona: 'maintainer',
         demoLease: 'conflict',
         demoNetwork: 'timeout',
         demoArtifact: 'blocked',
@@ -37,6 +39,7 @@ describe('Demo Inspector state', () => {
       })
     ).toEqual({
       demoScene: 'degraded',
+      demoPersona: 'maintainer',
       demoLease: 'conflict',
       demoNetwork: 'timeout',
       demoArtifact: 'blocked',

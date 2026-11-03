@@ -33,6 +33,7 @@ function inspectorNavigationTargetKey(
     demo?: unknown
     uiDemo?: unknown
     demoScene?: unknown
+    demoPersona?: unknown
     demoLease?: unknown
     demoNetwork?: unknown
     demoArtifact?: unknown
@@ -46,6 +47,7 @@ function inspectorNavigationTargetKey(
     search.demo,
     search.uiDemo,
     search.demoScene,
+    search.demoPersona,
     search.demoLease,
     search.demoNetwork,
     search.demoArtifact,
@@ -128,6 +130,7 @@ function App() {
     }
     const {
       demoScene: _demoScene,
+      demoPersona: _demoPersona,
       demoLease: _demoLease,
       demoNetwork: _demoNetwork,
       demoArtifact: _demoArtifact,
@@ -200,6 +203,7 @@ function App() {
         current.search.demo === next.search.demo &&
         current.search.uiDemo === next.search.uiDemo &&
         current.search.demoScene === next.search.demoScene &&
+        current.search.demoPersona === next.search.demoPersona &&
         current.search.demoLease === next.search.demoLease &&
         current.search.demoNetwork === next.search.demoNetwork &&
         current.search.demoArtifact === next.search.demoArtifact &&
@@ -443,6 +447,7 @@ function App() {
           const mergedState = { ...previousState, ...nextState }
           const {
             demoScene: _demoScene,
+            demoPersona: _demoPersona,
             demoLease: _demoLease,
             demoNetwork: _demoNetwork,
             demoArtifact: _demoArtifact,
@@ -510,6 +515,7 @@ function App() {
             : currentState
         const {
           demoScene: _demoScene,
+          demoPersona: _demoPersona,
           demoLease: _demoLease,
           demoNetwork: _demoNetwork,
           demoArtifact: _demoArtifact,
@@ -540,6 +546,7 @@ function App() {
 
   const simulateInspectorAction = useCallback(
     (kind: DemoActionKind) => {
+      if (inspectorStateRef.current.demoPersona === 'observer') return
       const targetDeviceId =
         routeState?.kind === 'device' ? routeState.deviceId : activeScenario.selectedDeviceId
       const event: EventLogEntry = {
@@ -610,6 +617,7 @@ function App() {
           onStateChange={(next) => void updateInspectorState(next)}
           onSelectDevice={(deviceId) => void selectInspectorDevice(deviceId)}
           shareUrl={`${window.location.origin}${location.pathname}${location.searchStr}`}
+          recentActions={demoSession.actions}
           onSimulate={simulateInspectorAction}
           onReset={resetDemo}
         />
