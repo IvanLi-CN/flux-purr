@@ -10482,11 +10482,11 @@
 
   .demo-inspector__bottom-column .simplebar-content {
     min-height: 100%;
-    padding-right: 0.45rem;
   }
 
   .demo-inspector__bottom-column .simplebar-content-wrapper {
     min-height: 0;
+    padding-right: 0.45rem;
   }
 
   .demo-inspector__bottom-column .demo-inspector__group + .demo-inspector__group {

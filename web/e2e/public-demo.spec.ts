@@ -321,11 +321,26 @@ test.describe('public demo build', () => {
         bottomColumnCount: document.querySelectorAll('.demo-inspector__bottom-column').length,
         bottomColumnMetrics: Array.from(
           document.querySelectorAll('.demo-inspector__bottom-column')
-        ).map((column) => ({
-          contentScrollHeight: column.querySelector('.simplebar-content')?.scrollHeight ?? 0,
-          viewportClientHeight:
-            column.querySelector('.simplebar-content-wrapper')?.clientHeight ?? 0,
-        })),
+        ).map((column) => {
+          const content = column.querySelector('.simplebar-content')
+          const permissionHelp = column.querySelector(
+            '.demo-inspector__help--permission .demo-inspector__help-trigger'
+          )
+          const shareCopy = column.querySelector<HTMLButtonElement>(
+            'button[aria-label="复制 Demo 分享链接"]'
+          )
+          return {
+            contentScrollHeight: content?.scrollHeight ?? 0,
+            viewportClientHeight:
+              column.querySelector('.simplebar-content-wrapper')?.clientHeight ?? 0,
+            wrapperRight:
+              column.querySelector('.simplebar-content-wrapper')?.getBoundingClientRect().right ??
+              0,
+            contentRight: content?.getBoundingClientRect().right ?? 0,
+            permissionHelpRight: permissionHelp?.getBoundingClientRect().right ?? null,
+            shareCopyRight: shareCopy?.getBoundingClientRect().right ?? null,
+          }
+        }),
         scrollWidth: document.documentElement.scrollWidth,
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
@@ -346,6 +361,16 @@ test.describe('public demo build', () => {
           contentScrollHeight >= viewportClientHeight
       )
     ).toBe(true)
+    expect(bottomLayout.bottomColumnMetrics[0].permissionHelpRight).not.toBeNull()
+    expect(bottomLayout.bottomColumnMetrics[3].shareCopyRight).not.toBeNull()
+    expect(
+      bottomLayout.bottomColumnMetrics[0].wrapperRight -
+        (bottomLayout.bottomColumnMetrics[0].permissionHelpRight ?? 0)
+    ).toBeGreaterThanOrEqual(6)
+    expect(
+      bottomLayout.bottomColumnMetrics[3].wrapperRight -
+        (bottomLayout.bottomColumnMetrics[3].shareCopyRight ?? 0)
+    ).toBeGreaterThanOrEqual(6)
     expect(bottomLayout.scrollWidth).toBeLessThanOrEqual(bottomLayout.viewportWidth)
 
     await page.setViewportSize({ width: 1700, height: 1000 })
