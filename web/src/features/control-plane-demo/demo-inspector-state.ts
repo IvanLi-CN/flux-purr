@@ -31,12 +31,39 @@ export const demoSceneIds = [
 ] as const
 
 export type DemoSceneId = (typeof demoSceneIds)[number]
+export type DemoPersonaId = 'operator' | 'maintainer' | 'observer'
 export type DemoLeaseState = 'none' | 'conflict'
 export type DemoNetworkState = 'healthy' | 'timeout'
 export type DemoArtifactState = 'ready' | 'blocked'
 export type DemoWifiCapabilityState = 'default' | 'read-only' | 'unavailable'
 export type DemoLogState = 'normal' | 'empty'
 export type DemoTelemetryState = 'available' | 'unavailable'
+
+export const demoPersonas: Array<{
+  id: DemoPersonaId
+  label: string
+  permissions: string
+  description: string
+}> = [
+  {
+    id: 'operator',
+    label: 'Operator',
+    permissions: 'Operate · Configure · Inspect',
+    description: 'Can run safe simulated control actions.',
+  },
+  {
+    id: 'maintainer',
+    label: 'Maintainer',
+    permissions: 'Configure · Calibrate · Inspect',
+    description: 'Can inspect service state and calibration flows.',
+  },
+  {
+    id: 'observer',
+    label: 'Observer',
+    permissions: 'Inspect only',
+    description: 'Read-only persona; simulated mutations stay disabled.',
+  },
+]
 
 export type DemoActionKind = 'thermal-warning' | 'fan-recovery'
 
@@ -48,6 +75,7 @@ export interface DemoAction {
 
 export interface DemoInspectorState {
   demoScene: DemoSceneId
+  demoPersona: DemoPersonaId
   demoLease: DemoLeaseState
   demoNetwork: DemoNetworkState
   demoArtifact: DemoArtifactState
@@ -58,6 +86,7 @@ export interface DemoInspectorState {
 
 export const defaultDemoInspectorState: DemoInspectorState = {
   demoScene: 'normal',
+  demoPersona: 'operator',
   demoLease: 'none',
   demoNetwork: 'healthy',
   demoArtifact: 'ready',
@@ -69,6 +98,7 @@ export const defaultDemoInspectorState: DemoInspectorState = {
 export function demoInspectorStateFromSearch(search: Record<string, unknown>): DemoInspectorState {
   return {
     demoScene: normalizeDemoScene(search.demoScene),
+    demoPersona: normalizeDemoPersona(search.demoPersona),
     demoLease: search.demoLease === 'conflict' ? 'conflict' : 'none',
     demoNetwork: search.demoNetwork === 'timeout' ? 'timeout' : 'healthy',
     demoArtifact: search.demoArtifact === 'blocked' ? 'blocked' : 'ready',
@@ -84,6 +114,7 @@ export function demoInspectorStateFromSearch(search: Record<string, unknown>): D
 export function demoInspectorSearch(state: DemoInspectorState) {
   return {
     demoScene: state.demoScene === 'normal' ? undefined : state.demoScene,
+    demoPersona: state.demoPersona === 'operator' ? undefined : state.demoPersona,
     demoLease: state.demoLease === 'none' ? undefined : state.demoLease,
     demoNetwork: state.demoNetwork === 'healthy' ? undefined : state.demoNetwork,
     demoArtifact: state.demoArtifact === 'ready' ? undefined : state.demoArtifact,
@@ -239,4 +270,8 @@ function normalizeDemoScene(value: unknown): DemoSceneId {
   return typeof value === 'string' && demoSceneIds.includes(value as DemoSceneId)
     ? (value as DemoSceneId)
     : 'normal'
+}
+
+function normalizeDemoPersona(value: unknown): DemoPersonaId {
+  return value === 'maintainer' || value === 'observer' ? value : 'operator'
 }

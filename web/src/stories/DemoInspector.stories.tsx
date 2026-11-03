@@ -1,8 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { useState } from 'react'
-import { expect, userEvent, within } from 'storybook/test'
+import { useEffect, useState } from 'react'
+import { expect, fireEvent, userEvent, within } from 'storybook/test'
 import { DemoInspector } from '@/features/control-plane-demo/components/demo-inspector'
 import {
+  type DemoAction,
   defaultDemoInspectorState,
   deriveDemoScenario,
 } from '@/features/control-plane-demo/demo-inspector-state'
@@ -15,7 +16,11 @@ function InspectorStory({
   clipboard?: { writeText(value: string): Promise<void> } | null
 }) {
   const [state, setState] = useState(initialState)
-  const scenario = deriveDemoScenario(state)
+  const [selectedDeviceId, setSelectedDeviceId] = useState(
+    () => deriveDemoScenario(initialState).selectedDeviceId
+  )
+  const [actions, setActions] = useState<DemoAction[]>([])
+  const scenario = deriveDemoScenario(state, [], actions, selectedDeviceId)
   return (
     <div className="industrial-shell" style={{ minHeight: 740, padding: 24 }}>
       <DemoInspector
@@ -23,14 +28,49 @@ function InspectorStory({
         devices={scenario.devices}
         selectedDeviceId={scenario.selectedDeviceId}
         onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
-        onSelectDevice={() => undefined}
+        onSelectDevice={setSelectedDeviceId}
         shareUrl="https://flux-purr-demo.ivanli.cc/devices/fp-lab-01/overview"
         clipboard={clipboard}
-        onSimulate={() => undefined}
-        onReset={() => setState(defaultDemoInspectorState)}
+        recentActions={actions}
+        onSimulate={(kind) =>
+          setActions((current) => [
+            ...current,
+            {
+              kind,
+              targetDeviceId: selectedDeviceId,
+              sequence: current.length + 1,
+            },
+          ])
+        }
+        onReset={() => {
+          setState(defaultDemoInspectorState)
+          setActions([])
+          setSelectedDeviceId(deriveDemoScenario(defaultDemoInspectorState).selectedDeviceId)
+        }}
       />
     </div>
   )
+}
+
+function MobileInspectorStory() {
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    const originalMatchMedia = window.matchMedia
+    window.matchMedia = (query) => {
+      const mediaQuery = originalMatchMedia(query)
+      if (query === '(max-width: 1179px)') {
+        Object.defineProperty(mediaQuery, 'matches', { configurable: true, value: true })
+      }
+      return mediaQuery
+    }
+    setReady(true)
+    return () => {
+      window.matchMedia = originalMatchMedia
+    }
+  }, [])
+
+  return ready ? <InspectorStory /> : null
 }
 
 const meta = {
@@ -48,19 +88,24 @@ export const Default: Story = {}
 export const InteractionSmoke: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const body = within(canvasElement.ownerDocument.body)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
-    await userEvent.click(await canvas.findByRole('button', { name: /^Degraded/ }))
-    await expect(await canvas.findByRole('button', { name: /^Degraded/ })).toHaveAttribute(
-      'aria-pressed',
-      'true'
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current scene' }))
+    await userEvent.click(await body.findByRole('option', { name: 'Degraded' }))
+    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
+      'Degraded'
     )
     await userEvent.click(await canvas.findByRole('checkbox', { name: 'Simulate network timeout' }))
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current target' }))
     await expect(
-      await canvas.findByRole('button', { name: /USB Config Fixture.*WiFi 可配置/ })
-    ).toBeVisible()
+      await body.findByRole('option', { name: /USB Config Fixture.*WiFi 可配置/ })
+    ).toHaveAttribute('data-value', 'fp-wifi-usb-04')
+    await userEvent.keyboard('{Escape}')
+    await userEvent.click(await canvas.findByRole('button', { name: '查看 Demo Inspector 说明' }))
+    await expect(await canvas.findByRole('note', { name: 'Demo scope' })).toBeVisible()
   },
 }
 
@@ -75,6 +120,39 @@ export const DataUnavailable: Story = {
       }}
     />
   ),
+}
+
+export const LayoutMenuReview: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
+    fireEvent.contextMenu(await canvas.findByRole('heading', { name: 'Demo Inspector' }))
+    await expect(await canvas.queryByRole('menu', { name: 'Demo Inspector 布局' })).toBeNull()
+    fireEvent.contextMenu(await canvas.findByRole('button', { name: '收起 Demo Inspector' }))
+    await expect(await canvas.findByRole('menu', { name: 'Demo Inspector 布局' })).toBeVisible()
+    await expect(await canvas.findByRole('menuitemradio', { name: /左侧/ })).toBeVisible()
+    await expect(await canvas.findByRole('menuitemradio', { name: /右侧/ })).toBeVisible()
+    await expect(await canvas.findByRole('menuitemradio', { name: /底部/ })).toBeVisible()
+    await expect(await canvas.findByRole('menuitemradio', { name: /悬浮/ })).toBeVisible()
+    await expect(await canvas.findByRole('menuitem', { name: /收起/ })).toBeVisible()
+  },
+}
+
+export const MobileReview: Story = {
+  render: () => <MobileInspectorStory />,
+  parameters: {
+    viewport: { value: 'fluxPurrMobile', isRotated: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
+    await expect(await canvas.findByRole('dialog', { name: 'Demo Inspector' })).toHaveAttribute(
+      'aria-modal',
+      'true'
+    )
+    await userEvent.keyboard('{Escape}')
+    await expect(await canvas.findByRole('complementary', { name: 'Demo Inspector' })).toBeVisible()
+  },
 }
 
 export const CopyFailure: Story = {
@@ -96,10 +174,9 @@ export const ResetState: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
-    await userEvent.click(await canvas.findByRole('button', { name: 'Reset demo state' }))
-    await expect(await canvas.findByRole('button', { name: /^Normal/ })).toHaveAttribute(
-      'aria-pressed',
-      'true'
+    await userEvent.click(await canvas.findByRole('button', { name: 'Reset current case' }))
+    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
+      'Normal'
     )
   },
 }
