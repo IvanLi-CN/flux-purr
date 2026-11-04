@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { fn } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
@@ -91,6 +91,17 @@ export const IdleReady: Story = {
 export const Loading: Story = {
   name: 'Loading live snapshot',
   args: { snapshot: emptySnapshot, loading: true },
+}
+
+export const LoadingRunning: Story = {
+  name: 'Running / Snapshot pending',
+  args: { snapshot: emptySnapshot, loading: true, runtimeRunning: true },
+  play: async ({ canvasElement, args }) => {
+    const stop = within(canvasElement).getByRole('button', { name: '停止自动校准' })
+    await expect(stop).toBeEnabled()
+    await userEvent.click(stop)
+    await expect(args.onStartStop).toHaveBeenCalledOnce()
+  },
 }
 
 export const Running: Story = {

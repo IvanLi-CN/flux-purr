@@ -112,6 +112,7 @@ export function ThermalPlantRunCard({
   unsupported = false,
   loading = false,
   readError,
+  runtimeRunning = false,
   onStartStop,
 }: {
   snapshot: ThermalPlantRunSnapshot
@@ -119,11 +120,13 @@ export function ThermalPlantRunCard({
   unsupported?: boolean
   loading?: boolean
   readError?: string
+  runtimeRunning?: boolean
   onStartStop: () => void
 }) {
   const attempt = snapshot.attempt
   const presentation = thermalPlantRunCardPresentation(snapshot, unsupported, loading, readError)
-  const { isRunning, showActiveResult } = presentation
+  const { showActiveResult } = presentation
+  const isRunning = runtimeRunning || presentation.isRunning
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
   const trace = snapshot.tracePage.points
@@ -389,28 +392,28 @@ export function ThermalPlantRunCard({
               className={[
                 'thermal-plant-run-card__command',
                 isRunning ? 'thermal-plant-run-card__command--stop' : '',
-                loading ? 'thermal-plant-run-card__command--loading' : '',
+                loading && !isRunning ? 'thermal-plant-run-card__command--loading' : '',
               ]
                 .filter(Boolean)
                 .join(' ')}
-              disabled={disabled || loading || !canControl}
+              disabled={disabled || (loading && !isRunning) || !canControl}
               onClick={onStartStop}
             >
-              {loading ? (
+              {isRunning ? (
+                <CircleStop size={16} aria-hidden="true" />
+              ) : loading ? (
                 <LoaderCircle
                   className="thermal-plant-run-card__spinner"
                   size={16}
                   aria-hidden="true"
                 />
-              ) : isRunning ? (
-                <CircleStop size={16} aria-hidden="true" />
               ) : (
                 <RefreshCw size={16} aria-hidden="true" />
               )}
-              {loading
-                ? '正在读取设备状态…'
-                : isRunning
-                  ? '停止自动校准'
+              {isRunning
+                ? '停止自动校准'
+                : loading
+                  ? '正在读取设备状态…'
                   : attempt == null
                     ? '开始自动校准'
                     : '重新开始自动校准'}

@@ -45,6 +45,41 @@ describe('thermal plant run result presentation', () => {
     expect(markup).not.toContain('尚未开始自动热模型标定')
   })
 
+  it.each([
+    { loading: true },
+    { readError: 'snapshot read failed' },
+  ])('keeps a known running job cancellable while its snapshot is unavailable: %j', (readState) => {
+    const markup = renderToStaticMarkup(
+      createElement(ThermalPlantRunCard, {
+        snapshot: createEmptyThermalPlantSnapshot(),
+        runtimeRunning: true,
+        ...readState,
+        onStartStop: () => undefined,
+      })
+    )
+
+    expect(markup).toContain('停止自动校准')
+    expect(markup).toContain('thermal-plant-run-card__command--stop')
+    expect(markup).not.toContain('disabled')
+    expect(markup).not.toContain('正在读取设备状态…')
+  })
+
+  it('keeps an idle loading job and transport-blocked stop command disabled', () => {
+    for (const props of [
+      { loading: true },
+      { loading: true, runtimeRunning: true, disabled: true },
+    ]) {
+      const markup = renderToStaticMarkup(
+        createElement(ThermalPlantRunCard, {
+          snapshot: createEmptyThermalPlantSnapshot(),
+          ...props,
+          onStartStop: () => undefined,
+        })
+      )
+      expect(markup).toContain('disabled')
+    }
+  })
+
   it('labels an empty snapshot as ready to start instead of loading', () => {
     const snapshot = createEmptyThermalPlantSnapshot()
     const presentation = thermalPlantRunCardPresentation(snapshot)

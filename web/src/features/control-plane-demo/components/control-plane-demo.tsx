@@ -8106,6 +8106,7 @@ function CalibrationView({
                   unsupported={thermalPlantRunUnsupported}
                   loading={thermalPlantRunLoading}
                   readError={thermalPlantRunReadError}
+                  runtimeRunning={jobRunning && currentJob.kind === 'thermal_plant_auto'}
                   disabled={
                     controlsBlocked ||
                     pendingCalibrationAction != null ||
