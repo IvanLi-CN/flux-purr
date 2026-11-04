@@ -57,6 +57,10 @@ function inspectorNavigationTargetKey(
   ].join('\u0001')
 }
 
+function isCalibrationDemoScene(scene: DemoInspectorState['demoScene']) {
+  return scene === 'calibration-active' || scene === 'calibration-loading'
+}
+
 function App() {
   const search = RootRoute.useSearch()
   const publicDemo = isPublicDemoBuild()
@@ -122,7 +126,7 @@ function App() {
     const routedDeviceId = routeState?.kind === 'device' ? routeState.deviceId : null
     if (
       isLive ||
-      inspectorState.demoScene !== 'calibration-active' ||
+      !isCalibrationDemoScene(inspectorState.demoScene) ||
       !routedDeviceId ||
       routedDeviceId === activeScenario.selectedDeviceId
     ) {
@@ -471,7 +475,7 @@ function App() {
           )
           const nextPathname =
             sceneChanged && !options?.preserveRoute
-              ? mergedState.demoScene === 'calibration-active'
+              ? isCalibrationDemoScene(mergedState.demoScene)
                 ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
                 : `/devices/${nextScenario.selectedDeviceId}/overview`
               : inspectorPathnameRef.current
@@ -509,10 +513,9 @@ function App() {
     async (deviceId: string) =>
       enqueueInspectorNavigation(async () => {
         const currentState = inspectorStateRef.current
-        const nextInspectorState =
-          currentState.demoScene === 'calibration-active'
-            ? { ...currentState, demoScene: 'normal' as const }
-            : currentState
+        const nextInspectorState = isCalibrationDemoScene(currentState.demoScene)
+          ? { ...currentState, demoScene: 'normal' as const }
+          : currentState
         const {
           demoScene: _demoScene,
           demoPersona: _demoPersona,
@@ -597,6 +600,7 @@ function App() {
         navigation={navigation}
         allowDemoControls={!isLive}
         mockOnly={mockOnly}
+        demoThermalPlantRunLoading={!isLive && inspectorState.demoScene === 'calibration-loading'}
         firmwareArtifacts={mockOnly ? firmwareDemoArtifacts : undefined}
         initialFirmwareActivity={mockOnly ? firmwareDemoActivity : undefined}
         devd={{

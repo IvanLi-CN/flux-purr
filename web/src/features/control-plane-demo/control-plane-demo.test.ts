@@ -5,6 +5,7 @@ import { shouldRefreshCalibrationDraft, syncCalibrationDraftText } from './calib
 import {
   ControlPlaneDemo,
   clearStaleWebSerialFailure,
+  createDemoEventFeed,
   deviceChoiceMatchesRouteId,
   devicePickerTargets,
   formatRuntimeEventTime,
@@ -114,6 +115,15 @@ describe('Web Serial feedback settlement', () => {
     }
 
     expect(clearStaleWebSerialFailure(current)).toBe(current)
+  })
+})
+
+describe('mock log feed stability', () => {
+  it('keeps visible demo log rows stable between stream updates', () => {
+    const firstFrame = createDemoEventFeed(controlPlaneScenario.events)
+    const laterFrame = createDemoEventFeed(controlPlaneScenario.events)
+
+    expect(laterFrame).toEqual(firstFrame)
   })
 })
 

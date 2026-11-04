@@ -2522,9 +2522,17 @@ pub(crate) fn thermal_plant_heat_response(
     memory_config: &MemoryConfig,
 ) -> Option<flux_purr_firmware::thermal_response::HeatResponse> {
     use flux_purr_firmware::thermal_response::{ResponseSample, fit_shutdown_response};
-    let (model, ambient_c) = thermal_plant_projection_for_runtime(memory_config)?;
     let transaction = memory_config.thermal_plant_transient_active.as_ref()?;
     let count = usize::from(transaction.sample_count);
+    // A fan-assisted row is terminal evidence for the plant projection, but
+    // it is not a natural heater-cutoff response. Do not fit extra cooling
+    // into the response model, including for legacy persisted transactions.
+    if transaction.samples[..count].iter().any(|sample| {
+        flux_purr_firmware::memory::thermal_plant_sample_is_fan_assisted_cooling(*sample)
+    }) {
+        return None;
+    }
+    let (model, ambient_c) = thermal_plant_projection_for_runtime(memory_config)?;
     let mut samples = [ResponseSample::default(); THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     let mut temperatures = [0.0_f32; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in transaction.samples[..count].iter().enumerate() {

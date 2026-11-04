@@ -4,11 +4,64 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createDefaultThermalPlantSnapshot,
+  createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
   thermalPlantRunCardPresentation,
 } from './thermal-plant-run-card'
 
 describe('thermal plant run result presentation', () => {
+  it('shows a live snapshot loading state without presenting it as idle', () => {
+    const snapshot = createEmptyThermalPlantSnapshot()
+    const markup = renderToStaticMarkup(
+      createElement(ThermalPlantRunCard, { snapshot, loading: true, onStartStop: () => undefined })
+    )
+
+    expect(markup).toContain('aria-busy="true"')
+    expect(markup).toContain('thermal-plant-run-card--loading')
+    expect(markup).toContain('正在读取设备快照')
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton /g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton-canvas"/g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton-grid"/g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton-axes"/g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton-status"/g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__chart-skeleton-plot"/g)).toHaveLength(2)
+    expect(markup.match(/class="thermal-plant-run-card__table-loading-status"/g)).toHaveLength(1)
+    expect(markup).not.toContain('thermal-plant-run-card__chart-skeleton-area')
+    expect(markup).not.toContain('thermal-plant-run-card__chart-skeleton-line')
+    expect(markup).not.toContain('thermal-plant-run-card__chart-skeleton-trace')
+    expect(markup).not.toContain('<text')
+    expect(markup).not.toContain('<circle')
+    expect(markup).not.toContain('>0 点</span>')
+    expect(markup.match(/thermal-plant-run-card__table-loading-body/g)).toHaveLength(1)
+    expect(markup.match(/thermal-plant-run-card__table-loading-row/g)).toHaveLength(8)
+    expect(markup.match(/class="thermal-plant-run-card__table-loading-body"/g)).toHaveLength(1)
+    expect(markup).toContain('aria-label="读取中"')
+    expect(markup).not.toContain('正在读取供电数据')
+    expect(markup).not.toContain('正在读取温度数据')
+    expect(markup).not.toContain('正在读取供电边界采样')
+    expect(markup).toContain('thermal-plant-run-card__metric-value-skeleton')
+    expect(markup).not.toContain('thermal-plant-run-card__state-summary')
+    expect(markup).not.toContain('设备已就绪')
+    expect(markup).not.toContain('尚未开始自动热模型标定')
+  })
+
+  it('labels an empty snapshot as ready to start instead of loading', () => {
+    const snapshot = createEmptyThermalPlantSnapshot()
+    const presentation = thermalPlantRunCardPresentation(snapshot)
+    const markup = renderToStaticMarkup(
+      createElement(ThermalPlantRunCard, { snapshot, onStartStop: () => undefined })
+    )
+
+    expect(presentation.statusText).toBe('待开始')
+    expect(presentation.traceStatus).toBe('待开始')
+    expect(presentation.runEvidence).toBe('设备已就绪 · 尚未开始自动热模型标定')
+    expect(markup).toContain('设备已就绪')
+    expect(markup).toContain('尚未开始采样')
+    expect(markup).toContain('尚未采集供电边界数据')
+    expect(markup).not.toContain('读取中')
+    expect(markup).not.toContain('正在读取设备快照')
+  })
+
   it('presents the supply boundary and transient evidence instead of legacy resistance data', () => {
     const snapshot = createDefaultThermalPlantSnapshot()
     const markup = renderToStaticMarkup(

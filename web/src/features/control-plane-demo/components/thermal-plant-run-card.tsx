@@ -2,6 +2,7 @@ import {
   Activity,
   CircleStop,
   Gauge,
+  LoaderCircle,
   type LucideIcon,
   Microscope,
   RefreshCw,
@@ -26,40 +27,73 @@ const statusLabel: Record<string, string> = {
   canceled: '已停止',
 }
 
+const thermalPlantLoadingRows = [
+  'one',
+  'two',
+  'three',
+  'four',
+  'five',
+  'six',
+  'seven',
+  'eight',
+] as const
+
+const thermalPlantLoadingCells = ['voltage', 'current', 'vin', 'rtd', 'kind'] as const
+
 export function thermalPlantRunCardPresentation(
   snapshot: ThermalPlantRunSnapshot,
-  unsupported = false
+  unsupported = false,
+  loading = false,
+  readError?: string
 ) {
   const attempt = snapshot.attempt
   const isRunning = attempt?.status === 'running'
-  const status = unsupported ? 'unsupported' : (attempt?.status ?? 'idle')
+  const status = readError
+    ? 'error'
+    : loading
+      ? 'loading'
+      : unsupported
+        ? 'unsupported'
+        : (attempt?.status ?? 'idle')
   const terminalFailure = status === 'failed' || status === 'canceled'
   const showActiveResult = Boolean(snapshot.activeResult) && !isRunning
   const preservesPriorActive = showActiveResult && terminalFailure
   const trace = snapshot.tracePage.points
-  const statusText = unsupported
-    ? '兼容状态'
-    : terminalFailure
-      ? (statusLabel[status] ?? status)
-      : showActiveResult
-        ? 'active 有效'
-        : (statusLabel[status] ?? status)
-  const runEvidence = isRunning
-    ? `${phaseLabel[attempt?.phase ?? 'ambient']}中 · ${attempt?.sampleCount ?? trace.length} / ${Math.max(snapshot.tracePage.totalSamples, attempt?.sampleCount ?? 0)} 样本`
-    : terminalFailure
-      ? `${statusLabel[status]} · 本次未写入 EEPROM${attempt?.error ? ` · ${attempt.error}` : ''}${preservesPriorActive ? ' · 当前 active 保留' : ''}`
-      : showActiveResult
-        ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · 220℃断热 · 80℃自然冷却完成`
-        : '等待开始自动热模型标定'
-  const traceStatus = isRunning
-    ? '采样中'
-    : attempt?.status === 'completed'
-      ? '80℃完成'
-      : terminalFailure
-        ? (statusLabel[status] ?? status)
-        : trace.length > 0
-          ? '已记录'
-          : '等待中'
+  const statusText = readError
+    ? '读取失败'
+    : loading
+      ? '读取中'
+      : unsupported
+        ? '兼容状态'
+        : terminalFailure
+          ? (statusLabel[status] ?? status)
+          : showActiveResult
+            ? 'active 有效'
+            : (statusLabel[status] ?? status)
+  const runEvidence = readError
+    ? `设备快照读取失败 · ${readError}`
+    : loading
+      ? '正在读取设备快照 · 数据到达后显示'
+      : isRunning
+        ? `${phaseLabel[attempt?.phase ?? 'ambient']}中 · ${attempt?.sampleCount ?? trace.length} / ${Math.max(snapshot.tracePage.totalSamples, attempt?.sampleCount ?? 0)} 样本`
+        : terminalFailure
+          ? `${statusLabel[status]} · 本次未写入 EEPROM${attempt?.error ? ` · ${attempt.error}` : ''}${preservesPriorActive ? ' · 当前 active 保留' : ''}`
+          : showActiveResult
+            ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · 220℃断热 · 80℃自然冷却完成`
+            : '设备已就绪 · 尚未开始自动热模型标定'
+  const traceStatus = readError
+    ? '读取失败'
+    : loading
+      ? '读取中'
+      : isRunning
+        ? '采样中'
+        : attempt?.status === 'completed'
+          ? '80℃完成'
+          : terminalFailure
+            ? (statusLabel[status] ?? status)
+            : trace.length > 0
+              ? '已记录'
+              : '待开始'
 
   return {
     isRunning,
@@ -76,31 +110,56 @@ export function ThermalPlantRunCard({
   snapshot,
   disabled,
   unsupported = false,
+  loading = false,
+  readError,
   onStartStop,
 }: {
   snapshot: ThermalPlantRunSnapshot
   disabled?: boolean
   unsupported?: boolean
+  loading?: boolean
+  readError?: string
   onStartStop: () => void
 }) {
   const attempt = snapshot.attempt
-  const presentation = thermalPlantRunCardPresentation(snapshot, unsupported)
+  const presentation = thermalPlantRunCardPresentation(snapshot, unsupported, loading, readError)
   const { isRunning, showActiveResult } = presentation
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
   const trace = snapshot.tracePage.points
   const canControl = !unsupported && (isRunning || attempt == null || attempt.restartAllowed)
+  const hasNoRunData =
+    !loading &&
+    !readError &&
+    !unsupported &&
+    !snapshot.activeResult &&
+    !attempt &&
+    trace.length === 0 &&
+    boundaryPoints.length === 0
 
   return (
-    <article className="thermal-plant-run-card" aria-label="自动热模型标定结果">
-      <header className="thermal-plant-run-card__header">
-        <output
-          className={`thermal-plant-run-card__status thermal-plant-run-card__status--${presentation.status}`}
+    <article
+      className={`thermal-plant-run-card${loading ? ' thermal-plant-run-card--loading' : ''}`}
+      aria-busy={loading}
+      aria-label="自动热模型标定结果"
+    >
+      {!loading ? (
+        <header
+          className={`thermal-plant-run-card__header${readError || hasNoRunData ? ' thermal-plant-run-card__header--with-summary' : ''}`}
         >
-          <span aria-hidden="true" />
-          {presentation.statusText}
-        </output>
-      </header>
+          {readError ? (
+            <StateSummary icon={Activity} title="快照读取失败" detail="请检查设备连接后重试" />
+          ) : hasNoRunData ? (
+            <StateSummary icon={Activity} title="设备已就绪" detail="尚未开始自动标定" />
+          ) : null}
+          <output
+            className={`thermal-plant-run-card__status thermal-plant-run-card__status--${presentation.status}`}
+          >
+            <span aria-hidden="true" />
+            {presentation.statusText}
+          </output>
+        </header>
+      ) : null}
 
       {unsupported ? (
         <p className="thermal-plant-run-card__compatibility">
@@ -109,7 +168,7 @@ export function ThermalPlantRunCard({
       ) : null}
 
       <div className="thermal-plant-run-card__metrics">
-        {showActiveResult && snapshot.activeResult ? (
+        {!loading && showActiveResult && snapshot.activeResult ? (
           <>
             <Metric
               icon={Gauge}
@@ -137,18 +196,26 @@ export function ThermalPlantRunCard({
             <Metric
               icon={Thermometer}
               label="阶段"
-              value={phaseLabel[attempt?.phase ?? 'ambient']}
+              value={attempt ? phaseLabel[attempt.phase ?? 'ambient'] : '待开始'}
+              loading={loading}
             />
-            <Metric icon={Activity} label="进度" value={`${attempt?.progressPercent ?? 0}%`} />
+            <Metric
+              icon={Activity}
+              label="进度"
+              value={attempt ? `${attempt.progressPercent}%` : '—'}
+              loading={loading}
+            />
             <Metric
               icon={Zap}
               label="当前温度"
-              value={`${formatTemp(attempt?.currentTempCentiC)}℃`}
+              value={attempt ? `${formatTemp(attempt.currentTempCentiC)}℃` : '—'}
+              loading={loading}
             />
             <Metric
               icon={Gauge}
               label="采样"
-              value={`${attempt?.sampleCount ?? trace.length} 点`}
+              value={attempt ? `${attempt.sampleCount} 点` : '—'}
+              loading={loading}
             />
           </>
         )}
@@ -162,9 +229,9 @@ export function ThermalPlantRunCard({
           >
             <div className="thermal-plant-run-card__section-heading">
               <h3>供电边界曲线</h3>
-              <span>{boundaryPoints.length} 点</span>
+              <span>{loading ? '读取中' : `${boundaryPoints.length} 点`}</span>
             </div>
-            <SupplyBoundaryChart boundary={boundary} />
+            <SupplyBoundaryChart boundary={boundary} loading={loading} running={isRunning} />
           </section>
 
           <section className="thermal-plant-run-card__trace-panel" aria-label="温度轨迹">
@@ -172,21 +239,41 @@ export function ThermalPlantRunCard({
               <h3>温度轨迹</h3>
               <span>{presentation.traceStatus}</span>
             </div>
-            <TraceChart points={trace} />
-            <div className="thermal-plant-run-card__legend">
-              <span>
-                <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--ambient" />
-                环境
-              </span>
-              <span>
-                <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--heating" />
-                加热
-              </span>
-              <span>
-                <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--cooling" />
-                自然冷却
-              </span>
-            </div>
+            <TraceChart points={trace} loading={loading} running={isRunning} />
+            {loading ? (
+              <div
+                className="thermal-plant-run-card__legend thermal-plant-run-card__legend--loading"
+                aria-hidden="true"
+              >
+                <span>
+                  <i />
+                  <b />
+                </span>
+                <span>
+                  <i />
+                  <b />
+                </span>
+                <span>
+                  <i />
+                  <b />
+                </span>
+              </div>
+            ) : (
+              <div className="thermal-plant-run-card__legend">
+                <span>
+                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--ambient" />
+                  环境
+                </span>
+                <span>
+                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--heating" />
+                  加热
+                </span>
+                <span>
+                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--cooling" />
+                  自然冷却
+                </span>
+              </div>
+            )}
           </section>
         </div>
 
@@ -194,66 +281,139 @@ export function ThermalPlantRunCard({
           <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
             <div className="thermal-plant-run-card__section-heading">
               <h3>供电边界采样</h3>
-              <span>{boundaryPoints.length} 点</span>
+              <span>{loading ? '读取中' : `${boundaryPoints.length} 点`}</span>
             </div>
-            <div className="thermal-plant-run-card__table-scroll">
-              <table aria-label="供电边界采样">
-                <thead>
-                  <tr>
-                    <th>请求电压</th>
-                    <th>限流</th>
-                    <th>VIN</th>
-                    <th>RTD 原始</th>
-                    <th>类型</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {boundaryPoints.slice(-8).map((point, index) => (
-                    <tr key={`${point[0]}-${point[6]}-${index}`}>
-                      <td>{formatBoundaryVoltage(point)} V</td>
-                      <td>{formatBoundaryCurrent(point)} A</td>
-                      <td>{formatBoundaryVoltageMv(point[4])} V</td>
-                      <td>{point[2]} mV</td>
-                      <td>
-                        <span className="thermal-plant-run-card__valid">
-                          {point[8] ? '跟踪' : '边界'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
-                  {boundaryPoints.length === 0 ? (
+            <div
+              className={`thermal-plant-run-card__table-scroll${loading ? ' thermal-plant-run-card__table-scroll--loading' : boundaryPoints.length === 0 ? ' thermal-plant-run-card__table-scroll--empty' : ''}`}
+            >
+              {loading ? (
+                <>
+                  <table
+                    className="thermal-plant-run-card__table-loading-header"
+                    aria-label="供电边界采样"
+                  >
+                    <thead>
+                      <tr>
+                        <th>请求电压</th>
+                        <th>限流</th>
+                        <th>VIN</th>
+                        <th>RTD 原始</th>
+                        <th>类型</th>
+                      </tr>
+                    </thead>
+                  </table>
+                  <div className="thermal-plant-run-card__table-loading-body" aria-hidden="true">
+                    {thermalPlantLoadingRows.map((rowKey) => (
+                      <div className="thermal-plant-run-card__table-loading-row" key={rowKey}>
+                        {thermalPlantLoadingCells.map((cell) => (
+                          <span
+                            className={`thermal-plant-run-card__table-loading-cell thermal-plant-run-card__table-loading-cell--${cell}`}
+                            key={cell}
+                          >
+                            <span
+                              className={`thermal-plant-run-card__table-skeleton-cell thermal-plant-run-card__table-skeleton-cell--${cell}`}
+                            />
+                          </span>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <output
+                    className="thermal-plant-run-card__table-loading-status"
+                    aria-live="polite"
+                  >
+                    <LoaderCircle size={15} aria-hidden="true" />
+                    <span>读取中</span>
+                  </output>
+                </>
+              ) : (
+                <table aria-label="供电边界采样">
+                  <thead>
                     <tr>
-                      <td colSpan={5} className="thermal-plant-run-card__empty">
-                        {presentation.isRunning ? '等待供电边界扫描' : '暂无供电边界采样'}
-                      </td>
+                      <th>请求电压</th>
+                      <th>限流</th>
+                      <th>VIN</th>
+                      <th>RTD 原始</th>
+                      <th>类型</th>
                     </tr>
-                  ) : null}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {boundaryPoints.slice(-8).map((point, index) => (
+                      <tr key={`${point[0]}-${point[6]}-${index}`}>
+                        <td>{formatBoundaryVoltage(point)} V</td>
+                        <td>{formatBoundaryCurrent(point)} A</td>
+                        <td>{formatBoundaryVoltageMv(point[4])} V</td>
+                        <td>{point[2]} mV</td>
+                        <td>
+                          <span className="thermal-plant-run-card__valid">
+                            {point[8] ? '跟踪' : '边界'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                    {boundaryPoints.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="thermal-plant-run-card__empty">
+                          {readError
+                            ? '读取失败，暂无供电边界数据'
+                            : presentation.isRunning
+                              ? '等待供电边界扫描'
+                              : '尚未采集供电边界数据'}
+                        </td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              )}
             </div>
           </section>
 
           <footer className="thermal-plant-run-card__footer">
-            <output className="thermal-plant-run-card__run-evidence" aria-live="polite">
-              <Activity size={15} aria-hidden="true" />
+            <output
+              className={`thermal-plant-run-card__run-evidence${loading ? ' thermal-plant-run-card__run-evidence--loading' : ''}`}
+              aria-live="polite"
+            >
+              {loading ? (
+                <LoaderCircle
+                  className="thermal-plant-run-card__spinner"
+                  size={15}
+                  aria-hidden="true"
+                />
+              ) : (
+                <Activity size={15} aria-hidden="true" />
+              )}
               {presentation.runEvidence}
             </output>
             <button
               type="button"
-              className={
-                isRunning
-                  ? 'thermal-plant-run-card__command thermal-plant-run-card__command--stop'
-                  : 'thermal-plant-run-card__command'
-              }
-              disabled={disabled || !canControl}
+              className={[
+                'thermal-plant-run-card__command',
+                isRunning ? 'thermal-plant-run-card__command--stop' : '',
+                loading ? 'thermal-plant-run-card__command--loading' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
+              disabled={disabled || loading || !canControl}
               onClick={onStartStop}
             >
-              {isRunning ? (
+              {loading ? (
+                <LoaderCircle
+                  className="thermal-plant-run-card__spinner"
+                  size={16}
+                  aria-hidden="true"
+                />
+              ) : isRunning ? (
                 <CircleStop size={16} aria-hidden="true" />
               ) : (
                 <RefreshCw size={16} aria-hidden="true" />
               )}
-              {isRunning ? '停止自动校准' : attempt == null ? '开始自动校准' : '重新开始自动校准'}
+              {loading
+                ? '正在读取设备状态…'
+                : isRunning
+                  ? '停止自动校准'
+                  : attempt == null
+                    ? '开始自动校准'
+                    : '重新开始自动校准'}
             </button>
           </footer>
         </aside>
@@ -350,27 +510,79 @@ export function createEmptyThermalPlantSnapshot(): ThermalPlantRunSnapshot {
   }
 }
 
-function Metric({ icon: Icon, label, value }: { icon: LucideIcon; label: string; value: string }) {
+function Metric({
+  icon: Icon,
+  label,
+  value,
+  loading = false,
+}: {
+  icon: LucideIcon
+  label: string
+  value: string
+  loading?: boolean
+}) {
   return (
-    <div className="thermal-plant-run-card__metric">
+    <div
+      className={`thermal-plant-run-card__metric${loading ? ' thermal-plant-run-card__metric--loading' : ''}`}
+    >
       <Icon size={16} aria-hidden="true" />
       <span>
         <small>{label}</small>
-        <strong>{value}</strong>
+        {loading ? (
+          <output className="thermal-plant-run-card__metric-value-skeleton" aria-label="读取中">
+            <span aria-hidden="true" />
+          </output>
+        ) : (
+          <strong>{value}</strong>
+        )}
       </span>
     </div>
   )
 }
 
-function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
+function StateSummary({
+  icon: Icon,
+  title,
+  detail,
+}: {
+  icon: LucideIcon
+  title: string
+  detail: string
+}) {
+  return (
+    <div className="thermal-plant-run-card__state-summary">
+      <Icon size={15} aria-hidden="true" />
+      <span>
+        <strong>{title}</strong>
+        <small>{detail}</small>
+      </span>
+    </div>
+  )
+}
+
+function TraceChart({
+  points,
+  loading,
+  running,
+}: {
+  points: ThermalPlantTracePoint[]
+  loading: boolean
+  running: boolean
+}) {
   const width = 440
   const initialHeight = 152
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length < 2)
     return (
-      <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--trace">
-        等待温度轨迹
-      </div>
+      <ChartPlaceholder
+        loading={loading}
+        variant="trace"
+        icon={Thermometer}
+        title={running ? '等待温度采样' : '尚未开始采样'}
+        detail={
+          running ? '设备已开始标定，温度轨迹会随着采样到达' : '开始自动校准后，温度轨迹会实时出现'
+        }
+      />
     )
   const height = viewBoxHeight
   const inset = {
@@ -504,7 +716,150 @@ function TraceChart({ points }: { points: ThermalPlantTracePoint[] }) {
   )
 }
 
-function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null }) {
+function ChartLoadingSkeleton({ variant }: { variant: 'boundary' | 'trace' }) {
+  const width = variant === 'boundary' ? 600 : 440
+  const initialHeight = variant === 'boundary' ? 340 : 152
+  const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
+  const height = viewBoxHeight
+  const inset =
+    variant === 'boundary'
+      ? {
+          top: Math.max(16, height * 0.047),
+          right: 26,
+          bottom: Math.max(36, height * 0.106),
+          left: 38,
+        }
+      : {
+          top: Math.max(12, height * 0.079),
+          right: 18,
+          // No tick labels are shown while loading; keep only the axis-to-legend gap.
+          bottom: 6,
+          left: 34,
+        }
+  const plotWidth = width - inset.left - inset.right
+  const plotBottom = height - inset.bottom
+  const plotHeight = plotBottom - inset.top
+  const gridRows = [0.25, 0.5, 0.75]
+  const gridColumns = [0.2, 0.4, 0.6, 0.8]
+  const smoothTrace = [
+    `M ${inset.left} ${plotBottom - plotHeight * 0.08}`,
+    `C ${inset.left + plotWidth * 0.16} ${plotBottom - plotHeight * 0.08},`,
+    `${inset.left + plotWidth * 0.25} ${plotBottom - plotHeight * 0.18},`,
+    `${inset.left + plotWidth * 0.38} ${inset.top + plotHeight * 0.12}`,
+    `C ${inset.left + plotWidth * 0.52} ${inset.top + plotHeight * 0.02},`,
+    `${inset.left + plotWidth * 0.57} ${inset.top + plotHeight * 0.58},`,
+    `${inset.left + plotWidth * 0.72} ${inset.top + plotHeight * 0.68}`,
+    `C ${inset.left + plotWidth * 0.84} ${inset.top + plotHeight * 0.76},`,
+    `${inset.left + plotWidth * 0.91} ${inset.top + plotHeight * 0.8},`,
+    `${width - inset.right} ${inset.top + plotHeight * 0.82}`,
+  ].join(' ')
+  const boundaryCurve = [
+    `M ${inset.left} ${inset.top + plotHeight * 0.16}`,
+    `C ${inset.left + plotWidth * 0.2} ${inset.top + plotHeight * 0.2},`,
+    `${inset.left + plotWidth * 0.42} ${inset.top + plotHeight * 0.32},`,
+    `${inset.left + plotWidth * 0.58} ${inset.top + plotHeight * 0.46}`,
+    `C ${inset.left + plotWidth * 0.74} ${inset.top + plotHeight * 0.6},`,
+    `${inset.left + plotWidth * 0.88} ${inset.top + plotHeight * 0.72},`,
+    `${width - inset.right} ${plotBottom - plotHeight * 0.06}`,
+  ].join(' ')
+
+  return (
+    <div
+      ref={containerRef}
+      className={`thermal-plant-run-card__chart-skeleton thermal-plant-run-card__chart-skeleton--${variant}`}
+      aria-hidden="true"
+    >
+      <svg
+        className="thermal-plant-run-card__chart-skeleton-canvas"
+        viewBox={`0 0 ${width} ${height}`}
+        preserveAspectRatio="xMidYMid meet"
+        aria-hidden="true"
+      >
+        <g className="thermal-plant-run-card__chart-skeleton-grid">
+          {gridRows.map((position) => (
+            <line
+              key={`row-${position}`}
+              x1={inset.left}
+              x2={width - inset.right}
+              y1={inset.top + plotHeight * position}
+              y2={inset.top + plotHeight * position}
+            />
+          ))}
+          {gridColumns.map((position) => (
+            <line
+              key={`column-${position}`}
+              x1={inset.left + plotWidth * position}
+              x2={inset.left + plotWidth * position}
+              y1={inset.top}
+              y2={plotBottom}
+            />
+          ))}
+        </g>
+        <g className="thermal-plant-run-card__chart-skeleton-axes">
+          <line x1={inset.left} x2={inset.left} y1={inset.top} y2={plotBottom} />
+          <line x1={inset.left} x2={width - inset.right} y1={plotBottom} y2={plotBottom} />
+        </g>
+        <path
+          className="thermal-plant-run-card__chart-skeleton-plot"
+          d={variant === 'boundary' ? boundaryCurve : smoothTrace}
+        />
+      </svg>
+      <div className="thermal-plant-run-card__chart-skeleton-status">
+        <LoaderCircle size={15} aria-hidden="true" />
+        <span>读取中</span>
+      </div>
+    </div>
+  )
+}
+
+function ChartPlaceholder({
+  loading,
+  variant,
+  icon: Icon,
+  title,
+  detail,
+}: {
+  loading: boolean
+  variant: 'boundary' | 'trace'
+  icon: LucideIcon
+  title: string
+  detail: string
+}) {
+  return (
+    <div
+      className={`thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--${variant}${loading ? ' thermal-plant-run-card__chart-empty--loading' : ''}`}
+    >
+      {loading ? (
+        <ChartLoadingSkeleton variant={variant} />
+      ) : (
+        <>
+          <div className="thermal-plant-run-card__placeholder-grid" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="thermal-plant-run-card__placeholder-copy">
+            <span className="thermal-plant-run-card__placeholder-icon" aria-hidden="true">
+              <Icon size={17} />
+            </span>
+            <strong>{title}</strong>
+            <span>{detail}</span>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SupplyBoundaryChart({
+  boundary,
+  loading,
+  running,
+}: {
+  boundary?: SupplyBoundary | null
+  loading: boolean
+  running: boolean
+}) {
   const points = (boundary?.points ?? []).map((point) => ({
     requestVoltageMv: point[6] || point[7],
     requestCurrentMa: point[5],
@@ -514,9 +869,17 @@ function SupplyBoundaryChart({ boundary }: { boundary?: SupplyBoundary | null })
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length === 0)
     return (
-      <div className="thermal-plant-run-card__chart-empty thermal-plant-run-card__chart-empty--boundary">
-        等待供电边界采样
-      </div>
+      <ChartPlaceholder
+        loading={loading}
+        variant="boundary"
+        icon={Zap}
+        title={running ? '等待供电边界采样' : '尚未开始采样'}
+        detail={
+          running
+            ? '设备正在扫描供电边界，数据到达后会绘制曲线'
+            : '开始自动校准后，供电边界会逐步出现'
+        }
+      />
     )
   const height = viewBoxHeight
   const inset = {
