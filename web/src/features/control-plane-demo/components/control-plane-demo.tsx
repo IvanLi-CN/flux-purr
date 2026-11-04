@@ -928,6 +928,7 @@ export function ControlPlaneDemo({
     lanRuntimeOptions?.readCalibration,
     lanRuntimeOptions?.readHeaterCurve,
   ])
+  const [streamTick, setStreamTick] = useState(0)
   const [targetTempByDevice, setTargetTempByDevice] = useState<Record<string, number>>({})
   const [selectedPresetByDevice, setSelectedPresetByDevice] = useState<Record<string, number>>({})
   const [presetTempsByDevice, setPresetTempsByDevice] = useState<Record<string, number[]>>({})
@@ -1240,6 +1241,18 @@ export function ControlPlaneDemo({
       cancelled = true
     }
   }, [allowDemoControls, lanRuntime, routedRecoveryIdentityId])
+
+  useEffect(() => {
+    if (!allowDemoControls || activeScenario.events.length < 2) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setStreamTick((tick) => tick + 1)
+    }, 2200)
+
+    return () => window.clearInterval(timer)
+  }, [activeScenario.events.length, allowDemoControls])
 
   const selectedDevice = useMemo(
     () =>
