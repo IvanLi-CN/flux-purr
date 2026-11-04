@@ -1345,7 +1345,10 @@ pub(crate) fn record_thermal_plant_transient_sample(
         return false;
     }
     let heater_voltage_125mv = if job.phase == ThermalPlantAutoPhase::Cooling {
-        flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+        // Thermal-plant calibration measures the unassisted plant loss. The
+        // runtime safety path fails the job before recording when a fan is
+        // active, so every live cooling sample is the passive marker.
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
     } else {
         quantize_thermal_plant_heater_voltage_mv(latest_vin_mv)
     };
@@ -2802,24 +2805,8 @@ pub(crate) fn update_thermal_cooling_phase(
     recorded_temp_c: f32,
 ) -> bool {
     calibration.heater_enabled = false;
-    // The fan is a 12 V working load. The rapid scan may finish at a much
-    // lower CC-limited PPS voltage, which leaves the fan enabled logically but
-    // unable to cool the board. Move the calibration-owned contract to the
-    // fan working floor before collecting fan-assisted cooling evidence.
-    if manual_pps.target_mv.unwrap_or(0) < FAN_WORKING_CONTRACT_MV {
-        if let Err(error) = manual_pps.enable(
-            ManualPpsOwner::Calibration,
-            FAN_WORKING_CONTRACT_MV,
-            Some(job.source_current_ma),
-        ) {
-            fail_thermal_plant_calibration(calibration, manual_pps, error);
-            return false;
-        }
-        calibration.pps_enabled = true;
-        calibration.pps_mv = Some(FAN_WORKING_CONTRACT_MV);
-        calibration.pps_ma = Some(job.source_current_ma);
-        calibration.job.next_request_mv = Some(FAN_WORKING_CONTRACT_MV);
-    }
+    // Keep the calibration-owned PPS contract unchanged. Natural cooling is
+    // measured with the heater off and without requesting a fan working floor.
     let cooling_complete = thermal_plant_cooling_complete(input.latest_temp_c, recorded_temp_c);
     let timed_out =
         job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_COOL_TIMEOUT_TICKS;

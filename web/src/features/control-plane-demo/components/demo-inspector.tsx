@@ -84,6 +84,7 @@ const scenes: Array<{ id: DemoSceneId; label: string; description: string }> = [
   { id: 'degraded', label: 'Degraded', description: 'Lease and handoff fault' },
   { id: 'offline', label: 'Offline', description: 'Unavailable mock target' },
   { id: 'blocked-artifact', label: 'Artifact gate', description: 'Dry-check blocked' },
+  { id: 'calibration-loading', label: 'Loading', description: 'Thermal snapshot read in progress' },
   { id: 'calibration-active', label: 'Calibration', description: 'Leave guard active' },
 ]
 

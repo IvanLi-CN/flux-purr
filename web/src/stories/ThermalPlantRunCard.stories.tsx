@@ -1,12 +1,14 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { fn } from 'storybook/test'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   createDefaultThermalPlantSnapshot,
+  createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
 } from '@/features/control-plane-demo/components/thermal-plant-run-card'
 import type { ThermalPlantRunSnapshot } from '@/features/control-plane-demo/contracts'
 
 const completedSnapshot = createDefaultThermalPlantSnapshot()
+const emptySnapshot = createEmptyThermalPlantSnapshot()
 const completedAttempt = requireAttempt(completedSnapshot)
 const completedResult = requireActiveResult(completedSnapshot)
 const runningSnapshot: ThermalPlantRunSnapshot = {
@@ -56,8 +58,17 @@ const meta = {
   parameters: { layout: 'centered' },
   decorators: [
     (Story) => (
-      <div style={{ width: 'min(100vw - 2rem, 72rem)' }}>
-        <Story />
+      <div
+        data-visual-evidence-surface
+        style={{
+          width: 'min(100vw - 2rem, 72rem)',
+          padding: '24px',
+          background: 'var(--industrial-panel)',
+        }}
+      >
+        <div data-visual-evidence-target>
+          <Story />
+        </div>
       </div>
     ),
   ],
@@ -71,6 +82,37 @@ export default meta
 type Story = StoryObj<typeof meta>
 
 export const Completed: Story = {}
+
+export const IdleReady: Story = {
+  name: 'Idle / Ready to calibrate',
+  args: { snapshot: emptySnapshot },
+}
+
+export const Loading: Story = {
+  name: 'Loading live snapshot',
+  args: { snapshot: emptySnapshot, loading: true },
+}
+
+export const LoadingRunning: Story = {
+  name: 'Running / Snapshot pending',
+  args: { snapshot: emptySnapshot, loading: true, runtimeRunning: true },
+  play: async ({ canvasElement, args }) => {
+    const stop = within(canvasElement).getByRole('button', { name: '停止自动校准' })
+    await expect(stop).toBeEnabled()
+    await userEvent.click(stop)
+    await expect(args.onStartStop).toHaveBeenCalledOnce()
+  },
+}
+
+export const StaleRunningSnapshot: Story = {
+  name: 'Stopped / Snapshot stale',
+  args: { snapshot: runningSnapshot, runtimeRunning: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.queryByRole('button', { name: '停止自动校准' })).not.toBeInTheDocument()
+    await expect(canvas.getByRole('button', { name: '重新开始自动校准' })).toBeDisabled()
+  },
+}
 
 export const Running: Story = {
   args: { snapshot: runningSnapshot },

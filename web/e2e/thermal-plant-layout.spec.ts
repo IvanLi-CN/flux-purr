@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('thermal plant result layout', () => {
-  test('does not let the trace consume the representative-point table after a desktop re-entry', async ({
+  test('keeps the live trace and supply-boundary table readable after a desktop re-entry', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 960, height: 900 })
@@ -9,7 +9,142 @@ test.describe('thermal plant result layout', () => {
 
     const resultCard = page.getByRole('article', { name: '自动热模型标定结果' })
     await expect(resultCard).toBeVisible({ timeout: 10_000 })
+    await expect(resultCard.getByText('供电边界曲线')).toBeVisible()
+    await expect(resultCard.getByText('供电边界采样')).toBeVisible()
+    await expect(
+      resultCard
+        .getByRole('table', { name: '供电边界采样' })
+        .getByRole('cell', { name: '21.0 V' })
+        .first()
+    ).toBeVisible()
+    await expect(resultCard.getByText('R(T)', { exact: false })).toHaveCount(0)
+
+    const boundaryChart = resultCard.locator('svg[aria-label="供电边界曲线"]')
+    const traceChart = resultCard.locator('svg[aria-label="加热和自然冷却温度曲线"]')
+    const chartAspectDifference = (chart: typeof boundaryChart) => async () =>
+      chart.evaluate((svg) => {
+        const viewBox = svg.getAttribute('viewBox')?.split(/\s+/).map(Number) ?? []
+        const rect = svg.getBoundingClientRect()
+        return Math.abs(
+          (viewBox[2] ?? 0) / (viewBox[3] ?? 1) - rect.width / Math.max(rect.height, 1)
+        )
+      })
+    const boundaryAspectDifference = chartAspectDifference(boundaryChart)
+    const traceAspectDifference = chartAspectDifference(traceChart)
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
+
     await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
+    const chartHeight = await boundaryChart.evaluate((svg) => svg.getBoundingClientRect().height)
+    expect(chartHeight).toBeLessThan(600)
+    const desktopLayout = await resultCard.evaluate((element) => {
+      const read = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector)
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { x: rect.x, width: rect.width, right: rect.right }
+      }
+      const cardRect = element.getBoundingClientRect()
+      return {
+        card: { height: cardRect.height },
+        boundary: read('.thermal-plant-run-card__chart--boundary'),
+        trace: read('.thermal-plant-run-card__trace-panel'),
+        table: read('.thermal-plant-run-card__table-wrap'),
+        footer: read('.thermal-plant-run-card__footer'),
+      }
+    })
+    expect(desktopLayout.card?.height ?? 0).toBeGreaterThan(500)
+    expect(desktopLayout.boundary?.x ?? 0).toBeLessThan(desktopLayout.table?.x ?? 0)
+    expect(desktopLayout.trace?.x ?? 0).toBeLessThan(desktopLayout.table?.x ?? 0)
+    expect(Math.abs((desktopLayout.boundary?.x ?? 0) - (desktopLayout.trace?.x ?? 0))).toBeLessThan(
+      2
+    )
+    expect(
+      Math.abs((desktopLayout.boundary?.width ?? 0) - (desktopLayout.trace?.width ?? 0))
+    ).toBeLessThan(2)
+    expect(desktopLayout.footer?.x ?? 0).toBeGreaterThanOrEqual((desktopLayout.table?.x ?? 0) - 1)
+    expect(desktopLayout.footer?.right ?? 0).toBeLessThanOrEqual(
+      (desktopLayout.table?.right ?? 0) + 1
+    )
+
+    const surfaceStyles = await resultCard.evaluate((element) => {
+      const read = (node: Element | null) => {
+        const styles = getComputedStyle(node ?? element)
+        return {
+          borderRadius: styles.borderRadius,
+          boxShadow: styles.boxShadow,
+          padding: styles.padding,
+        }
+      }
+      return {
+        surface: read(element),
+        metrics: read(element.querySelector('.thermal-plant-run-card__metrics')),
+        boundary: read(element.querySelector('.thermal-plant-run-card__chart--boundary')),
+        trace: read(element.querySelector('.thermal-plant-run-card__trace-panel')),
+        table: read(element.querySelector('.thermal-plant-run-card__table-wrap')),
+        footer: read(element.querySelector('.thermal-plant-run-card__footer')),
+      }
+    })
+    expect(surfaceStyles.surface.borderRadius).toBe('0px')
+    expect(surfaceStyles.surface.boxShadow).toBe('none')
+    expect(surfaceStyles.surface.padding).toBe('0px')
+    for (const section of [
+      surfaceStyles.metrics,
+      surfaceStyles.boundary,
+      surfaceStyles.trace,
+      surfaceStyles.table,
+      surfaceStyles.footer,
+    ]) {
+      expect(section.borderRadius).toBe('12px')
+      expect(section.boxShadow).not.toBe('none')
+    }
+
+    await page.setViewportSize({ width: 1440, height: 850 })
+    const shortHeightLayout = await resultCard.evaluate((element) => {
+      const read = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector)
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { y: rect.y, bottom: rect.bottom }
+      }
+      const surface = element.getBoundingClientRect()
+      const styles = getComputedStyle(element)
+      return {
+        surface: { y: surface.y, bottom: surface.bottom },
+        header: read('.thermal-plant-run-card__header'),
+        metrics: read('.thermal-plant-run-card__metrics'),
+        body: read('.thermal-plant-run-card__body'),
+        gridTemplateRows: styles.gridTemplateRows,
+        headerPosition: getComputedStyle(
+          element.querySelector('.thermal-plant-run-card__header') ?? element
+        ).position,
+      }
+    })
+    expect(shortHeightLayout.headerPosition).toBe('absolute')
+    expect(shortHeightLayout.gridTemplateRows.split(' ').length).toBe(2)
+    expect((shortHeightLayout.metrics?.y ?? 0) - (shortHeightLayout.surface?.y ?? 0)).toBeLessThan(
+      2
+    )
+    expect(shortHeightLayout.header?.y ?? 0).toBeLessThan(shortHeightLayout.metrics?.bottom ?? 0)
+    expect(shortHeightLayout.header?.bottom ?? 0).toBeGreaterThan(shortHeightLayout.metrics?.y ?? 0)
+    expect(
+      (shortHeightLayout.body?.y ?? 0) - (shortHeightLayout.metrics?.bottom ?? 0)
+    ).toBeLessThan(16)
+
+    await page.setViewportSize({ width: 393, height: 852 })
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
+    const mobileChartHeight = await boundaryChart.evaluate(
+      (svg) => svg.getBoundingClientRect().height
+    )
+    expect(mobileChartHeight).toBeGreaterThan(100)
+    expect(mobileChartHeight).toBeLessThan(220)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)
+    await expect.poll(traceAspectDifference).toBeLessThan(0.03)
 
     const samples = [] as Array<{
       documentHeight: number

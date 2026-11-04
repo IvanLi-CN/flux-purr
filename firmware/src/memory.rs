@@ -372,10 +372,10 @@ pub struct ThermalPlantTransientSample {
     /// 50 ms ticks from the start of the automatic job.
     pub elapsed_ticks: u32,
     pub raw_rtd_adc_mv: u16,
-    /// Measured heater voltage, quantized to 125 mV. Codes 254 and 255 are
-    /// reserved for fan-assisted and passive-cooling samples; real voltage
-    /// codes cover the complete 28 V PD guard without changing the persisted
-    /// sample size.
+    /// Measured heater voltage, quantized to 125 mV. Code 255 marks passive
+    /// cooling and code 254 is reserved for safety-intervened or legacy
+    /// fan-assisted cooling; real voltage codes cover the complete 28 V PD
+    /// guard without changing the persisted sample size.
     pub heater_voltage_125mv: u8,
     pub duty_percent: u8,
 }

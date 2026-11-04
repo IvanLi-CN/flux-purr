@@ -27,6 +27,7 @@ export const demoSceneIds = [
   'degraded',
   'offline',
   'blocked-artifact',
+  'calibration-loading',
   'calibration-active',
 ] as const
 
@@ -237,21 +238,28 @@ export function deriveDemoScenario(
   )
 
   const sceneEvent: EventLogEntry | null =
-    state.demoScene === 'calibration-active'
+    state.demoScene === 'calibration-loading'
       ? {
-          time: '20:18:12',
+          time: '20:18:08',
           source: 'demo',
-          message: 'simulated calibration sequence armed',
-          tone: 'warning',
+          message: 'simulated thermal snapshot read is pending',
+          tone: 'info',
         }
-      : state.demoScene === 'blocked-artifact' || state.demoArtifact === 'blocked'
+      : state.demoScene === 'calibration-active'
         ? {
             time: '20:18:12',
             source: 'demo',
-            message: 'simulated artifact compatibility gate blocked',
+            message: 'simulated calibration sequence armed',
             tone: 'warning',
           }
-        : null
+        : state.demoScene === 'blocked-artifact' || state.demoArtifact === 'blocked'
+          ? {
+              time: '20:18:12',
+              source: 'demo',
+              message: 'simulated artifact compatibility gate blocked',
+              tone: 'warning',
+            }
+          : null
 
   return {
     ...base,

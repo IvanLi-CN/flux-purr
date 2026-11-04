@@ -7058,6 +7058,22 @@ fn transient_fit_excludes_fan_assisted_cooling_from_energy_balance() {
 }
 
 #[test]
+fn thermal_plant_heat_response_rejects_fan_assisted_cooling_trace() {
+    let mut memory = synthetic_memory_config();
+    let (samples, count) = synthetic_trace(&memory, 25.0);
+    let mut transaction = assert_synthetic_fit(&memory, &samples, count, 25.0);
+    for sample in &mut transaction.samples[..count] {
+        if flux_purr_firmware::memory::thermal_plant_sample_is_cooling(*sample) {
+            sample.heater_voltage_125mv =
+                flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL;
+        }
+    }
+    memory.thermal_plant_transient_active = Some(transaction);
+
+    assert!(thermal_plant_heat_response(&memory).is_none());
+}
+
+#[test]
 fn transient_fit_accepts_a_zero_duty_cutoff_sample_in_heating_phase() {
     let memory = synthetic_memory_config();
     let temperatures = [
@@ -7568,8 +7584,68 @@ fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     ));
     assert_eq!(
         job.samples[25].heater_voltage_125mv,
-        flux_purr_firmware::memory::THERMAL_PLANT_FAN_COOLING_VOLTAGE_SENTINEL
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
     );
+    assert!(
+        !flux_purr_firmware::memory::thermal_plant_sample_is_fan_assisted_cooling(job.samples[25])
+    );
+}
+
+#[test]
+fn thermal_plant_cooling_does_not_raise_pps_contract() {
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut memory_config = MemoryConfig::default();
+    let mut manual_pps = thermal_plant_job_manual_pps(20_000, 3_000);
+    manual_pps
+        .enable(ManualPpsOwner::Calibration, 5_500, Some(3_000))
+        .unwrap();
+    let mut job = CalibrationThermalPlantAutoJob {
+        run_id: 1,
+        phase: ThermalPlantAutoPhase::Cooling,
+        source_current_ma: 3_000,
+        ambient_raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        idle_samples: THERMAL_PLANT_AMBIENT_TICKS,
+        supply_scan: None,
+        started_at_ms: Some(0),
+        elapsed_ticks: 1,
+        phase_started_tick: 0,
+        sample_count: 0,
+        last_saved_temp_c: f32::MIN,
+        last_saved_tick: 0,
+        samples: [ThermalPlantTransientSample {
+            elapsed_ticks: 0,
+            raw_rtd_adc_mv: 0,
+            heater_voltage_125mv: 0,
+            duty_percent: 0,
+        }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
+    };
+
+    assert!(update_thermal_cooling_phase(
+        &mut calibration,
+        &mut memory_config,
+        &mut manual_pps,
+        &mut job,
+        CalibrationJobUpdateInput {
+            now_ms: 50,
+            latest_rtd_raw_code: 1_000,
+            latest_vin_raw_code: 400,
+            wifi_started: Some(false),
+            pd_conduction_allowed: true,
+            pd_confirmed: true,
+            latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(120.0),
+            latest_vin_raw_adc_mv: 275,
+            latest_temp_c: 120.0,
+            latest_vin_mv: 5_500,
+            heater_duty_percent: 0,
+        },
+        120.0,
+    ));
+    assert_eq!(manual_pps.target_mv, Some(5_500));
+    assert_eq!(
+        job.samples[0].heater_voltage_125mv,
+        flux_purr_firmware::memory::THERMAL_PLANT_COOLING_VOLTAGE_SENTINEL
+    );
+    assert!(!calibration.heater_enabled);
 }
 
 #[test]
@@ -15531,6 +15607,16 @@ fn auto_cooling_policy_runs_full_speed_then_cooldown_below_35c() {
         full.command,
         FanHardwareCommand::from_profile(FanVoltageProfile::Full)
     );
+}
+
+#[test]
+fn thermal_plant_calibration_cooling_keeps_fan_off() {
+    let decision = thermal_plant_calibration_cooling_fan_decision();
+    assert_eq!(decision.state, FanPolicyState::Disabled);
+    assert_eq!(decision.command, FanHardwareCommand::disabled());
+    assert_eq!(decision.display_state, FanDisplayState::Off);
+    assert_eq!(decision.source, FanPolicySource::Idle);
+    assert_eq!(decision.output_level, FanOutputLevel::Off);
 }
 
 #[test]

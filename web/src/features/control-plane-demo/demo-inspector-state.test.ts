@@ -133,12 +133,22 @@ describe('Demo Inspector state', () => {
 
   it('derives blocked and calibration fixtures without mutating the baseline', () => {
     const blocked = deriveDemoScenario({ ...defaultDemoInspectorState, demoArtifact: 'blocked' })
+    const loading = deriveDemoScenario({
+      ...defaultDemoInspectorState,
+      demoScene: 'calibration-loading',
+    })
     const calibration = deriveDemoScenario({
       ...defaultDemoInspectorState,
       demoScene: 'calibration-active',
     })
 
     expect(blocked.artifacts[0]?.compatibility).toBe('blocked')
+    expect(loading.selectedDeviceId).toBe('fp-lab-01')
+    expect(loading.devices[0]?.calibration.job.status).toBe('idle')
+    expect(loading.events.at(-1)).toMatchObject({
+      message: 'simulated thermal snapshot read is pending',
+      tone: 'info',
+    })
     expect(calibration.selectedDeviceId).toBe('fp-lab-01')
     expect(calibration.devices[0]?.calibration.job.status).toBe('running')
     expect(deriveDemoScenario(defaultDemoInspectorState).artifacts[0]?.compatibility).not.toBe(

@@ -5,6 +5,7 @@ import { shouldRefreshCalibrationDraft, syncCalibrationDraftText } from './calib
 import {
   ControlPlaneDemo,
   clearStaleWebSerialFailure,
+  createDemoEventFeed,
   deviceChoiceMatchesRouteId,
   devicePickerTargets,
   formatRuntimeEventTime,
@@ -16,6 +17,7 @@ import {
   shouldShowDeviceControlBlockFeedback,
   vinAutoCalibrationActionDisabled,
 } from './components/control-plane-demo'
+import { defaultDemoInspectorState, deriveDemoScenario } from './demo-inspector-state'
 import { liveControlPlaneScenario } from './live-scenario'
 import { controlPlaneScenario } from './mock-data'
 
@@ -114,6 +116,15 @@ describe('Web Serial feedback settlement', () => {
     }
 
     expect(clearStaleWebSerialFailure(current)).toBe(current)
+  })
+})
+
+describe('mock log feed stability', () => {
+  it('keeps visible demo log rows stable between stream updates', () => {
+    const firstFrame = createDemoEventFeed(controlPlaneScenario.events)
+    const laterFrame = createDemoEventFeed(controlPlaneScenario.events)
+
+    expect(laterFrame).toEqual(firstFrame)
   })
 })
 
@@ -427,5 +438,33 @@ describe('voltage auto-calibration power gate', () => {
         readyAction
       )
     ).toBe(false)
+  })
+})
+
+describe('calibration snapshot loading controls', () => {
+  it('uses runtime job state to keep the stop command available before the first snapshot', () => {
+    const scenario = deriveDemoScenario(
+      { ...defaultDemoInspectorState, demoScene: 'calibration-active' },
+      [],
+      []
+    )
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario,
+        initialView: 'calibration',
+        allowDemoControls: true,
+        mockOnly: true,
+        demoThermalPlantRunLoading: true,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+      })
+    )
+    const command = markup.match(
+      /<button[^>]*class="thermal-plant-run-card__command[^"]*"[^>]*>[\s\S]*?<\/button>/
+    )?.[0]
+
+    expect(markup).toContain('aria-busy="true"')
+    expect(command).toContain('停止自动校准')
+    expect(command).not.toContain('disabled')
   })
 })

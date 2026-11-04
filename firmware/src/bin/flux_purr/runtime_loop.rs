@@ -1816,74 +1816,99 @@ pub(crate) fn runtime_update_calibration_job(
             true,
             &mut state.manual_pps_state,
         );
-    } else {
-        let calibration_temp_c = thermal_plant_calibration_temperature_c(
-            state.calibration_runtime_state,
-            calibration_live_rtd_temp_c,
-            state.latest_temp_c,
-        );
-        let supply_snapshot = state.pd_port.snapshot().with_fresh_observation(elapsed_ms);
-        let pd_confirmed = supply_scan_contract_matches(supply_snapshot, &state.manual_pps_state);
-        // The exact target must be confirmed before the scan advances, but a
-        // same-APDO/current PPS handoff may keep the previous safe contract
-        // conducting. Keep that distinction explicit so a pending voltage
-        // request cannot create a zero-duty frame between two full-conduction
-        // samples.
-        let continuous_adjustment = manual_pps_contract_request(&state.manual_pps_state, true)
-            .is_some_and(|request| {
-                supply_snapshot.active.is_some_and(|active| {
-                    active.request_keeps_same_pps_apdo_or_reduces_current(
-                        supply_snapshot.source,
-                        request,
-                    )
-                })
-            });
-        let confirmed_old_pps_is_safe = supply_snapshot.active.is_some_and(|active| {
-            active.mode == PdContractRequestMode::Pps
-                && state
-                    .manual_pps_state
-                    .target_ma
-                    .is_some_and(|target_ma| target_ma <= active.operating_current_ma)
-                && supply_snapshot.service_available
-                && supply_snapshot.capabilities.is_some()
-        });
-        let pd_conduction_allowed = if state.manual_pps_state.owner == ManualPpsOwner::Calibration
-            && state.manual_pps_state.enabled
-        {
-            calibration_pps_conduction_allowed(
-                pd_confirmed,
-                continuous_adjustment,
-                confirmed_old_pps_is_safe,
-            ) || calibration_pps_transition_is_pending(state)
-        } else {
-            pd_confirmed
-        };
-        // The scan must only retain a point after the PWM gate has actually
-        // applied the previous frame. A confirmed PD contract is not proof
-        // that the asynchronous safety gate allowed physical conduction.
-        let heater_duty_percent = calibration_trace_duty_percent(state.last_heater_duty);
-        let job_input = CalibrationJobUpdateInput {
-            now_ms: elapsed_ms,
-            latest_rtd_raw_code: state.latest_rtd_raw_code,
-            latest_vin_raw_code: state.latest_vin_raw_code,
-            wifi_started: flux_purr_firmware::heater_supply::wifi_hardware_started(),
-            pd_conduction_allowed,
-            pd_confirmed,
-            latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
-            latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
-            latest_temp_c: calibration_temp_c,
-            latest_vin_mv: state.latest_vin_mv,
-            heater_duty_percent,
-        };
-        update_calibration_job_state(
+    } else if thermal_plant_was_running
+        && state
+            .thermal_plant_workspace
+            .job
+            .as_ref()
+            .is_some_and(|job| job.phase == ThermalPlantAutoPhase::Cooling)
+        && (state.fan_command.enabled || state.overtemp_forced_fan_active)
+    {
+        // A cooling sample is valid only while the fan is physically off. The
+        // previous command can still be active when this loop starts, and an
+        // over-temperature guard can be raised by the current sensor frame;
+        // fail before recording either case instead of labelling it passive.
+        calibration_job_fail(
             &mut state.calibration_runtime_state,
-            &mut state.memory_config,
+            ManualPpsError::ThermalPlantProjectionInvalid,
+            true,
             &mut state.manual_pps_state,
-            state.thermal_plant_workspace,
-            job_input,
         );
+    } else {
+        runtime_update_calibration_job_state(state, calibration_live_rtd_temp_c, elapsed_ms);
     }
     thermal_plant_was_running
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_update_calibration_job_state(
+    state: &mut RuntimeLoopState,
+    calibration_live_rtd_temp_c: Option<f32>,
+    elapsed_ms: u64,
+) {
+    let calibration_temp_c = thermal_plant_calibration_temperature_c(
+        state.calibration_runtime_state,
+        calibration_live_rtd_temp_c,
+        state.latest_temp_c,
+    );
+    let supply_snapshot = state.pd_port.snapshot().with_fresh_observation(elapsed_ms);
+    let pd_confirmed = supply_scan_contract_matches(supply_snapshot, &state.manual_pps_state);
+    // The exact target must be confirmed before the scan advances, but a
+    // same-APDO/current PPS handoff may keep the previous safe contract
+    // conducting. Keep that distinction explicit so a pending voltage
+    // request cannot create a zero-duty frame between two full-conduction
+    // samples.
+    let continuous_adjustment = manual_pps_contract_request(&state.manual_pps_state, true)
+        .is_some_and(|request| {
+            supply_snapshot.active.is_some_and(|active| {
+                active
+                    .request_keeps_same_pps_apdo_or_reduces_current(supply_snapshot.source, request)
+            })
+        });
+    let confirmed_old_pps_is_safe = supply_snapshot.active.is_some_and(|active| {
+        active.mode == PdContractRequestMode::Pps
+            && state
+                .manual_pps_state
+                .target_ma
+                .is_some_and(|target_ma| target_ma <= active.operating_current_ma)
+            && supply_snapshot.service_available
+            && supply_snapshot.capabilities.is_some()
+    });
+    let pd_conduction_allowed = if state.manual_pps_state.owner == ManualPpsOwner::Calibration
+        && state.manual_pps_state.enabled
+    {
+        calibration_pps_conduction_allowed(
+            pd_confirmed,
+            continuous_adjustment,
+            confirmed_old_pps_is_safe,
+        ) || calibration_pps_transition_is_pending(state)
+    } else {
+        pd_confirmed
+    };
+    // The scan must only retain a point after the PWM gate has actually
+    // applied the previous frame. A confirmed PD contract is not proof
+    // that the asynchronous safety gate allowed physical conduction.
+    let heater_duty_percent = calibration_trace_duty_percent(state.last_heater_duty);
+    let job_input = CalibrationJobUpdateInput {
+        now_ms: elapsed_ms,
+        latest_rtd_raw_code: state.latest_rtd_raw_code,
+        latest_vin_raw_code: state.latest_vin_raw_code,
+        wifi_started: flux_purr_firmware::heater_supply::wifi_hardware_started(),
+        pd_conduction_allowed,
+        pd_confirmed,
+        latest_rtd_raw_adc_mv: state.latest_rtd_raw_adc_mv,
+        latest_vin_raw_adc_mv: state.latest_vin_raw_adc_mv,
+        latest_temp_c: calibration_temp_c,
+        latest_vin_mv: state.latest_vin_mv,
+        heater_duty_percent,
+    };
+    update_calibration_job_state(
+        &mut state.calibration_runtime_state,
+        &mut state.memory_config,
+        &mut state.manual_pps_state,
+        state.thermal_plant_workspace,
+        job_input,
+    );
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -2967,32 +2992,40 @@ fn runtime_confirm_fan_power(
     }
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn thermal_plant_calibration_cooling_fan_decision() -> FanPolicyDecision {
+    FanPolicyDecision {
+        state: FanPolicyState::Disabled,
+        command: FanHardwareCommand::disabled(),
+        display_state: FanDisplayState::Off,
+        source: FanPolicySource::Idle,
+        output_level: FanOutputLevel::Off,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
+fn thermal_plant_calibration_cooling_active(state: &RuntimeLoopState) -> bool {
+    state.calibration_runtime_state.mode == CalibrationMode::ThermalPlant
+        && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
+        && state
+            .thermal_plant_workspace
+            .job
+            .as_ref()
+            .is_some_and(|job| job.phase == ThermalPlantAutoPhase::Cooling)
+}
+
 #[cfg(target_arch = "xtensa")]
 fn runtime_override_fan_decision(
     state: &RuntimeLoopState,
     mut fan_decision: FanPolicyDecision,
     elapsed_ms: u64,
 ) -> FanPolicyDecision {
-    let thermal_plant_cooling = state.calibration_runtime_state.mode
-        == CalibrationMode::ThermalPlant
-        && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
-        && state
-            .thermal_plant_workspace
-            .job
-            .as_ref()
-            .is_some_and(|job| job.phase == ThermalPlantAutoPhase::Cooling);
+    let thermal_plant_cooling = thermal_plant_calibration_cooling_active(state);
     if state.calibration_runtime_state.mode == CalibrationMode::ThermalPlant
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running
     {
         if thermal_plant_cooling {
-            let command = FanPolicyState::ActiveCooling.command(elapsed_ms);
-            fan_decision = FanPolicyDecision {
-                state: FanPolicyState::ActiveCooling,
-                command,
-                display_state: FanDisplayState::Safe,
-                source: FanPolicySource::Safety,
-                output_level: FanOutputLevel::High,
-            };
+            fan_decision = thermal_plant_calibration_cooling_fan_decision();
         } else {
             fan_decision = FanPolicyDecision {
                 state: FanPolicyState::Disabled,
@@ -3050,6 +3083,7 @@ fn runtime_override_fan_decision(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms: u64) -> bool {
+    let thermal_plant_cooling = thermal_plant_calibration_cooling_active(state);
     let fan_decision = fan_policy_decision_with_modes(
         state.latest_display_temp_i16,
         elapsed_ms,
@@ -3064,7 +3098,13 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
     );
     let mut fan_decision = runtime_override_fan_decision(state, fan_decision, elapsed_ms);
     runtime_update_tuning_cooling_latch(state);
-    fan_decision = tuning_cooldown_fan_decision(fan_decision, state.tuning_cooling_latched);
+    if thermal_plant_cooling && fan_decision.source != FanPolicySource::Safety {
+        // Tuning cooldown is a normal policy layer. It must not re-enable the
+        // fan after thermal-plant calibration has selected passive cooling.
+        fan_decision = thermal_plant_calibration_cooling_fan_decision();
+    } else if !thermal_plant_cooling {
+        fan_decision = tuning_cooldown_fan_decision(fan_decision, state.tuning_cooling_latched);
+    }
     runtime_confirm_fan_power(state, &mut fan_decision, elapsed_ms);
     state.fan_policy_state = fan_decision.state;
     state.fan_command = fan_decision.command;

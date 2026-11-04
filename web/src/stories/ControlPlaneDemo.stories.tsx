@@ -378,18 +378,16 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
       await expect(await canvas.findByRole('article', { name: '自动热模型标定结果' })).toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: 'R(T) 加热曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '供电边界曲线' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '温度轨迹' })).toBeVisible()
       await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
       expect(canvas.queryByRole('button', { name: '导入预览' })).toBeNull()
       expect(canvas.queryByRole('button', { name: '保存曲线' })).toBeNull()
-      const representativePointTable = await canvas.findByRole('table', {
-        name: 'R(T) 代表点',
+      const boundaryTable = await canvas.findByRole('table', {
+        name: '供电边界采样',
       })
-      expect(representativePointTable.scrollWidth).toBeLessThanOrEqual(
-        representativePointTable.clientWidth + 1
-      )
+      expect(boundaryTable.scrollWidth).toBeLessThanOrEqual(boundaryTable.clientWidth + 1)
     })
 
     await step(
@@ -635,6 +633,85 @@ export const DemoCalibrationLeaveGuard: Story = {
   },
 }
 
+export const DemoCalibrationSnapshotLoading: Story = {
+  name: 'Demo / Thermal snapshot loading',
+  args: {
+    scenario: controlPlaneScenario,
+    initialView: 'calibration',
+    allowDemoControls: true,
+    mockOnly: true,
+    demoThermalPlantRunLoading: true,
+    devd: {
+      enabled: false,
+    },
+    webSerial: {
+      enabled: false,
+    },
+  },
+  play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+
+    await step('keeps the snapshot read state centered inside the records', async () => {
+      const resultCard = await canvas.findByRole('article', { name: '自动热模型标定结果' })
+      expect(resultCard).toHaveAttribute('aria-busy', 'true')
+      await expect(await canvas.findByLabelText('校准读取状态')).toHaveTextContent('读取中')
+      await expect(await canvas.findByText(/正在读取设备快照 · 数据到达后显示/)).toBeVisible()
+      const chartSkeletons = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton'
+      )
+      const chartSkeletonCanvases = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton-canvas'
+      )
+      const chartSkeletonGrid = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton-grid'
+      )
+      const chartSkeletonAxes = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton-axes'
+      )
+      const chartSkeletonStatuses = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton-status'
+      )
+      const chartSkeletonFrames = Array.from(chartSkeletons).map((node) => {
+        const frame = node.getBoundingClientRect()
+        const parent = node.parentElement?.getBoundingClientRect()
+        return {
+          height: Math.round(frame.height),
+          parentHeight: Math.round(parent?.height ?? 0),
+          parentWidth: Math.round(parent?.width ?? 0),
+          width: Math.round(frame.width),
+        }
+      })
+      const chartSkeletonDataNodes = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__chart-skeleton text, .thermal-plant-run-card__chart-skeleton rect, .thermal-plant-run-card__chart-skeleton circle, .thermal-plant-run-card__chart-skeleton polyline'
+      )
+      const tableSkeleton = canvasElement.querySelector(
+        '.thermal-plant-run-card__table-loading-body'
+      )
+      const tableSkeletonRows = canvasElement.querySelectorAll(
+        '.thermal-plant-run-card__table-loading-body .thermal-plant-run-card__table-loading-row'
+      )
+      expect(chartSkeletons).toHaveLength(2)
+      expect(chartSkeletonCanvases).toHaveLength(2)
+      expect(chartSkeletonGrid).toHaveLength(2)
+      expect(chartSkeletonAxes).toHaveLength(2)
+      expect(chartSkeletonStatuses).toHaveLength(2)
+      expect(
+        chartSkeletonFrames.every(
+          ({ width, height, parentWidth, parentHeight }) =>
+            width === parentWidth && height === parentHeight && width > 0 && height > 0
+        )
+      ).toBe(true)
+      expect(chartSkeletonDataNodes).toHaveLength(0)
+      expect(
+        Array.from(chartSkeletonStatuses).every((node) => node.textContent?.trim() === '读取中')
+      ).toBe(true)
+      expect(tableSkeleton).toBeVisible()
+      expect(tableSkeleton?.tagName).toBe('DIV')
+      expect(tableSkeletonRows).toHaveLength(8)
+    })
+  },
+}
+
 export const DemoCalibrationHeaterCurvePreview: Story = {
   name: 'Demo / 自动热模型结果',
   args: {
@@ -652,7 +729,7 @@ export const DemoCalibrationHeaterCurvePreview: Story = {
     const canvas = within(canvasElement)
 
     await step('shows the persisted automatic calibration result', async () => {
-      await expect(await canvas.findByRole('table', { name: 'R(T) 代表点' })).toBeVisible()
+      await expect(await canvas.findByRole('table', { name: '供电边界采样' })).toBeVisible()
       await expect(await canvas.findByText('active 有效')).toBeVisible()
       await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()

@@ -293,7 +293,7 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 
 ![VIN ADC calibration layout](./assets/adc-calibration-vin-layout.png)
 
-### 自动热模型结果卡
+### 自动热模型结果区
 
 - source_type: `ui_demo`
 - target_program: `mock-only`
@@ -302,9 +302,13 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - viewport_strategy: `devtools-emulate`
 - sensitive_exclusion: `N/A`
 
-The thermal-model result card retains the coefficient metrics and run trace. Its historical resistance plot is empty for supply-boundary calibration; it must not infer or display an R(T) curve from PPS contract currents. Raw supply-boundary observations are available through the version 2 run snapshot. The image below documents the historical resistance presentation and is not evidence for supply-boundary calibration.
+The thermal-model result surface retains the coefficient metrics and run trace without introducing one additional outer card inside the calibration tab. For supply-boundary calibration it renders the version 2 raw observations as a fixed-container two-column result: the requested-voltage/current boundary chart and temperature trace are stacked on the left, while the sampling table and run action remain on the right. The inner metric strip, chart panels, sampling table, and action footer retain their existing rounded inset surfaces; only the result surface wrapper itself is flat. When a live run has not received boundary data it shows an explicit waiting state. The chart must preserve SVG aspect ratio for readable text, deduplicate dense voltage ticks, and cap displayed axis labels while retaining every raw point in the plotted polyline and keeping the latest sampling window in the table. The table must stay within the fixed workbench height and use an internal scroll window when needed. It must not infer or display an R(T) curve from PPS contract currents. The image below records the current single-outer-surface presentation for supply-boundary calibration.
 
-![Thermal plant run result card](./assets/thermal-plant-run-card-1440x900.png)
+![Thermal plant run flat surface](./assets/thermal-plant-run-flat-1440x900.png)
+
+`assets/thermal-plant-run-short-height-1440x850.png` records the running state at a short desktop height. The status pill shares the metric strip's row and no longer reserves a separate empty grid row above the calibration evidence.
+
+![Thermal plant run short-height layout](./assets/thermal-plant-run-short-height-1440x850.png)
 
 ## 风险 / 开放问题 / 假设
 
