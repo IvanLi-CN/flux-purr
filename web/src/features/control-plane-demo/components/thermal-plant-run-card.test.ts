@@ -64,6 +64,32 @@ describe('thermal plant run result presentation', () => {
     expect(markup).not.toContain('正在读取设备状态…')
   })
 
+  it.each([
+    {},
+    { loading: true },
+    { readError: 'snapshot read failed' },
+  ])('uses an explicit terminal runtime state instead of a stale running snapshot: %j', (readState) => {
+    const snapshot = createDefaultThermalPlantSnapshot()
+    if (!snapshot.attempt) throw new Error('default fixture requires an attempt')
+    snapshot.attempt = { ...snapshot.attempt, status: 'running', restartAllowed: false }
+    const markup = renderToStaticMarkup(
+      createElement(ThermalPlantRunCard, {
+        snapshot,
+        runtimeRunning: false,
+        ...readState,
+        onStartStop: () => undefined,
+      })
+    )
+    const command = markup.match(
+      /<button[^>]*class="thermal-plant-run-card__command[^"]*"[^>]*>[\s\S]*?<\/button>/
+    )?.[0]
+
+    expect(command).toBeDefined()
+    expect(command).not.toContain('停止自动校准')
+    expect(command).not.toContain('thermal-plant-run-card__command--stop')
+    expect(command).toContain('disabled')
+  })
+
   it('keeps an idle loading job and transport-blocked stop command disabled', () => {
     for (const props of [
       { loading: true },

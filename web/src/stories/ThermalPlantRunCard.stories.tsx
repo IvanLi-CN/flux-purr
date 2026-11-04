@@ -104,6 +104,16 @@ export const LoadingRunning: Story = {
   },
 }
 
+export const StaleRunningSnapshot: Story = {
+  name: 'Stopped / Snapshot stale',
+  args: { snapshot: runningSnapshot, runtimeRunning: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.queryByRole('button', { name: '停止自动校准' })).not.toBeInTheDocument()
+    await expect(canvas.getByRole('button', { name: '重新开始自动校准' })).toBeDisabled()
+  },
+}
+
 export const Running: Story = {
   args: { snapshot: runningSnapshot },
 }

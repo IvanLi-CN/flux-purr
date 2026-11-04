@@ -112,7 +112,7 @@ export function ThermalPlantRunCard({
   unsupported = false,
   loading = false,
   readError,
-  runtimeRunning = false,
+  runtimeRunning,
   onStartStop,
 }: {
   snapshot: ThermalPlantRunSnapshot
@@ -126,7 +126,7 @@ export function ThermalPlantRunCard({
   const attempt = snapshot.attempt
   const presentation = thermalPlantRunCardPresentation(snapshot, unsupported, loading, readError)
   const { showActiveResult } = presentation
-  const isRunning = runtimeRunning || presentation.isRunning
+  const isRunning = runtimeRunning ?? presentation.isRunning
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
   const trace = snapshot.tracePage.points
