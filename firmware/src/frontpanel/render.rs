@@ -1672,7 +1672,6 @@ fn draw_device_info(
         DeviceInfoPage::Runtime => "RUNTIME",
     };
     draw_text_info(canvas, title, 5, 2, theme.accent);
-    draw_text_info(canvas, ["1/3", "2/3", "3/3"][page], 140, 2, theme.muted);
     fill_rect(canvas, 5, 12, 150, 1, theme.border);
     match state.device_info_page {
         DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
@@ -1762,7 +1761,7 @@ fn draw_device_calibration_info(
         canvas,
         d.config,
         25,
-        39,
+        37,
         8,
         if d.config == "ERROR" {
             theme.warning
@@ -1770,7 +1769,7 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    draw_info_value_info(canvas, model, 62, 39, 18, theme.muted);
+    draw_info_value_info(canvas, model, 62, 37, 18, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1785,12 +1784,12 @@ fn draw_device_runtime_info(
     draw_info_value_info(canvas, &reset, 5, 30, 25, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_info(canvas, &outputs, 5, 40, theme.text);
+    draw_text_info(canvas, &outputs, 5, 37, theme.text);
     draw_text_info(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
-        108,
-        40,
+        104,
+        37,
         theme.text,
     );
 }
