@@ -1736,6 +1736,7 @@ fn draw_device_identity_info(
         4,
         theme.muted,
     );
+    fill_rect(canvas, 5, 29, 150, 1, theme.border);
 }
 
 fn draw_device_calibration_info(
@@ -1743,24 +1744,25 @@ fn draw_device_calibration_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_info(canvas, "THERMAL", 5, 17, theme.muted);
+    draw_text_info(canvas, "THERMAL", 5, 16, theme.muted);
     let valid = d.thermal == "VALID";
     draw_text_mid(
         canvas,
         d.thermal,
         63,
-        15,
+        14,
         if valid { theme.success } else { theme.warning },
     );
-    let mut row = heapless::String::<64>::new();
-    let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
-    draw_info_value_info(canvas, &row, 5, 30, 25, theme.text);
+    draw_text_info(canvas, "RTD", 5, 28, theme.muted);
+    draw_info_value_info(canvas, d.rtd, 24, 28, 8, theme.text);
+    draw_text_info(canvas, "VIN", 82, 28, theme.muted);
+    draw_info_value_info(canvas, d.vin, 101, 28, 8, theme.text);
     let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
     draw_text_info(canvas, "CFG", 5, 39, theme.muted);
     draw_info_value_info(
         canvas,
         d.config,
-        25,
+        24,
         37,
         8,
         if d.config == "ERROR" {
@@ -1769,7 +1771,8 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    draw_info_value_info(canvas, model, 62, 37, 18, theme.muted);
+    draw_text_info(canvas, "MODEL", 82, 39, theme.muted);
+    draw_info_value_info(canvas, model, 108, 37, 8, theme.muted);
 }
 
 fn draw_device_runtime_info(
