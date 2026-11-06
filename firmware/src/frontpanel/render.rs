@@ -1771,8 +1771,9 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    draw_text_info(canvas, "MODEL", 82, 39, theme.muted);
-    draw_info_value_info(canvas, model, 108, 37, 8, theme.muted);
+    let mut model_status = heapless::String::<32>::new();
+    let _ = write!(model_status, "MODEL {}", model);
+    draw_info_value_info(canvas, &model_status, 82, 37, 13, theme.muted);
 }
 
 fn draw_device_runtime_info(
