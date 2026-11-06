@@ -3,7 +3,7 @@ use core::fmt::Write as _;
 use embedded_graphics::{
     mono_font::{
         MonoTextStyle,
-        ascii::{FONT_6X10, FONT_8X13},
+        ascii::{FONT_4X6, FONT_6X10, FONT_8X13},
     },
     pixelcolor::Rgb565,
     prelude::*,
@@ -533,6 +533,7 @@ enum BitmapAlign {
 enum BitmapFont {
     Small,
     Mid,
+    Info,
     ControlLabel,
     ControlTitle,
 }
@@ -596,6 +597,7 @@ impl BitmapFont {
     const fn width(self) -> i32 {
         match self {
             Self::Small | Self::Mid => BITMAP_FONT_WIDTH,
+            Self::Info => 4,
             Self::ControlLabel => 6,
             Self::ControlTitle => 8,
         }
@@ -603,7 +605,7 @@ impl BitmapFont {
 
     const fn scale(self) -> u32 {
         match self {
-            Self::Small | Self::ControlLabel | Self::ControlTitle => 1,
+            Self::Small | Self::Info | Self::ControlLabel | Self::ControlTitle => 1,
             Self::Mid => 2,
         }
     }
@@ -675,8 +677,9 @@ fn draw_bitmap_text(
                 cursor_x += (font.width() + spacing) * scale;
             }
         }
-        BitmapFont::ControlLabel | BitmapFont::ControlTitle => {
+        BitmapFont::Info | BitmapFont::ControlLabel | BitmapFont::ControlTitle => {
             let style = match font {
+                BitmapFont::Info => MonoTextStyle::new(&FONT_4X6, color),
                 BitmapFont::ControlLabel => MonoTextStyle::new(&FONT_6X10, color),
                 BitmapFont::ControlTitle => MonoTextStyle::new(&FONT_8X13, color),
                 BitmapFont::Small | BitmapFont::Mid => unreachable!(),
@@ -741,6 +744,17 @@ fn draw_text_mid(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: 
         y,
         color,
         BitmapTextStyle::new(BitmapFont::Mid, 1, BitmapAlign::Left),
+    );
+}
+
+fn draw_text_info(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapTextStyle::new(BitmapFont::Info, 1, BitmapAlign::Left),
     );
 }
 
@@ -1638,8 +1652,8 @@ fn draw_device_info(
         DeviceInfoPage::Calibration => "CALIBRATION",
         DeviceInfoPage::Runtime => "RUNTIME",
     };
-    draw_text_mid(canvas, title, 5, 1, theme.accent);
-    draw_text_mid(canvas, ["1/3", "2/3", "3/3"][page], 135, 1, theme.muted);
+    draw_text_info(canvas, title, 5, 2, theme.accent);
+    draw_text_info(canvas, ["1/3", "2/3", "3/3"][page], 140, 2, theme.muted);
     fill_rect(canvas, 5, 12, 150, 1, theme.border);
     match state.device_info_page {
         DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
@@ -1690,17 +1704,17 @@ fn draw_device_identity_info(
         .device_id
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
-    draw_text_mid(canvas, "ID", 5, 34, theme.muted);
-    draw_info_value_mid(canvas, id, 20, 34, 14, theme.text);
-    draw_info_value_mid(
+    draw_text_info(canvas, "ID", 5, 36, theme.muted);
+    draw_info_value_info(canvas, id, 17, 36, 20, theme.text);
+    draw_info_value_info(
         canvas,
         if d.board == "esp32-s3" {
             "S3"
         } else {
             &d.board
         },
-        140,
-        34,
+        143,
+        36,
         4,
         theme.muted,
     );
@@ -1711,7 +1725,7 @@ fn draw_device_calibration_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_mid(canvas, "THERMAL", 5, 15, theme.muted);
+    draw_text_info(canvas, "THERMAL", 5, 17, theme.muted);
     let valid = d.thermal == "VALID";
     draw_text_mid(
         canvas,
@@ -1722,22 +1736,22 @@ fn draw_device_calibration_info(
     );
     let mut row = heapless::String::<64>::new();
     let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
-    draw_info_value_mid(canvas, &row, 5, 28, 20, theme.text);
+    draw_info_value_info(canvas, &row, 5, 30, 25, theme.text);
     let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
-    draw_text_mid(canvas, "CFG", 5, 38, theme.muted);
-    draw_info_value_mid(
+    draw_text_info(canvas, "CFG", 5, 40, theme.muted);
+    draw_info_value_info(
         canvas,
         d.config,
-        29,
-        38,
-        6,
+        23,
+        40,
+        8,
         if d.config == "ERROR" {
             theme.warning
         } else {
             theme.text
         },
     );
-    draw_info_value_mid(canvas, model, 68, 38, 11, theme.muted);
+    draw_info_value_info(canvas, model, 58, 40, 20, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1745,19 +1759,19 @@ fn draw_device_runtime_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_mid(canvas, "UP", 5, 15, theme.muted);
+    draw_text_info(canvas, "UP", 5, 17, theme.muted);
     draw_text_mid(canvas, &d.uptime(), 25, 15, theme.text);
     let mut reset = heapless::String::<40>::new();
     let _ = write!(reset, "RESET {}", d.reset);
-    draw_info_value_mid(canvas, &reset, 5, 28, 20, theme.text);
+    draw_info_value_info(canvas, &reset, 5, 30, 25, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_mid(canvas, &outputs, 5, 38, theme.text);
-    draw_text_mid(
+    draw_text_info(canvas, &outputs, 5, 41, theme.text);
+    draw_text_info(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
-        102,
-        38,
+        110,
+        41,
         theme.text,
     );
 }
@@ -1783,6 +1797,29 @@ fn draw_info_value_mid(
         }
     }
     draw_text_mid(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_info(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_info(canvas, &text, x, y, color);
 }
 
 fn draw_info_value(
@@ -2331,10 +2368,12 @@ mod tests {
     fn frontpanel_fonts_keep_expected_native_sizes() {
         assert_eq!(BitmapFont::Small.width(), 3);
         assert_eq!(BitmapFont::Mid.width(), 3);
+        assert_eq!(BitmapFont::Info.width(), 4);
         assert_eq!(BitmapFont::ControlLabel.width(), 6);
         assert_eq!(BitmapFont::ControlTitle.width(), 8);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Small, 1), 11);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Mid, 1), 22);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::Info, 1), 14);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 0), 18);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 1), 20);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
