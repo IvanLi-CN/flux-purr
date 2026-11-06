@@ -437,7 +437,7 @@ pub fn render_frontpanel_ui_with_theme(
         FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, &palette, theme),
         FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state, theme),
         FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state, theme),
-        FrontPanelRoute::DeviceInfo => draw_device_info(canvas, theme),
+        FrontPanelRoute::DeviceInfo => draw_device_info(canvas, state, theme),
     }
 }
 
@@ -1618,11 +1618,167 @@ fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: 
     draw_text_mid(canvas, &pairing, 8, 32, theme.warning);
 }
 
-fn draw_device_info(canvas: &mut DisplayCanvas, theme: &FrontPanelTheme) {
+fn draw_device_info(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &FrontPanelTheme,
+) {
+    use super::DeviceInfoPage;
+    let d = &state.device_info;
     fill_rect(canvas, 4, 1, 152, 45, theme.panel);
-    draw_text_mid(canvas, "BOARD FP-S3", 8, 6, theme.text);
-    draw_text_mid(canvas, "FW V0.3.0", 8, 19, theme.warning);
-    draw_text_mid(canvas, "ID S3-001", 8, 32, theme.info);
+    let (title, page) = match state.device_info_page {
+        DeviceInfoPage::Identity => (
+            if d.version.contains("-dev") {
+                "IDENTITY / DEV"
+            } else {
+                "IDENTITY"
+            },
+            0,
+        ),
+        DeviceInfoPage::Calibration => ("CALIBRATION", 1),
+        DeviceInfoPage::Runtime => ("RUNTIME", 2),
+    };
+    draw_text_small(canvas, title, 5, 2, theme.accent);
+    draw_text_small(canvas, ["1/3", "2/3", "3/3"][page], 134, 2, theme.muted);
+    fill_rect(canvas, 5, 12, 150, 1, theme.border);
+    match state.device_info_page {
+        DeviceInfoPage::Identity => {
+            let version = d
+                .version
+                .split('-')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("--");
+            if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
+                draw_text_mid(canvas, version, 5, 16, theme.text);
+            } else {
+                draw_info_value(canvas, version, 5, 18, 26, theme.text);
+            }
+            draw_info_value(
+                canvas,
+                d.sha.get(..7).unwrap_or(&d.sha),
+                115,
+                20,
+                7,
+                theme.accent,
+            );
+            let id = d
+                .device_id
+                .strip_prefix("flux-purr-")
+                .unwrap_or(&d.device_id);
+            draw_text_small(canvas, "ID", 5, 36, theme.muted);
+            draw_info_value(canvas, id, 17, 36, 29, theme.text);
+            draw_info_value(
+                canvas,
+                if d.board == "esp32-s3" {
+                    "S3"
+                } else {
+                    &d.board
+                },
+                139,
+                36,
+                4,
+                theme.muted,
+            );
+        }
+        DeviceInfoPage::Calibration => {
+            draw_text_small(canvas, "THERMAL", 5, 17, theme.muted);
+            let valid = d.thermal == "VALID";
+            draw_text_mid(
+                canvas,
+                d.thermal,
+                61,
+                15,
+                if valid { theme.success } else { theme.warning },
+            );
+            let mut row = heapless::String::<64>::new();
+            let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
+            draw_info_value(canvas, &row, 5, 29, 37, theme.text);
+            let mut detail = heapless::String::<64>::new();
+            let _ = write!(
+                detail,
+                "CFG {} / {}",
+                d.config,
+                if valid {
+                    "NATURAL MODEL"
+                } else {
+                    "MODEL UNAVAILABLE"
+                }
+            );
+            draw_info_value(
+                canvas,
+                &detail,
+                5,
+                38,
+                37,
+                if d.config == "ERROR" {
+                    theme.warning
+                } else {
+                    theme.muted
+                },
+            );
+        }
+        DeviceInfoPage::Runtime => draw_device_runtime_info(canvas, d, theme),
+    }
+    for i in 0..3 {
+        fill_rect(
+            canvas,
+            70 + i * 9,
+            47,
+            5,
+            2,
+            if i as usize == page {
+                theme.accent
+            } else {
+                theme.border
+            },
+        );
+    }
+}
+
+fn draw_device_runtime_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    draw_text_small(canvas, "UP", 5, 17, theme.muted);
+    draw_text_mid(canvas, &d.uptime(), 25, 15, theme.text);
+    let mut reset = heapless::String::<40>::new();
+    let _ = write!(reset, "RESET {}", d.reset);
+    draw_info_value(canvas, &reset, 5, 29, 37, theme.text);
+    let mut outputs = heapless::String::<40>::new();
+    let _ = write!(outputs, "HEATER {}%", d.heater_percent);
+    draw_text_small(canvas, &outputs, 5, 40, theme.text);
+    draw_text_small(
+        canvas,
+        if d.fan_on { "FAN ON" } else { "FAN OFF" },
+        110,
+        40,
+        theme.text,
+    );
+}
+
+fn draw_info_value(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_small(canvas, &text, x, y, color);
 }
 
 #[cfg(test)]
@@ -2157,3 +2313,8 @@ mod tests {
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
     }
 }
+
+// Host-only design proposals; not linked into the device image.
+#[cfg(not(target_arch = "xtensa"))]
+#[path = "device_info_design_preview.rs"]
+pub mod device_info_design_preview;

@@ -74,6 +74,10 @@ export interface FrontPanelWifiInfoScreen extends FrontPanelBaseScreen {
 
 export interface FrontPanelDeviceInfoScreen extends FrontPanelBaseScreen {
   kind: 'device-info'
+  page?: number
+  uptimeSeconds?: number
+  heaterPercent?: number
+  fanOn?: boolean
   board: string
   firmwareVersion: string
   serial: string

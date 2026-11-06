@@ -760,21 +760,40 @@ function drawDeviceInfoScreen(
   palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  drawBitmapText(ctx, `BOARD ${screen.board}`, 8, 6, {
-    color: palette.text,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `FW ${screen.firmwareVersion}`, 8, 19, {
-    color: palette.warning,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `ID ${screen.serial}`, 8, 32, {
-    color: palette.cyan,
-    scale: 2,
-    letterSpacing: 1,
-  })
+  fillRect(ctx, 4, 1, 152, 45, palette.panel)
+  const page = screen.page ?? 0
+  const text = (value: string, x: number, y: number, color = palette.text, scale = 1) =>
+    drawBitmapText(ctx, value.toUpperCase(), x, y, { color, scale, letterSpacing: 1 })
+  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 5, 2, palette.accent)
+  text(`${page + 1}/3`, 134, 2, palette.muted)
+  fillRect(ctx, 5, 12, 150, 1, palette.border)
+  if (page === 0) {
+    text(screen.firmwareVersion, 5, 16, palette.text, 2)
+    text('--', 115, 20, palette.accent)
+    text(`ID ${screen.serial}`, 5, 36)
+    text('S3', 139, 36, palette.muted)
+  } else if (page === 1) {
+    text('THERMAL', 5, 17, palette.muted)
+    text('MISSING', 61, 15, palette.warning, 2)
+    text('RTD DEFAULT  VIN DEFAULT', 5, 29)
+    text('CFG UNKNOWN / MODEL UNAVAILABLE', 5, 38, palette.muted)
+  } else {
+    const seconds = screen.uptimeSeconds ?? 0
+    const hours = Math.floor(seconds / 3600)
+    const time =
+      hours > 99
+        ? `${Math.floor(hours / 24)}D ${String(hours % 24).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}`
+        : [hours, Math.floor(seconds / 60) % 60, seconds % 60]
+            .map((v) => String(v).padStart(2, '0'))
+            .join(':')
+    text('UP', 5, 17, palette.muted)
+    text(time, 25, 15, palette.text, 2)
+    text('RESET UNKNOWN', 5, 29)
+    text(`HEATER ${screen.heaterPercent ?? 0}%`, 5, 40)
+    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 110, 40)
+  }
+  for (let i = 0; i < 3; i++)
+    fillRect(ctx, 70 + i * 9, 47, 5, 2, i === page ? palette.accent : palette.border)
 }
 
 function drawFrontPanel(
