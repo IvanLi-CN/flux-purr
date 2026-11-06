@@ -1736,7 +1736,6 @@ fn draw_device_identity_info(
         4,
         theme.muted,
     );
-    fill_rect(canvas, 12, 29, 136, 1, theme.border);
 }
 
 fn draw_device_calibration_info(
