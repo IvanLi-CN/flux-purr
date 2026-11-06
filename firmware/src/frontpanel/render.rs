@@ -685,13 +685,6 @@ fn draw_bitmap_text(
                 BitmapFont::Small | BitmapFont::Mid => unreachable!(),
             };
             for ch in text.chars() {
-                if matches!(font, BitmapFont::Info) {
-                    if let Some(glyph) = info_glyph_override(ch) {
-                        draw_info_glyph(canvas, glyph, cursor_x, y, color);
-                        cursor_x += font.width() + spacing;
-                        continue;
-                    }
-                }
                 let mut glyph = heapless::String::<4>::new();
                 let _ = glyph.push(ch.to_ascii_uppercase());
                 Text::with_baseline(
@@ -703,28 +696,6 @@ fn draw_bitmap_text(
                 .draw(canvas)
                 .ok();
                 cursor_x += font.width() + spacing;
-            }
-        }
-    }
-}
-
-fn info_glyph_override(ch: char) -> Option<&'static [&'static str; 8]> {
-    match ch.to_ascii_uppercase() {
-        '0' => Some(&[
-            "01110", "10001", "10001", "10001", "10001", "10001", "01110", "00000",
-        ]),
-        'T' => Some(&[
-            "11111", "00100", "00100", "00100", "00100", "00100", "00100", "00000",
-        ]),
-        _ => None,
-    }
-}
-
-fn draw_info_glyph(canvas: &mut DisplayCanvas, glyph: &[&str; 8], x: i32, y: i32, color: Rgb565) {
-    for (row, pattern) in glyph.iter().enumerate() {
-        for (column, pixel) in pattern.bytes().enumerate() {
-            if pixel == b'1' {
-                fill_rect(canvas, x + column as i32, y + row as i32, 1, 1, color);
             }
         }
     }
@@ -2360,15 +2331,6 @@ mod tests {
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 0), 18);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 1), 20);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
-    }
-
-    #[test]
-    fn info_font_uses_corrected_zero_and_t_glyphs() {
-        assert_eq!(info_glyph_override('0').unwrap()[0], "01110");
-        assert_eq!(info_glyph_override('0').unwrap()[6], "01110");
-        assert_eq!(info_glyph_override('T').unwrap()[0], "11111");
-        assert_eq!(info_glyph_override('T').unwrap()[1], "00100");
-        assert!(info_glyph_override('A').is_none());
     }
 }
 
