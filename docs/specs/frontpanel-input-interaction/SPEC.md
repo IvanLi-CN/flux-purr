@@ -1,6 +1,6 @@
 # Flux Purr 前面板五向输入与交互导航
 
-## 背景 / 问题陈述
+## Context and Scope
 
 - `frontpanel-ui-contract` 已冻结 `160×50` 前面板的视觉基线，但当前固件仍停留在启动后静态轮播，无法验证五向键的实际 GPIO 映射、手势判定和页面联动。
 - 五向开关的中心键与 `GPIO0 / BOOT` 复用，若把诊断入口绑到上电长按，会把调试入口和启动约束耦死，给真机校准带来不必要风险。
@@ -41,11 +41,11 @@
 - 真实温控、风扇闭环或联网设置的数据契约变更
 - 非前面板 UI 的 console 页面结构变更
 
-## 需求（Requirements）
+## Requirements
 
 ### MUST
 
-- 五向键去抖阈值固定在 `20-30ms`，当前实现口径使用 `20ms`。
+- REQ-INPUT-QUICK-TAP: 五向键释放去抖窗口为 `5ms`。已采样到的按下候选必须保留到释放稳定；即使按下未达到稳定按下阈值，也应生成一次短按，不能在原始释放边沿直接丢弃。释放窗口内的反复跳变合并为同一次点击；完全发生在两次采样之间的脉冲不保证捕获。
 - 长按阈值固定为 `500ms`；双击窗口固定为 `250ms`。
 - 长按每次按住只允许发出一次 `long` 事件，且不得在释放时回补 `short`。
 - App runtime 的手势识别必须按当前 route 的有效输入能力收窄；只有当前 route 支持同一逻辑键双击时，短按才等待双击窗口。
@@ -54,18 +54,18 @@
 - 诊断入口不得依赖 `GPIO0` 上电长按；必须使用 build-time `FrontPanelRuntimeMode` 切换。
 - `Dashboard` 上/下必须以 `1°C` 步进调整当前目标温度。
 - `Dashboard` 左/右必须按“已启用记忆温度的实际温度值排序”找到最近的下一个温度，而不是按槽位顺序切换。
-- `Dashboard` 暂不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
+- `Dashboard` 不显示当前命中的预设槽位或 `MAN / Mx` 文案，保持既有视觉基线不变。
 - `Dashboard` 中键短按只切 heater arm；中键双击保持无副作用；中键长按只进菜单。
-- 当持久化故障提示待确认时，第一个任意物理按键只清除提示覆盖层，但不会吞掉菜单或页面导航事件。安全域锁仍阻止 heater、PPS 与 calibration；偏好/网络域失败不锁定 heater。
+- 当持久化故障提示尚未被操作者确认时，第一个任意物理按键只清除提示覆盖层，但不会吞掉菜单或页面导航事件。安全域锁仍阻止 heater、PPS 与 calibration；偏好/网络域失败不锁定 heater。
 - 一级菜单必须固定为 `Preset Temp / FAN CTRL / WiFi Info / Device Info` 四项，左右移动，中键短按进入，中键长按回 Dashboard。
 - 子页默认中键短按退出，中键长按兜底退出；左键返回菜单。
 - `Preset Temp` 页必须允许进入全部 `M1-M10` 槽位；灰色槽位只代表当前值无效，不代表不可进入。
 - `Preset Temp` 默认预设温度必须固定为 `50 / 100 / 120 / 150 / 180 / 200 / 210 / 220 / 250 / 300°C`，并按 `M1-M10` 顺序展示。
 - `Preset Temp` 页中，当槽位值降到 `0°C` 以下时必须进入 `---` 状态并置灰；再次上调时必须能从 `---` 回到 `0°C`。
 - `Dashboard` 仅在左右切换记忆温度时忽略灰色 / `---` 槽位，不得把无效预设当作可命中的目标值。
-- `FAN CTRL` 页提供 `POST`（`OFF/NORMAL/FAST`）与 `HEAT`（`OFF/LOW/MED/HIGH`）两行暂存编辑；上/下选择行，左/右循环档位，中键短按保存，长按放弃返回菜单。页面只显示状态、来源和抽象档位，不显示 PD、电压、PWM 或硬编码规则。
+- `FAN CTRL` 页提供 `POST`（`OFF/NORMAL/FAST`）与 `HEAT`（`OFF/LOW/MED/HIGH`）两行草稿编辑；上/下选择行，左/右循环档位，中键短按保存，长按放弃返回菜单。页面只显示状态、来源和抽象档位，不显示 PD、电压、PWM 或硬编码规则。
 - `WiFi Info` 是只读网络信息页，但进入时必须显示本次新生成的四位 LAN 配对码；离开页面立即撤销该码。`Device Info` 保持只读页；两者只处理返回/退出。
-- 若 runtime 处于“fault 已消失但 attention reminder 仍待确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
+- 若 runtime 处于“fault 已消失但 attention reminder 尚未被操作者确认”状态，则第一次任意输入只负责确认/静音，不执行 heater/fan/menu 原动作；第二次输入才恢复正常语义。
 - 所有已接受的前面板用户操作都必须提交声音反馈请求；Dashboard 的 heater / 主动降温切换继续提交专用 cue，其余已接受交互（菜单导航、进入/退出子页、Preset Temp 编辑等）统一提交通用提示音。实际播放受 `buzzer-cue-arbitration` 的单输出优先级、合并和安全状态抑制合同约束。
 - 真实 heater / fan 执行链路、保护与运行态真相源以 `heater-pid-frontpanel-runtime` 为准；本 spec 只冻结输入与导航语义。
 - Storybook 必须提供 docs/gallery 与交互故事，作为 Web 侧视觉主证据源。
@@ -162,7 +162,9 @@
 
 None
 
-## 验收标准（Acceptance Criteria）
+## Verification
+
+- VER-INPUT-QUICK-TAP covers: REQ-INPUT-QUICK-TAP. Given 任意五向键仅在一次采样中为按下，When 随后释放并稳定超过去抖窗口，Then 最终恰好产生一次短按事件；支持双击的键仍等待双击窗口，长按不得回补短按。
 
 - Given `Key Test` 模式，When 任意物理方向键或中键在真机上触发短按 / 双击 / 长按，Then 屏幕会点亮正确的逻辑方向，并显示匹配的 raw/logical/gesture 诊断信息。
 - Given `Key Test` 模式，When 单击一次，Then 不会被误判成双击；When 长按一次，Then 只发出一次长按事件；When 换键测试，Then 不会串扰前一个键的 pending click。
