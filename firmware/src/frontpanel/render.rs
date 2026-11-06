@@ -1722,8 +1722,8 @@ fn draw_device_identity_info(
         .device_id
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
-    draw_text_info(canvas, "ID", 12, 34, theme.muted);
-    draw_info_value_info(canvas, id, 26, 34, 16, theme.text);
+    draw_text_info(canvas, "ID", 12, 31, theme.muted);
+    draw_info_value_info(canvas, id, 26, 31, 16, theme.text);
     draw_info_value_info(
         canvas,
         if d.board == "esp32-s3" {
@@ -1732,7 +1732,7 @@ fn draw_device_identity_info(
             &d.board
         },
         136,
-        34,
+        31,
         4,
         theme.muted,
     );
@@ -1757,12 +1757,12 @@ fn draw_device_calibration_info(
     draw_text_info(canvas, "VIN", 84, 28, theme.muted);
     draw_info_value_info(canvas, d.vin, 103, 28, 8, theme.text);
     let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
-    draw_text_info(canvas, "CFG", 12, 39, theme.muted);
+    draw_text_info(canvas, "CFG", 12, 36, theme.muted);
     draw_info_value_info(
         canvas,
         d.config,
         31,
-        37,
+        36,
         8,
         if d.config == "ERROR" {
             theme.warning
@@ -1770,7 +1770,7 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    draw_info_value_info(canvas, model, 84, 37, 11, theme.muted);
+    draw_info_value_info(canvas, model, 84, 36, 11, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1782,15 +1782,15 @@ fn draw_device_runtime_info(
     draw_text_mid(canvas, &d.uptime(), 30, 15, theme.text);
     let mut reset = heapless::String::<40>::new();
     let _ = write!(reset, "RESET {}", d.reset);
-    draw_info_value_info(canvas, &reset, 12, 30, 23, theme.text);
+    draw_info_value_info(canvas, &reset, 12, 29, 23, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_info(canvas, &outputs, 12, 37, theme.text);
+    draw_text_info(canvas, &outputs, 12, 38, theme.text);
     draw_text_info(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
         105,
-        37,
+        38,
         theme.text,
     );
 }
