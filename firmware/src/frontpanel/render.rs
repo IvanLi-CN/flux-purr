@@ -1653,7 +1653,7 @@ fn draw_device_info(
             47,
             5,
             2,
-            if i == page {
+            if i as usize == page {
                 theme.accent
             } else {
                 theme.border
