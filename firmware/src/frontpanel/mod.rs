@@ -978,7 +978,7 @@ impl FrontPanelUiState {
                 ]),
                 FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
                     KeyGestureSet::SHORT_LONG,
-                    KeyGestureSet::NONE,
+                    KeyGestureSet::SHORT,
                     KeyGestureSet::NONE,
                     KeyGestureSet::SHORT,
                     KeyGestureSet::SHORT,
@@ -2304,6 +2304,11 @@ mod device_info_navigation_tests {
     fn device_info_navigation_cycles_without_mutating_outputs() {
         let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
         state.route = FrontPanelRoute::DeviceInfo;
+        let capabilities = state.gesture_capabilities();
+        assert_eq!(
+            capabilities.gestures_for(FrontPanelKey::Right),
+            KeyGestureSet::SHORT
+        );
         let original = state.clone();
         for expected in [
             DeviceInfoPage::Calibration,
