@@ -1671,8 +1671,8 @@ fn draw_device_info(
         DeviceInfoPage::Calibration => "CALIBRATION",
         DeviceInfoPage::Runtime => "RUNTIME",
     };
-    draw_text_info(canvas, title, 5, 2, theme.accent);
-    fill_rect(canvas, 5, 12, 150, 1, theme.border);
+    draw_text_info(canvas, title, 12, 2, theme.accent);
+    fill_rect(canvas, 12, 12, 136, 1, theme.border);
     match state.device_info_page {
         DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
         DeviceInfoPage::Calibration => draw_device_calibration_info(canvas, d, theme),
@@ -1706,14 +1706,14 @@ fn draw_device_identity_info(
         .filter(|s| !s.is_empty())
         .unwrap_or("--");
     if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
-        draw_text_mid(canvas, version, 5, 16, theme.text);
+        draw_text_mid(canvas, version, 12, 16, theme.text);
     } else {
-        draw_info_value_mid(canvas, version, 5, 16, 26, theme.text);
+        draw_info_value_mid(canvas, version, 12, 16, 24, theme.text);
     }
     draw_info_value_info(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
-        96,
+        99,
         16,
         7,
         theme.accent,
@@ -1722,8 +1722,8 @@ fn draw_device_identity_info(
         .device_id
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
-    draw_text_info(canvas, "ID", 5, 34, theme.muted);
-    draw_info_value_info(canvas, id, 19, 34, 18, theme.text);
+    draw_text_info(canvas, "ID", 12, 34, theme.muted);
+    draw_info_value_info(canvas, id, 26, 34, 16, theme.text);
     draw_info_value_info(
         canvas,
         if d.board == "esp32-s3" {
@@ -1731,12 +1731,12 @@ fn draw_device_identity_info(
         } else {
             &d.board
         },
-        143,
+        136,
         34,
         4,
         theme.muted,
     );
-    fill_rect(canvas, 5, 29, 150, 1, theme.border);
+    fill_rect(canvas, 12, 29, 136, 1, theme.border);
 }
 
 fn draw_device_calibration_info(
@@ -1744,25 +1744,25 @@ fn draw_device_calibration_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_info(canvas, "THERMAL", 5, 16, theme.muted);
+    draw_text_info(canvas, "THERMAL", 12, 16, theme.muted);
     let valid = d.thermal == "VALID";
     draw_text_mid(
         canvas,
         d.thermal,
-        63,
+        66,
         14,
         if valid { theme.success } else { theme.warning },
     );
-    draw_text_info(canvas, "RTD", 5, 28, theme.muted);
-    draw_info_value_info(canvas, d.rtd, 24, 28, 8, theme.text);
-    draw_text_info(canvas, "VIN", 82, 28, theme.muted);
-    draw_info_value_info(canvas, d.vin, 101, 28, 8, theme.text);
+    draw_text_info(canvas, "RTD", 12, 28, theme.muted);
+    draw_info_value_info(canvas, d.rtd, 31, 28, 8, theme.text);
+    draw_text_info(canvas, "VIN", 84, 28, theme.muted);
+    draw_info_value_info(canvas, d.vin, 103, 28, 8, theme.text);
     let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
-    draw_text_info(canvas, "CFG", 5, 39, theme.muted);
+    draw_text_info(canvas, "CFG", 12, 39, theme.muted);
     draw_info_value_info(
         canvas,
         d.config,
-        24,
+        31,
         37,
         8,
         if d.config == "ERROR" {
@@ -1771,9 +1771,7 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    let mut model_status = heapless::String::<32>::new();
-    let _ = write!(model_status, "MODEL {}", model);
-    draw_info_value_info(canvas, &model_status, 82, 37, 13, theme.muted);
+    draw_info_value_info(canvas, model, 84, 37, 11, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1781,18 +1779,18 @@ fn draw_device_runtime_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_info(canvas, "UP", 5, 17, theme.muted);
-    draw_text_mid(canvas, &d.uptime(), 25, 15, theme.text);
+    draw_text_info(canvas, "UP", 12, 17, theme.muted);
+    draw_text_mid(canvas, &d.uptime(), 30, 15, theme.text);
     let mut reset = heapless::String::<40>::new();
     let _ = write!(reset, "RESET {}", d.reset);
-    draw_info_value_info(canvas, &reset, 5, 30, 25, theme.text);
+    draw_info_value_info(canvas, &reset, 12, 30, 23, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_info(canvas, &outputs, 5, 37, theme.text);
+    draw_text_info(canvas, &outputs, 12, 37, theme.text);
     draw_text_info(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
-        104,
+        105,
         37,
         theme.text,
     );
