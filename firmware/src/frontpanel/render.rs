@@ -1626,98 +1626,24 @@ fn draw_device_info(
     use super::DeviceInfoPage;
     let d = &state.device_info;
     fill_rect(canvas, 4, 1, 152, 45, theme.panel);
-    let (title, page) = match state.device_info_page {
-        DeviceInfoPage::Identity => (
+    let page = state.device_info_page as usize;
+    let title = match state.device_info_page {
+        DeviceInfoPage::Identity => {
             if d.version.contains("-dev") {
                 "IDENTITY / DEV"
             } else {
                 "IDENTITY"
-            },
-            0,
-        ),
-        DeviceInfoPage::Calibration => ("CALIBRATION", 1),
-        DeviceInfoPage::Runtime => ("RUNTIME", 2),
+            }
+        }
+        DeviceInfoPage::Calibration => "CALIBRATION",
+        DeviceInfoPage::Runtime => "RUNTIME",
     };
     draw_text_small(canvas, title, 5, 2, theme.accent);
     draw_text_small(canvas, ["1/3", "2/3", "3/3"][page], 134, 2, theme.muted);
     fill_rect(canvas, 5, 12, 150, 1, theme.border);
     match state.device_info_page {
-        DeviceInfoPage::Identity => {
-            let version = d
-                .version
-                .split('-')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("--");
-            if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
-                draw_text_mid(canvas, version, 5, 16, theme.text);
-            } else {
-                draw_info_value(canvas, version, 5, 18, 26, theme.text);
-            }
-            draw_info_value(
-                canvas,
-                d.sha.get(..7).unwrap_or(&d.sha),
-                115,
-                20,
-                7,
-                theme.accent,
-            );
-            let id = d
-                .device_id
-                .strip_prefix("flux-purr-")
-                .unwrap_or(&d.device_id);
-            draw_text_small(canvas, "ID", 5, 36, theme.muted);
-            draw_info_value(canvas, id, 17, 36, 29, theme.text);
-            draw_info_value(
-                canvas,
-                if d.board == "esp32-s3" {
-                    "S3"
-                } else {
-                    &d.board
-                },
-                139,
-                36,
-                4,
-                theme.muted,
-            );
-        }
-        DeviceInfoPage::Calibration => {
-            draw_text_small(canvas, "THERMAL", 5, 17, theme.muted);
-            let valid = d.thermal == "VALID";
-            draw_text_mid(
-                canvas,
-                d.thermal,
-                61,
-                15,
-                if valid { theme.success } else { theme.warning },
-            );
-            let mut row = heapless::String::<64>::new();
-            let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
-            draw_info_value(canvas, &row, 5, 29, 37, theme.text);
-            let mut detail = heapless::String::<64>::new();
-            let _ = write!(
-                detail,
-                "CFG {} / {}",
-                d.config,
-                if valid {
-                    "NATURAL MODEL"
-                } else {
-                    "MODEL UNAVAILABLE"
-                }
-            );
-            draw_info_value(
-                canvas,
-                &detail,
-                5,
-                38,
-                37,
-                if d.config == "ERROR" {
-                    theme.warning
-                } else {
-                    theme.muted
-                },
-            );
-        }
+        DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
+        DeviceInfoPage::Calibration => draw_device_calibration_info(canvas, d, theme),
         DeviceInfoPage::Runtime => draw_device_runtime_info(canvas, d, theme),
     }
     for i in 0..3 {
@@ -1727,13 +1653,99 @@ fn draw_device_info(
             47,
             5,
             2,
-            if i as usize == page {
+            if i == page {
                 theme.accent
             } else {
                 theme.border
             },
         );
     }
+}
+
+fn draw_device_identity_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    let version = d
+        .version
+        .split('-')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("--");
+    if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
+        draw_text_mid(canvas, version, 5, 16, theme.text);
+    } else {
+        draw_info_value(canvas, version, 5, 18, 26, theme.text);
+    }
+    draw_info_value(
+        canvas,
+        d.sha.get(..7).unwrap_or(&d.sha),
+        115,
+        20,
+        7,
+        theme.accent,
+    );
+    let id = d
+        .device_id
+        .strip_prefix("flux-purr-")
+        .unwrap_or(&d.device_id);
+    draw_text_small(canvas, "ID", 5, 36, theme.muted);
+    draw_info_value(canvas, id, 17, 36, 29, theme.text);
+    draw_info_value(
+        canvas,
+        if d.board == "esp32-s3" {
+            "S3"
+        } else {
+            &d.board
+        },
+        139,
+        36,
+        4,
+        theme.muted,
+    );
+}
+
+fn draw_device_calibration_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    draw_text_small(canvas, "THERMAL", 5, 17, theme.muted);
+    let valid = d.thermal == "VALID";
+    draw_text_mid(
+        canvas,
+        d.thermal,
+        61,
+        15,
+        if valid { theme.success } else { theme.warning },
+    );
+    let mut row = heapless::String::<64>::new();
+    let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
+    draw_info_value(canvas, &row, 5, 29, 37, theme.text);
+    let mut detail = heapless::String::<64>::new();
+    let _ = write!(
+        detail,
+        "CFG {} / {}",
+        d.config,
+        if valid {
+            "NATURAL MODEL"
+        } else {
+            "MODEL UNAVAILABLE"
+        }
+    );
+    draw_info_value(
+        canvas,
+        &detail,
+        5,
+        38,
+        37,
+        if d.config == "ERROR" {
+            theme.warning
+        } else {
+            theme.muted
+        },
+    );
 }
 
 fn draw_device_runtime_info(
