@@ -1,10 +1,7 @@
 //! Host-only proposals. Diagnostic fields are fixtures; FW comes from the build.
 use flux_purr_firmware::{
     display::{DISPLAY_FRAMEBUFFER_BYTES, DisplayCanvas},
-    frontpanel::render::{
-        DashboardThemeId,
-        device_info_design_preview::{render, render_glyph_check},
-    },
+    frontpanel::render::{DashboardThemeId, device_info_design_preview::render},
 };
 use std::{env, fs, io, path::Path};
 fn main() -> io::Result<()> {
@@ -24,11 +21,6 @@ fn main() -> io::Result<()> {
             canvas.write_rgb565_le_bytes(&mut frame);
             fs::write(output.join(format!("{scene}-{theme}.bin")), frame)?;
         }
-        let mut canvas = DisplayCanvas::new();
-        render_glyph_check(&mut canvas, palette);
-        let mut frame = [0; DISPLAY_FRAMEBUFFER_BYTES];
-        canvas.write_rgb565_le_bytes(&mut frame);
-        fs::write(output.join(format!("glyph-check-{theme}.bin")), frame)?;
     }
     Ok(())
 }
