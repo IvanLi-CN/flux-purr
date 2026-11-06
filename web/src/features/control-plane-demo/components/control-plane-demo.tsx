@@ -2647,11 +2647,12 @@ export function ControlPlaneDemo({
     lanDeviceBaseUrl,
     webSerial,
   ])
+  const readWebSerialThermalPlantRun = webSerial.getThermalPlantRun
   useEffect(() => {
     if (activeView !== 'calibration' || visibleDeviceTransport === 'mock') {
       return
     }
-    if (!visibleDevice.capabilities.includes('thermal_plant_run')) {
+    if (thermalPlantRunUnsupported) {
       return
     }
     setThermalPlantRunReadStateByDevice((current) => ({
@@ -2669,7 +2670,7 @@ export function ControlPlaneDemo({
     let timer: number | null = null
     const readPage = async (afterSample: number) => {
       if (visibleDeviceIsDirectWebSerial) {
-        return webSerial.getThermalPlantRun(afterSample)
+        return readWebSerialThermalPlantRun(afterSample)
       }
       if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
         const session = loadLanDeviceSession(lanDeviceBaseUrl)
@@ -2792,14 +2793,14 @@ export function ControlPlaneDemo({
     controlClient,
     devdBaseUrl,
     lanDeviceBaseUrl,
-    visibleDevice.capabilities,
+    thermalPlantRunUnsupported,
     visibleDeviceId,
     visibleDeviceIsDirectWebSerial,
     visibleDeviceLeaseId,
     visibleDeviceNetworkState,
     visibleDeviceTransport,
     visibleRuntimeCalibration.job.status,
-    webSerial,
+    readWebSerialThermalPlantRun,
   ])
   const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
     if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })

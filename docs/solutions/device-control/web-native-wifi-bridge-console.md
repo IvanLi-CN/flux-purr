@@ -294,3 +294,7 @@ Flux Purr 已经有 Web surface 与 ESP32-S3 firmware 工作。最低风险采�
 Flux Purr 的当前 Web demo surface 由 `docs/specs/web-control-plane-demo/SPEC.md` 冻结。该 demo 只实现 mock-first 的轻量热控 bench 工具界面：低频选择一个设备，查看 Dashboard 热板运行态，在 Settings 调整 preset / fan policy，并在 Update 中执行 firmware dry-check。公开 Demo 变体使用同一 console 与确定性 fixture，并通过 Inspector 切换 scene、lease/network/artifact 故障和模拟动作；share URL 只携带这些枚举状态与稳定 device identity，不携带地址、transport target 或凭据。公开域名不连接 devd、Web Serial、direct LAN 或真实写入。
 
 后续真实 transport work 应复用 demo 中的领域语言和状态分组，但不要把本 demo 扩张成 fleet 管理后台；接口契约仍应在对应 firmware/native/Web spec 中单独冻结。
+
+## 热模型快照长期显示读取中
+
+若日志持续记录快照读取成功，而结果卡片只短暂出现后又恢复骨架屏，应检查读取 effect 的依赖引用是否随设备发现轮询变化。能力数组内容相同也可能每次反序列化都获得新引用；effect 清理会把在途请求标为 canceled，下一轮又重置 loading。使用能力支持布尔值与稳定的具体读取函数作为依赖，保留设备身份、租约和运行状态等真实生命周期边界。回归测试应让快照响应慢于设备刷新周期，并验证完整快照可见且后续发现刷新不会重新请求已完成结果。

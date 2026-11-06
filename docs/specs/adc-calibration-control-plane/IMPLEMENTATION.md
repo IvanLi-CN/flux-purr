@@ -4,6 +4,8 @@
 
 用户 ADC 校准是可选输入。缺省激活槽位为 gain=1、offset=0，用户样本保持为空；首次设置不依赖人工两点样本，完成设置不修改校准样本或槽位。
 
+快照轮询以稳定的能力支持值和 Web Serial 读取函数作为依赖，设备发现刷新不会取消慢速分页请求或遮蔽已读取结果。DEVD 浏览器回归覆盖响应慢于设备发现轮询的情形。
+
 ## Coverage
 
 - 固件 `MemoryConfig` 已改为保存 channel-centered calibration state：共享样本、`slots.a` / `slots.b` 与 `active_slot`。
