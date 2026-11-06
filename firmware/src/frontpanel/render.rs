@@ -1714,7 +1714,7 @@ fn draw_device_identity_info(
     draw_info_value_mid(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
-        108,
+        96,
         16,
         7,
         theme.accent,
