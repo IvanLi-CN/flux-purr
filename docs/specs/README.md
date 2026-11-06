@@ -57,6 +57,7 @@
 | adc-calibration-control-plane | active | `adc-calibration-control-plane/IMPLEMENTATION.md` | `adc-calibration-control-plane/SPEC.md` | - | RTD/VIN slots, raw whole-device supply boundary, and thermal-model calibration |
 | buzzer-cue-arbitration | active | `buzzer-cue-arbitration/IMPLEMENTATION.md` | `buzzer-cue-arbitration/SPEC.md` | - | Single-output priority, safety suppression, and diagnostic cues |
 | dual-fan-pcb-variants | active | `dual-fan-pcb-variants/IMPLEMENTATION.md` | `dual-fan-pcb-variants/SPEC.md` | - | 5 V and 12 V board variants with a voltage-agnostic firmware contract |
+| device-info-pages | active | `device-info-pages/IMPLEMENTATION.md` | `device-info-pages/SPEC.md` | - | 160×50 Identity, Calibration, and Runtime read-only page geometry, typography, colors, content, and acceptance |
 | eeprom-memory-config | active | `eeprom-memory-config/IMPLEMENTATION.md` | `eeprom-memory-config/SPEC.md` | - | M24C64 EEPROM-only persistence; MCU-internal configuration fallback and migration are unsupported |
 | enclosure-5p6cm-models | active | `enclosure-5p6cm-models/IMPLEMENTATION.md` | `enclosure-5p6cm-models/SPEC.md` | - | Tracked 5.6 cm enclosure model baseline |
 | flux-purr-init | archived | `flux-purr-init/IMPLEMENTATION.md` | `flux-purr-init/SPEC.md` | - | Repository bootstrap and initial toolchain decisions are historical |

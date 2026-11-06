@@ -764,20 +764,30 @@ function drawDeviceInfoScreen(
   const page = screen.page ?? 0
   const text = (value: string, x: number, y: number, color = palette.text, scale = 1) =>
     drawBitmapText(ctx, value.toUpperCase(), x, y, { color, scale, letterSpacing: 1 })
-  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 5, 1, palette.accent, 2)
-  text(`${page + 1}/3`, 135, 1, palette.muted, 2)
-  fillRect(ctx, 5, 12, 150, 1, palette.border)
+  const rightText = (value: string, right: number, y: number, color = palette.text, scale = 1) =>
+    drawBitmapText(ctx, value.toUpperCase(), right, y, {
+      color,
+      scale,
+      letterSpacing: 1,
+      align: 'right',
+    })
+  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 12, 2, palette.accent, 1)
+  fillRect(ctx, 12, 12, 136, 1, palette.border)
   if (page === 0) {
-    text(screen.firmwareVersion, 5, 16, palette.text, 2)
-    text('--', 108, 16, palette.accent, 2)
-    text(`ID ${screen.serial}`, 5, 34, palette.text, 2)
-    text('S3', 140, 34, palette.muted, 2)
+    text(screen.firmwareVersion, 12, 16, palette.text, 2)
+    rightText('--', 148, 16, palette.accent, 1)
+    text(`ID ${screen.serial}`, 12, 31, palette.text, 1)
+    rightText('S3', 148, 31, palette.muted, 1)
   } else if (page === 1) {
-    text('THERMAL', 5, 15, palette.muted, 2)
-    text('MISSING', 61, 15, palette.warning, 2)
-    text('RTD DEFAULT  VIN DEFAULT', 5, 28, palette.text, 2)
-    text('CFG UNKNOWN', 5, 38, palette.text, 2)
-    text('UNAVAILABLE', 68, 38, palette.muted, 2)
+    text('THERMAL', 12, 16, palette.muted, 1)
+    text('MISSING', 66, 14, palette.warning, 2)
+    text('RTD', 12, 28, palette.muted, 1)
+    text('DEFAULT', 31, 28, palette.text, 1)
+    text('VIN', 84, 28, palette.muted, 1)
+    text('DEFAULT', 103, 28, palette.text, 1)
+    text('CFG', 12, 37, palette.muted, 1)
+    text('UNKNOWN', 31, 37, palette.warning, 1)
+    text('UNAVAILABLE', 84, 37, palette.muted, 1)
   } else {
     const seconds = screen.uptimeSeconds ?? 0
     const hours = Math.floor(seconds / 3600)
@@ -787,11 +797,11 @@ function drawDeviceInfoScreen(
         : [hours, Math.floor(seconds / 60) % 60, seconds % 60]
             .map((v) => String(v).padStart(2, '0'))
             .join(':')
-    text('UP', 5, 15, palette.muted, 2)
-    text(time, 25, 15, palette.text, 2)
-    text('RESET UNKNOWN', 5, 28, palette.text, 2)
-    text(`HEATER ${screen.heaterPercent ?? 0}%`, 5, 38, palette.text, 2)
-    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 102, 38, palette.text, 2)
+    text('UP', 12, 17, palette.muted, 1)
+    text(time, 30, 15, palette.text, 2)
+    text('RESET UNKNOWN', 12, 29, palette.text, 1)
+    text(`HEATER ${screen.heaterPercent ?? 0}%`, 12, 37, palette.text, 1)
+    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 94, 37, palette.text, 1)
   }
   for (let i = 0; i < 3; i++)
     fillRect(ctx, 70 + i * 9, 47, 5, 2, i === page ? palette.accent : palette.border)

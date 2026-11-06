@@ -1705,15 +1705,11 @@ fn draw_device_identity_info(
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("--");
-    if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
-        draw_text_mid(canvas, version, 12, 16, theme.text);
-    } else {
-        draw_info_value_mid(canvas, version, 12, 16, 24, theme.text);
-    }
-    draw_info_value_info(
+    draw_info_value_mid(canvas, version, 12, 16, 10, theme.text);
+    draw_info_value_info_right(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
-        99,
+        148,
         16,
         7,
         theme.accent,
@@ -1724,14 +1720,14 @@ fn draw_device_identity_info(
         .unwrap_or(&d.device_id);
     draw_text_info(canvas, "ID", 12, 31, theme.muted);
     draw_info_value_info(canvas, id, 26, 31, 16, theme.text);
-    draw_info_value_info(
+    draw_info_value_info_right(
         canvas,
         if d.board == "esp32-s3" {
             "S3"
         } else {
             &d.board
         },
-        136,
+        148,
         31,
         4,
         theme.muted,
@@ -1745,11 +1741,12 @@ fn draw_device_calibration_info(
 ) {
     draw_text_info(canvas, "THERMAL", 12, 16, theme.muted);
     let valid = d.thermal == "VALID";
-    draw_text_mid(
+    draw_info_value_mid(
         canvas,
         d.thermal,
         66,
         14,
+        10,
         if valid { theme.success } else { theme.warning },
     );
     draw_text_info(canvas, "RTD", 12, 28, theme.muted);
@@ -1757,12 +1754,12 @@ fn draw_device_calibration_info(
     draw_text_info(canvas, "VIN", 84, 28, theme.muted);
     draw_info_value_info(canvas, d.vin, 103, 28, 8, theme.text);
     let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
-    draw_text_info(canvas, "CFG", 12, 36, theme.muted);
+    draw_text_info(canvas, "CFG", 12, 37, theme.muted);
     draw_info_value_info(
         canvas,
         d.config,
         31,
-        36,
+        37,
         8,
         if d.config == "ERROR" {
             theme.warning
@@ -1770,7 +1767,7 @@ fn draw_device_calibration_info(
             theme.text
         },
     );
-    draw_info_value_info(canvas, model, 84, 36, 11, theme.muted);
+    draw_info_value_info(canvas, model, 84, 37, 11, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1785,12 +1782,12 @@ fn draw_device_runtime_info(
     draw_info_value_info(canvas, &reset, 12, 29, 23, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_info(canvas, &outputs, 12, 38, theme.text);
+    draw_text_info(canvas, &outputs, 12, 37, theme.text);
     draw_text_info(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
-        105,
-        38,
+        94,
+        37,
         theme.text,
     );
 }
@@ -1839,6 +1836,30 @@ fn draw_info_value_info(
         }
     }
     draw_text_info(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_info_right(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    right: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    let width = measure_bitmap_text(&text, BitmapFont::Info, 1);
+    draw_text_info(canvas, &text, right - width, y, color);
 }
 
 #[cfg(test)]
