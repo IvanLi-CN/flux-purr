@@ -21,3 +21,12 @@ pub fn render(canvas: &mut DisplayCanvas, theme: DashboardThemeId, scene: &str) 
     };
     render_frontpanel_ui_with_theme(canvas, &state, theme, &DEFAULT_TEMPERATURE_PALETTE);
 }
+
+pub fn render_glyph_check(canvas: &mut DisplayCanvas, theme: DashboardThemeId) {
+    let palette = frontpanel_theme(theme);
+    canvas.clear(palette.background).ok();
+    fill_rect(canvas, 4, 4, 152, 42, palette.panel);
+    draw_text_mid(canvas, "0 O 0 O", 8, 10, palette.text);
+    draw_text_mid(canvas, "T T T", 8, 24, palette.accent);
+    draw_text_mid(canvas, "0123456789", 8, 37, palette.text);
+}
