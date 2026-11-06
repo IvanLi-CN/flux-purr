@@ -1711,7 +1711,7 @@ fn draw_device_identity_info(
     } else {
         draw_info_value_mid(canvas, version, 5, 16, 26, theme.text);
     }
-    draw_info_value_mid(
+    draw_info_value_info(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
         96,
@@ -1724,8 +1724,8 @@ fn draw_device_identity_info(
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
     draw_text_info(canvas, "ID", 5, 34, theme.muted);
-    draw_info_value_mid(canvas, id, 19, 34, 16, theme.text);
-    draw_info_value_mid(
+    draw_info_value_info(canvas, id, 19, 34, 18, theme.text);
+    draw_info_value_info(
         canvas,
         if d.board == "esp32-s3" {
             "S3"
@@ -1795,29 +1795,6 @@ fn draw_device_runtime_info(
     );
 }
 
-fn draw_info_value_info(
-    canvas: &mut DisplayCanvas,
-    value: &str,
-    x: i32,
-    y: i32,
-    max: usize,
-    color: Rgb565,
-) {
-    let mut text = heapless::String::<64>::new();
-    if value.is_empty() {
-        let _ = text.push_str("--");
-    } else {
-        for ch in value.chars().take(max) {
-            let _ = text.push(ch);
-        }
-        if value.chars().count() > max && max > 3 {
-            text.truncate(max - 3);
-            let _ = text.push_str("...");
-        }
-    }
-    draw_text_info(canvas, &text, x, y, color);
-}
-
 fn draw_info_value_mid(
     canvas: &mut DisplayCanvas,
     value: &str,
@@ -1839,6 +1816,29 @@ fn draw_info_value_mid(
         }
     }
     draw_text_mid(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_info(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_info(canvas, &text, x, y, color);
 }
 
 #[cfg(test)]
