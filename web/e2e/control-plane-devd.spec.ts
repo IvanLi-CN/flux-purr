@@ -5,7 +5,7 @@ import { resolve } from 'node:path'
 
 import { expect, type Page, test } from '@playwright/test'
 import { zipSync } from 'fflate'
-
+import { createDefaultThermalPlantSnapshot } from '../src/features/control-plane-demo/components/thermal-plant-run-card'
 import type {
   CalibrationChannel,
   CalibrationFit,
@@ -118,6 +118,7 @@ async function createE2eFirmwareBundle() {
 }
 
 test.describe('control plane live devd bridge', () => {
+  let thermalSnapshotDelayMs: number | null = null
   let server: http.Server
   const requests: Array<{ method: string; path: string; body: unknown }> = []
   const sseClients = new Set<http.ServerResponse>()
@@ -249,6 +250,7 @@ test.describe('control plane live devd bridge', () => {
                 'wifi_state_v2',
                 'monitor',
                 'flash',
+                ...(thermalSnapshotDelayMs !== null ? ['thermal_plant_run'] : []),
               ]),
               network: wifiNetwork,
               status: withStatusNetwork(runtimeStatus, wifiNetwork),
@@ -267,6 +269,15 @@ test.describe('control plane live devd bridge', () => {
             },
           ],
         })
+        return
+      }
+
+      if (
+        method === 'GET' &&
+        url.pathname === `/api/v1/devices/${deviceId}/calibration/thermal-plant/run`
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, thermalSnapshotDelayMs ?? 0))
+        sendJson(response, 200, createDefaultThermalPlantSnapshot())
         return
       }
 
@@ -561,6 +572,7 @@ test.describe('control plane live devd bridge', () => {
   })
 
   test.beforeEach(() => {
+    thermalSnapshotDelayMs = null
     requests.length = 0
     listDevicesCallCount = 0
     failDeviceList = false
@@ -570,6 +582,23 @@ test.describe('control plane live devd bridge', () => {
     wifiNetwork = network('connected')
     calibrationState = calibration()
     heaterCurveState = heaterCurve()
+  })
+
+  test('keeps a slow thermal snapshot visible across device capability refreshes', async ({
+    page,
+  }) => {
+    // Discovery refreshes every 2s with equal capabilities in newly decoded arrays.
+    thermalSnapshotDelayMs = 2500
+    await page.goto(`/devices/${deviceId}/calibration/heater-curve?demo=false`)
+    const result = page.getByRole('article', { name: '自动热模型标定结果' })
+    await expect(result.getByText('active 有效')).toBeVisible({ timeout: 15000 })
+    const callsBefore = listDevicesCallCount
+    await expect.poll(() => listDevicesCallCount).toBeGreaterThan(callsBefore + 1)
+    await expect(result.getByText('active 有效')).toBeVisible()
+    await expect(result.getByText('正在读取设备快照 · 数据到达后显示')).toHaveCount(0)
+    expect(requests.filter((r) => r.path.endsWith('/calibration/thermal-plant/run'))).toHaveLength(
+      1
+    )
   })
 
   test('discovers live devd target and completes artifact dry-check through HTTP bridge', async ({

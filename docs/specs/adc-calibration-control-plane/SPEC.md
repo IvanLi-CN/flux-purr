@@ -61,6 +61,7 @@
 - REQ-ADC-CONTROL: USB、LAN、devd、CLI 与 Web MUST 共享下述 live 校准模式、操作和拒绝语义；硬件状态为实际输出真相源。
 - REQ-ADC-BOUNDARY: `thermal_plant_auto` MUST 使用可控制 PPS 电压及电流的 FUSB302B 和实际 APDO 能力启动，不依赖预先存在的 20V PPS 合同；MUST 先关热申请起始合同，采集带 WiFi 状态和 ADC 假设的整机供电边界，执行下述扫描、截止、冷却及原子提交规则；旧电阻及关联热模型 MUST 视为不存在。
 - REQ-ADC-SNAPSHOT: 只读运行快照 MUST 使用 v2、受限分页及独立原始边界字段，重启后恢复同一已提交结果，不得将请求值报告为实测值。
+- Web 快照读取生命周期 MUST 只随设备身份、连接授权、传输、能力支持值或运行状态等语义变化重建；内容相同但引用不同的 capabilities 数组及无关 Web Serial 控制对象更新 MUST NOT 取消在途分页读取或把已展示结果重置为“读取中”。
 
 - RTD calibration owns only the raw-ADC-to-temperature projection. Whole-device supply-boundary and thermal calibration MUST store their raw ADC observations independently. Activating another RTD calibration slot MUST trigger projection rebuild and MUST NOT clear, rewrite, or mark those raw observations stale.
 
