@@ -1706,12 +1706,12 @@ fn draw_device_identity_info(
         .next()
         .filter(|s| !s.is_empty())
         .unwrap_or("--");
-    if measure_bitmap_text(version, BitmapFont::Info, 1) <= 140 {
-        draw_text_info(canvas, version, 5, 16, theme.text);
+    if measure_bitmap_text(version, BitmapFont::Mid, 1) <= 104 {
+        draw_text_mid(canvas, version, 5, 16, theme.text);
     } else {
-        draw_info_value_info(canvas, version, 5, 16, 26, theme.text);
+        draw_info_value_mid(canvas, version, 5, 16, 26, theme.text);
     }
-    draw_info_value_info(
+    draw_info_value_mid(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
         108,
@@ -1724,8 +1724,8 @@ fn draw_device_identity_info(
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
     draw_text_info(canvas, "ID", 5, 34, theme.muted);
-    draw_info_value_info(canvas, id, 19, 34, 17, theme.text);
-    draw_info_value_info(
+    draw_info_value_mid(canvas, id, 19, 34, 16, theme.text);
+    draw_info_value_mid(
         canvas,
         if d.board == "esp32-s3" {
             "S3"
@@ -1746,7 +1746,7 @@ fn draw_device_calibration_info(
 ) {
     draw_text_info(canvas, "THERMAL", 5, 17, theme.muted);
     let valid = d.thermal == "VALID";
-    draw_text_info(
+    draw_text_mid(
         canvas,
         d.thermal,
         63,
@@ -1779,7 +1779,7 @@ fn draw_device_runtime_info(
     theme: &FrontPanelTheme,
 ) {
     draw_text_info(canvas, "UP", 5, 17, theme.muted);
-    draw_text_info(canvas, &d.uptime(), 25, 15, theme.text);
+    draw_text_mid(canvas, &d.uptime(), 25, 15, theme.text);
     let mut reset = heapless::String::<40>::new();
     let _ = write!(reset, "RESET {}", d.reset);
     draw_info_value_info(canvas, &reset, 5, 30, 25, theme.text);
@@ -1816,6 +1816,29 @@ fn draw_info_value_info(
         }
     }
     draw_text_info(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_mid(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_mid(canvas, &text, x, y, color);
 }
 
 #[cfg(test)]
