@@ -1,14 +1,33 @@
 use core::fmt::Write as _;
 
 use embedded_graphics::{
+    geometry::Size,
+    image::ImageRaw,
     mono_font::{
-        MonoTextStyle,
-        ascii::{FONT_5X8, FONT_6X10, FONT_8X13},
+        DecorationDimensions, MonoFont, MonoTextStyle,
+        ascii::{FONT_6X10, FONT_8X13},
+        mapping::ASCII,
     },
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyle, Rectangle, Triangle},
     text::{Baseline, Text},
+};
+
+const FONT_INFO_5X8: MonoFont<'static> = MonoFont {
+    image: ImageRaw::new(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/frontpanel-fonts/font_5x8_info.raw"
+        )),
+        80,
+    ),
+    glyph_mapping: &ASCII,
+    character_size: Size::new(5, 8),
+    character_spacing: 0,
+    baseline: 6,
+    underline: DecorationDimensions::new(8, 1),
+    strikethrough: DecorationDimensions::new(4, 1),
 };
 
 use crate::display::DisplayCanvas;
@@ -679,7 +698,7 @@ fn draw_bitmap_text(
         }
         BitmapFont::Info | BitmapFont::ControlLabel | BitmapFont::ControlTitle => {
             let style = match font {
-                BitmapFont::Info => MonoTextStyle::new(&FONT_5X8, color),
+                BitmapFont::Info => MonoTextStyle::new(&FONT_INFO_5X8, color),
                 BitmapFont::ControlLabel => MonoTextStyle::new(&FONT_6X10, color),
                 BitmapFont::ControlTitle => MonoTextStyle::new(&FONT_8X13, color),
                 BitmapFont::Small | BitmapFont::Mid => unreachable!(),
