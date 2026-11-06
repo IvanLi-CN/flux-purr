@@ -1638,8 +1638,8 @@ fn draw_device_info(
         DeviceInfoPage::Calibration => "CALIBRATION",
         DeviceInfoPage::Runtime => "RUNTIME",
     };
-    draw_text_small(canvas, title, 5, 2, theme.accent);
-    draw_text_small(canvas, ["1/3", "2/3", "3/3"][page], 134, 2, theme.muted);
+    draw_text_mid(canvas, title, 5, 1, theme.accent);
+    draw_text_mid(canvas, ["1/3", "2/3", "3/3"][page], 135, 1, theme.muted);
     fill_rect(canvas, 5, 12, 150, 1, theme.border);
     match state.device_info_page {
         DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
@@ -1678,11 +1678,11 @@ fn draw_device_identity_info(
     } else {
         draw_info_value(canvas, version, 5, 18, 26, theme.text);
     }
-    draw_info_value(
+    draw_info_value_mid(
         canvas,
         d.sha.get(..7).unwrap_or(&d.sha),
-        115,
-        20,
+        108,
+        16,
         7,
         theme.accent,
     );
@@ -1690,17 +1690,17 @@ fn draw_device_identity_info(
         .device_id
         .strip_prefix("flux-purr-")
         .unwrap_or(&d.device_id);
-    draw_text_small(canvas, "ID", 5, 36, theme.muted);
-    draw_info_value(canvas, id, 17, 36, 29, theme.text);
-    draw_info_value(
+    draw_text_mid(canvas, "ID", 5, 34, theme.muted);
+    draw_info_value_mid(canvas, id, 20, 34, 14, theme.text);
+    draw_info_value_mid(
         canvas,
         if d.board == "esp32-s3" {
             "S3"
         } else {
             &d.board
         },
-        139,
-        36,
+        140,
+        34,
         4,
         theme.muted,
     );
@@ -1711,41 +1711,33 @@ fn draw_device_calibration_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_small(canvas, "THERMAL", 5, 17, theme.muted);
+    draw_text_mid(canvas, "THERMAL", 5, 15, theme.muted);
     let valid = d.thermal == "VALID";
     draw_text_mid(
         canvas,
         d.thermal,
-        61,
+        63,
         15,
         if valid { theme.success } else { theme.warning },
     );
     let mut row = heapless::String::<64>::new();
     let _ = write!(row, "RTD {}  VIN {}", d.rtd, d.vin);
-    draw_info_value(canvas, &row, 5, 29, 37, theme.text);
-    let mut detail = heapless::String::<64>::new();
-    let _ = write!(
-        detail,
-        "CFG {} / {}",
-        d.config,
-        if valid {
-            "NATURAL MODEL"
-        } else {
-            "MODEL UNAVAILABLE"
-        }
-    );
-    draw_info_value(
+    draw_info_value_mid(canvas, &row, 5, 28, 20, theme.text);
+    let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
+    draw_text_mid(canvas, "CFG", 5, 38, theme.muted);
+    draw_info_value_mid(
         canvas,
-        &detail,
-        5,
+        d.config,
+        29,
         38,
-        37,
+        6,
         if d.config == "ERROR" {
             theme.warning
         } else {
-            theme.muted
+            theme.text
         },
     );
+    draw_info_value_mid(canvas, model, 68, 38, 11, theme.muted);
 }
 
 fn draw_device_runtime_info(
@@ -1753,21 +1745,44 @@ fn draw_device_runtime_info(
     d: &super::device_info::DeviceInfo,
     theme: &FrontPanelTheme,
 ) {
-    draw_text_small(canvas, "UP", 5, 17, theme.muted);
+    draw_text_mid(canvas, "UP", 5, 15, theme.muted);
     draw_text_mid(canvas, &d.uptime(), 25, 15, theme.text);
     let mut reset = heapless::String::<40>::new();
     let _ = write!(reset, "RESET {}", d.reset);
-    draw_info_value(canvas, &reset, 5, 29, 37, theme.text);
+    draw_info_value_mid(canvas, &reset, 5, 28, 20, theme.text);
     let mut outputs = heapless::String::<40>::new();
     let _ = write!(outputs, "HEATER {}%", d.heater_percent);
-    draw_text_small(canvas, &outputs, 5, 40, theme.text);
-    draw_text_small(
+    draw_text_mid(canvas, &outputs, 5, 38, theme.text);
+    draw_text_mid(
         canvas,
         if d.fan_on { "FAN ON" } else { "FAN OFF" },
-        110,
-        40,
+        102,
+        38,
         theme.text,
     );
+}
+
+fn draw_info_value_mid(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_mid(canvas, &text, x, y, color);
 }
 
 fn draw_info_value(

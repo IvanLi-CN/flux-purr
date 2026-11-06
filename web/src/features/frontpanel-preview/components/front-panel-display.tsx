@@ -764,19 +764,20 @@ function drawDeviceInfoScreen(
   const page = screen.page ?? 0
   const text = (value: string, x: number, y: number, color = palette.text, scale = 1) =>
     drawBitmapText(ctx, value.toUpperCase(), x, y, { color, scale, letterSpacing: 1 })
-  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 5, 2, palette.accent)
-  text(`${page + 1}/3`, 134, 2, palette.muted)
+  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 5, 1, palette.accent, 2)
+  text(`${page + 1}/3`, 135, 1, palette.muted, 2)
   fillRect(ctx, 5, 12, 150, 1, palette.border)
   if (page === 0) {
     text(screen.firmwareVersion, 5, 16, palette.text, 2)
-    text('--', 115, 20, palette.accent)
-    text(`ID ${screen.serial}`, 5, 36)
-    text('S3', 139, 36, palette.muted)
+    text('--', 108, 16, palette.accent, 2)
+    text(`ID ${screen.serial}`, 5, 34, palette.text, 2)
+    text('S3', 140, 34, palette.muted, 2)
   } else if (page === 1) {
-    text('THERMAL', 5, 17, palette.muted)
+    text('THERMAL', 5, 15, palette.muted, 2)
     text('MISSING', 61, 15, palette.warning, 2)
-    text('RTD DEFAULT  VIN DEFAULT', 5, 29)
-    text('CFG UNKNOWN / MODEL UNAVAILABLE', 5, 38, palette.muted)
+    text('RTD DEFAULT  VIN DEFAULT', 5, 28, palette.text, 2)
+    text('CFG UNKNOWN', 5, 38, palette.text, 2)
+    text('UNAVAILABLE', 68, 38, palette.muted, 2)
   } else {
     const seconds = screen.uptimeSeconds ?? 0
     const hours = Math.floor(seconds / 3600)
@@ -786,11 +787,11 @@ function drawDeviceInfoScreen(
         : [hours, Math.floor(seconds / 60) % 60, seconds % 60]
             .map((v) => String(v).padStart(2, '0'))
             .join(':')
-    text('UP', 5, 17, palette.muted)
+    text('UP', 5, 15, palette.muted, 2)
     text(time, 25, 15, palette.text, 2)
-    text('RESET UNKNOWN', 5, 29)
-    text(`HEATER ${screen.heaterPercent ?? 0}%`, 5, 40)
-    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 110, 40)
+    text('RESET UNKNOWN', 5, 28, palette.text, 2)
+    text(`HEATER ${screen.heaterPercent ?? 0}%`, 5, 38, palette.text, 2)
+    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 102, 38, palette.text, 2)
   }
   for (let i = 0; i < 3; i++)
     fillRect(ctx, 70 + i * 9, 47, 5, 2, i === page ? palette.accent : palette.border)
