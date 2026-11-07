@@ -35,6 +35,7 @@ export interface FrontPanelRuntimeState {
   mode: FrontPanelRuntimeMode
   route: FrontPanelRoute
   elapsedMs: number
+  deviceInfoPage: number
   currentTempC: number
   currentTempDeciC: number
   targetTempC: number
@@ -355,6 +356,7 @@ export function createFrontPanelRuntimeState(
   return reconcileCoolingState({
     mode,
     route: mode === 'key-test' ? 'key-test' : 'dashboard',
+    deviceInfoPage: 0,
     elapsedMs: 0,
     currentTempC: 32,
     currentTempDeciC: 321,
@@ -501,6 +503,7 @@ export function applyFrontPanelInteraction(
       return {
         ...state,
         route: state.selectedMenuItem,
+        deviceInfoPage: 0,
       }
     }
     if (interaction.key === 'center' && interaction.gesture === 'long') {
@@ -594,6 +597,17 @@ export function applyFrontPanelInteraction(
       }
     }
     return state
+  }
+
+  if (
+    state.route === 'device-info' &&
+    interaction.gesture === 'short' &&
+    (interaction.key === 'left' || interaction.key === 'right')
+  ) {
+    return {
+      ...state,
+      deviceInfoPage: (state.deviceInfoPage + (interaction.key === 'right' ? 1 : 2)) % 3,
+    }
   }
 
   if (
@@ -691,10 +705,14 @@ export function frontPanelRuntimeToScreen(state: FrontPanelRuntimeState): FrontP
   return {
     kind: 'device-info',
     title: 'Device Info',
-    subtitle: 'Readonly · center/left back',
-    board: 'FP-S3',
-    firmwareVersion: 'v0.3.0',
-    serial: 'S3-001',
+    subtitle: 'Simulated · left/right pages · center back',
+    page: state.deviceInfoPage,
+    uptimeSeconds: Math.floor(state.elapsedMs / 1000),
+    heaterPercent: state.heaterOutputPercent,
+    fanOn: state.fanRuntimeEnabled,
+    board: 'ESP32-S3',
+    firmwareVersion: '--',
+    serial: '--',
   }
 }
 

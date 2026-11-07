@@ -515,3 +515,11 @@ PPS voltage is the actuator for the requested power during Warmup. The normal au
 - `../frontpanel-input-interaction/SPEC.md`
 - `../../hardware/heater-power-switch-design.md`
 - `../../hardware/s3-frontpanel-baseline.md`
+
+## 设备信息档案
+
+设备信息页为只读三页：身份、校准、运行。左右短按循环翻页，中键短按或长按返回菜单；上下键及左右长按无操作。每次从菜单进入从身份页开始，不自动轮播。Wi-Fi 信息页保留原有返回交互。
+
+身份页使用与控制平面 Identity 同源的固件版本、构建 SHA、设备 MAC 身份和板型。开发标识来自真实版本后缀；缺失字段显示 `--`。长版本降字号或显式省略，不能覆盖短 SHA。校准页区分热模型 VALID、MISSING、INVALID、LEGACY，RTD/VIN 的 SET、DEFAULT、INVALID，以及配置存储 OK、ERROR、UNKNOWN。只有通过自然冷却证据门禁的模型可以标为自然冷却模型。
+
+运行页显示秒级运行时间、复位原因、加热物理输出百分比与风扇实际命令；超过 99 小时使用天数格式。页面不触发配置写入、热控或风扇控制。所有页面复用项目浅深主题与原生点阵字形；host 预览调用正式固件 renderer，Web 前面板模拟器以明确的模拟值或未知值呈现，不伪装成真实硬件身份。

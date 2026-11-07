@@ -626,7 +626,7 @@ impl BootRuntimeState {
                 pending_automatic_power_request: None,
                 hold_pps_governor: HoldPpsGovernor::new(),
                 heater_controller: HeaterController::new(),
-                ui_state: FrontPanelUiState::new_startup(runtime_mode),
+                ui_state: initial_device_info_ui(runtime_mode),
                 current_rtd_fault: None,
                 latest_temp_c: 0.0,
                 latest_temp_i16: 0,
@@ -2836,4 +2836,19 @@ pub(crate) async fn initialize_runtime_state_stage(
         .take()
         .expect("memory stage completes before runtime initialization");
     initialize_runtime_state_from_ready(spawner, ready).await
+}
+
+#[cfg(target_arch = "xtensa")]
+fn initial_device_info_ui(runtime_mode: FrontPanelRuntimeMode) -> FrontPanelUiState {
+    let mut ui = FrontPanelUiState::new_startup(runtime_mode);
+    let mut identity = flux_purr_firmware::control_plane::Identity::firmware_from_mac(
+        esp_hal::efuse::Efuse::mac_address(),
+    );
+    let reason = reset_reason_log_line(esp_hal::system::reset_reason())
+        .trim()
+        .strip_prefix("reset_reason=")
+        .unwrap_or("unknown");
+    identity.reset_reason = reason.try_into().ok();
+    ui.device_info.set_identity(&identity);
+    ui
 }

@@ -5,6 +5,7 @@ use crate::fan_policy::{
     FanOutputLevel, FanPolicySource, HeatingFanGuardMode, PostHeatCoolingMode,
 };
 
+pub mod device_info;
 pub mod render;
 
 // The runtime samples the panel every 5 ms. A longer debounce interval can
@@ -766,9 +767,19 @@ pub struct KeyTestState {
     pub last_gesture: Option<KeyGesture>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceInfoPage {
+    #[default]
+    Identity,
+    Calibration,
+    Runtime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontPanelUiState {
     pub runtime_mode: FrontPanelRuntimeMode,
+    pub device_info_page: DeviceInfoPage,
+    pub device_info: device_info::DeviceInfo,
     pub route: FrontPanelRoute,
     pub dashboard_presentation: DashboardPresentationState,
     pub current_temp_c: i16,
@@ -817,6 +828,8 @@ impl FrontPanelUiState {
 
         Self {
             runtime_mode,
+            device_info_page: DeviceInfoPage::Identity,
+            device_info: device_info::DeviceInfo::default(),
             route,
             dashboard_presentation: DashboardPresentationState::Ready,
             current_temp_c: 0,
@@ -981,10 +994,10 @@ impl FrontPanelUiState {
                 ]),
                 FrontPanelRoute::DeviceInfo => FrontPanelGestureCapabilities::new([
                     KeyGestureSet::SHORT_LONG,
-                    KeyGestureSet::NONE,
-                    KeyGestureSet::NONE,
                     KeyGestureSet::SHORT,
                     KeyGestureSet::NONE,
+                    KeyGestureSet::SHORT,
+                    KeyGestureSet::SHORT,
                 ]),
             },
         }
@@ -1053,7 +1066,7 @@ impl FrontPanelUiState {
             FrontPanelRoute::PresetTemp => self.apply_preset_temp_event(event),
             FrontPanelRoute::ActiveCooling => self.apply_active_cooling_event(event),
             FrontPanelRoute::WifiInfo => self.apply_readonly_page_event(event),
-            FrontPanelRoute::DeviceInfo => self.apply_readonly_page_event(event),
+            FrontPanelRoute::DeviceInfo => self.apply_device_info_event(event),
         }
     }
 
@@ -1120,6 +1133,9 @@ impl FrontPanelUiState {
             }
             (FrontPanelKey::Center, KeyGesture::ShortPress) => {
                 self.route = self.selected_menu_item.route();
+                if self.route == FrontPanelRoute::DeviceInfo {
+                    self.device_info_page = DeviceInfoPage::Identity;
+                }
                 if self.route != FrontPanelRoute::WifiInfo {
                     self.leave_wifi_pairing();
                 }
@@ -1210,6 +1226,33 @@ impl FrontPanelUiState {
             (FrontPanelKey::Center, KeyGesture::LongPress) => {
                 self.fan_settings_draft_post_heat = self.post_heat_cooling_mode;
                 self.fan_settings_draft_guard = self.heating_fan_guard_mode;
+                self.route = FrontPanelRoute::Menu;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn apply_device_info_event(&mut self, event: KeyEvent) -> bool {
+        use DeviceInfoPage::{Calibration, Identity, Runtime};
+        match (event.key, event.gesture) {
+            (FrontPanelKey::Left, KeyGesture::ShortPress) => {
+                self.device_info_page = match self.device_info_page {
+                    Identity => Runtime,
+                    Calibration => Identity,
+                    Runtime => Calibration,
+                };
+                true
+            }
+            (FrontPanelKey::Right, KeyGesture::ShortPress) => {
+                self.device_info_page = match self.device_info_page {
+                    Identity => Calibration,
+                    Calibration => Runtime,
+                    Runtime => Identity,
+                };
+                true
+            }
+            (FrontPanelKey::Center, KeyGesture::ShortPress | KeyGesture::LongPress) => {
                 self.route = FrontPanelRoute::Menu;
                 true
             }
@@ -2337,4 +2380,64 @@ fn production_runtime_default_is_app() {
         FrontPanelRuntimeMode::compile_time_default(),
         FrontPanelRuntimeMode::App
     );
+}
+
+#[cfg(test)]
+mod device_info_navigation_tests {
+    use super::*;
+
+    #[test]
+    fn device_info_navigation_cycles_without_mutating_outputs() {
+        let mut state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+        state.route = FrontPanelRoute::DeviceInfo;
+        let capabilities = state.gesture_capabilities();
+        assert_eq!(
+            capabilities.gestures_for(FrontPanelKey::Right),
+            KeyGestureSet::SHORT
+        );
+        let original = state.clone();
+        for expected in [
+            DeviceInfoPage::Calibration,
+            DeviceInfoPage::Runtime,
+            DeviceInfoPage::Identity,
+        ] {
+            assert!(state.apply_device_info_event(KeyEvent {
+                at_ms: 0,
+                raw_key: RawFrontPanelKey::CenterBoot,
+                key: FrontPanelKey::Right,
+                gesture: KeyGesture::ShortPress
+            }));
+            assert_eq!(state.device_info_page, expected);
+        }
+        assert_eq!(state, original);
+        assert!(state.apply_device_info_event(KeyEvent {
+            at_ms: 0,
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Left,
+            gesture: KeyGesture::ShortPress
+        }));
+        assert_eq!(state.device_info_page, DeviceInfoPage::Runtime);
+        let before = state.clone();
+        for key in [
+            FrontPanelKey::Up,
+            FrontPanelKey::Down,
+            FrontPanelKey::Left,
+            FrontPanelKey::Right,
+        ] {
+            assert!(!state.apply_device_info_event(KeyEvent {
+                at_ms: 0,
+                raw_key: RawFrontPanelKey::CenterBoot,
+                key,
+                gesture: KeyGesture::LongPress
+            }));
+            assert_eq!(state, before);
+        }
+        assert!(state.apply_device_info_event(KeyEvent {
+            at_ms: 0,
+            raw_key: RawFrontPanelKey::CenterBoot,
+            key: FrontPanelKey::Center,
+            gesture: KeyGesture::ShortPress
+        }));
+        assert_eq!(state.route, FrontPanelRoute::Menu);
+    }
 }

@@ -80,3 +80,22 @@ describe('front panel fan policy preview', () => {
     expect(saved.postHeatCoolingMode).toBe('fast')
   })
 })
+
+describe('device info navigation', () => {
+  it('cycles pages without changing heater or fan and returns with center', () => {
+    let state = { ...createFrontPanelRuntimeState(), route: 'device-info' as const }
+    const original = state
+    for (const page of [1, 2, 0]) {
+      state = applyFrontPanelInteraction(state, { key: 'right', gesture: 'short' }) as typeof state
+      expect(state.deviceInfoPage).toBe(page)
+      expect(state.heaterEnabled).toBe(original.heaterEnabled)
+      expect(state.fanRuntimeEnabled).toBe(original.fanRuntimeEnabled)
+    }
+    expect(
+      applyFrontPanelInteraction(state, { key: 'left', gesture: 'short' }).deviceInfoPage
+    ).toBe(2)
+    expect(applyFrontPanelInteraction(state, { key: 'center', gesture: 'short' }).route).toBe(
+      'menu'
+    )
+  })
+})

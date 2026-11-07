@@ -760,21 +760,51 @@ function drawDeviceInfoScreen(
   palette: FrontPanelPalette
 ) {
   fillRect(ctx, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT, palette.bg)
-  drawBitmapText(ctx, `BOARD ${screen.board}`, 8, 6, {
-    color: palette.text,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `FW ${screen.firmwareVersion}`, 8, 19, {
-    color: palette.warning,
-    scale: 2,
-    letterSpacing: 1,
-  })
-  drawBitmapText(ctx, `ID ${screen.serial}`, 8, 32, {
-    color: palette.cyan,
-    scale: 2,
-    letterSpacing: 1,
-  })
+  fillRect(ctx, 4, 1, 152, 45, palette.panel)
+  const page = screen.page ?? 0
+  const text = (value: string, x: number, y: number, color = palette.text, scale = 1) =>
+    drawBitmapText(ctx, value.toUpperCase(), x, y, { color, scale, letterSpacing: 1 })
+  const rightText = (value: string, right: number, y: number, color = palette.text, scale = 1) =>
+    drawBitmapText(ctx, value.toUpperCase(), right, y, {
+      color,
+      scale,
+      letterSpacing: 1,
+      align: 'right',
+    })
+  text(['IDENTITY', 'CALIBRATION', 'RUNTIME'][page], 12, 2, palette.accent, 1)
+  fillRect(ctx, 12, 12, 136, 1, palette.border)
+  if (page === 0) {
+    text(screen.firmwareVersion, 12, 16, palette.text, 2)
+    rightText('--', 148, 16, palette.accent, 1)
+    text(`ID ${screen.serial}`, 12, 31, palette.text, 1)
+    rightText('S3', 148, 31, palette.muted, 1)
+  } else if (page === 1) {
+    text('THERMAL', 12, 16, palette.muted, 1)
+    text('MISSING', 66, 14, palette.warning, 2)
+    text('RTD', 12, 28, palette.muted, 1)
+    text('DEFAULT', 31, 28, palette.text, 1)
+    text('VIN', 84, 28, palette.muted, 1)
+    text('DEFAULT', 103, 28, palette.text, 1)
+    text('CFG', 12, 37, palette.muted, 1)
+    text('UNKNOWN', 31, 37, palette.warning, 1)
+    text('UNAVAILABLE', 84, 37, palette.muted, 1)
+  } else {
+    const seconds = screen.uptimeSeconds ?? 0
+    const hours = Math.floor(seconds / 3600)
+    const time =
+      hours > 99
+        ? `${Math.floor(hours / 24)}D ${String(hours % 24).padStart(2, '0')}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}`
+        : [hours, Math.floor(seconds / 60) % 60, seconds % 60]
+            .map((v) => String(v).padStart(2, '0'))
+            .join(':')
+    text('UP', 12, 17, palette.muted, 1)
+    text(time, 30, 15, palette.text, 2)
+    text('RESET UNKNOWN', 12, 29, palette.text, 1)
+    text(`HEATER ${screen.heaterPercent ?? 0}%`, 12, 37, palette.text, 1)
+    text(screen.fanOn ? 'FAN ON' : 'FAN OFF', 94, 37, palette.text, 1)
+  }
+  for (let i = 0; i < 3; i++)
+    fillRect(ctx, 70 + i * 9, 47, 5, 2, i === page ? palette.accent : palette.border)
 }
 
 function drawFrontPanel(

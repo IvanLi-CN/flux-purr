@@ -1,14 +1,33 @@
 use core::fmt::Write as _;
 
 use embedded_graphics::{
+    geometry::Size,
+    image::ImageRaw,
     mono_font::{
-        MonoTextStyle,
+        DecorationDimensions, MonoFont, MonoTextStyle,
         ascii::{FONT_6X10, FONT_8X13},
+        mapping::ASCII,
     },
     pixelcolor::Rgb565,
     prelude::*,
     primitives::{Circle, PrimitiveStyle, Rectangle, Triangle},
     text::{Baseline, Text},
+};
+
+const FONT_INFO_5X8: MonoFont<'static> = MonoFont {
+    image: ImageRaw::new(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/frontpanel-fonts/font_5x8_info.raw"
+        )),
+        80,
+    ),
+    glyph_mapping: &ASCII,
+    character_size: Size::new(5, 8),
+    character_spacing: 0,
+    baseline: 6,
+    underline: DecorationDimensions::new(8, 1),
+    strikethrough: DecorationDimensions::new(4, 1),
 };
 
 use crate::display::DisplayCanvas;
@@ -437,7 +456,7 @@ pub fn render_frontpanel_ui_with_theme(
         FrontPanelRoute::PresetTemp => draw_preset_temp(canvas, state, &palette, theme),
         FrontPanelRoute::ActiveCooling => draw_active_cooling(canvas, state, theme),
         FrontPanelRoute::WifiInfo => draw_wifi_info(canvas, state, theme),
-        FrontPanelRoute::DeviceInfo => draw_device_info(canvas, theme),
+        FrontPanelRoute::DeviceInfo => draw_device_info(canvas, state, theme),
     }
 }
 
@@ -533,6 +552,7 @@ enum BitmapAlign {
 enum BitmapFont {
     Small,
     Mid,
+    Info,
     ControlLabel,
     ControlTitle,
 }
@@ -596,6 +616,7 @@ impl BitmapFont {
     const fn width(self) -> i32 {
         match self {
             Self::Small | Self::Mid => BITMAP_FONT_WIDTH,
+            Self::Info => 5,
             Self::ControlLabel => 6,
             Self::ControlTitle => 8,
         }
@@ -603,7 +624,7 @@ impl BitmapFont {
 
     const fn scale(self) -> u32 {
         match self {
-            Self::Small | Self::ControlLabel | Self::ControlTitle => 1,
+            Self::Small | Self::Info | Self::ControlLabel | Self::ControlTitle => 1,
             Self::Mid => 2,
         }
     }
@@ -675,8 +696,9 @@ fn draw_bitmap_text(
                 cursor_x += (font.width() + spacing) * scale;
             }
         }
-        BitmapFont::ControlLabel | BitmapFont::ControlTitle => {
+        BitmapFont::Info | BitmapFont::ControlLabel | BitmapFont::ControlTitle => {
             let style = match font {
+                BitmapFont::Info => MonoTextStyle::new(&FONT_INFO_5X8, color),
                 BitmapFont::ControlLabel => MonoTextStyle::new(&FONT_6X10, color),
                 BitmapFont::ControlTitle => MonoTextStyle::new(&FONT_8X13, color),
                 BitmapFont::Small | BitmapFont::Mid => unreachable!(),
@@ -741,6 +763,17 @@ fn draw_text_mid(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: 
         y,
         color,
         BitmapTextStyle::new(BitmapFont::Mid, 1, BitmapAlign::Left),
+    );
+}
+
+fn draw_text_info(canvas: &mut DisplayCanvas, text: &str, x: i32, y: i32, color: Rgb565) {
+    draw_bitmap_text(
+        canvas,
+        text,
+        x,
+        y,
+        color,
+        BitmapTextStyle::new(BitmapFont::Info, 1, BitmapAlign::Left),
     );
 }
 
@@ -1618,11 +1651,215 @@ fn draw_wifi_info(canvas: &mut DisplayCanvas, state: &FrontPanelUiState, theme: 
     draw_text_mid(canvas, &pairing, 8, 32, theme.warning);
 }
 
-fn draw_device_info(canvas: &mut DisplayCanvas, theme: &FrontPanelTheme) {
+fn draw_device_info(
+    canvas: &mut DisplayCanvas,
+    state: &FrontPanelUiState,
+    theme: &FrontPanelTheme,
+) {
+    use super::DeviceInfoPage;
+    let d = &state.device_info;
     fill_rect(canvas, 4, 1, 152, 45, theme.panel);
-    draw_text_mid(canvas, "BOARD FP-S3", 8, 6, theme.text);
-    draw_text_mid(canvas, "FW V0.3.0", 8, 19, theme.warning);
-    draw_text_mid(canvas, "ID S3-001", 8, 32, theme.info);
+    let page = state.device_info_page as usize;
+    let title = match state.device_info_page {
+        DeviceInfoPage::Identity => {
+            if d.version.contains("-dev") {
+                "IDENTITY / DEV"
+            } else {
+                "IDENTITY"
+            }
+        }
+        DeviceInfoPage::Calibration => "CALIBRATION",
+        DeviceInfoPage::Runtime => "RUNTIME",
+    };
+    draw_text_info(canvas, title, 12, 2, theme.accent);
+    fill_rect(canvas, 12, 12, 136, 1, theme.border);
+    match state.device_info_page {
+        DeviceInfoPage::Identity => draw_device_identity_info(canvas, d, theme),
+        DeviceInfoPage::Calibration => draw_device_calibration_info(canvas, d, theme),
+        DeviceInfoPage::Runtime => draw_device_runtime_info(canvas, d, theme),
+    }
+    for i in 0..3 {
+        fill_rect(
+            canvas,
+            70 + i * 9,
+            47,
+            5,
+            2,
+            if i as usize == page {
+                theme.accent
+            } else {
+                theme.border
+            },
+        );
+    }
+}
+
+fn draw_device_identity_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    let version = d
+        .version
+        .split('-')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("--");
+    draw_info_value_mid(canvas, version, 12, 16, 10, theme.text);
+    draw_info_value_info_right(
+        canvas,
+        d.sha.get(..7).unwrap_or(&d.sha),
+        148,
+        16,
+        7,
+        theme.accent,
+    );
+    let id = d
+        .device_id
+        .strip_prefix("flux-purr-")
+        .unwrap_or(&d.device_id);
+    draw_text_info(canvas, "ID", 12, 31, theme.muted);
+    draw_info_value_info(canvas, id, 26, 31, 16, theme.text);
+    draw_info_value_info_right(
+        canvas,
+        if d.board == "esp32-s3" {
+            "S3"
+        } else {
+            &d.board
+        },
+        148,
+        31,
+        4,
+        theme.muted,
+    );
+}
+
+fn draw_device_calibration_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    draw_text_info(canvas, "THERMAL", 12, 16, theme.muted);
+    let valid = d.thermal == "VALID";
+    draw_info_value_mid(
+        canvas,
+        d.thermal,
+        66,
+        14,
+        10,
+        if valid { theme.success } else { theme.warning },
+    );
+    draw_text_info(canvas, "RTD", 12, 28, theme.muted);
+    draw_info_value_info(canvas, d.rtd, 31, 28, 8, theme.text);
+    draw_text_info(canvas, "VIN", 84, 28, theme.muted);
+    draw_info_value_info(canvas, d.vin, 103, 28, 8, theme.text);
+    let model = if valid { "NATURAL" } else { "UNAVAILABLE" };
+    draw_text_info(canvas, "CFG", 12, 37, theme.muted);
+    draw_info_value_info(
+        canvas,
+        d.config,
+        31,
+        37,
+        8,
+        if d.config == "ERROR" {
+            theme.warning
+        } else {
+            theme.text
+        },
+    );
+    draw_info_value_info(canvas, model, 84, 37, 11, theme.muted);
+}
+
+fn draw_device_runtime_info(
+    canvas: &mut DisplayCanvas,
+    d: &super::device_info::DeviceInfo,
+    theme: &FrontPanelTheme,
+) {
+    draw_text_info(canvas, "UP", 12, 17, theme.muted);
+    draw_text_mid(canvas, &d.uptime(), 30, 15, theme.text);
+    let mut reset = heapless::String::<40>::new();
+    let _ = write!(reset, "RESET {}", d.reset);
+    draw_info_value_info(canvas, &reset, 12, 29, 23, theme.text);
+    let mut outputs = heapless::String::<40>::new();
+    let _ = write!(outputs, "HEATER {}%", d.heater_percent);
+    draw_text_info(canvas, &outputs, 12, 37, theme.text);
+    draw_text_info(
+        canvas,
+        if d.fan_on { "FAN ON" } else { "FAN OFF" },
+        94,
+        37,
+        theme.text,
+    );
+}
+
+fn draw_info_value_mid(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_mid(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_info(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    x: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    draw_text_info(canvas, &text, x, y, color);
+}
+
+fn draw_info_value_info_right(
+    canvas: &mut DisplayCanvas,
+    value: &str,
+    right: i32,
+    y: i32,
+    max: usize,
+    color: Rgb565,
+) {
+    let mut text = heapless::String::<64>::new();
+    if value.is_empty() {
+        let _ = text.push_str("--");
+    } else {
+        for ch in value.chars().take(max) {
+            let _ = text.push(ch);
+        }
+        if value.chars().count() > max && max > 3 {
+            text.truncate(max - 3);
+            let _ = text.push_str("...");
+        }
+    }
+    let width = measure_bitmap_text(&text, BitmapFont::Info, 1);
+    draw_text_info(canvas, &text, right - width, y, color);
 }
 
 #[cfg(test)]
@@ -2148,12 +2385,19 @@ mod tests {
     fn frontpanel_fonts_keep_expected_native_sizes() {
         assert_eq!(BitmapFont::Small.width(), 3);
         assert_eq!(BitmapFont::Mid.width(), 3);
+        assert_eq!(BitmapFont::Info.width(), 5);
         assert_eq!(BitmapFont::ControlLabel.width(), 6);
         assert_eq!(BitmapFont::ControlTitle.width(), 8);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Small, 1), 11);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::Mid, 1), 22);
+        assert_eq!(measure_bitmap_text("FAN", BitmapFont::Info, 1), 17);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 0), 18);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlLabel, 1), 20);
         assert_eq!(measure_bitmap_text("FAN", BitmapFont::ControlTitle, 1), 26);
     }
 }
+
+// Host-only design proposals; not linked into the device image.
+#[cfg(not(target_arch = "xtensa"))]
+#[path = "device_info_design_preview.rs"]
+pub mod device_info_design_preview;

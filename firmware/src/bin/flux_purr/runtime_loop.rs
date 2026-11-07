@@ -3118,7 +3118,57 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
     runtime_restore_idle_power(state, elapsed_ms);
     let persistence_locked = state.ui_state.persistence_locked();
     let automatic_heater_power_available = runtime_automatic_heater_power_available(state);
-    sync_frontpanel_runtime_state(
+    let info_before = state.ui_state.device_info.clone();
+    state.ui_state.device_info.uptime_seconds = elapsed_ms / 1000;
+    state.ui_state.device_info.heater_percent = state.last_heater_duty;
+    state.ui_state.device_info.fan_on = state.fan_command.enabled;
+    state.ui_state.device_info.config =
+        if state.ui_state.persistence_fault.is_some() || state.eeprom_data_incompatible {
+            "ERROR"
+        } else if state.persistence_record_state == "valid" {
+            "OK"
+        } else {
+            "UNKNOWN"
+        };
+    fn adc_label(
+        channel: &flux_purr_firmware::memory::AdcCalibrationChannelConfig,
+    ) -> &'static str {
+        let fit = channel.active_slot_fit();
+        if !fit.gain.is_finite() || fit.gain <= 0.0 || !fit.offset_mv.is_finite() {
+            "INVALID"
+        } else if fit.gain == 1.0 && fit.offset_mv == 0.0 {
+            "DEFAULT"
+        } else {
+            "SET"
+        }
+    }
+    state.ui_state.device_info.rtd = adc_label(&state.memory_config.adc_calibration.rtd);
+    state.ui_state.device_info.vin = adc_label(&state.memory_config.adc_calibration.vin);
+    if info_before.uptime_seconds != elapsed_ms / 1000
+        && state.ui_state.device_info_page
+            == flux_purr_firmware::frontpanel::DeviceInfoPage::Calibration
+    {
+        state.ui_state.device_info.thermal =
+            if let Some(tx) = state.memory_config.thermal_plant_transient_active.as_ref() {
+                let count = usize::from(tx.sample_count).min(tx.samples.len());
+                if tx.samples[..count].iter().any(|s| {
+                    flux_purr_firmware::memory::thermal_plant_sample_is_fan_assisted_cooling(*s)
+                }) {
+                    "LEGACY"
+                } else if thermal_plant_heat_response(&state.memory_config).is_some() {
+                    "VALID"
+                } else {
+                    "INVALID"
+                }
+            } else if state.memory_config.thermal_plant_active.is_some() {
+                "LEGACY"
+            } else {
+                "MISSING"
+            };
+    }
+    let info_changed = state.ui_state.device_info != info_before;
+
+    let ui_changed = sync_frontpanel_runtime_state(
         &mut state.ui_state,
         fan_decision,
         next_heater_lock_reason_with_automatic_power(
@@ -3134,7 +3184,8 @@ pub(crate) fn runtime_update_fan_and_ui(state: &mut RuntimeLoopState, elapsed_ms
             automatic_heater_power_available,
         ),
         elapsed_ms,
-    )
+    );
+    ui_changed || info_changed
 }
 
 #[cfg(target_arch = "xtensa")]
