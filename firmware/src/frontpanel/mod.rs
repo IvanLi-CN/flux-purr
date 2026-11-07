@@ -8,7 +8,9 @@ use crate::fan_policy::{
 pub mod device_info;
 pub mod render;
 
-pub const FRONTPANEL_DEBOUNCE_MS: u64 = 20;
+// The runtime samples the panel every 5 ms. A longer debounce interval can
+// discard a legitimate quick tap before the stable press edge is observed.
+pub const FRONTPANEL_DEBOUNCE_MS: u64 = 5;
 pub const FRONTPANEL_LONG_PRESS_MS: u64 = 500;
 pub const FRONTPANEL_DOUBLE_CLICK_MS: u64 = 250;
 pub const FRONTPANEL_REPEAT_INITIAL_INTERVAL_MS: u64 = 120;
@@ -423,9 +425,6 @@ fn update_raw_tracker(tracker: &mut KeyTracker, pressed: bool, now_ms: u64) {
     if pressed {
         tracker.press_started_ms = Some(now_ms);
         tracker.long_fired = false;
-    } else if !tracker.stable_pressed {
-        tracker.press_started_ms = None;
-        tracker.long_fired = false;
     }
 }
 
@@ -466,6 +465,23 @@ fn update_stable_tracker(
     gestures: KeyGestureSet,
     result: &mut FrontPanelSampleResult,
 ) {
+    if !tracker.raw_pressed
+        && !tracker.stable_pressed
+        && tracker.press_started_ms.is_some()
+        && now_ms.saturating_sub(tracker.last_raw_change_ms) >= timings.debounce_ms
+    {
+        tracker.press_started_ms.take();
+        emit_release_gesture(
+            tracker,
+            now_ms,
+            timings,
+            raw_key,
+            logical_key,
+            gestures,
+            result,
+        );
+        return;
+    }
     if tracker.raw_pressed == tracker.stable_pressed
         || now_ms.saturating_sub(tracker.last_raw_change_ms) < timings.debounce_ms
     {
@@ -1534,6 +1550,76 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].key, FrontPanelKey::Up);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+    }
+
+    #[test]
+    fn quick_tap_shorter_than_legacy_debounce_survives_sampling() {
+        let mut controller = FrontPanelInputController::default();
+        let capabilities =
+            FrontPanelUiState::new(FrontPanelRuntimeMode::App).gesture_capabilities();
+        let events = collect_events_with_capabilities(
+            &mut controller,
+            capabilities,
+            &[
+                (0, raw_state(&[])),
+                (5, raw_state(&[RawFrontPanelKey::Up])),
+                (10, raw_state(&[])),
+                (15, raw_state(&[])),
+            ],
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].key, FrontPanelKey::Up);
+        assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+    }
+
+    #[test]
+    fn single_sample_taps_survive_for_every_key_and_debounce_window() {
+        for debounce_ms in [5, 20] {
+            for raw_key in RawFrontPanelKey::ALL {
+                let mut controller = FrontPanelInputController::new(
+                    FrontPanelKeyMap::default(),
+                    FrontPanelInputTimings {
+                        debounce_ms,
+                        ..FrontPanelInputTimings::default()
+                    },
+                );
+                let events = collect_events(
+                    &mut controller,
+                    &[
+                        (0, raw_state(&[])),
+                        (5, raw_state(&[raw_key])),
+                        (10, raw_state(&[])),
+                        (30, raw_state(&[])),
+                        (300, raw_state(&[])),
+                        (600, raw_state(&[])),
+                    ],
+                );
+                assert_eq!(events.len(), 1, "{raw_key:?}, debounce={debounce_ms}");
+                assert_eq!(events[0].raw_key, raw_key);
+                assert_eq!(events[0].gesture, KeyGesture::ShortPress);
+            }
+        }
+    }
+
+    #[test]
+    fn single_sample_tap_release_bounce_emits_only_once() {
+        let mut controller = FrontPanelInputController::default();
+        let events = collect_events(
+            &mut controller,
+            &[
+                (0, raw_state(&[])),
+                (5, raw_state(&[RawFrontPanelKey::Up])),
+                (6, raw_state(&[])),
+                (7, raw_state(&[RawFrontPanelKey::Up])),
+                (8, raw_state(&[])),
+                (13, raw_state(&[])),
+                (300, raw_state(&[])),
+                (600, raw_state(&[])),
+            ],
+        );
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].gesture, KeyGesture::ShortPress);
     }
 
