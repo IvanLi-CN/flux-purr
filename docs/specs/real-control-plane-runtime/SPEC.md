@@ -52,6 +52,10 @@
 
 ## Requirements
 
+### REQ-RCP-LOCAL-VISUAL-BOUNDARY
+
+- 顶部设备栏与加热曲线标定右下角操作区的视觉整理 MUST 遵守[局部视觉需求](./WEB-MARKED-REGIONS-REQUIREMENTS.md)，保留工业拟物主题，仅改变两个标记区域内部；框外元素的位置、尺寸、间距、样式与布局 MUST 保持不变。
+
 ### REQ-RCP-TRANSPORT
 
 ### MUST
@@ -258,6 +262,12 @@
 - HTML 的目标卡、指标、候选详情和默认主图须指向同一 adopted trial，显示 trial 序号/总数；其余 trial 可切换，温度、逻辑请求/实际 PWM、VIN/PPS 电压和 PPS 合同电流图同步切换并使用独立量纲。报告显示 warmup/approach/hold、稳定窗口建立时间、full-speed-to-stable、过冲、hold p2p 与 `60s` 确认；cooldown 只留原始审计。Mock 示例必须只替换数据，并通过同一正式生成命令与渲染代码。
 
 ## Verification
+
+### VER-RCP-LOCAL-VISUAL-BOUNDARY
+
+- covers: `REQ-RCP-LOCAL-VISUAL-BOUNDARY`
+- 在相同视口、相同状态下比较调整前后，框内层级和操作排布清晰；框外标题、导航、图表、采样表与日志几何边界及视觉样式不变；既有控件行为和安全限制保持不变。
+
 
 ### VER-RCP-TRANSPORT
 

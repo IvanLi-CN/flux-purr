@@ -1677,12 +1677,8 @@
 .thermal-plant-run-card__footer {
   display: grid;
   align-items: stretch;
+  justify-content: stretch;
   gap: 0.56rem;
-  border-radius: 12px;
-  background: var(--industrial-bg);
-  box-shadow:
-    inset 3px 3px 7px color-mix(in oklch, var(--industrial-shadow) 50%, transparent),
-    inset -3px -3px 7px color-mix(in oklch, var(--industrial-light) 80%, transparent);
   padding: 0.58rem 0.62rem 0.48rem;
 }
 
@@ -3587,11 +3583,8 @@
     flex-wrap: wrap;
     gap: 0.75rem;
     align-items: end;
-    border-radius: 18px;
-    background: var(--industrial-bg);
-    box-shadow:
-      inset 4px 4px 8px var(--industrial-shadow),
-      inset -4px -4px 8px var(--industrial-light);
+    background: transparent;
+    box-shadow: none;
     padding: 1rem;
   }
 
