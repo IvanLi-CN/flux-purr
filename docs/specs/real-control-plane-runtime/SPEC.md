@@ -338,6 +338,12 @@
 
 ## Visual Evidence
 
+顶部设备栏与标定操作区的局部视觉边界见[局部视觉需求](./WEB-MARKED-REGIONS-REQUIREMENTS.md)。
+
+![顶部设备栏](./assets/marked-regions-toolbar.png)
+
+![标定操作区与周边布局](./assets/marked-regions-calibration.png)
+
 - 证据来源：Web app runtime 与 mock-only Storybook component。
 - PR: none
 - `assets/bridge-usb-identity-progress.png`：mock-only Storybook `App/ControlPlaneDemo/Live / Bridge USB connection progress`。每个 DEVD USB 候选行右侧提供独立“连接”按钮；触发后模态框锁定候选操作，并先读取固件身份、API 版本、USB 协议版本与必要 capability，未完成核验前不会注册或选择控制目标。`source_type=storybook_canvas`，`target_program=mock-only`，`capture_scope=browser-viewport`，`requested_viewport=1600x1000`，`viewport_strategy=storybook-viewport`，`margin_policy=trim_only`，`evidence_surface=page`，`state=bridge-usb-identity-verification-in-progress`，`evidence_note=per-candidate-connect-enters-identity-first-modal-before-target-registration`，`sensitive_exclusion=fixture-only-non-executable-device-location-no-live-hardware`，`story_id_or_title=App/ControlPlaneDemo/Live / Bridge USB connection progress`，`trim_result=viewport-capture-retained`，`submission_gate=owner-approved`。
