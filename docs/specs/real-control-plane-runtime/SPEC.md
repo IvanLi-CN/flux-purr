@@ -52,6 +52,10 @@
 
 ## Requirements
 
+### REQ-RCP-LOCAL-VISUAL-BOUNDARY
+
+- 顶部设备栏与加热曲线标定右下角操作区的视觉整理 MUST 遵守[局部视觉需求](./WEB-MARKED-REGIONS-REQUIREMENTS.md)，保留工业拟物主题，仅改变两个标记区域内部；框外元素的位置、尺寸、间距、样式与布局 MUST 保持不变。
+
 ### REQ-RCP-TRANSPORT
 
 ### MUST
@@ -259,6 +263,12 @@
 
 ## Verification
 
+### VER-RCP-LOCAL-VISUAL-BOUNDARY
+
+- covers: `REQ-RCP-LOCAL-VISUAL-BOUNDARY`
+- 在相同视口、相同状态下比较调整前后，框内层级和操作排布清晰；框外标题、导航、图表、采样表与日志几何边界及视觉样式不变；既有控件行为和安全限制保持不变。
+
+
 ### VER-RCP-TRANSPORT
 
 - covers: `REQ-RCP-TRANSPORT`
@@ -327,6 +337,12 @@
 - Storybook 必须为 LAN pairing 提供连接后 required code dialog、免配对码、pairing unavailable 的基础只读、PNA/transport failure、无效或锁定 pairing code、lease unavailable、恢复已保存设备与 mobile layout 的稳定故事和 play 覆盖；所有 token/code fixture 必须为测试值且不得进入视觉证据之外的日志。
 
 ## Visual Evidence
+
+顶部设备栏与标定操作区的局部视觉边界见[局部视觉需求](./WEB-MARKED-REGIONS-REQUIREMENTS.md)。
+
+![顶部设备栏](./assets/marked-regions-toolbar.png)
+
+![标定操作区与周边布局](./assets/marked-regions-calibration.png)
 
 - 证据来源：Web app runtime 与 mock-only Storybook component。
 - PR: none

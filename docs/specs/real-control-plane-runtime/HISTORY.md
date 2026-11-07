@@ -299,3 +299,7 @@ an 8192-byte private EEPROM archive. Candidate manifests, failed controls,
 normal-write results and final acceptance runs are retained under
 `target/usb-host-recovery-20261006/`; acceptance is bound to the candidate card,
 not inferred from these earlier observations.
+
+## 局部视觉边界
+
+- 顶部设备栏与标定操作区仅整理标记区域内部的层级和排布，保留外部布局占位；截图由主人确认。实现提交为 `4505d54b`，不改变设备操作流程。
