@@ -76,6 +76,7 @@ test.describe('thermal plant result layout', () => {
           borderRadius: styles.borderRadius,
           boxShadow: styles.boxShadow,
           padding: styles.padding,
+          backgroundColor: styles.backgroundColor,
         }
       }
       return {
@@ -95,11 +96,36 @@ test.describe('thermal plant result layout', () => {
       surfaceStyles.boundary,
       surfaceStyles.trace,
       surfaceStyles.table,
-      surfaceStyles.footer,
     ]) {
       expect(section.borderRadius).toBe('12px')
       expect(section.boxShadow).not.toBe('none')
     }
+    expect(surfaceStyles.footer.borderRadius).toBe('0px')
+    expect(surfaceStyles.footer.boxShadow).toBe('none')
+    expect(surfaceStyles.footer.backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    const footerCommand = await resultCard
+      .locator('.thermal-plant-run-card__footer')
+      .evaluate((footer) => {
+        const command = footer.querySelector('button')
+        if (!command) throw new Error('Calibration command is missing')
+        const styles = getComputedStyle(footer)
+        const frame = footer.getBoundingClientRect()
+        const button = command.getBoundingClientRect()
+        return {
+          leftInset: button.left - frame.left,
+          rightInset: frame.right - button.right,
+          paddingLeft: Number.parseFloat(styles.paddingLeft),
+          paddingRight: Number.parseFloat(styles.paddingRight),
+        }
+      })
+    expect(Math.abs(footerCommand.leftInset - footerCommand.paddingLeft)).toBeLessThan(1)
+    expect(Math.abs(footerCommand.rightInset - footerCommand.paddingRight)).toBeLessThan(1)
+    const toolbarStyles = await page.locator('.industrial-status-strip').evaluate((toolbar) => {
+      const styles = getComputedStyle(toolbar)
+      return { backgroundColor: styles.backgroundColor, boxShadow: styles.boxShadow }
+    })
+    expect(toolbarStyles.backgroundColor).toBe('rgba(0, 0, 0, 0)')
+    expect(toolbarStyles.boxShadow).toBe('none')
 
     await page.setViewportSize({ width: 1440, height: 850 })
     const shortHeightLayout = await resultCard.evaluate((element) => {
