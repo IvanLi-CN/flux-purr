@@ -384,6 +384,18 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
       expect(canvas.queryByRole('button', { name: '导入预览' })).toBeNull()
       expect(canvas.queryByRole('button', { name: '保存曲线' })).toBeNull()
+      const tabsList = canvasElement.querySelector('.industrial-calibration-tabs__list')
+      const runStatus = canvasElement.querySelector('.industrial-calibration-tabs__thermal-status')
+      expect(tabsList).not.toBeNull()
+      expect(runStatus).not.toBeNull()
+      if (tabsList && runStatus) {
+        const tabsRect = tabsList.getBoundingClientRect()
+        const statusRect = runStatus.getBoundingClientRect()
+        expect(
+          Math.abs(tabsRect.top + tabsRect.height / 2 - (statusRect.top + statusRect.height / 2))
+        ).toBeLessThan(2)
+        expect(statusRect.left).toBeGreaterThanOrEqual(tabsRect.right)
+      }
       const boundaryTable = await canvas.findByRole('table', {
         name: '供电边界采样',
       })

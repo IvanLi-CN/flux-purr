@@ -103,6 +103,30 @@ export function thermalPlantRunCardPresentation(
   }
 }
 
+export function ThermalPlantRunCardStatus({
+  presentation,
+  className,
+}: {
+  presentation: ReturnType<typeof thermalPlantRunCardPresentation>
+  className?: string
+}) {
+  return (
+    <output
+      className={[
+        'thermal-plant-run-card__status',
+        `thermal-plant-run-card__status--${presentation.status}`,
+        className,
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      aria-label="自动校准状态"
+    >
+      <span aria-hidden="true" />
+      {presentation.statusText}
+    </output>
+  )
+}
+
 export function ThermalPlantRunCard({
   snapshot,
   disabled,
@@ -110,6 +134,7 @@ export function ThermalPlantRunCard({
   loading = false,
   readError,
   runtimeRunning,
+  statusPlacement = 'card',
   onStartStop,
 }: {
   snapshot: ThermalPlantRunSnapshot
@@ -118,6 +143,7 @@ export function ThermalPlantRunCard({
   loading?: boolean
   readError?: string
   runtimeRunning?: boolean
+  statusPlacement?: 'card' | 'tabs'
   onStartStop: () => void
 }) {
   const attempt = snapshot.attempt
@@ -141,28 +167,33 @@ export function ThermalPlantRunCard({
     !attempt &&
     trace.length === 0 &&
     boundaryPoints.length === 0
+  const hasHeaderSummary = Boolean(readError || hasNoRunData)
+  const showCardHeader = !loading && (statusPlacement === 'card' || hasHeaderSummary)
 
   return (
     <article
-      className={`thermal-plant-run-card${loading ? ' thermal-plant-run-card--loading' : ''}`}
+      className={[
+        'thermal-plant-run-card',
+        loading ? 'thermal-plant-run-card--loading' : '',
+        statusPlacement === 'tabs' && !showCardHeader ? 'thermal-plant-run-card--headerless' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
       aria-busy={loading}
       aria-label="自动热模型标定结果"
     >
-      {!loading ? (
+      {showCardHeader ? (
         <header
-          className={`thermal-plant-run-card__header${readError || hasNoRunData ? ' thermal-plant-run-card__header--with-summary' : ''}`}
+          className={`thermal-plant-run-card__header${hasHeaderSummary ? ' thermal-plant-run-card__header--with-summary' : ''}`}
         >
           {readError ? (
             <StateSummary icon={Activity} title="快照读取失败" detail="请检查设备连接后重试" />
           ) : hasNoRunData ? (
             <StateSummary icon={Activity} title="设备已就绪" detail="尚未开始自动标定" />
           ) : null}
-          <output
-            className={`thermal-plant-run-card__status thermal-plant-run-card__status--${presentation.status}`}
-          >
-            <span aria-hidden="true" />
-            {presentation.statusText}
-          </output>
+          {statusPlacement === 'card' ? (
+            <ThermalPlantRunCardStatus presentation={presentation} />
+          ) : null}
         </header>
       ) : null}
 

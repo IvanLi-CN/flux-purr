@@ -784,6 +784,14 @@
   grid-template-rows: auto auto auto minmax(0, 1fr);
 }
 
+.thermal-plant-run-card--headerless {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.thermal-plant-run-card--headerless:has(.thermal-plant-run-card__compatibility) {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
 .thermal-plant-run-card__header,
 .thermal-plant-run-card__footer,
 .thermal-plant-run-card__section-heading,
@@ -6754,7 +6762,7 @@
   .industrial-calibration-tabs__list-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: stretch;
+    align-items: center;
     gap: 0.6rem;
     min-width: 0;
   }
@@ -6775,12 +6783,11 @@
 
   .industrial-calibration-tabs__status {
     display: inline-flex;
-    align-items: flex-end;
-    align-self: stretch;
+    align-items: center;
+    align-self: center;
     gap: 0.34rem;
     min-width: 4rem;
-    border-bottom: 1px solid rgba(80, 67, 58, 0.18);
-    padding: 0 0.25rem 0.7rem;
+    padding: 0 0.25rem;
     color: var(--industrial-accent);
     font-family: "JetBrains Mono", monospace;
     font-size: 0.62rem;
@@ -8608,11 +8615,13 @@
       padding-left: 0;
     }
 
-    .industrial-calibration-tabs__list {
+    .industrial-calibration-tabs .industrial-calibration-tabs__list {
       display: grid;
       grid-template-columns: minmax(0, 1fr);
       justify-items: stretch;
       gap: 0.28rem;
+      min-width: 0;
+      width: 100%;
     }
 
     .industrial-calibration-tabs__list-row {
@@ -8621,10 +8630,17 @@
     }
 
     .industrial-calibration-tabs__status {
-      align-items: flex-start;
+      align-items: center;
+      align-self: start;
       border-bottom: 0;
       min-width: auto;
-      padding: 0.62rem 0.2rem 0 0;
+      padding: 0.2rem 0.2rem 0 0;
+    }
+
+    .industrial-calibration-tabs__thermal-status {
+      align-self: start;
+      margin-top: 0.2rem;
+      margin-right: 0;
     }
 
     .industrial-calibration-tab {
@@ -9077,6 +9093,11 @@
   font-weight: 850;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.industrial-calibration-tabs__thermal-status {
+  align-self: center;
+  margin-right: 0.15rem;
 }
 
 .industrial-wifi-settings__form {
@@ -11554,5 +11575,13 @@
   }
   .thermal-plant-run-card__trace-panel {
     grid-template-rows: auto minmax(14rem, 1fr) auto;
+  }
+}
+
+@media (max-width: 760px) {
+  .industrial-calibration-tabs .industrial-calibration-tabs__list {
+    display: grid;
+    min-width: 0;
+    width: 100%;
   }
 }

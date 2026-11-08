@@ -193,6 +193,8 @@ import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
+  ThermalPlantRunCardStatus,
+  thermalPlantRunCardPresentation,
 } from './thermal-plant-run-card'
 import { WifiNetworkSettings, type WifiNetworkSettingsDraft } from './wifi-network-settings'
 
@@ -8096,7 +8098,17 @@ function CalibrationView({
                 />
                 <span>读取中</span>
               </output>
-            ) : null}
+            ) : (
+              <ThermalPlantRunCardStatus
+                presentation={thermalPlantRunCardPresentation(
+                  thermalPlantRun,
+                  thermalPlantRunUnsupported,
+                  thermalPlantRunLoading,
+                  thermalPlantRunReadError
+                )}
+                className="industrial-calibration-tabs__thermal-status"
+              />
+            )}
           </div>
 
           <TabsContent value="heater_curve" className="industrial-calibration-tabs__content">
@@ -8107,6 +8119,7 @@ function CalibrationView({
                   unsupported={thermalPlantRunUnsupported}
                   loading={thermalPlantRunLoading}
                   readError={thermalPlantRunReadError}
+                  statusPlacement="tabs"
                   runtimeRunning={jobRunning && currentJob.kind === 'thermal_plant_auto'}
                   disabled={
                     controlsBlocked ||
