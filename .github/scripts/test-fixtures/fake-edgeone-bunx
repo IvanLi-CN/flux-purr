@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${EDGEONE_TEST_COUNT_FILE:?EDGEONE_TEST_COUNT_FILE is required}"
+count=0
+if [[ -s "${EDGEONE_TEST_COUNT_FILE}" ]]; then
+  count="$(<"${EDGEONE_TEST_COUNT_FILE}")"
+fi
+count=$((count + 1))
+printf '%s\n' "${count}" > "${EDGEONE_TEST_COUNT_FILE}"
+
+fail_until="${EDGEONE_TEST_FAIL_UNTIL:-0}"
+if (( count <= fail_until )); then
+  echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+  exit 7
+fi
+
+echo "[cli] Deploy Success"
