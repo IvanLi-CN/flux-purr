@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useState } from 'react'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
+import defaultSupplyBoundaryJson from '../fixtures/supply-observations.json'
 import {
   chartValueAtPointer,
   clampChartValue,
@@ -393,32 +394,11 @@ export function createDefaultThermalPlantSnapshot(): ThermalPlantRunSnapshot {
 }
 
 function createDefaultSupplyBoundary(): SupplyBoundary {
-  const points = [
-    [0, 1050, 1050, 5000, 5002, 3000, 5000, 5000, 0],
-    [30_000, 1090, 1090, 9000, 9004, 3000, 9000, 9000, 0],
-    [60_000, 1140, 1140, 13000, 13008, 3000, 13000, 13000, 0],
-    [90_000, 1210, 1210, 17000, 17012, 3000, 17000, 17000, 0],
-    [120_000, 1290, 1290, 21000, 21018, 3000, 21000, 21000, 1],
-  ] as SupplyBoundary['points']
+  const fixture = defaultSupplyBoundaryJson as SupplyBoundary
   return {
-    formatVersion: 6,
-    adc: {
-      dividerSupplyMv: 3328,
-      referenceMv: 1100,
-      referenceCode: 2048,
-      initCode: 2048,
-      efuseVersion: 2,
-      attenuationDb: 6,
-    },
-    wifiStarted: false,
-    cutoffReached: true,
-    sourceMinMv: 5000,
-    sourceMaxMv: 21000,
-    sourceMaxMa: 3000,
-    sourcePowerLimitMw: 63_000,
-    advertisedMinMv: 5000,
-    advertisedMaxMv: 21000,
-    points,
+    ...fixture,
+    adc: { ...fixture.adc },
+    points: fixture.points.map((point) => [...point] as SupplyBoundary['points'][number]),
   }
 }
 
