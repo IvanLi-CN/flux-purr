@@ -591,10 +591,11 @@ test.describe('control plane live devd bridge', () => {
     thermalSnapshotDelayMs = 2500
     await page.goto(`/devices/${deviceId}/calibration/heater-curve?demo=false`)
     const result = page.getByRole('article', { name: '自动热模型标定结果' })
-    await expect(result.getByText('active 有效')).toBeVisible({ timeout: 15000 })
+    const status = page.getByLabel('自动校准状态')
+    await expect(status.getByText('active 有效')).toBeVisible({ timeout: 15000 })
     const callsBefore = listDevicesCallCount
     await expect.poll(() => listDevicesCallCount).toBeGreaterThan(callsBefore + 1)
-    await expect(result.getByText('active 有效')).toBeVisible()
+    await expect(status.getByText('active 有效')).toBeVisible()
     await expect(result.getByText('正在读取设备快照 · 数据到达后显示')).toHaveCount(0)
     expect(requests.filter((r) => r.path.endsWith('/calibration/thermal-plant/run'))).toHaveLength(
       1
