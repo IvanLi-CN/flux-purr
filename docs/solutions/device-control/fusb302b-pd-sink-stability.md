@@ -63,7 +63,7 @@ Clearing an override is an explicit Idle operation, not a fire-and-forget reques
 3. Exercise the focused firmware tests for queued confirmations, rejection and replacement, keepalive wraparound, stale replies, interleaved data, rediscovery, and idle restoration. Build the Xtensa image and run `scripts/check-firmware-boot-stack.sh` when changing the interrupt executor or its call chain.
 4. Follow the [PD Sink HIL procedure](../../specs/fusb302b-dual-pd-sink/HIL.md) on the intended image and an authorized exact port. With heating off, confirm boot and the firmware-specific automatic idle baseline; request supported 15 V, 17.3 V, and 20 V PPS points, hold 17.3 V for at least 60 seconds under read-only CLI load, then clear and confirm restoration. Test 20 V / 5 A only when the fixture supports it. Record `pdState`, confirmed contract kind/voltage/current, VIN, uptime, manual override, and physical heater output from independent settled samples.
 
-`pdContractCurrentMa` and `pdContractPowerMw` are negotiated limits, not measured load. Stable CLI samples show the observable result within their sampling windows; they do not measure every PD packet, prove a worst-case service interval, or establish front-panel interaction between samples. A complete HIL result records those observations separately.
+`pdContractCurrentMa` is a negotiated current limit and `pdSourceCapabilityPowerMw` is the maximum power advertised by one current source PDO/APDO; neither is measured load. Stable CLI samples show the observable result within their sampling windows; they do not measure every PD packet, prove a worst-case service interval, or establish front-panel interaction between samples. A complete HIL result records those observations separately.
 
 ## References
 

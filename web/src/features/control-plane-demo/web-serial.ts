@@ -196,7 +196,7 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     pdController: probe.status.pdController ?? null,
     pdContractKind: probe.status.pdContractKind ?? null,
     pdContractCurrentMa: probe.status.pdContractCurrentMa ?? null,
-    pdContractPowerMw: probe.status.pdContractPowerMw ?? null,
+    pdSourceCapabilityPowerMw: probe.status.pdSourceCapabilityPowerMw ?? null,
     pdPerformanceGuaranteed: probe.status.pdPerformanceGuaranteed ?? null,
     pdDegradedReason: probe.status.pdDegradedReason ?? null,
     manualPpsEnabled: probe.status.manualPpsEnabled ?? false,

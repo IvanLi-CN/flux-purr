@@ -78,7 +78,7 @@ const calibrationScenario: ControlPlaneScenario = {
           pdController: 'ch224q',
           pdContractKind: 'pps',
           pdContractCurrentMa: 3000,
-          pdContractPowerMw: 60000,
+          pdSourceCapabilityPowerMw: 63000,
           pdPerformanceGuaranteed: true,
           pdDegradedReason: null,
           ppsCapabilityMinMv: 5000,
@@ -1777,7 +1777,7 @@ const bridgeVerifiedIdentity: Identity = {
   buildId: 'storybook-build',
   gitSha: '0123456789abcdef',
   board: 'esp32s3_frontpanel',
-  apiVersion: '2026-05-29',
+  apiVersion: '2026-11-09',
   protocolVersion: 'flux-purr.usb.v1',
   capabilities: ['identity', 'network', 'status', 'monitor'],
 }
@@ -2639,7 +2639,7 @@ const identity = {
   buildId: 'story-build',
   gitSha: 'story',
   board: 'esp32-s3',
-  apiVersion: '2026-05-29',
+  apiVersion: '2026-11-09',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
   capabilities: [

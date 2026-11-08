@@ -518,6 +518,7 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_max_mv: Option<u16>,
     pub(crate) capability_max_ma: Option<u16>,
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
+    pub(crate) source_capability_power_mw: Option<u32>,
     pub(crate) source_power_limit_mw: Option<u32>,
     pub(crate) source_power_limit_ma: Option<u16>,
     pub(crate) error: Option<ManualPpsError>,
@@ -545,6 +546,7 @@ impl Default for ManualPpsState {
             capability_max_mv: None,
             capability_max_ma: None,
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
+            source_capability_power_mw: None,
             source_power_limit_mw: None,
             source_power_limit_ma: None,
             error: None,
@@ -1260,6 +1262,7 @@ impl ManualPpsState {
         let Some(capabilities) = capabilities else {
             return state;
         };
+        state.source_capability_power_mw = capabilities.source_capability_power_mw;
         let Some((min_mv, max_mv, max_ma)) = capabilities
             .pps_min_mv
             .zip(capabilities.pps_max_mv)

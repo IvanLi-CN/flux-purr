@@ -81,6 +81,11 @@ pub(crate) fn control_runtime_status_context(
     heater_fault_latched: Option<HeaterFaultReason>,
     attention_pending: bool,
 ) -> UsbRuntimeStatusContext {
+    let source_capability_power_mw = match context.pd_controller {
+        ControllerKind::Fusb302b => context.pd_port.snapshot().source.maximum_power_mw(),
+        ControllerKind::Ch224q => manual_pps.source_capability_power_mw,
+        ControllerKind::Unknown => None,
+    };
     UsbRuntimeStatusContext {
         elapsed_ms: context.elapsed_ms,
         pd_controller: context.pd_controller,
@@ -90,6 +95,7 @@ pub(crate) fn control_runtime_status_context(
         heater_control_timing: context.heater_control_timing,
         heater_physical_output_percent: HeaterPwmGate::applied_duty_percent(),
         manual_pps,
+        source_capability_power_mw,
         fan_command: context.fan_command,
         fan_working_power_pending: context.fan_working_power_pending,
         current_rtd_fault: context.current_rtd_fault,

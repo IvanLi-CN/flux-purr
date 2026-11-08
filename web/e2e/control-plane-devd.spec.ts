@@ -1131,7 +1131,7 @@ function identity(capabilities: string[]) {
     buildId: 'e2e-build',
     gitSha: 'e2e',
     board: 'esp32-s3',
-    apiVersion: '2026-05-29',
+    apiVersion: '2026-11-09',
     protocolVersion: 'flux-purr.usb.v1',
     hostname: 'flux-purr-e2e',
     capabilities,

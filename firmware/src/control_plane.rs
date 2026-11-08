@@ -28,7 +28,7 @@ use crate::{
     },
 };
 
-pub const CONTROL_PLANE_API_VERSION: &str = "2026-05-29";
+pub const CONTROL_PLANE_API_VERSION: &str = "2026-11-09";
 pub const USB_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
 pub const USB_FRAMING: &str = "jsonl";
 pub const DEVICE_ID_MAX_LEN: usize = 48;
@@ -296,8 +296,10 @@ pub struct ControlPlaneStatus {
     pub pd_contract_kind: String<ERROR_CODE_MAX_LEN>,
     #[serde(default)]
     pub pd_contract_current_ma: u16,
-    #[serde(default)]
-    pub pd_contract_power_mw: u32,
+    /// Maximum power advertised by one current source PDO/APDO. This is not
+    /// derived from the requested or active contract voltage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pd_source_capability_power_mw: Option<u32>,
     #[serde(default)]
     pub pd_performance_guaranteed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -410,8 +412,8 @@ pub struct ThermalStatusWire {
     pub pd_contract_kind: String<ERROR_CODE_MAX_LEN>,
     #[serde(rename = "ci")]
     pub pd_contract_current_ma: u16,
-    #[serde(rename = "cp")]
-    pub pd_contract_power_mw: u32,
+    #[serde(rename = "scp", default, skip_serializing_if = "Option::is_none")]
+    pub pd_source_capability_power_mw: Option<u32>,
     #[serde(rename = "sp", default, skip_serializing_if = "Option::is_none")]
     pub source_power_limit_mw: Option<u32>,
     #[serde(rename = "sa", default, skip_serializing_if = "Option::is_none")]
@@ -449,7 +451,7 @@ impl ThermalStatusWire {
             pd_state: status.pd_state,
             pd_contract_kind: status.pd_contract_kind.clone(),
             pd_contract_current_ma: status.pd_contract_current_ma,
-            pd_contract_power_mw: status.pd_contract_power_mw,
+            pd_source_capability_power_mw: status.pd_source_capability_power_mw,
             source_power_limit_mw: status.source_power_limit_mw,
             source_power_limit_ma: status.source_power_limit_ma,
             automatic_safe_mv: status.automatic_safe_mv,
@@ -740,7 +742,7 @@ impl ControlPlaneStatus {
                 pd_controller: default_pd_controller_wire(),
                 pd_contract_kind: default_pd_contract_kind_wire(),
                 pd_contract_current_ma: 0,
-                pd_contract_power_mw: 0,
+                pd_source_capability_power_mw: None,
                 pd_performance_guaranteed: false,
                 pd_degraded_reason: Some(default_pd_degraded_reason_wire()),
                 pd_last_protocol_fault: None,
@@ -3850,7 +3852,7 @@ mod tests {
         assert_eq!(status.pd_controller.as_str(), "unknown");
         assert_eq!(status.pd_contract_kind.as_str(), "none");
         assert_eq!(status.pd_contract_current_ma, 0);
-        assert_eq!(status.pd_contract_power_mw, 0);
+        assert_eq!(status.pd_source_capability_power_mw, None);
         assert!(!status.pd_performance_guaranteed);
         assert_eq!(
             status.pd_degraded_reason.as_deref(),
@@ -4087,12 +4089,13 @@ mod tests {
             target_temp_c: 180,
             ..MemoryConfig::default()
         };
-        let status = ControlPlaneStatus::from_device_status(
+        let mut status = ControlPlaneStatus::from_device_status(
             snapshot_at(180, 0),
             &memory,
             12,
             NetworkSummary::default(),
         );
+        status.pd_source_capability_power_mw = Some(63_000);
         let compact = ThermalStatusWire::from_control_plane_status(&status);
         let frame = UsbFrame::Response {
             request_id: string("thermal-compact"),
@@ -4105,6 +4108,8 @@ mod tests {
 
         assert!(json.contains(r#""thermalStatus":{"m":"sampling""#));
         assert!(json.contains(r#""tt":180"#));
+        assert!(json.contains(r#""scp":63000"#));
+        assert!(!json.contains(r#""cp":"#));
         assert!(json.len() < 512, "compact status is {} bytes", json.len());
         assert_eq!(parse_usb_frame(json).expect("compact status parses"), frame);
     }

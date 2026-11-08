@@ -3029,6 +3029,7 @@ fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
         },
         heater_control_timing: HeaterControlTiming::default(),
         manual_pps: ManualPpsState::default(),
+        source_capability_power_mw: None,
         calibration: CalibrationRuntimeState::default(),
         fan_command: FanHardwareCommand::disabled(),
         fan_working_power_pending: false,
@@ -4532,6 +4533,17 @@ fn runtime_status_reports_backend_request_when_manual_pps_is_disabled() {
 
     assert_eq!(status.pd_request_mv, 12_000);
     assert_eq!(status.pd_contract_mv, 12_000);
+}
+
+#[test]
+fn manual_pps_state_retains_fixed_source_capability_without_pps() {
+    let state = ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+        source_capability_power_mw: Some(30_000),
+        ..Default::default()
+    }));
+
+    assert_eq!(state.capability_min_mv, None);
+    assert_eq!(state.source_capability_power_mw, Some(30_000));
 }
 
 #[test]
@@ -17237,6 +17249,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
         UsbRuntimeStatusContext {
             pd_controller: ControllerKind::Fusb302b,
             last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(100_000),
             vin_mv: 20_000,
             ..test_usb_runtime_status_context()
         },
@@ -17245,7 +17258,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
     assert_eq!(status.pd_controller.as_str(), "fusb302b");
     assert_eq!(status.pd_contract_kind.as_str(), "fixed");
     assert_eq!(status.pd_contract_current_ma, 5_000);
-    assert_eq!(status.pd_contract_power_mw, 100_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(100_000));
     assert!(status.pd_performance_guaranteed);
     assert_eq!(status.pd_degraded_reason, None);
     assert!(!pd_contract_allows_calibration(
@@ -17274,6 +17287,36 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
         effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
         15_000
     );
+}
+
+#[test]
+fn pd_status_reports_source_capability_without_using_requested_voltage() {
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+    let observation = PdStatusObservation {
+        status_raw: 1 << 3,
+        status: Status::from_register(1 << 3),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
+    };
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let status = usb_runtime_status(
+        &ui_state,
+        &MemoryConfig::default(),
+        UsbRuntimeStatusContext {
+            pd_controller: ControllerKind::Fusb302b,
+            last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(63_000),
+            vin_mv: 20_000,
+            ..test_usb_runtime_status_context()
+        },
+    );
+
+    assert_eq!(status.pd_contract_mv, 20_000);
+    assert_eq!(status.pd_contract_current_ma, 3_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(63_000));
+    assert_ne!(status.pd_source_capability_power_mw, Some(60_000));
 }
 
 #[test]
@@ -17329,13 +17372,14 @@ fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         UsbRuntimeStatusContext {
             pd_controller: ControllerKind::Fusb302b,
             last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(105_000),
             vin_mv: 20_000,
             ..test_usb_runtime_status_context()
         },
     );
 
     assert_eq!(status.pd_contract_kind.as_str(), "pps");
-    assert_eq!(status.pd_contract_power_mw, 100_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(105_000));
     assert!(status.pd_performance_guaranteed);
     assert!(pd_contract_allows_calibration(
         ControllerKind::Fusb302b,
@@ -17597,7 +17641,7 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
 
     assert_eq!(status.pd_contract_kind.as_str(), "none");
     assert_eq!(status.pd_contract_current_ma, 0);
-    assert_eq!(status.pd_contract_power_mw, 0);
+    assert_eq!(status.pd_source_capability_power_mw, None);
     assert!(!status.pd_performance_guaranteed);
     assert_eq!(
         status.pd_degraded_reason.as_deref(),

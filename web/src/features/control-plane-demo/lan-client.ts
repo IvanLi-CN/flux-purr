@@ -130,7 +130,7 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     pdController: status.pdController ?? null,
     pdContractKind: status.pdContractKind ?? null,
     pdContractCurrentMa: status.pdContractCurrentMa ?? null,
-    pdContractPowerMw: status.pdContractPowerMw ?? null,
+    pdSourceCapabilityPowerMw: status.pdSourceCapabilityPowerMw ?? null,
     pdPerformanceGuaranteed: status.pdPerformanceGuaranteed ?? null,
     pdDegradedReason: status.pdDegradedReason ?? null,
     manualPpsEnabled: status.manualPpsEnabled ?? false,

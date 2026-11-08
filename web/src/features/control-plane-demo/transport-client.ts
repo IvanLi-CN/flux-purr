@@ -462,7 +462,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     pdController: record.status.pdController ?? null,
     pdContractKind: record.status.pdContractKind ?? null,
     pdContractCurrentMa: record.status.pdContractCurrentMa ?? null,
-    pdContractPowerMw: record.status.pdContractPowerMw ?? null,
+    pdSourceCapabilityPowerMw: record.status.pdSourceCapabilityPowerMw ?? null,
     pdPerformanceGuaranteed: record.status.pdPerformanceGuaranteed ?? null,
     pdDegradedReason: record.status.pdDegradedReason ?? null,
     manualPpsEnabled: record.status.manualPpsEnabled ?? false,

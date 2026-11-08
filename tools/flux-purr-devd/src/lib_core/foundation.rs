@@ -612,7 +612,7 @@ pub(crate) fn mock_identity(id: &str) -> Identity {
         git_sha: "unknown".to_string(),
         reset_reason: None,
         board: "esp32-s3".to_string(),
-        api_version: "2026-05-29".to_string(),
+        api_version: "2026-11-09".to_string(),
         protocol_version: "flux-purr.usb.v1".to_string(),
         hostname: id.to_string(),
         capabilities: [
@@ -696,7 +696,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pd_controller: Some("fusb302b".to_string()),
         pd_contract_kind: Some("pps".to_string()),
         pd_contract_current_ma: Some(3_000),
-        pd_contract_power_mw: Some(60_000),
+        pd_source_capability_power_mw: Some(105_000),
         pd_performance_guaranteed: Some(true),
         pd_degraded_reason: None,
         pd_last_protocol_fault: None,
@@ -791,7 +791,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         pd_controller: Some("unknown".to_string()),
         pd_contract_kind: Some("none".to_string()),
         pd_contract_current_ma: None,
-        pd_contract_power_mw: None,
+        pd_source_capability_power_mw: None,
         pd_performance_guaranteed: Some(false),
         pd_degraded_reason: Some("pd_contract_unavailable".to_string()),
         pd_last_protocol_fault: None,
@@ -843,7 +843,7 @@ pub(crate) fn native_placeholder_identity() -> Identity {
         git_sha: "unknown".to_string(),
         reset_reason: None,
         board: "unknown".to_string(),
-        api_version: "2026-05-29".to_string(),
+        api_version: "2026-11-09".to_string(),
         protocol_version: "flux-purr.usb.v1".to_string(),
         hostname: String::new(),
         capabilities: [
@@ -1147,7 +1147,7 @@ pub struct ControlPlaneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pd_contract_current_ma: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pd_contract_power_mw: Option<u32>,
+    pub pd_source_capability_power_mw: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pd_performance_guaranteed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1263,8 +1263,8 @@ pub(crate) struct ThermalStatus {
     pd_contract_kind: String,
     #[serde(rename = "ci")]
     pd_contract_current_ma: u16,
-    #[serde(rename = "cp")]
-    pd_contract_power_mw: u32,
+    #[serde(rename = "scp", default)]
+    pd_source_capability_power_mw: Option<u32>,
     #[serde(rename = "sp", default)]
     source_power_limit_mw: Option<u32>,
     #[serde(rename = "sa", default)]
@@ -1303,7 +1303,7 @@ impl ThermalStatus {
             "pdState": self.pd_state,
             "pdContractKind": self.pd_contract_kind,
             "pdContractCurrentMa": self.pd_contract_current_ma,
-            "pdContractPowerMw": self.pd_contract_power_mw,
+            "pdSourceCapabilityPowerMw": self.pd_source_capability_power_mw,
             "sourcePowerLimitMw": self.source_power_limit_mw,
             "sourcePowerLimitMa": self.source_power_limit_ma,
             "automaticSafeMv": self.automatic_safe_mv,

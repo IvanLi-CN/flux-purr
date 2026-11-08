@@ -1052,7 +1052,7 @@ const identity = {
   buildId: 'build-1',
   gitSha: 'abc',
   board: 'esp32-s3',
-  apiVersion: '2026-05-29',
+  apiVersion: '2026-11-09',
   protocolVersion: 'flux-purr.usb.v1',
   hostname: 'flux-purr-s3-001',
   capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],

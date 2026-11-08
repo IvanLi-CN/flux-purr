@@ -487,6 +487,7 @@ pub(crate) fn adjustable_capabilities_from_view(
     view: SourceCapabilitiesView,
 ) -> Option<ch224q::AdjustablePowerCapabilities> {
     let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
+    capabilities.source_capability_power_mw = view.maximum_power_mw();
     let mut has_pps = false;
     for range in view.pps.into_iter().flatten() {
         has_pps = true;

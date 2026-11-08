@@ -438,6 +438,26 @@ pub struct SourceCapabilitiesView {
     pub pps: [Option<PpsAdjustmentRange>; MAX_SOURCE_PDOS],
 }
 
+impl SourceCapabilitiesView {
+    /// Return the greatest power advertised by one source PDO or APDO.
+    ///
+    /// Voltage and current must come from the same source object. Combining
+    /// the maximum voltage from one APDO with the maximum current from another
+    /// would invent a capability the source never advertised.
+    pub fn maximum_power_mw(self) -> Option<u32> {
+        self.fixed
+            .into_iter()
+            .flatten()
+            .map(|(voltage_mv, max_ma)| (u32::from(voltage_mv) * u32::from(max_ma)) / 1_000)
+            .chain(
+                self.pps.into_iter().flatten().map(|range| {
+                    (u32::from(range.max_mv) * u32::from(range.max_current_ma)) / 1_000
+                }),
+            )
+            .max()
+    }
+}
+
 impl SourceCapabilities {
     pub fn view(self) -> SourceCapabilitiesView {
         let mut view = SourceCapabilitiesView::default();
@@ -849,6 +869,16 @@ mod tests {
 
     fn fixed_pdo(mv: u16, ma: u16) -> u32 {
         ((mv / 50) as u32) << 10 | ((ma / 10) as u32)
+    }
+
+    #[test]
+    fn source_capability_power_does_not_cross_pair_pdo_endpoints() {
+        let capabilities = SourceCapabilities::from_pdos(&[
+            pps_pdo(5_500, 21_000, 3_000),
+            pps_pdo(5_500, 20_000, 5_000),
+        ]);
+
+        assert_eq!(capabilities.view().maximum_power_mw(), Some(100_000));
     }
 
     #[test]

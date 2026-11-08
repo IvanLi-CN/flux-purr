@@ -575,7 +575,7 @@ export function useLiveWebSerialScenario(
                   buildId: current.buildId,
                   gitSha: 'unknown',
                   board: 'esp32-s3',
-                  apiVersion: '2026-05-29',
+                  apiVersion: '2026-11-09',
                   protocolVersion: 'flux-purr.usb.v1',
                   hostname: current.alias,
                   capabilities: current.capabilities,

@@ -166,6 +166,9 @@ pub struct AdjustablePowerCapabilities {
     pub pps_max_mv: Option<u16>,
     pub pps_max_ma: Option<u16>,
     pub pps_apdos: [Option<PpsApdo>; MAX_PPS_APDOS],
+    /// Maximum power advertised by one source PDO or APDO. This is source
+    /// capability metadata, not the persisted thermal source boundary below.
+    pub source_capability_power_mw: Option<u32>,
     /// Conservative source power envelope inferred from a high-voltage
     /// Fixed PDO when the controller exposes the complete PD source list.
     /// This is kept separate from APDO identity so exact PPS matching is
@@ -210,7 +213,18 @@ impl AdjustablePowerCapabilities {
     }
 
     fn merge_power_data_object(capabilities: &mut Self, raw: u32) {
-        if raw == 0 || pd_object_type(raw) != 0b11 {
+        if raw == 0 {
+            return;
+        }
+
+        if pd_object_type(raw) == 0 {
+            let voltage_mv = (((raw >> 10) & 0x3ff) as u16) * 50;
+            let max_ma = ((raw & 0x3ff) as u16) * 10;
+            record_source_capability_power(capabilities, voltage_mv, max_ma);
+            return;
+        }
+
+        if pd_object_type(raw) != 0b11 {
             return;
         }
 
@@ -228,6 +242,7 @@ impl AdjustablePowerCapabilities {
                     max_mv,
                     max_ma,
                 };
+                record_source_capability_power(capabilities, max_mv, max_ma);
                 capabilities.push_pps_apdo(pps_apdo);
                 capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
                 if pps_candidate_is_better(
@@ -271,6 +286,22 @@ impl AdjustablePowerCapabilities {
             }
         }
     }
+}
+
+fn record_source_capability_power(
+    capabilities: &mut AdjustablePowerCapabilities,
+    voltage_mv: u16,
+    max_ma: u16,
+) {
+    if voltage_mv == 0 || max_ma == 0 {
+        return;
+    }
+    let power_mw = (u32::from(voltage_mv) * u32::from(max_ma)) / 1_000;
+    capabilities.source_capability_power_mw = Some(
+        capabilities
+            .source_capability_power_mw
+            .map_or(power_mw, |previous| previous.max(power_mw)),
+    );
 }
 
 const fn pps_candidate_is_better(
@@ -438,6 +469,7 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.pps_max_ma, Some(3_000));
+        assert_eq!(capabilities.source_capability_power_mw, Some(63_000));
         assert_eq!(
             capabilities.pps_apdos[0],
             Some(PpsApdo {
@@ -482,6 +514,7 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(5_000));
         assert_eq!(capabilities.pps_max_mv, Some(20_000));
         assert_eq!(capabilities.pps_max_ma, Some(5_000));
+        assert_eq!(capabilities.source_capability_power_mw, Some(100_000));
     }
 
     #[test]
@@ -525,6 +558,7 @@ mod tests {
         assert_eq!(capabilities.pps_max_mv, None);
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
+        assert_eq!(capabilities.source_capability_power_mw, Some(30_000));
     }
 
     #[test]

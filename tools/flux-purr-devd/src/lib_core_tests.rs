@@ -4409,7 +4409,7 @@ fn runtime_verification_requires_product_firmware_kind() {
         git_sha: bundle.manifest.identity.source_sha.clone(),
         reset_reason: None,
         board: "esp32-s3".into(),
-        api_version: "2026-05-29".into(),
+        api_version: "2026-11-09".into(),
         protocol_version: "flux-purr.usb.v1".into(),
         hostname: "device".into(),
         capabilities: vec![],

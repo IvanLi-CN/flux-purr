@@ -2998,6 +2998,9 @@ pub(crate) struct UsbRuntimeStatusContext {
     pub(crate) heater_control_timing: HeaterControlTiming,
     pub(crate) heater_physical_output_percent: u8,
     pub(crate) manual_pps: ManualPpsState,
+    /// Maximum power advertised by one current source PDO/APDO. This is
+    /// distinct from the thermal source boundary used by heater control.
+    pub(crate) source_capability_power_mw: Option<u32>,
     #[cfg(test)]
     pub(crate) calibration: CalibrationRuntimeState,
     pub(crate) fan_command: FanHardwareCommand,

@@ -145,15 +145,7 @@ pub(crate) fn populate_status_contract(
             .or(context.manual_pps.capability_max_ma)
             .unwrap_or(0)
     };
-    let contract_voltage_mv = observed_contract
-        .map(|contract| contract.voltage_mv)
-        .unwrap_or(if fusb_contract_pending {
-            0
-        } else {
-            pd_contract_mv
-        });
-    status.pd_contract_power_mw =
-        (u32::from(contract_voltage_mv) * u32::from(status.pd_contract_current_ma)) / 1_000;
+    status.pd_source_capability_power_mw = context.source_capability_power_mw;
     status.pd_performance_guaranteed = if fusb_contract_pending {
         false
     } else {

@@ -199,7 +199,7 @@ pub fn write_identity(out: &mut String<1024>) -> core::fmt::Result {
     use core::fmt::Write;
     write!(
         out,
-        "{{\"type\":\"hello\",\"protocolVersion\":\"{PROTOCOL_VERSION}\",\"framing\":\"{FRAMING}\",\"firmwareKind\":\"{FIRMWARE_KIND}\",\"identity\":{{\"firmwareKind\":\"{FIRMWARE_KIND}\",\"deviceId\":\"flux-purr-ram-s3\",\"firmwareVersion\":\"ram-bringup/0.1\",\"buildId\":\"{}\",\"gitSha\":\"{}\",\"board\":\"esp32-s3\",\"apiVersion\":\"2026-05-29\",\"protocolVersion\":\"{PROTOCOL_VERSION}\",\"hostname\":\"flux-purr-ram-s3\",\"capabilities\":[",
+        "{{\"type\":\"hello\",\"protocolVersion\":\"{PROTOCOL_VERSION}\",\"framing\":\"{FRAMING}\",\"firmwareKind\":\"{FIRMWARE_KIND}\",\"identity\":{{\"firmwareKind\":\"{FIRMWARE_KIND}\",\"deviceId\":\"flux-purr-ram-s3\",\"firmwareVersion\":\"ram-bringup/0.1\",\"buildId\":\"{}\",\"gitSha\":\"{}\",\"board\":\"esp32-s3\",\"apiVersion\":\"2026-11-09\",\"protocolVersion\":\"{PROTOCOL_VERSION}\",\"hostname\":\"flux-purr-ram-s3\",\"capabilities\":[",
         env!("FLUX_PURR_RAM_BUILD_ID"),
         env!("FLUX_PURR_RAM_SOURCE_SHA")
     )?;
