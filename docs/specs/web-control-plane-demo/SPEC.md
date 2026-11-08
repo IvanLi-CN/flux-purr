@@ -196,7 +196,7 @@
 - Given EdgeOne 部署产物，When 刷新任意规范 history 深链，Then `edgeone.json` 将请求 rewrite 到 `/index.html` 并由 router 恢复页面。
 - Given public Demo build，When 打开 `/?demo=false&uiDemo=true`，Then 始终进入完整 mock-only console，不出现 LAN pairing 页面且不会启动 devd、Web Serial 或 direct LAN。
 - Given formal build，When 打开 `/?demo=true` 或任意带 `uiDemo` 的旧入口，Then 显示入口停用页，不挂载 live 控制台。
-- Given Demo Inspector，When 切换 scene、persona/permissions、lease/network/artifact、能力/数据覆盖或模拟动作，Then console 与全局 trace 同步更新，Inspector 通过按需帮助按钮提供当前权限说明并保留近期 simulated mutation 记录；场景初始条件可刷新恢复，临时操作不回放；选择 Calibration active 时同一校准离开保护生效。
+- Given Demo Inspector，When 切换 scene、persona/permissions、lease/network/artifact、能力/数据覆盖或模拟动作，Then console 与全局 trace 同步更新，Inspector 顶部说明与 Persona 权限帮助采用默认透明、无边框和阴影的纯 icon text 风格按钮，权限帮助紧邻 Persona 标签且不独占行，保留键盘焦点反馈、触摸点击区域与按需展开行为，并保留近期 simulated mutation 记录；场景初始条件可刷新恢复，临时操作不回放；选择 Calibration active 时同一校准离开保护生效。
 - Given Demo Inspector，When 查看控制项，Then 全局 Demo 设置只承载会话范围的 Persona/权限，当前 Demo 用例设置承载 scene、target、故障、能力/数据和模拟动作；布局偏好不作为 Demo 控制项出现，scene 与 target 使用紧凑选择器并显示当前摘要。
 - Given Demo Inspector，When 用户在同一个收起按钮上右键或触摸长按，Then 布局菜单显示左侧、右侧、底部、悬浮和收起；空间不足的布局不可选，点击菜单外区域或按 Escape 关闭菜单，收起后左键重新打开恢复上次可用布局。
 - Given Demo 中选定设备，When 注入 lease/network fault 或 thermal warning，Then 故障只作用于当前 URL identity，保护态覆盖已有操作值，fan recovery 不能解除有效安全锁。

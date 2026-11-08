@@ -577,7 +577,7 @@ test.describe('public demo build', () => {
       .toBe('-2px')
   })
 
-  test('keeps the Inspector header actions the same size', async ({ page }) => {
+  test('keeps the compact Inspector help action vertically aligned', async ({ page }) => {
     await page.setViewportSize({ width: 1378, height: 1471 })
     await page.goto('/')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
@@ -590,12 +590,26 @@ test.describe('public demo build', () => {
       const helpBox = help?.getBoundingClientRect()
       const closeBox = close?.getBoundingClientRect()
       return {
-        help: helpBox ? { width: helpBox.width, height: helpBox.height } : null,
-        close: closeBox ? { width: closeBox.width, height: closeBox.height } : null,
+        help: helpBox
+          ? {
+              width: helpBox.width,
+              height: helpBox.height,
+              centerY: helpBox.top + helpBox.height / 2,
+            }
+          : null,
+        close: closeBox
+          ? {
+              width: closeBox.width,
+              height: closeBox.height,
+              centerY: closeBox.top + closeBox.height / 2,
+            }
+          : null,
       }
     })
 
-    expect(sizes.help).toEqual(sizes.close)
+    expect(sizes.help).toMatchObject({ width: 32, height: 32 })
+    expect(sizes.close).toMatchObject({ width: 48, height: 48 })
+    expect(sizes.help?.centerY).toBe(sizes.close?.centerY)
   })
 
   test('keeps mock targets usable and guards a calibration target switch', async ({ page }) => {

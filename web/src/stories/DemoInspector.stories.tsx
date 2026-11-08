@@ -104,6 +104,11 @@ export const InteractionSmoke: Story = {
       await body.findByRole('option', { name: /USB Config Fixture.*WiFi 可配置/ })
     ).toHaveAttribute('data-value', 'fp-wifi-usb-04')
     await userEvent.keyboard('{Escape}')
+    const permissionHelp = await canvas.findByRole('button', { name: '查看当前 Persona 权限' })
+    await userEvent.click(permissionHelp)
+    await expect(await canvas.findByRole('note', { name: 'Persona permissions' })).toBeVisible()
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.queryByRole('note', { name: 'Persona permissions' })).toBeNull()
     await userEvent.click(await canvas.findByRole('button', { name: '查看 Demo Inspector 说明' }))
     await expect(await canvas.findByRole('note', { name: 'Demo scope' })).toBeVisible()
   },
