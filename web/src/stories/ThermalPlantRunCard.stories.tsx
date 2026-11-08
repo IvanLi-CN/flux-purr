@@ -1,11 +1,17 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { useState } from 'react'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
   ThermalPlantRunCard,
 } from '@/features/control-plane-demo/components/thermal-plant-run-card'
-import type { ThermalPlantRunSnapshot } from '@/features/control-plane-demo/contracts'
+import { TemperatureRequestChart } from '@/features/control-plane-demo/components/thermal-supply-observations'
+import type {
+  SupplyBoundary,
+  ThermalPlantRunSnapshot,
+} from '@/features/control-plane-demo/contracts'
+import observedBoundary from '@/features/control-plane-demo/fixtures/supply-observations.json'
 
 const completedSnapshot = createDefaultThermalPlantSnapshot()
 const emptySnapshot = createEmptyThermalPlantSnapshot()
@@ -32,12 +38,27 @@ const runningSnapshot: ThermalPlantRunSnapshot = {
 }
 const failedSnapshot: ThermalPlantRunSnapshot = {
   ...completedSnapshot,
+  tracePage: {
+    ...completedSnapshot.tracePage,
+    points: completedSnapshot.tracePage.points.map((point, index) =>
+      index === completedSnapshot.tracePage.points.length - 1
+        ? { ...point, temperatureCentiC: 9000 }
+        : point
+    ),
+  },
   attempt: {
     ...completedAttempt,
     status: 'failed',
+    currentTempCentiC: 9000,
     phase: 'cooling',
     restartAllowed: true,
-    error: '自然冷却阶段未达到 80℃，未覆盖已有 active 结果。',
+    error: 'thermal_plant_timeout',
+    failureContext: {
+      stage: 'cooling',
+      elapsedMs: 450000,
+      stageElapsedMs: 300000,
+      condition: 'passive_temperature_at_most_80c',
+    },
   },
 }
 
@@ -132,5 +153,114 @@ export const UnsupportedFirmware: Story = {
       activeResult: null,
     },
     unsupported: true,
+  },
+}
+
+export const ObservedSixteenPoints: Story = {
+  args: {
+    snapshot: {
+      ...failedSnapshot,
+      supplyBoundary: observedBoundary as SupplyBoundary,
+      supplyBoundarySource: 'attempt',
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const points = canvas.getAllByRole('button', { name: /^观测 / })
+    await expect(points).toHaveLength(16)
+    await expect(canvas.getByText('5.5', { exact: true })).toBeVisible()
+    await expect(canvas.getByText('28.0', { exact: true })).toBeVisible()
+    await expect(canvas.queryByText('0.0', { exact: true })).not.toBeInTheDocument()
+    await expect(canvas.getByLabelText('3.00 A 温度—申请电压拟合曲线')).toBeInTheDocument()
+    const fitPath = canvas.getByLabelText(
+      '3.00 A 温度—申请电压拟合曲线'
+    ) as unknown as SVGGraphicsElement
+    const temperatureAxis = canvasElement.querySelector(
+      '.thermal-supply-chart svg line'
+    ) as SVGGraphicsElement
+    await expect(fitPath.getBBox().y).toBeCloseTo(temperatureAxis.getBBox().y, 1)
+    await expect(fitPath.getBBox().height).toBeCloseTo(temperatureAxis.getBBox().height, 1)
+    const traceSvg = canvasElement.querySelector(
+      '.thermal-plant-run-card__svg--trace'
+    ) as SVGSVGElement
+    const traceLine = traceSvg.querySelector(
+      '.thermal-plant-run-card__trace--heating'
+    ) as SVGGraphicsElement
+    const supplySvg = fitPath.closest('svg') as SVGSVGElement
+    await expect(supplySvg.viewBox.baseVal.width).toBe(traceSvg.viewBox.baseVal.width)
+    await expect(getComputedStyle(supplySvg.querySelector('text') as Element).fontSize).toBe(
+      getComputedStyle(traceSvg.querySelector('text') as Element).fontSize
+    )
+    await expect(getComputedStyle(fitPath).stroke).toBe(getComputedStyle(traceLine).stroke)
+    await expect(getComputedStyle(fitPath).strokeWidth).toBe(
+      getComputedStyle(traceLine).strokeWidth
+    )
+
+    await expect(canvas.queryByLabelText('2.85 A 温度—申请电压拟合曲线')).not.toBeInTheDocument()
+    await userEvent.click(points[0])
+    await expect(canvas.getByText(/29.8℃ · 申请 9.5 V/)).toBeVisible()
+    await userEvent.click(points[15])
+    await expect(canvas.getByText(/合同 2.85 A · RTD 1324 mV/)).toBeVisible()
+    await points[3].focus()
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByText(/58.3℃ · 申请 14.2 V/)).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: '选择观测 1' }))
+    await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+  },
+}
+export const NarrowObserved: Story = {
+  ...ObservedSixteenPoints,
+  globals: { viewport: { value: 'fluxPurrMobile', isRotated: false } },
+  parameters: {
+    viewport: {
+      options: { mobile1: { name: '审查窄屏', styles: { width: '393px', height: '852px' } } },
+    },
+  },
+}
+export const LegacyUnlabelled: Story = {
+  args: { snapshot: { ...completedSnapshot, supplyBoundarySource: undefined, attempt: null } },
+}
+export const InvalidRtdMetadata: Story = {
+  args: {
+    snapshot: {
+      ...completedSnapshot,
+      supplyBoundary: {
+        ...observedBoundary,
+        adc: { ...observedBoundary.adc, dividerSupplyMv: 0 },
+      } as SupplyBoundary,
+    },
+  },
+}
+export const Disconnected: Story = {
+  args: { snapshot: failedSnapshot, readError: '设备已断开', disabled: true },
+}
+
+export const NarrowChart: Story = {
+  globals: { viewport: { value: 'fluxPurrMobile', isRotated: false } },
+  render: function NarrowChartStory() {
+    const [selectedIndex, setSelectedIndex] = useState(0)
+    return (
+      <div style={{ height: 300, display: 'grid' }}>
+        <TemperatureRequestChart
+          boundary={observedBoundary as SupplyBoundary}
+          loading={false}
+          running={false}
+          selectedIndex={selectedIndex}
+          onSelect={setSelectedIndex}
+        />
+      </div>
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const chart = canvasElement.querySelector('.thermal-supply-chart')
+    const detail = chart?.querySelector('output')
+    const plot = chart?.querySelector('.thermal-plant-run-card__chart-canvas')
+    if (!detail || !plot) throw new Error('Missing chart surface')
+    const style = getComputedStyle(detail)
+    await expect(style.whiteSpace).toBe('nowrap')
+    await expect(detail.getBoundingClientRect().height).toBeLessThanOrEqual(
+      Number.parseFloat(style.lineHeight) + 1
+    )
+    await expect(plot.getBoundingClientRect().height).toBeGreaterThanOrEqual(224)
   },
 }

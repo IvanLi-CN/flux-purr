@@ -1283,6 +1283,7 @@ pub(crate) async fn runtime_retry_persistence_io(
     commit_memory_config_now(
         &mut state.eeprom_i2c,
         CommitMemoryConfigInput {
+            deadline_ms: None,
             memory_sequence: &mut state.memory_sequence,
             memory_config: &state.memory_config,
             domains_to_write: retry_domains,
@@ -1810,32 +1811,26 @@ pub(crate) fn runtime_update_calibration_job(
         && state.calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
     if state.current_rtd_fault.is_some() && thermal_plant_was_running {
-        calibration_job_fail(
-            &mut state.calibration_runtime_state,
-            ManualPpsError::WriteFailed,
-            true,
-            &mut state.manual_pps_state,
+        runtime_fail_thermal_plant_job(
+            state,
+            ManualPpsError::SupplyScan(
+                flux_purr_firmware::heater_supply::scan::ScanFailure::InvalidSample,
+            ),
+            "rtd_sensor_healthy",
         );
     } else if thermal_plant_was_running
-        && state
-            .thermal_plant_workspace
-            .job
-            .as_ref()
-            .is_some_and(|job| job.phase == ThermalPlantAutoPhase::Cooling)
         && (state.fan_command.enabled || state.overtemp_forced_fan_active)
     {
-        // A cooling sample is valid only while the fan is physically off. The
-        // previous command can still be active when this loop starts, and an
-        // over-temperature guard can be raised by the current sensor frame;
-        // fail before recording either case instead of labelling it passive.
-        calibration_job_fail(
-            &mut state.calibration_runtime_state,
+        runtime_fail_thermal_plant_job(
+            state,
             ManualPpsError::ThermalPlantProjectionInvalid,
-            true,
-            &mut state.manual_pps_state,
+            "passive_fan_off",
         );
     } else {
         runtime_update_calibration_job_state(state, calibration_live_rtd_temp_c, elapsed_ms);
+    }
+    if thermal_plant_was_running {
+        runtime_freeze_thermal_attempt_elapsed(state, elapsed_ms);
     }
     thermal_plant_was_running
 }
@@ -2673,57 +2668,6 @@ fn runtime_observe_applied_heat(state: &mut RuntimeLoopState) {
 }
 
 #[cfg(target_arch = "xtensa")]
-pub(crate) async fn runtime_persist_completed_thermal_plant(state: &mut RuntimeLoopState) {
-    let commit_result = commit_memory_config_now(
-        &mut state.eeprom_i2c,
-        CommitMemoryConfigInput {
-            memory_sequence: &mut state.memory_sequence,
-            memory_config: &state.memory_config,
-            domains_to_write: PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-            #[cfg(feature = "web_serial")]
-            persistence_log_sink: &mut state.transport.persistence_log_sink,
-            #[cfg(not(feature = "web_serial"))]
-            persistence_log_sink: &mut state.transport.persistence_log_sink,
-            record_staging: state.eeprom_record_staging,
-        },
-    )
-    .await;
-    match commit_result {
-        Ok(()) => {
-            copy_persisted_domains(
-                &mut state.last_persisted_memory_config,
-                &state.memory_config,
-                PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-            );
-            state.memory_commit_due_ms = None;
-        }
-        Err(error) => {
-            let code = error.code();
-            restore_persisted_memory_domains(
-                &mut state.memory_config,
-                &mut state.ui_state,
-                &state.last_persisted_memory_config,
-                PersistDomainMask::SAFETY.union(PersistDomainMask::THERMAL_PLANT),
-            );
-            mark_eeprom_required(
-                &mut state.ui_state,
-                &mut state.calibration_runtime_state,
-                &mut state.manual_pps_state,
-                &mut state.memory_commit_due_ms,
-                Some(persistence_fault_from_commit(error)),
-            );
-            calibration_job_fail(
-                &mut state.calibration_runtime_state,
-                ManualPpsError::WriteFailed,
-                false,
-                &mut state.manual_pps_state,
-            );
-            info!("thermal plant activation commit failed reason={=str}", code);
-        }
-    }
-}
-
-#[cfg(target_arch = "xtensa")]
 pub(crate) fn runtime_reconcile_heater_status(
     state: &mut RuntimeLoopState,
     current_pd_observation: Option<PdStatusObservation>,
@@ -2796,6 +2740,9 @@ pub(crate) const fn runtime_memory_commit_permitted(
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState, elapsed_ms: u64) {
+    if runtime_commit_pending_thermal_plant(state, elapsed_ms).await {
+        return;
+    }
     discard_deferred_memory_commit_for_incompatible_eeprom(
         state.ui_state.persistence_locked(),
         &mut state.memory_commit_due_ms,
@@ -2826,6 +2773,7 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
     let commit_result = commit_memory_config_now(
         &mut state.eeprom_i2c,
         CommitMemoryConfigInput {
+            deadline_ms: None,
             memory_sequence: &mut state.memory_sequence,
             memory_config: &state.memory_config,
             domains_to_write: commit_domains,
@@ -3432,16 +3380,8 @@ pub(crate) async fn runtime_control_heater(state: &mut RuntimeLoopState, elapsed
                 &mut state.manual_pps_state,
             );
         }
-        let thermal_plant_completed = state.calibration_runtime_state.mode == CalibrationMode::Off
-            && state.calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
-            && state.calibration_runtime_state.job.status == CalibrationJobStatus::Completed;
         if state.memory_config != memory_before_calibration_job {
-            if thermal_plant_completed {
-                runtime_persist_completed_thermal_plant(state).await;
-            } else {
-                state.memory_commit_due_ms =
-                    Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
-            }
+            state.memory_commit_due_ms = Some(elapsed_ms.saturating_add(MEMORY_WRITE_DEBOUNCE_MS));
         }
         let (force_thermal_plant_output_off, arming_needs_redraw) =
             runtime_reconcile_heater_arming(

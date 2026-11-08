@@ -7526,6 +7526,7 @@ fn dirty_dashboard_refresh_is_capped_at_thirty_frames_per_second() {
 #[test]
 fn transient_trace_zero_duty_samples_do_not_rearm_from_source_voltage() {
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Ambient,
         source_current_ma: 3_000,
@@ -7600,6 +7601,7 @@ fn thermal_plant_cooling_does_not_raise_pps_contract() {
         .enable(ManualPpsOwner::Calibration, 5_500, Some(3_000))
         .unwrap();
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Cooling,
         source_current_ma: 3_000,
@@ -7651,6 +7653,7 @@ fn thermal_plant_cooling_does_not_raise_pps_contract() {
 #[test]
 fn transient_temperature_steps_are_rate_limited_after_dense_startup() {
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Heating,
         source_current_ma: 5_000,
@@ -7708,6 +7711,7 @@ fn transient_trace_compaction_keeps_the_full_heating_span_for_fitting() {
     assert!(sample_count > 48);
     let ambient_raw_rtd_adc_mv = samples[0].raw_rtd_adc_mv;
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Cooling,
         source_current_ma: 3_000,
@@ -7763,6 +7767,7 @@ fn transient_trace_compaction_keeps_the_full_heating_span_for_fitting() {
 fn transient_trace_compaction_handles_non_monotonic_rtd_samples() {
     let ambient_raw_rtd_adc_mv = runtime_test_raw_rtd_adc_mv_for_temp(25.0);
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Cooling,
         source_current_ma: 3_000,
@@ -7817,6 +7822,7 @@ fn transient_trace_compaction_handles_non_monotonic_rtd_samples() {
 #[test]
 fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degrees() {
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Cooling,
         source_current_ma: 5_000,
@@ -7870,6 +7876,7 @@ fn transient_cutoff_keeps_time_samples_when_temperature_has_not_moved_four_degre
 #[test]
 fn transient_trace_periodically_samples_slow_cooling() {
     let mut job = CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Cooling,
         source_current_ma: 3_000,
@@ -8165,6 +8172,21 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
             &mut manual_pps,
             &mut workspace,
         );
+        if let Some(job) = workspace.job.as_mut()
+            && job.completion.candidate.is_some()
+        {
+            assert!(config.thermal_plant_transient_active.is_none());
+            assert!(job.completion.cutoff_reached);
+            assert!(plant.temperature_c <= 80.0);
+            assert!(finish_thermal_plant_persistence(
+                &mut calibration,
+                &mut manual_pps,
+                job,
+                &mut config,
+                plant.now_ms,
+                true
+            ));
+        }
     }
     if calibration.job.status != CalibrationJobStatus::Completed {
         let job = workspace.job.as_ref().unwrap();
@@ -8183,7 +8205,7 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
     );
     assert!(
         plant.now_ms <= u64::from(THERMAL_PLANT_TOTAL_TIMEOUT_TICKS) * HEATER_CONTROL_INTERVAL_MS,
-        "rapid thermal plant calibration exceeded five-minute budget: {} ms",
+        "full-range thermal plant calibration exceeded eleven-minute budget: {} ms",
         plant.now_ms
     );
     assert_eq!(calibration.mode, CalibrationMode::Off);
@@ -8191,7 +8213,11 @@ fn thermal_plant_auto_completes_supply_scan_and_cooling_on_a_three_amp_source() 
     assert!(!calibration.heater_enabled);
     assert!(!manual_pps.enabled);
     assert!(config.thermal_plant_transient_active.is_some());
-    assert_boundary_warmup_reaches_cutoff(&config, &manual_pps);
+    assert_completed_thermal_plant_trace(config, &manual_pps);
+}
+
+fn assert_completed_thermal_plant_trace(mut config: MemoryConfig, manual_pps: &ManualPpsState) {
+    assert_boundary_warmup_reaches_cutoff(&config, manual_pps);
     let transaction = config.thermal_plant_transient_active.unwrap();
     let projection = thermal_plant_projection_from_transient(&transaction).unwrap();
     assert!(
@@ -8270,6 +8296,7 @@ fn thermal_plant_transient_cuts_heat_at_220_before_the_next_output_cycle() {
         ..CalibrationRuntimeState::default()
     };
     test_install_thermal_plant_job(CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: 1,
         phase: ThermalPlantAutoPhase::Heating,
         source_current_ma: 3_000,
@@ -20591,4 +20618,236 @@ fn automatic_relative_supply_response_waits_for_matching_settled_voltage() {
     assert!(!automatic_supply_response_fault_latched(
         false, true, true, 52, false
     ));
+}
+
+fn full_range_pending_job() -> (
+    CalibrationRuntimeState,
+    ManualPpsState,
+    CalibrationThermalPlantAutoJob,
+    MemoryConfig,
+) {
+    let mut calibration = CalibrationRuntimeState::default();
+    let mut memory = MemoryConfig::default();
+    let mut manual = thermal_plant_job_manual_pps(20_000, 3_000);
+    let mut workspace = CalibrationThermalPlantWorkspace::default();
+    calibration_job_start_with_workspace(
+        &mut calibration,
+        CalibrationJobKind::ThermalPlant,
+        &mut memory,
+        &mut manual,
+        &mut workspace,
+    )
+    .unwrap();
+    let mut job = workspace.job.take().unwrap();
+    job.started_at_ms = Some(0);
+    job.phase = ThermalPlantAutoPhase::Cooling;
+    job.phase_started_tick = 4_000;
+    job.elapsed_ticks = 8_000;
+    job.completion.cutoff_reached = true;
+    job.completion.persistence_started_tick = 8_000;
+    job.completion.candidate = Some(Box::new(
+        flux_purr_firmware::memory::ThermalPlantPersistence {
+            active: None,
+            supply_boundary: Some(synthetic_supply_boundary()),
+        },
+    ));
+    (calibration, manual, job, memory)
+}
+
+#[test]
+fn full_range_persistence_never_publishes_unverified_or_expired_candidates() {
+    for (verified, now_ms, succeeds) in [
+        (false, 400_001, false),
+        (true, 659_999, true),
+        (true, 660_000, false),
+        (true, 660_001, false),
+    ] {
+        let (mut calibration, mut manual, mut job, mut memory) = full_range_pending_job();
+        let old = memory.clone();
+        assert_eq!(
+            finish_thermal_plant_persistence(
+                &mut calibration,
+                &mut manual,
+                &mut job,
+                &mut memory,
+                now_ms,
+                verified
+            ),
+            succeeds
+        );
+        if succeeds {
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Completed);
+        } else {
+            assert_eq!(memory, old);
+            assert_eq!(calibration.job.status, CalibrationJobStatus::Failed);
+            let context = thermal_plant_failure_context(&calibration, &job).unwrap();
+            assert_eq!(context.stage.as_str(), "persistence");
+            assert_eq!(context.elapsed_ms, (now_ms / 50 * 50) as u32);
+            assert!(!manual.enabled);
+        }
+    }
+}
+
+#[test]
+fn full_range_stage_deadlines_include_negotiation_and_allow_only_exact_boundary_success() {
+    let (_, _, mut job, _) = full_range_pending_job();
+    job.completion.candidate = None;
+    let mut input = CalibrationJobUpdateInput {
+        now_ms: 0,
+        latest_rtd_raw_code: 2000,
+        latest_vin_raw_code: 2000,
+        wifi_started: Some(false),
+        pd_conduction_allowed: false,
+        pd_confirmed: false,
+        latest_rtd_raw_adc_mv: 1200,
+        latest_vin_raw_adc_mv: 1500,
+        latest_temp_c: 169.0,
+        latest_vin_mv: 18000,
+        heater_duty_percent: 0,
+    };
+    for phase in [
+        ThermalPlantAutoPhase::Heating,
+        ThermalPlantAutoPhase::Cooling,
+    ] {
+        job.phase = phase;
+        job.phase_started_tick = 100;
+        for (elapsed, temp, expired) in [
+            (5999, 169.0, false),
+            (6000, 169.0, true),
+            (
+                6000,
+                if phase == ThermalPlantAutoPhase::Heating {
+                    220.0
+                } else {
+                    80.0
+                },
+                false,
+            ),
+            (
+                6001,
+                if phase == ThermalPlantAutoPhase::Heating {
+                    220.0
+                } else {
+                    80.0
+                },
+                true,
+            ),
+        ] {
+            job.elapsed_ticks = 100 + elapsed;
+            input.latest_temp_c = temp;
+            assert_eq!(thermal_plant_stage_error(&job, input).is_some(), expired);
+        }
+    }
+}
+
+#[test]
+fn full_range_failure_elapsed_and_samples_stay_frozen_after_terminal_state() {
+    let (mut calibration, mut manual, mut job, mut memory) = full_range_pending_job();
+    assert!(!finish_thermal_plant_persistence(
+        &mut calibration,
+        &mut manual,
+        &mut job,
+        &mut memory,
+        400_000,
+        false
+    ));
+    let context = thermal_plant_failure_context(&calibration, &job).unwrap();
+    let mut workspace = CalibrationThermalPlantWorkspace {
+        job: Some(job),
+        ..Default::default()
+    };
+    update_calibration_job_state_with_workspace(
+        &mut calibration,
+        &mut memory,
+        &mut manual,
+        &mut workspace,
+        CalibrationJobUpdateInput {
+            now_ms: 999_000,
+            latest_rtd_raw_code: 2000,
+            latest_vin_raw_code: 2000,
+            wifi_started: Some(false),
+            pd_conduction_allowed: false,
+            pd_confirmed: false,
+            latest_rtd_raw_adc_mv: 1000,
+            latest_vin_raw_adc_mv: 500,
+            latest_temp_c: 25.0,
+            latest_vin_mv: 5000,
+            heater_duty_percent: 0,
+        },
+    );
+    assert_eq!(
+        thermal_plant_failure_context(&calibration, workspace.job.as_ref().unwrap()).unwrap(),
+        context
+    );
+}
+
+#[test]
+fn full_range_scan_completion_at_169c_keeps_heating_without_rescan() {
+    let (mut calibration, mut manual, mut job, memory) = full_range_pending_job();
+    job.phase = ThermalPlantAutoPhase::Heating;
+    job.phase_started_tick = 100;
+    job.elapsed_ticks = 2800;
+    job.completion = ThermalPlantCompletion::default();
+    let mut boundary = synthetic_supply_boundary();
+    boundary.points[0].rtd_mv = runtime_test_raw_rtd_adc_mv_for_temp(160.0);
+    job.supply_scan = flux_purr_firmware::heater_supply::scan::SupplyScan::new(boundary);
+    let scan = job.supply_scan.as_mut().unwrap();
+    scan.phase = flux_purr_firmware::heater_supply::scan::ScanPhase::Complete;
+    scan.boundary = boundary;
+    let count = scan.boundary.point_count;
+    let input = CalibrationJobUpdateInput {
+        now_ms: 140000,
+        latest_rtd_raw_code: 2000,
+        latest_vin_raw_code: 2000,
+        wifi_started: Some(false),
+        pd_conduction_allowed: true,
+        pd_confirmed: true,
+        latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(169.0),
+        latest_vin_raw_adc_mv: 1500,
+        latest_temp_c: 169.0,
+        latest_vin_mv: 10000,
+        heater_duty_percent: 100,
+    };
+    assert!(
+        thermal_plant_continuation_request(&boundary, &memory, &manual, input).is_some(),
+        "range={:?} limits={:?} boundary={:?}",
+        manual.thermal_plant_pps_range(),
+        manual.thermal_plant_source_limits(),
+        boundary
+    );
+    assert!(update_thermal_heating_phase(
+        &mut calibration,
+        &memory,
+        &mut manual,
+        &mut job,
+        input,
+        169.0
+    ));
+    assert_eq!(job.phase, ThermalPlantAutoPhase::Heating);
+    assert!(!calibration.heater_enabled); // Changed contract waits for confirmation.
+    job.elapsed_ticks += 1;
+    assert!(update_thermal_heating_phase(
+        &mut calibration,
+        &memory,
+        &mut manual,
+        &mut job,
+        input,
+        169.0
+    ));
+    assert!(calibration.heater_enabled);
+    assert_eq!(manual.target_mv, Some(10000));
+    assert_eq!(
+        job.supply_scan.as_ref().unwrap().boundary.point_count,
+        count
+    );
+    let changed_wifi = CalibrationJobUpdateInput {
+        wifi_started: Some(true),
+        ..input
+    };
+    assert_eq!(
+        thermal_plant_stage_error(&job, changed_wifi),
+        Some(ManualPpsError::SupplyScan(
+            flux_purr_firmware::heater_supply::scan::ScanFailure::WifiChanged
+        ))
+    );
 }

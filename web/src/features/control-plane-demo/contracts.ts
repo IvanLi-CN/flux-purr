@@ -177,7 +177,15 @@ export interface ThermalPlantProvisionalCurve {
   curve: HeaterCurvePackage
 }
 
+export interface ThermalPlantFailureContext {
+  stage: 'ambient' | 'heating' | 'cooling' | 'fitting' | 'persistence'
+  elapsedMs: number
+  stageElapsedMs: number
+  condition: string
+}
+
 export interface ThermalPlantRunAttempt {
+  failureContext?: ThermalPlantFailureContext | null
   runId: number
   status: CalibrationJobStatus
   phase?: ThermalPlantRunPhase | null
@@ -201,6 +209,7 @@ export interface ThermalPlantActiveResult {
 }
 
 export interface ThermalPlantRunSnapshot {
+  supplyBoundarySource?: 'attempt' | 'active' | null
   supplyBoundary?: SupplyBoundary | null
   version: number
   attempt?: ThermalPlantRunAttempt | null

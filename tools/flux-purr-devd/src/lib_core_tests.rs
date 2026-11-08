@@ -4825,3 +4825,33 @@ fn setup_completion_requires_a_persisted_healthy_generation() {
     }
     assert!(setup_completion_is_persisted(&after, &after));
 }
+
+#[test]
+fn thermal_run_optional_diagnostics_survive_bridge_serialization() {
+    let mut snapshot = mock_thermal_plant_snapshot();
+    snapshot.supply_boundary_source = Some("attempt".into());
+    snapshot.attempt.as_mut().unwrap().failure_context = Some(ThermalPlantFailureContext {
+        stage: "persistence".into(),
+        elapsed_ms: 600000,
+        stage_elapsed_ms: 2000,
+        condition: "eeprom_write_and_readback_verified".into(),
+    });
+    let mut value = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(value["supplyBoundarySource"], "attempt");
+    assert_eq!(value["attempt"]["failureContext"]["stageElapsedMs"], 2000);
+    assert_eq!(
+        serde_json::from_value::<ThermalPlantRunSnapshot>(value.clone()).unwrap(),
+        snapshot
+    );
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("supplyBoundarySource");
+    value["attempt"]
+        .as_object_mut()
+        .unwrap()
+        .remove("failureContext");
+    let old: ThermalPlantRunSnapshot = serde_json::from_value(value).unwrap();
+    assert!(old.supply_boundary_source.is_none());
+    assert!(old.attempt.unwrap().failure_context.is_none());
+}

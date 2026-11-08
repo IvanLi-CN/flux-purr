@@ -1298,6 +1298,7 @@ describe('control-plane transport client', () => {
     const fetcher = vi.fn().mockResolvedValue(
       jsonResponse({
         version: 2,
+        supplyBoundarySource: 'attempt',
         supplyBoundary: {
           formatVersion: 1,
           adc: {
@@ -1318,7 +1319,25 @@ describe('control-plane transport client', () => {
           advertisedMaxMv: 21000,
           points: [[30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1]],
         },
-        attempt: null,
+        attempt: {
+          runId: 9,
+          status: 'failed',
+          phase: 'cooling',
+          progressPercent: 70,
+          elapsedMs: 420000,
+          currentTempCentiC: 9000,
+          heaterVoltageMv: 0,
+          dutyPercent: 0,
+          sampleCount: 17,
+          restartAllowed: true,
+          error: 'thermal_plant_timeout',
+          failureContext: {
+            stage: 'cooling',
+            elapsedMs: 420000,
+            stageElapsedMs: 300000,
+            condition: 'passive_temperature_at_most_80c',
+          },
+        },
         tracePage: {
           startSample: 16,
           nextSample: null,
@@ -1348,6 +1367,8 @@ describe('control-plane transport client', () => {
     )
 
     expect(snapshot.version).toBe(2)
+    expect(snapshot.supplyBoundarySource).toBe('attempt')
+    expect(snapshot.attempt?.failureContext?.stageElapsedMs).toBe(300000)
     expect(snapshot.supplyBoundary?.adc.dividerSupplyMv).toBe(3328)
     expect(snapshot.supplyBoundary?.points[0]).toEqual([
       30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1,

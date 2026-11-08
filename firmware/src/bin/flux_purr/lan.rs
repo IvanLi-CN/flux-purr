@@ -902,6 +902,20 @@ pub(crate) fn submit_buzzer_test_if_idle(
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+fn calibration_config_job_lock_response(
+    context: &ControlLineContext<'_, '_, '_>,
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> Option<UsbFrame> {
+    thermal_plant_calibration_job_running(*context.calibration_runtime_state).then(|| {
+        usb_error_response(
+            request_id,
+            ManualPpsError::CalibrationInProgress.code(),
+            "Automatic thermal-model calibration is running; calibration inputs are locked.",
+        )
+    })
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
 pub(crate) async fn process_calibration_config_frame(
     context: &mut ControlLineContext<'_, '_, '_>,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
@@ -926,15 +940,8 @@ pub(crate) async fn process_calibration_config_frame(
             ),
         );
     }
-    if thermal_plant_calibration_job_running(*context.calibration_runtime_state) {
-        return (
-            false,
-            usb_error_response(
-                request_id,
-                ManualPpsError::CalibrationInProgress.code(),
-                "Automatic thermal-model calibration is running; calibration inputs are locked.",
-            ),
-        );
+    if let Some(response) = calibration_config_job_lock_response(context, request_id.clone()) {
+        return (false, response);
     }
     let previous_memory_config = context.memory_config.clone();
     let response = usb_calibration_config_response(
@@ -960,6 +967,7 @@ pub(crate) async fn process_calibration_config_frame(
         if let Err(error) = commit_memory_config_now(
             context.eeprom_i2c,
             CommitMemoryConfigInput {
+                deadline_ms: None,
                 memory_sequence: context.memory_sequence,
                 memory_config: context.memory_config,
                 domains_to_write: changed_domains,
@@ -1379,6 +1387,7 @@ async fn persist_thermal_tuning_candidate(
     if let Err(error) = commit_memory_config_now(
         context.eeprom_i2c,
         CommitMemoryConfigInput {
+            deadline_ms: None,
             memory_sequence: context.memory_sequence,
             memory_config: context.memory_config,
             domains_to_write: changed_domains,

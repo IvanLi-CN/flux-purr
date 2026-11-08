@@ -687,11 +687,11 @@ pub(crate) const CALIBRATION_VIN_AUTO_MIN_MOVED_ADC_MV: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_AMBIENT_TICKS: u16 = 40;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_TOTAL_TIMEOUT_TICKS: u32 = 6_000;
+pub(crate) const THERMAL_PLANT_TOTAL_TIMEOUT_TICKS: u32 = 13_200;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 432_000;
+pub(crate) const THERMAL_PLANT_HEAT_TIMEOUT_TICKS: u32 = 6_000;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const THERMAL_PLANT_COOL_TIMEOUT_TICKS: u32 = 24_000;
+pub(crate) const THERMAL_PLANT_COOL_TIMEOUT_TICKS: u32 = 6_000;
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const THERMAL_PLANT_TARGET_TEMP_C: f32 = 220.0;
 #[cfg(any(target_arch = "xtensa", test))]
@@ -748,6 +748,7 @@ pub(crate) enum ThermalPlantAutoPhase {
 #[derive(Debug)]
 #[cfg_attr(not(target_arch = "xtensa"), allow(dead_code))]
 pub(crate) struct CalibrationThermalPlantAutoJob {
+    pub(crate) completion: ThermalPlantCompletion,
     pub(crate) run_id: u32,
     pub(crate) phase: ThermalPlantAutoPhase,
     pub(crate) source_current_ma: u16,
@@ -2376,6 +2377,13 @@ pub(crate) fn thermal_plant_run_snapshot_wire(
         )
     });
     ThermalPlantRunSnapshotWire {
+        supply_boundary_source: if job.and_then(|job| job.supply_scan.as_ref()).is_some() {
+            Some(heapless::String::try_from("attempt").unwrap())
+        } else if memory_config.heater_supply_boundary.is_some() {
+            Some(heapless::String::try_from("active").unwrap())
+        } else {
+            None
+        },
         supply_boundary: job
             .and_then(|job| job.supply_scan.as_ref().map(|scan| scan.boundary))
             .or(memory_config.heater_supply_boundary)
@@ -2479,6 +2487,7 @@ pub(crate) fn thermal_plant_run_attempt(
     duty_percent: u8,
 ) -> ThermalPlantRunAttemptWire {
     ThermalPlantRunAttemptWire {
+        failure_context: thermal_plant_failure_context(calibration, job),
         run_id,
         status: calibration.job.status.to_wire(),
         phase: Some(match job.phase {

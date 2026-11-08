@@ -33,3 +33,7 @@ _Avoid_：演示场景、日志消息
 **自动加热安全电压上限（Automatic Heating Voltage Ceiling）**：由适用的整机边界或明确标识的预设模型兜底，并受当前电源/合同/硬件能力约束的最高请求电压。
 
 **安全供电工作点（Safe Supply Operating Point）**：一组满足电源输出范围、设备供电条件与适用整机边界的供电电压和合同电流。
+
+**RTD 理论温度（Theoretical RTD Temperature）**：由 RTD 原始读数、对应的分压电路标称参数和 PT1000 理论关系换算出的温度，不包含用户校准修正，也不等同于独立温度计实测值。
+
+**温度—申请电压图（Temperature–Requested Voltage Plot）**：按每条供电观测的 RTD 理论温度与申请电压展示原始散点，并提供同合同电流内审查拟合的图表；合同电流是该观测的适用条件，不是负载实测电流。

@@ -5,6 +5,7 @@
 ## Related ADRs
 
 - [`0019-heater-supply-boundary-calibration`](../../adr/0019-heater-supply-boundary-calibration.md)
+- [`0022-full-range-thermal-plant-calibration`](../../adr/0022-full-range-thermal-plant-calibration.md)
 
 ## Context and Scope
 
@@ -108,7 +109,7 @@
 - 样本变化只允许更新拟合建议值，不得自动覆盖 `A/B` 槽位。
 - `标定温度` 输入必须是纯手动 value；硬件上报温度只能作为 placeholder/辅助提示，不得自动写入 value。
 - 当 RTD/VIN calibration state 从设备回读、导入 JSON、页面刷新或设备重启后，样本表显示的物理参考值必须优先使用原样持久化的 `referenceTempC` / `referenceVinMv`；只有历史旧样本缺失该字段时才允许回退到派生显示。
-- `thermal_plant_auto` MUST 按 ADR 0019 扫描整机 CC/CV 安全边界：单 APDO，先以加热关闭的高压请求确认 3A 合同，再按 2.0–3.0A / 100mA 电流档和 100mV 电压步进采集热平衡，并在档间做受限 3A 温度覆盖探测；平衡窗口为 10 秒 / 1°C，达到 220°C 同周期断热并记录 80°C 冷却。原始 ADC、3V3 假设与实际 WiFi 硬件状态必须保留。普通低于 3A 的热平衡点只用于热模型，不得授权自动加热限压；唯一例外是独立确认且满足整机功率边界的终点对（60W/21V 源为原始 `21V/2.85A`），自动模式只能按该原始电压/电流对使用，不能把它当作 3A 观测、推导其它点或合成 `21V/3A`。不得使用 OvO 遥测，不反推出 MCU 功耗，不再以合同电流计算加热板电阻；旧曲线及其热模型视为不存在。
+- `thermal_plant_auto` MUST 按 ADR 0022 完成完整温区标定：先以关热高压合同预检，再执行受保护 rapid 3A 供电边界扫描；扫描完成后仍须在实测安全供电边界内继续加热至 220°C，同周期断热，自然冷却至 80°C，拟合与 EEPROM 写入及读回校验通过后才激活结果。加热和冷却各最多五分钟，全流程最多十一分钟，等待与重试不重置计时。安全风扇介入、传感器故障、源掉压和超时必须失败并保留旧有效结果及诊断采样。60W/21V 源的独立终点合同只能按实测 21V/2.85A 使用，不得合成 21V/3A。保留原始 ADC、分压供电参数及 WiFi 硬件状态，不反推出负载实际电流或 MCU 功耗。
 - Web 必须用受限控件直接钳位 `5V~28V` 硬边界，并对超出实时 capability 的原始输入给出 inline error 与提交阻断；CLI 必须主动报错退出；firmware 和 `devd` 必须作为最终拒绝真相源。
 
 ### SHOULD
@@ -254,7 +255,7 @@ When a device does not advertise the `thermal_plant_run` capability, clients dis
 - Given `温度标定` mode is armed, When the operator toggles `开启加热`, Then Web must accept the action without imposing extra ADC-comparison gates and leave actual heating behavior to hardware feedback.
 - Given any calibration mode is armed, When the operator uses the heating control, Then Web presents that control as a Toggle switch rather than a text command button.
 - Given `温度标定` mode is armed, When hardware reports `heaterOutputPercent`, Then the status card must reflect that percentage through an energy-intensity visualization even if the heater switch is already on.
-- Given `thermal_plant_auto` starts, When each current stage reaches equilibrium, Then firmware records a classified raw boundary point, performs the bounded 3A coverage probe, and advances by 100mA; a 220°C sample disables the MOS immediately and records cutoff. Completion fits and atomically persists the current-format boundary/model pair after cooling.
+- Given `thermal_plant_auto` completes its supply scan below 220°C, Then it continues safe heating until the live 220°C cutoff and natural cooling through 80°C before fitting and verified persistence; partial coverage never activates a new result.
 - Given `thermal_plant_auto` completes with a physically valid result, When EEPROM commit and readback succeed, Then a firmware restart restores the active result and its transaction identity; if the commit fails, the result is not admitted for heating.
 - Given a legacy heater curve or resistance-derived thermal model, When boot/preview/save/normal heating reads it, Then it is absent or rejected and cannot restore heating. Independent ADC calibration and user/network preferences remain available.
 - The bounded trace retains electrical edges and 500ms opportunities during the first 10s after cutoff. Sample times derive from the job’s monotonic start on the 50ms storage grid; delayed control frames cannot distort model units or create duplicate cells. Legacy resistance anchors are not used.
@@ -315,3 +316,21 @@ The thermal-model result surface retains the coefficient metrics and run trace w
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。
 - 如果硬件分压电阻值变更，VIN expected-point 转换必须同步硬件基线。
+
+## 完整温区采集与供电观测审查
+
+完整标定遵循 [ADR 0022](../../adr/0022-full-range-thermal-plant-calibration.md)。阶段时限分别为 300000ms，总流程为 660000ms；阶段截止时刻满足目标可推进，否则失败。全流程超时不激活未提交候选。旧有效 EEPROM 记录可继续读取，但不得标为完整温区新标定。
+
+`thermal_plant_run` 保持 version=2，增加可选 `attempt.failureContext`（stage、elapsedMs、stageElapsedMs、condition）和 `supplyBoundarySource=attempt|active`。失败上下文记录 ambient/heating/cooling/fitting/persistence 阶段及固定终态耗时；旧端缺字段时保留原错误并显示来源未标注。
+
+供电观测以 RTD 理论温度—申请电压散点与拟合图和完整采样表呈现。每条温度由原始 RTD、该份数据的 dividerSupplyMv、2490Ω 和 PT1000 理论关系换算，不应用用户校准、不借用邻近轨迹温度；元数据无效则显示不可换算。图中全部点可选中查看温度、电压、合同限流、RTD 和时间；合同电流用形状及文字区分。原始点不直接连线；拟合按合同电流分别计算，在完整显示温区求值，包含实测范围之外的函数值。采样表显示全部记录和理论温度，并与选中点关联；明确区分失败尝试与已保存结果。
+
+图表 MUST 使用小尺寸散点，并按合同电流独立拟合至多三次最小二乘多项式。温度先缩放以保证数值稳定；每组至少需要三个不同温度点，否则只显示散点。图表横轴为申请电压、纵轴为 RTD 理论温度；电压轴默认 5.5–28 V，温度轴默认 25–220°C；观测或拟合超出默认范围时扩展到对应极值。图下选中观测详情最多一行，窄屏可横向滚动。拟合电流与电压 RMS 残差放在图表悬停说明中，并明确拟合仅供审查。拟合函数 MUST 在完整显示温区求值，默认覆盖 25–220°C，超出默认范围的温度观测使求值区间同步扩展。拟合线不替代原始观测或固件供电边界。供电图和温度轨迹 MUST 共用 SVG 比例、坐标留白、字体、线宽及主题色，图例位于图内顶部，图下详情保持单行。
+
+## Visual Evidence
+
+Storybook `ObservedSixteenPoints` 与 `NarrowChart` 展示供电观测审查界面。供电散点来自去身份化的 16 条已读取观测；温度轨迹与失败上下文为可控场景，不作为真机热性能证明。窄屏场景使用 393 × 852 原生预览视口，图下详情保持单行。
+
+![桌面：完整温区拟合曲线、全部供电观测及失败上下文](assets/full-range-desktop.png)
+
+![窄屏：理论温度—申请电压散点与完整拟合曲线](assets/full-range-narrow-chart.png)

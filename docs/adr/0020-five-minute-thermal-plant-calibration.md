@@ -4,6 +4,8 @@
 
 Accepted for the five-minute runtime budget; the cooling-output strategy is superseded by [ADR 0021](0021-passive-thermal-plant-cooling.md).
 
+The five-minute total budget and minimum 100°C completion decision are superseded by [ADR 0022](0022-full-range-thermal-plant-calibration.md), whose accepted target contract requires complete 220°C-to-80°C coverage. ADR 0022 records implementation status separately; the remaining supply-scan decisions here continue to apply.
+
 ## Decision
 
 The product `thermal_plant_auto` calibration has a five-minute wall-clock budget from its first runtime update. The budget covers ambient sampling, the protected PPS scan, passive cooling, fitting, and the final commit. A timeout disables heater output, clears the calibration-owned PPS request, retains any previously committed model, and reports `thermal_plant_timeout`; a partial trace is never activated.
