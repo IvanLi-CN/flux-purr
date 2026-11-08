@@ -196,3 +196,76 @@ fn pending_mode_off_still_fails_on_sensor_or_fan_safety() {
         assert_eq!(job.completion.failure_condition, Some(condition));
     }
 }
+
+#[test]
+fn pending_inputs_stay_locked_through_all_transport_write_guards() {
+    let (mut calibration, mut manual, _, _) = full_range_pending_job();
+    calibration.mode = CalibrationMode::Off;
+    let original = calibration;
+    let original_manual = manual;
+    let response = calibration_config_job_lock_response(
+        calibration,
+        heapless::String::try_from("pending-input-lock").unwrap(),
+    )
+    .expect("calibration_config must remain locked while saving");
+    let UsbFrame::Response {
+        ok,
+        error: Some(error),
+        ..
+    } = response
+    else {
+        panic!("expected a transport rejection");
+    };
+    assert!(!ok);
+    assert_eq!(
+        error.code.as_str(),
+        ManualPpsError::CalibrationInProgress.code()
+    );
+    for request in [
+        serde_json::json!({"manualPpsEnabled": true, "manualPpsMv": 20000}),
+        serde_json::json!({"manualPpsEnabled": false}),
+        serde_json::json!({"heaterEnabled": true}),
+        serde_json::json!({"calibration": {"mode": "heater_curve"}}),
+    ] {
+        let command: RuntimeConfigCommand = serde_json::from_value(request).unwrap();
+        let error = runtime_config_validation(&command, calibration).unwrap();
+        assert_eq!(
+            error.code.as_str(),
+            ManualPpsError::CalibrationInProgress.code()
+        );
+        if command.manual_pps_enabled.is_some() {
+            assert_eq!(
+                apply_manual_pps_config(&command, calibration, &mut manual),
+                Err(ManualPpsError::CalibrationInProgress)
+            );
+        }
+    }
+    let command: CalibrationControlCommand = serde_json::from_value(
+        serde_json::json!({"mode": "heater_curve", "ppsEnabled": true, "ppsMv": 20000}),
+    )
+    .unwrap();
+    assert_eq!(
+        apply_calibration_control_config(&command, &mut calibration, &mut manual),
+        Err(ManualPpsError::CalibrationInProgress)
+    );
+    assert_eq!(calibration, original);
+    assert_eq!(manual, original_manual);
+    for status in [
+        CalibrationJobStatus::Idle,
+        CalibrationJobStatus::Completed,
+        CalibrationJobStatus::Failed,
+        CalibrationJobStatus::Canceled,
+    ] {
+        calibration.job.status = status;
+        assert!(
+            calibration_config_job_lock_response(
+                calibration,
+                heapless::String::try_from("terminal").unwrap(),
+            )
+            .is_none()
+        );
+    }
+    calibration.job.status = CalibrationJobStatus::Running;
+    calibration.job.kind = Some(CalibrationJobKind::VinAdc);
+    assert!(!thermal_plant_calibration_job_running(calibration));
+}

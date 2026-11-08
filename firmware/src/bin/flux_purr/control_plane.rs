@@ -605,10 +605,7 @@ pub(crate) fn apply_manual_pps_config(
     {
         return Err(ManualPpsError::TerminalDisarmPending);
     }
-    if calibration.mode == CalibrationMode::ThermalPlant
-        && calibration.job.status == CalibrationJobStatus::Running
-        && manual_pps_requested
-    {
+    if thermal_plant_calibration_job_running(calibration) && manual_pps_requested {
         return Err(ManualPpsError::CalibrationInProgress);
     }
     if config.manual_pps_enabled == Some(false) {
@@ -715,7 +712,7 @@ pub(crate) fn apply_calibration_control_config(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn thermal_plant_calibration_job_running(calibration: CalibrationRuntimeState) -> bool {
-    calibration.mode == CalibrationMode::ThermalPlant
+    calibration.job.kind == Some(CalibrationJobKind::ThermalPlant)
         && calibration.job.status == CalibrationJobStatus::Running
 }
 

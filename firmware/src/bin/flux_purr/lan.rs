@@ -901,12 +901,12 @@ pub(crate) fn submit_buzzer_test_if_idle(
     }
 }
 
-#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
-fn calibration_config_job_lock_response(
-    context: &ControlLineContext<'_, '_, '_>,
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn calibration_config_job_lock_response(
+    calibration: CalibrationRuntimeState,
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
 ) -> Option<UsbFrame> {
-    thermal_plant_calibration_job_running(*context.calibration_runtime_state).then(|| {
+    thermal_plant_calibration_job_running(calibration).then(|| {
         usb_error_response(
             request_id,
             ManualPpsError::CalibrationInProgress.code(),
@@ -940,7 +940,9 @@ pub(crate) async fn process_calibration_config_frame(
             ),
         );
     }
-    if let Some(response) = calibration_config_job_lock_response(context, request_id.clone()) {
+    if let Some(response) =
+        calibration_config_job_lock_response(*context.calibration_runtime_state, request_id.clone())
+    {
         return (false, response);
     }
     let previous_memory_config = context.memory_config.clone();
