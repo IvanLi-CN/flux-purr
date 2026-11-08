@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { SupplyBoundary } from '../contracts'
 import { theoreticalRtdTemperatureForAdcMv } from '../rtd-calibration-display'
@@ -269,21 +269,40 @@ export function SupplyObservationTable({
   source,
 }: ObservationProps & { source?: 'attempt' | 'active' | null }) {
   const points = boundary?.points ?? []
-  const selectedRowRef = useCallback((row: HTMLTableRowElement | null) => {
+  const selectedRowRef = useRef<HTMLTableRowElement | null>(null)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: boundary points can mount after the selected index.
+  useLayoutEffect(() => {
+    const row = selectedRowRef.current
     if (!row) return
     const scrollContainer = row
       .closest<HTMLElement>('.thermal-plant-run-card__table-scroll')
       ?.querySelector<HTMLElement>('.simplebar-content-wrapper')
     if (!scrollContainer) return
 
-    const rowRect = row.getBoundingClientRect()
-    const containerRect = scrollContainer.getBoundingClientRect()
-    if (rowRect.top < containerRect.top) {
-      scrollContainer.scrollTop -= containerRect.top - rowRect.top
-    } else if (rowRect.bottom > containerRect.bottom) {
-      scrollContainer.scrollTop += rowRect.bottom - containerRect.bottom
-    }
-  }, [])
+    const frame = window.requestAnimationFrame(() => {
+      const rowRect = row.getBoundingClientRect()
+      const containerRect = scrollContainer.getBoundingClientRect()
+      const topDelta = rowRect.top - containerRect.top
+      const bottomDelta = rowRect.bottom - containerRect.bottom
+      if (topDelta >= 0 && bottomDelta <= 0) return
+
+      const maxScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight)
+      const nextScrollTop = Math.min(
+        maxScrollTop,
+        Math.max(0, scrollContainer.scrollTop + (topDelta < 0 ? topDelta : bottomDelta))
+      )
+      const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        ? 'auto'
+        : 'smooth'
+      if (typeof scrollContainer.scrollTo === 'function') {
+        scrollContainer.scrollTo({ top: nextScrollTop, behavior })
+      } else {
+        scrollContainer.scrollTop = nextScrollTop
+      }
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [points.length, selectedIndex])
   return (
     <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
       <div className="thermal-plant-run-card__section-heading">

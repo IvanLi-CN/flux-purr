@@ -238,6 +238,12 @@ export const ObservedSixteenPoints: Story = {
     ).not.toBeNull()
     await userEvent.click(points[15])
     await expect(points[15]).toHaveAttribute('aria-pressed', 'true')
+    await new Promise((resolve) => window.setTimeout(resolve, 550))
+    const selectedRow = tableScroll.querySelector('tr[aria-selected="true"]') as HTMLElement
+    const tableScrollRect = tableScroll.getBoundingClientRect()
+    const selectedRowRect = selectedRow.getBoundingClientRect()
+    await expect(selectedRowRect.top).toBeGreaterThanOrEqual(tableScrollRect.top - 1)
+    await expect(selectedRowRect.bottom).toBeLessThanOrEqual(tableScrollRect.bottom + 1)
     await points[3].focus()
     await userEvent.keyboard('{Enter}')
     await expect(points[3]).toHaveAttribute('aria-pressed', 'true')
