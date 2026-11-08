@@ -282,7 +282,11 @@ export function SupplyObservationTable({
     const frame = window.requestAnimationFrame(() => {
       const rowRect = row.getBoundingClientRect()
       const containerRect = scrollContainer.getBoundingClientRect()
-      const topDelta = rowRect.top - containerRect.top
+      const stickyHeaderBottom = scrollContainer
+        .querySelector<HTMLElement>('thead')
+        ?.getBoundingClientRect().bottom
+      const visibleTop = Math.max(containerRect.top, stickyHeaderBottom ?? containerRect.top)
+      const topDelta = rowRect.top - visibleTop
       const bottomDelta = rowRect.bottom - containerRect.bottom
       if (topDelta >= 0 && bottomDelta <= 0) return
 

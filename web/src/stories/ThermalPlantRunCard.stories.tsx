@@ -226,8 +226,35 @@ export const ObservedSixteenPoints: Story = {
     await expect(getComputedStyle(tableHead).backgroundColor).toBe(
       getComputedStyle(tableWrap).backgroundColor
     )
-    await userEvent.click(points[0])
-    await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+
+    const expectSelectedRowBelowStickyHeader = async () => {
+      const deadline = performance.now() + 1_000
+      let selectedRowRect: DOMRect | undefined
+      let tableScrollRect: DOMRect | undefined
+      let tableHeadRect: DOMRect | undefined
+      while (performance.now() < deadline) {
+        const selectedRow = tableScroll.querySelector('tr[aria-selected="true"]') as HTMLElement
+        tableScrollRect = tableScroll.getBoundingClientRect()
+        tableHeadRect = tableHead.getBoundingClientRect()
+        selectedRowRect = selectedRow.getBoundingClientRect()
+        if (
+          selectedRowRect.top >= tableHeadRect.bottom - 1 &&
+          selectedRowRect.bottom <= tableScrollRect.bottom + 1
+        ) {
+          return
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+      }
+      if (!selectedRowRect || !tableScrollRect || !tableHeadRect) {
+        throw new Error('selected observation geometry was not available')
+      }
+      await expect(selectedRowRect.top).toBeGreaterThanOrEqual(tableHeadRect.bottom - 1)
+      await expect(selectedRowRect.bottom).toBeLessThanOrEqual(tableScrollRect.bottom + 1)
+    }
+
+    await userEvent.click(points[15])
+    await expect(points[15]).toHaveAttribute('aria-pressed', 'true')
+    await expectSelectedRowBelowStickyHeader()
     const supplyRect = supplySvg.getBoundingClientRect()
     fireEvent.pointerMove(supplySvg, {
       clientX: supplyRect.left + supplyRect.width / 2,
@@ -236,14 +263,9 @@ export const ObservedSixteenPoints: Story = {
     await expect(
       canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
     ).not.toBeNull()
-    await userEvent.click(points[15])
-    await expect(points[15]).toHaveAttribute('aria-pressed', 'true')
-    await new Promise((resolve) => window.setTimeout(resolve, 550))
-    const selectedRow = tableScroll.querySelector('tr[aria-selected="true"]') as HTMLElement
-    const tableScrollRect = tableScroll.getBoundingClientRect()
-    const selectedRowRect = selectedRow.getBoundingClientRect()
-    await expect(selectedRowRect.top).toBeGreaterThanOrEqual(tableScrollRect.top - 1)
-    await expect(selectedRowRect.bottom).toBeLessThanOrEqual(tableScrollRect.bottom + 1)
+    await userEvent.click(points[0])
+    await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+    await expectSelectedRowBelowStickyHeader()
     await points[3].focus()
     await userEvent.keyboard('{Enter}')
     await expect(points[3]).toHaveAttribute('aria-pressed', 'true')
