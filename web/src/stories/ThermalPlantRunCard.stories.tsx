@@ -196,6 +196,19 @@ export const ObservedSixteenPoints: Story = {
       getComputedStyle(traceLine).strokeWidth
     )
 
+    const footers = canvasElement.querySelectorAll('.thermal-chart__footer')
+    await expect(footers).toHaveLength(2)
+    for (const footer of footers) {
+      const detail = footer.querySelector('output') as HTMLElement
+      const label = footer.querySelector('.thermal-chart__axis-title') as HTMLElement
+      const lineHeight = Number.parseFloat(getComputedStyle(detail).lineHeight)
+      await expect(footer.getBoundingClientRect().height).toBeLessThanOrEqual(lineHeight + 1)
+      await expect(detail.getBoundingClientRect().top).toBeCloseTo(
+        label.getBoundingClientRect().top,
+        0
+      )
+    }
+
     await expect(canvas.queryByLabelText('2.85 A 温度—申请电压拟合曲线')).not.toBeInTheDocument()
     await userEvent.click(points[0])
     await expect(canvas.getByText(/29.8℃ · 申请 9.5 V/)).toBeVisible()

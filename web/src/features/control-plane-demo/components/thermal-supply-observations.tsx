@@ -136,9 +136,6 @@ export function TemperatureRequestChart({
             <text x={left} y={18}>
               RTD 理论温度 / ℃
             </text>
-            <text x={right} y={height - 3} textAnchor="end">
-              申请电压 / V
-            </text>
             <text x={right} y={18} textAnchor="end" className="thermal-chart__key">
               ○ 3A · ◇ 其他 · — 拟合
             </text>
@@ -188,17 +185,20 @@ export function TemperatureRequestChart({
           </svg>
         )}
       </div>
-      <ScrollArea className="thermal-chart__detail-scroll">
-        <output
-          aria-live="polite"
-          className="thermal-supply-chart__detail thermal-chart__detail"
-          title={`○ 3.00 A · ◇ 其他合同限流 · — 同合同拟合（仅供审查，至少三个温度点）${fits.map((fit) => ` · ${(fit.currentMa / 1000).toFixed(2)} A RMS ${fit.rmseV.toFixed(2)} V`).join('')}`}
-        >
-          {observations[selectedIndex]
-            ? description(observations[selectedIndex], boundary)
-            : '选择观测查看详情'}
-        </output>
-      </ScrollArea>
+      <div className="thermal-chart__footer">
+        <ScrollArea className="thermal-chart__detail-scroll">
+          <output
+            aria-live="polite"
+            className="thermal-supply-chart__detail thermal-chart__detail"
+            title={`○ 3.00 A · ◇ 其他合同限流 · — 同合同拟合（仅供审查，至少三个温度点）${fits.map((fit) => ` · ${(fit.currentMa / 1000).toFixed(2)} A RMS ${fit.rmseV.toFixed(2)} V`).join('')}`}
+          >
+            {observations[selectedIndex]
+              ? description(observations[selectedIndex], boundary)
+              : '选择观测查看详情'}
+          </output>
+        </ScrollArea>
+        <span className="thermal-chart__axis-title">申请电压 / V</span>
+      </div>
     </div>
   )
 }

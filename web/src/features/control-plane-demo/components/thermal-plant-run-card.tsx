@@ -245,15 +245,18 @@ export function ThermalPlantRunCard({
               <span>{presentation.traceStatus}</span>
             </div>
             <TraceChart points={trace} loading={loading} running={isRunning} />
-            <ScrollArea className="thermal-chart__detail-scroll">
-              <output className="thermal-chart__detail">
-                {loading
-                  ? '读取中'
-                  : trace.length
-                    ? `温度 ${(trace[trace.length - 1].temperatureCentiC / 100).toFixed(1)}℃ · 时间 ${formatElapsed(trace[trace.length - 1].elapsedMs)} · ${phaseLabel[trace[trace.length - 1].phase]}`
-                    : '等待温度采样'}
-              </output>
-            </ScrollArea>
+            <div className="thermal-chart__footer">
+              <ScrollArea className="thermal-chart__detail-scroll">
+                <output className="thermal-chart__detail">
+                  {loading
+                    ? '读取中'
+                    : trace.length
+                      ? `温度 ${(trace[trace.length - 1].temperatureCentiC / 100).toFixed(1)}℃ · 时间 ${formatElapsed(trace[trace.length - 1].elapsedMs)} · ${phaseLabel[trace[trace.length - 1].phase]}`
+                      : '等待温度采样'}
+                </output>
+              </ScrollArea>
+              <span className="thermal-chart__axis-title">时间 / mm:ss</span>
+            </div>
           </section>
         </div>
 
@@ -555,9 +558,6 @@ function TraceChart({
           <tspan className="thermal-chart__key--ambient">环境 · </tspan>
           <tspan className="thermal-chart__key--heating">加热 · </tspan>
           <tspan className="thermal-chart__key--cooling">自然冷却</tspan>
-        </text>
-        <text x={width - inset.right} y={height - 3} textAnchor="end">
-          时间 / mm:ss
         </text>
         <line
           x1={inset.left}

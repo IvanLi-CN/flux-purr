@@ -11448,6 +11448,21 @@
   stroke-linejoin: round;
   pointer-events: none;
 }
+.thermal-chart__footer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  align-items: center;
+  column-gap: 0.75rem;
+  min-width: 0;
+  padding-inline-end: calc(100% * 40 / 600);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+.thermal-chart__axis-title {
+  color: var(--industrial-muted-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
 .thermal-chart__detail-scroll {
   min-width: 0;
   height: 1.05rem;
