@@ -87,6 +87,24 @@ test "${capture_failure_status}" = 7
 grep -Fq "output capture failed" "${capture_failure_log}"
 
 : > "${count_file}"
+successful_capture_failure_log="${test_root}/successful-capture-failure.log"
+if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
+  EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${successful_capture_failure_log}" 2>&1; then
+  echo "expected successful CLI with output capture failure to stop" >&2
+  exit 1
+else
+  successful_capture_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${successful_capture_status}" = 1
+grep -Fq "output capture failed" "${successful_capture_failure_log}"
+
+: > "${count_file}"
 postdeploy_failure_log="${test_root}/postdeploy-failure.log"
 if EDGEONE_API_TOKEN='<REDACTED>' \
   EDGEONE_BUNX_BIN="${fake_bunx}" \

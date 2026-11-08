@@ -83,6 +83,7 @@ assert "PIPESTATUS" in edgeone_helper
 assert "tee_status" in edgeone_helper
 assert "automatic retry is disabled" in edgeone_helper
 assert "endpoint or network failure" in edgeone_helper
+assert edgeone_helper.index("if (( attempt_output_ok == 0 ))") < edgeone_helper.index("if (( status == 0 ))")
 assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
 assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
 assert 'bash .github/scripts/deploy-edgeone.sh web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release

@@ -91,15 +91,22 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   attempt_log="${attempt_logs_dir}/attempt-${attempt}.log"
   echo "EdgeOne deployment attempt ${attempt}/${max_attempts} for ${target_label}."
   if run_deploy "${attempt_log}"; then
-    echo "EdgeOne deployment succeeded for ${target_label}."
-    exit 0
+    status=0
   else
     status=$?
   fi
 
   if (( attempt_output_ok == 0 )); then
     echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
+    if (( status == 0 )); then
+      exit 1
+    fi
     exit "${status}"
+  fi
+
+  if (( status == 0 )); then
+    echo "EdgeOne deployment succeeded for ${target_label}."
+    exit 0
   fi
 
   if deployment_started "${attempt_log}"; then
