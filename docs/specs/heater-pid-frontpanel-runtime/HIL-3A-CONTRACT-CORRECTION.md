@@ -48,6 +48,10 @@ owner 明确授权后，将 OvO 功率能力字段由 60 改为 65；前后完�
 
 去身份化的 [冷态电气记录](./assets/three-amp-normal.csv)、[温态复现记录](./assets/three-amp-normal-diagnostic-warm.csv)、[协议诊断复现记录](./assets/three-amp-normal-diagnostic-protocol.csv) 和 [保存后的标定快照](./assets/three-amp-calibration.json) 可用于审查。完整原始记录、时间关联脚本与文件摘要保留于该轮本地验收证据目录。
 
+## 交付验收范围
+
+owner 确认将交付限定为取消 60W／2.85A 限制、保持 3A 合同及改善低温边界采集。低温应用效果、完整标定与保存、合同一致性和超过 60W 不被工具拒绝属于当前验收范围。正常加热 300 秒未达 220°C 和一次自发重新上电保留为未通过、待排查的问题，不构成整机热性能或稳定性已合格的结论，也不降低原有温度目标或保护时限。
+
 ## 回归验证
 
 固件 host all-targets 共 1258 项测试通过；严格 host 与 Xtensa clippy、完整产品构建、无网络构建和启动栈检查通过。devd 全套测试通过，包含超过 60W 不被错误拒绝和 2850mA 合同被判为失败的回归。EEPROM 格式和旧数据解码保持兼容，旧降流终点不被正常 3A 运行时选用。
