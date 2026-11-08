@@ -29,6 +29,11 @@ if (( count <= fail_until )); then
       echo "[cli] Creating deployment in Production environment..."
       echo "[cli] Deployment failed after remote acceptance." >&2
       ;;
+    unknown-post-deploy)
+      echo "[cli] Validating API endpoint..."
+      echo "[cli] EdgeOne accepted the deployment request; status unavailable." >&2
+      echo "[cli] AxiosError: timeout of 15000ms exceeded" >&2
+      ;;
     permanent)
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
       ;;

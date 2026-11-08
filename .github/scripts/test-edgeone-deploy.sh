@@ -105,6 +105,25 @@ test "${successful_capture_status}" = 1
 grep -Fq "output capture failed" "${successful_capture_failure_log}"
 
 : > "${count_file}"
+unknown_postdeploy_failure_log="${test_root}/unknown-postdeploy-failure.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=unknown-post-deploy \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${unknown_postdeploy_failure_log}" 2>&1; then
+  echo "expected unknown post-deploy failures to stop without retry" >&2
+  exit 1
+else
+  unknown_postdeploy_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${unknown_postdeploy_status}" = 7
+grep -Fq "before a retryable endpoint preflight" "${unknown_postdeploy_failure_log}"
+
+: > "${count_file}"
 postdeploy_failure_log="${test_root}/postdeploy-failure.log"
 if EDGEONE_API_TOKEN='<REDACTED>' \
   EDGEONE_BUNX_BIN="${fake_bunx}" \

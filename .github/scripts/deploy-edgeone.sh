@@ -83,7 +83,7 @@ deployment_started() {
 
 retryable_preflight_failure() {
   grep -Eiq \
-    'AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up' \
+    'check and set region failed:.*(AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up)' \
     "$1"
 }
 
