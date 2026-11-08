@@ -233,9 +233,20 @@ pub struct ThermalPlantProvisionalCurve {
     pub curve: HeaterCurvePackage,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThermalPlantFailureContext {
+    pub stage: String,
+    pub elapsed_ms: u32,
+    pub stage_elapsed_ms: u32,
+    pub condition: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunAttempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_context: Option<ThermalPlantFailureContext>,
     pub run_id: u32,
     pub status: CalibrationJobStatus,
     pub phase: Option<ThermalPlantRunPhase>,
@@ -267,6 +278,8 @@ pub struct ThermalPlantActiveResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supply_boundary: Option<SupplyBoundary>,
     pub version: u8,

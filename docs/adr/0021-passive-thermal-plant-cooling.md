@@ -4,6 +4,8 @@
 
 Accepted
 
+The inherited five-minute total budget is superseded by [ADR 0022](0022-full-range-thermal-plant-calibration.md). The passive-cooling and safety-intervention decisions remain applicable; ADR 0022 records implementation status separately.
+
 ## Context
 
 The thermal-plant calibration is intended to identify the heater plate's

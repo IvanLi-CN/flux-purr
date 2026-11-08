@@ -407,6 +407,8 @@ describe('web serial control-plane client', () => {
       afterSample: 16,
     })
     expect(snapshot.version).toBe(2)
+    expect(snapshot.supplyBoundarySource).toBe('attempt')
+    expect(snapshot.attempt?.failureContext?.stageElapsedMs).toBe(300000)
     expect(snapshot.supplyBoundary?.adc.dividerSupplyMv).toBe(3328)
     expect(snapshot.supplyBoundary?.points[0]).toEqual([
       30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1,
@@ -855,6 +857,7 @@ function responseFor(request: Record<string, unknown>) {
       result: {
         thermal_plant_run: {
           version: 2,
+          supplyBoundarySource: 'attempt',
           supplyBoundary: {
             formatVersion: 1,
             adc: {
@@ -876,6 +879,12 @@ function responseFor(request: Record<string, unknown>) {
             points: [[30000, 2500, 750, 1900, 600, 3000, 9500, 9600, 1]],
           },
           attempt: {
+            failureContext: {
+              stage: 'cooling',
+              elapsedMs: 420000,
+              stageElapsedMs: 300000,
+              condition: 'passive_temperature_at_most_80c',
+            },
             runId: 9,
             status: 'running',
             phase: 'cooling',

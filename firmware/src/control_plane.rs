@@ -577,7 +577,18 @@ pub struct ThermalPlantProvisionalCurveWire {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ThermalPlantFailureContextWire {
+    pub stage: String<16>,
+    pub elapsed_ms: u32,
+    pub stage_elapsed_ms: u32,
+    pub condition: String<96>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunAttemptWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_context: Option<Box<ThermalPlantFailureContextWire>>,
     pub run_id: u32,
     pub status: CalibrationJobStatusWire,
     pub phase: Option<ThermalPlantRunPhaseWire>,
@@ -609,6 +620,8 @@ pub struct ThermalPlantActiveResultWire {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThermalPlantRunSnapshotWire {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supply_boundary_source: Option<String<8>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supply_boundary: Option<Box<SupplyBoundaryWire>>,
     pub version: u8,
@@ -5119,6 +5132,7 @@ mod tests {
             tracking_only: true,
         });
         let snapshot = ThermalPlantRunSnapshotWire {
+            supply_boundary_source: None,
             supply_boundary: Some(Box::new(boundary.into())),
             version: 2,
             attempt: None,
@@ -5154,6 +5168,26 @@ mod tests {
         assert!(json.contains(r#""formatVersion":6"#));
         assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
+    }
+
+    #[test]
+    fn thermal_failure_context_round_trips_and_old_v2_attempts_still_decode() {
+        let old = r#"{"runId":1,"status":"failed","phase":"cooling","progressPercent":70,"elapsedMs":420000,"ambientRawRtdAdcMv":1030,"currentTempCentiC":9000,"heaterVoltageMv":0,"dutyPercent":0,"sampleCount":16,"restartAllowed":true,"error":"thermal_plant_timeout"}"#;
+        let mut attempt: ThermalPlantRunAttemptWire = serde_json::from_str(old).unwrap();
+        assert!(attempt.failure_context.is_none());
+        attempt.failure_context = Some(Box::new(ThermalPlantFailureContextWire {
+            stage: string("cooling"),
+            elapsed_ms: 420000,
+            stage_elapsed_ms: 300000,
+            condition: string("passive_temperature_at_most_80c"),
+        }));
+        let encoded = serde_json::to_string(&attempt).unwrap();
+        assert!(encoded.contains("failureContext"));
+        assert!(encoded.contains("stageElapsedMs"));
+        assert_eq!(
+            serde_json::from_str::<ThermalPlantRunAttemptWire>(&encoded).unwrap(),
+            attempt
+        );
     }
 
     #[test]

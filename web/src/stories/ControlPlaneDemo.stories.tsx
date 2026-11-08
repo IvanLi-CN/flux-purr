@@ -378,7 +378,7 @@ export const DemoCalibrationTab: Story = {
       await expect(await canvas.findByRole('tab', { name: '温度标定' })).toBeVisible()
       await expect(await canvas.findByRole('tab', { name: '电压读数标定' })).toBeVisible()
       await expect(await canvas.findByRole('article', { name: '自动热模型标定结果' })).toBeVisible()
-      await expect(await canvas.findByRole('heading', { name: '供电边界曲线' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '温度—申请电压' })).toBeVisible()
       await expect(await canvas.findByRole('heading', { name: '温度轨迹' })).toBeVisible()
       await expect(await canvas.findByRole('img', { name: '加热和自然冷却温度曲线' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: '重新开始自动校准' })).toBeVisible()
@@ -684,17 +684,11 @@ export const DemoCalibrationSnapshotLoading: Story = {
       const chartSkeletonDataNodes = canvasElement.querySelectorAll(
         '.thermal-plant-run-card__chart-skeleton text, .thermal-plant-run-card__chart-skeleton rect, .thermal-plant-run-card__chart-skeleton circle, .thermal-plant-run-card__chart-skeleton polyline'
       )
-      const tableSkeleton = canvasElement.querySelector(
-        '.thermal-plant-run-card__table-loading-body'
-      )
-      const tableSkeletonRows = canvasElement.querySelectorAll(
-        '.thermal-plant-run-card__table-loading-body .thermal-plant-run-card__table-loading-row'
-      )
-      expect(chartSkeletons).toHaveLength(2)
-      expect(chartSkeletonCanvases).toHaveLength(2)
-      expect(chartSkeletonGrid).toHaveLength(2)
-      expect(chartSkeletonAxes).toHaveLength(2)
-      expect(chartSkeletonStatuses).toHaveLength(2)
+      expect(chartSkeletons).toHaveLength(1)
+      expect(chartSkeletonCanvases).toHaveLength(1)
+      expect(chartSkeletonGrid).toHaveLength(1)
+      expect(chartSkeletonAxes).toHaveLength(1)
+      expect(chartSkeletonStatuses).toHaveLength(1)
       expect(
         chartSkeletonFrames.every(
           ({ width, height, parentWidth, parentHeight }) =>
@@ -705,9 +699,12 @@ export const DemoCalibrationSnapshotLoading: Story = {
       expect(
         Array.from(chartSkeletonStatuses).every((node) => node.textContent?.trim() === '读取中')
       ).toBe(true)
-      expect(tableSkeleton).toBeVisible()
-      expect(tableSkeleton?.tagName).toBe('DIV')
-      expect(tableSkeletonRows).toHaveLength(8)
+      await expect(canvas.findByRole('table', { name: '供电边界采样' })).resolves.toHaveTextContent(
+        '读取中'
+      )
+      expect(canvasElement.querySelector('.thermal-supply-chart__placeholder')).toHaveTextContent(
+        '读取中'
+      )
     })
   },
 }

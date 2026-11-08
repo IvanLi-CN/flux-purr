@@ -10,8 +10,12 @@ import {
   TimerReset,
   Zap,
 } from 'lucide-react'
-import { useCallback, useLayoutEffect, useState } from 'react'
+import { useState } from 'react'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
+import { thermalChartStyle } from './thermal-chart-style'
+import { SupplyObservationTable, TemperatureRequestChart } from './thermal-supply-observations'
+import { useResponsiveSvgHeight } from './use-responsive-svg-height'
 
 const phaseLabel: Record<ThermalPlantTracePoint['phase'], string> = {
   ambient: '环境',
@@ -26,19 +30,6 @@ const statusLabel: Record<string, string> = {
   failed: '失败',
   canceled: '已停止',
 }
-
-const thermalPlantLoadingRows = [
-  'one',
-  'two',
-  'three',
-  'four',
-  'five',
-  'six',
-  'seven',
-  'eight',
-] as const
-
-const thermalPlantLoadingCells = ['voltage', 'current', 'vin', 'rtd', 'kind'] as const
 
 export function thermalPlantRunCardPresentation(
   snapshot: ThermalPlantRunSnapshot,
@@ -77,9 +68,9 @@ export function thermalPlantRunCardPresentation(
       : isRunning
         ? `${phaseLabel[attempt?.phase ?? 'ambient']}中 · ${attempt?.sampleCount ?? trace.length} / ${Math.max(snapshot.tracePage.totalSamples, attempt?.sampleCount ?? 0)} 样本`
         : terminalFailure
-          ? `${statusLabel[status]} · 本次未写入 EEPROM${attempt?.error ? ` · ${attempt.error}` : ''}${preservesPriorActive ? ' · 当前 active 保留' : ''}`
+          ? `${statusLabel[status]} · 本次未激活${attempt?.error ? ` · ${attempt.error}` : ''}${preservesPriorActive ? ' · 当前 active 保留' : ''}`
           : showActiveResult
-            ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · 220℃断热 · 80℃自然冷却完成`
+            ? `${trace.length} / ${snapshot.tracePage.totalSamples} 瞬态样本 · EEPROM 中的有效结果`
             : '设备已就绪 · 尚未开始自动热模型标定'
   const traceStatus = readError
     ? '读取失败'
@@ -129,6 +120,11 @@ export function ThermalPlantRunCard({
   const isRunning = runtimeRunning ?? presentation.isRunning
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
+  const selectionKey = `${attempt?.runId ?? 'active'}:${snapshot.supplyBoundarySource ?? 'unknown'}`
+  const [selection, setSelection] = useState({ key: selectionKey, index: 0 })
+  const selected =
+    selection.key === selectionKey && selection.index < boundaryPoints.length ? selection.index : 0
+  const setSelectedIndex = (index: number) => setSelection({ key: selectionKey, index })
   const trace = snapshot.tracePage.points
   const canControl = !unsupported && (isRunning || attempt == null || attempt.restartAllowed)
   const hasNoRunData =
@@ -228,13 +224,19 @@ export function ThermalPlantRunCard({
         <div className="thermal-plant-run-card__charts">
           <section
             className="thermal-plant-run-card__chart thermal-plant-run-card__chart--boundary"
-            aria-label="供电边界曲线"
+            aria-label="温度—申请电压"
           >
             <div className="thermal-plant-run-card__section-heading">
-              <h3>供电边界曲线</h3>
+              <h3>温度—申请电压</h3>
               <span>{loading ? '读取中' : `${boundaryPoints.length} 点`}</span>
             </div>
-            <SupplyBoundaryChart boundary={boundary} loading={loading} running={isRunning} />
+            <TemperatureRequestChart
+              boundary={boundary}
+              loading={loading}
+              running={isRunning}
+              selectedIndex={selected}
+              onSelect={setSelectedIndex}
+            />
           </section>
 
           <section className="thermal-plant-run-card__trace-panel" aria-label="温度轨迹">
@@ -243,135 +245,60 @@ export function ThermalPlantRunCard({
               <span>{presentation.traceStatus}</span>
             </div>
             <TraceChart points={trace} loading={loading} running={isRunning} />
-            {loading ? (
-              <div
-                className="thermal-plant-run-card__legend thermal-plant-run-card__legend--loading"
-                aria-hidden="true"
-              >
-                <span>
-                  <i />
-                  <b />
-                </span>
-                <span>
-                  <i />
-                  <b />
-                </span>
-                <span>
-                  <i />
-                  <b />
-                </span>
-              </div>
-            ) : (
-              <div className="thermal-plant-run-card__legend">
-                <span>
-                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--ambient" />
-                  环境
-                </span>
-                <span>
-                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--heating" />
-                  加热
-                </span>
-                <span>
-                  <i className="thermal-plant-run-card__legend-dot thermal-plant-run-card__legend-dot--cooling" />
-                  自然冷却
-                </span>
-              </div>
-            )}
+            <div className="thermal-chart__footer">
+              <ScrollArea className="thermal-chart__detail-scroll">
+                <output className="thermal-chart__detail">
+                  {loading
+                    ? '读取中'
+                    : trace.length
+                      ? `温度 ${(trace[trace.length - 1].temperatureCentiC / 100).toFixed(1)}℃ · 时间 ${formatElapsed(trace[trace.length - 1].elapsedMs)} · ${phaseLabel[trace[trace.length - 1].phase]}`
+                      : '等待温度采样'}
+                </output>
+              </ScrollArea>
+              <span className="thermal-chart__axis-title">时间 / mm:ss</span>
+            </div>
           </section>
         </div>
 
         <aside className="thermal-plant-run-card__evidence" aria-label="瞬态与供电边界证据">
-          <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
-            <div className="thermal-plant-run-card__section-heading">
-              <h3>供电边界采样</h3>
-              <span>{loading ? '读取中' : `${boundaryPoints.length} 点`}</span>
-            </div>
-            <div
-              className={`thermal-plant-run-card__table-scroll${loading ? ' thermal-plant-run-card__table-scroll--loading' : boundaryPoints.length === 0 ? ' thermal-plant-run-card__table-scroll--empty' : ''}`}
-            >
-              {loading ? (
-                <>
-                  <table
-                    className="thermal-plant-run-card__table-loading-header"
-                    aria-label="供电边界采样"
-                  >
-                    <thead>
-                      <tr>
-                        <th>请求电压</th>
-                        <th>限流</th>
-                        <th>VIN</th>
-                        <th>RTD 原始</th>
-                        <th>类型</th>
-                      </tr>
-                    </thead>
-                  </table>
-                  <div className="thermal-plant-run-card__table-loading-body" aria-hidden="true">
-                    {thermalPlantLoadingRows.map((rowKey) => (
-                      <div className="thermal-plant-run-card__table-loading-row" key={rowKey}>
-                        {thermalPlantLoadingCells.map((cell) => (
-                          <span
-                            className={`thermal-plant-run-card__table-loading-cell thermal-plant-run-card__table-loading-cell--${cell}`}
-                            key={cell}
-                          >
-                            <span
-                              className={`thermal-plant-run-card__table-skeleton-cell thermal-plant-run-card__table-skeleton-cell--${cell}`}
-                            />
-                          </span>
-                        ))}
-                      </div>
-                    ))}
-                  </div>
-                  <output
-                    className="thermal-plant-run-card__table-loading-status"
-                    aria-live="polite"
-                  >
-                    <LoaderCircle size={15} aria-hidden="true" />
-                    <span>读取中</span>
-                  </output>
-                </>
-              ) : (
-                <table aria-label="供电边界采样">
-                  <thead>
-                    <tr>
-                      <th>请求电压</th>
-                      <th>限流</th>
-                      <th>VIN</th>
-                      <th>RTD 原始</th>
-                      <th>类型</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {boundaryPoints.slice(-8).map((point, index) => (
-                      <tr key={`${point[0]}-${point[6]}-${index}`}>
-                        <td>{formatBoundaryVoltage(point)} V</td>
-                        <td>{formatBoundaryCurrent(point)} A</td>
-                        <td>{formatBoundaryVoltageMv(point[4])} V</td>
-                        <td>{point[2]} mV</td>
-                        <td>
-                          <span className="thermal-plant-run-card__valid">
-                            {point[8] ? '跟踪' : '边界'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                    {boundaryPoints.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="thermal-plant-run-card__empty">
-                          {readError
-                            ? '读取失败，暂无供电边界数据'
-                            : presentation.isRunning
-                              ? '等待供电边界扫描'
-                              : '尚未采集供电边界数据'}
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              )}
-            </div>
-          </section>
+          <SupplyObservationTable
+            boundary={boundary}
+            loading={loading}
+            selectedIndex={selected}
+            onSelect={setSelectedIndex}
+            source={snapshot.supplyBoundarySource}
+          />
 
           <footer className="thermal-plant-run-card__footer">
+            {attempt?.failureContext ? (
+              <p className="thermal-plant-run-card__failure-context">
+                失败阶段：
+                {
+                  {
+                    ambient: '环境',
+                    heating: '加热',
+                    cooling: '自然冷却',
+                    fitting: '拟合',
+                    persistence: '保存',
+                  }[attempt.failureContext.stage]
+                }{' '}
+                · 总耗时 {(attempt.failureContext.elapsedMs / 1000).toFixed(1)} s · 阶段耗时{' '}
+                {(attempt.failureContext.stageElapsedMs / 1000).toFixed(1)} s<br />
+                未满足：
+                {(
+                  {
+                    rtd_sensor_healthy: 'RTD 传感器读数正常',
+                    passive_fan_off: '无安全风扇介入',
+                    eeprom_write_and_readback_verified: 'EEPROM 写入与读回校验成功',
+                    physical_fit_and_complete_trace: '完整轨迹与物理拟合通过',
+                    valid_ambient_samples: '有效环境温度采样',
+                    live_temperature_at_least_220c: '实时温度达到 220℃',
+                    passive_temperature_at_most_80c: '自然冷却至 80℃',
+                    total_elapsed_less_than_660000ms: '全流程在 11 分钟内保存成功',
+                  } as Record<string, string>
+                )[attempt.failureContext.condition] ?? attempt.failureContext.condition}
+              </p>
+            ) : null}
             <output
               className={`thermal-plant-run-card__run-evidence${loading ? ' thermal-plant-run-card__run-evidence--loading' : ''}`}
               aria-live="polite"
@@ -429,6 +356,7 @@ export function createDefaultThermalPlantSnapshot(): ThermalPlantRunSnapshot {
   const temperatures = [25, 35, 52, 78, 112, 148, 182, 207, 220, 205, 174, 138, 102, 80]
   return {
     supplyBoundary: createDefaultSupplyBoundary(),
+    supplyBoundarySource: 'attempt',
     version: 2,
     attempt: {
       runId: 7,
@@ -572,8 +500,7 @@ function TraceChart({
   loading: boolean
   running: boolean
 }) {
-  const width = 440
-  const initialHeight = 152
+  const { width, initialHeight, inset } = thermalChartStyle
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   if (points.length < 2)
     return (
@@ -588,12 +515,6 @@ function TraceChart({
       />
     )
   const height = viewBoxHeight
-  const inset = {
-    top: Math.max(12, height * 0.079),
-    right: 18,
-    bottom: Math.max(28, height * 0.184),
-    left: 34,
-  }
   const minT = Math.min(...points.map((point) => point.temperatureCentiC / 100), 25)
   const maxT = Math.max(...points.map((point) => point.temperatureCentiC / 100), 220)
   const maxElapsed = Math.max(...points.map((point) => point.elapsedMs), 1)
@@ -630,6 +551,14 @@ function TraceChart({
         role="img"
         aria-label="加热和自然冷却温度曲线"
       >
+        <text x={inset.left} y={18}>
+          温度 / ℃
+        </text>
+        <text x={width - inset.right} y={18} textAnchor="end" className="thermal-chart__key">
+          <tspan className="thermal-chart__key--ambient">环境 · </tspan>
+          <tspan className="thermal-chart__key--heating">加热 · </tspan>
+          <tspan className="thermal-chart__key--cooling">自然冷却</tspan>
+        </text>
         <line
           x1={inset.left}
           y1={inset.top}
@@ -682,7 +611,7 @@ function TraceChart({
           <circle
             cx={cutoffPoint.x}
             cy={cutoffPoint.y}
-            r="3.5"
+            r="3"
             className="thermal-plant-run-card__point thermal-plant-run-card__point--heating"
           />
         ) : null}
@@ -690,7 +619,7 @@ function TraceChart({
           <circle
             cx={completionPoint.x}
             cy={completionPoint.y}
-            r="3.5"
+            r="3"
             className="thermal-plant-run-card__point thermal-plant-run-card__point--cooling"
           />
         ) : null}
@@ -703,15 +632,15 @@ function TraceChart({
         <text x={inset.left - 8} y={plotBottom + 3} textAnchor="end">
           {Math.round(minT)}
         </text>
-        <text x={inset.left} y={height - 5}>
+        <text x={inset.left} y={plotBottom + 20}>
           {formatElapsed(0)}
         </text>
         {cutoffPoint ? (
-          <text x={cutoffPoint.x} y={height - 5} textAnchor="middle">
+          <text x={cutoffPoint.x} y={plotBottom + 20} textAnchor="middle">
             {formatElapsed(points[cutoffIndex]?.elapsedMs ?? 0)}
           </text>
         ) : null}
-        <text x={width - inset.right} y={height - 5} textAnchor="end">
+        <text x={width - inset.right} y={plotBottom + 20} textAnchor="end">
           {formatElapsed(maxElapsed)}
         </text>
       </svg>
@@ -854,219 +783,8 @@ function ChartPlaceholder({
   )
 }
 
-function SupplyBoundaryChart({
-  boundary,
-  loading,
-  running,
-}: {
-  boundary?: SupplyBoundary | null
-  loading: boolean
-  running: boolean
-}) {
-  const points = (boundary?.points ?? []).map((point) => ({
-    requestVoltageMv: point[6] || point[7],
-    requestCurrentMa: point[5],
-  }))
-  const width = 600
-  const initialHeight = 340
-  const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
-  if (points.length === 0)
-    return (
-      <ChartPlaceholder
-        loading={loading}
-        variant="boundary"
-        icon={Zap}
-        title={running ? '等待供电边界采样' : '尚未开始采样'}
-        detail={
-          running
-            ? '设备正在扫描供电边界，数据到达后会绘制曲线'
-            : '开始自动校准后，供电边界会逐步出现'
-        }
-      />
-    )
-  const height = viewBoxHeight
-  const inset = {
-    top: Math.max(16, height * 0.047),
-    right: 26,
-    bottom: Math.max(36, height * 0.106),
-    left: 38,
-  }
-  const minX = Math.min(...points.map((point) => point.requestVoltageMv))
-  const maxX = Math.max(...points.map((point) => point.requestVoltageMv))
-  const rawMaxY = Math.max(...points.map((point) => point.requestCurrentMa))
-  const minY = 0
-  const maxY = Math.max(boundary?.sourceMaxMa ?? 0, rawMaxY, 1)
-  const plotWidth = width - inset.left - inset.right
-  const plotBottom = height - inset.bottom
-  const plotHeight = plotBottom - inset.top
-  const positionFor = (point: { requestVoltageMv: number; requestCurrentMa: number }) => ({
-    x: inset.left + ((point.requestVoltageMv - minX) / Math.max(maxX - minX, 1)) * plotWidth,
-    y: plotBottom - ((point.requestCurrentMa - minY) / Math.max(maxY - minY, 1)) * plotHeight,
-  })
-  const positions = points.map(positionFor)
-  const path = points
-    .map((point) => {
-      const position = positionFor(point)
-      return `${position.x},${position.y}`
-    })
-    .join(' ')
-  const tickIndices = selectBoundaryTickIndices(points)
-  return (
-    <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
-      <svg
-        className="thermal-plant-run-card__svg thermal-plant-run-card__svg--boundary"
-        preserveAspectRatio="xMidYMid meet"
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label="供电边界曲线"
-      >
-        <line
-          x1={inset.left}
-          y1={inset.top}
-          x2={inset.left}
-          y2={plotBottom}
-          className="thermal-plant-run-card__axis"
-        />
-        <line
-          x1={inset.left}
-          y1={plotBottom}
-          x2={width - inset.right}
-          y2={plotBottom}
-          className="thermal-plant-run-card__axis"
-        />
-        <line
-          x1={inset.left}
-          y1={inset.top + plotHeight / 3}
-          x2={width - inset.right}
-          y2={inset.top + plotHeight / 3}
-          className="thermal-plant-run-card__guide"
-        />
-        <line
-          x1={inset.left}
-          y1={inset.top + (plotHeight * 2) / 3}
-          x2={width - inset.right}
-          y2={inset.top + (plotHeight * 2) / 3}
-          className="thermal-plant-run-card__guide"
-        />
-        <polyline points={path} className="thermal-plant-run-card__boundary" />
-        {points.map((point, index) => (
-          <circle
-            key={`${point.requestVoltageMv}-${point.requestCurrentMa}-${index}`}
-            cx={positions[index]?.x}
-            cy={positions[index]?.y}
-            r="4"
-            className="thermal-plant-run-card__point thermal-plant-run-card__point--boundary"
-          />
-        ))}
-        {tickIndices.map((index) => {
-          const point = points[index]
-          return (
-            <text
-              key={`${point.requestVoltageMv}-label-${index}`}
-              x={positions[index]?.x}
-              y={height - 8}
-              textAnchor="middle"
-            >
-              {formatBoundaryVoltageMv(point.requestVoltageMv)}V
-            </text>
-          )
-        })}
-        <text x={inset.left - 16} y={inset.top + 5}>
-          {formatBoundaryCurrentMa(maxY)}A
-        </text>
-        <text x={inset.left - 16} y={plotBottom + 3}>
-          0A
-        </text>
-      </svg>
-    </div>
-  )
-}
-
-function useResponsiveSvgHeight(viewBoxWidth: number, initialHeight: number) {
-  const [container, setContainer] = useState<HTMLDivElement | null>(null)
-  const [viewBoxHeight, setViewBoxHeight] = useState(initialHeight)
-  const containerRef = useCallback((node: HTMLDivElement | null) => setContainer(node), [])
-
-  useLayoutEffect(() => {
-    if (!container) return
-
-    const updateViewBox = () => {
-      const { width, height } = container.getBoundingClientRect()
-      if (width <= 0 || height <= 0) return
-      const nextHeight = (viewBoxWidth * height) / width
-      setViewBoxHeight((currentHeight) =>
-        Math.abs(currentHeight - nextHeight) < 0.5 ? currentHeight : nextHeight
-      )
-    }
-
-    let frameId = 0
-    const scheduleUpdate = () => {
-      updateViewBox()
-      if (typeof requestAnimationFrame !== 'function') return
-      if (frameId !== 0) cancelAnimationFrame(frameId)
-      frameId = requestAnimationFrame(() => {
-        frameId = 0
-        updateViewBox()
-      })
-    }
-
-    const observer =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleUpdate)
-
-    updateViewBox()
-    scheduleUpdate()
-    observer?.observe(container)
-    window.addEventListener('resize', scheduleUpdate)
-    window.visualViewport?.addEventListener('resize', scheduleUpdate)
-    return () => {
-      observer?.disconnect()
-      if (frameId !== 0) cancelAnimationFrame(frameId)
-      window.removeEventListener('resize', scheduleUpdate)
-      window.visualViewport?.removeEventListener('resize', scheduleUpdate)
-    }
-  }, [container, viewBoxWidth])
-
-  return { containerRef, viewBoxHeight }
-}
-
-function selectBoundaryTickIndices(points: Array<{ requestVoltageMv: number }>, maxTicks = 6) {
-  const tickLimit = Math.max(2, Math.floor(maxTicks))
-  const uniqueIndices: number[] = []
-  const seenVoltages = new Set<number>()
-
-  points.forEach((point, index) => {
-    if (seenVoltages.has(point.requestVoltageMv)) return
-    seenVoltages.add(point.requestVoltageMv)
-    uniqueIndices.push(index)
-  })
-
-  if (uniqueIndices.length <= tickLimit) return uniqueIndices
-
-  const lastIndex = uniqueIndices.length - 1
-  return Array.from({ length: tickLimit }, (_, tick) => {
-    const position = Math.round((tick * lastIndex) / (tickLimit - 1))
-    return uniqueIndices[position] as number
-  })
-}
-
 function formatTemp(centiC: number | undefined) {
   return ((centiC ?? 0) / 100).toFixed(1)
-}
-
-function formatBoundaryVoltage(point: SupplyBoundary['points'][number]) {
-  return formatBoundaryVoltageMv(point[6] || point[7])
-}
-
-function formatBoundaryVoltageMv(value: number) {
-  return (value / 1000).toFixed(1)
-}
-
-function formatBoundaryCurrent(point: SupplyBoundary['points'][number]) {
-  return (point[5] / 1000).toFixed(2)
-}
-
-function formatBoundaryCurrentMa(value: number) {
-  return (value / 1000).toFixed(1)
 }
 
 function formatElapsed(elapsedMs: number) {

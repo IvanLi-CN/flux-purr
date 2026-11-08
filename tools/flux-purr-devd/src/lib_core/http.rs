@@ -1232,6 +1232,7 @@ pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, reque
         .map(|attempt| attempt.run_id.saturating_add(1))
         .unwrap_or(1);
     device.thermal_plant_run.attempt = Some(ThermalPlantRunAttempt {
+        failure_context: None,
         run_id: next_run_id,
         status: CalibrationJobStatus::Running,
         phase: Some(ThermalPlantRunPhase::Ambient),
@@ -1245,6 +1246,11 @@ pub(crate) fn initialize_mock_thermal_plant_run(device: &mut DeviceRecord, reque
         restart_allowed: false,
         error: None,
     });
+    device.thermal_plant_run.supply_boundary_source = device
+        .thermal_plant_run
+        .supply_boundary
+        .as_ref()
+        .map(|_| "active".into());
     device.thermal_plant_run.version = 2;
     device.thermal_plant_run.trace_page = ThermalPlantTracePage::default();
     device.thermal_plant_run.provisional_curve = None;

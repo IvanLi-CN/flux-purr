@@ -40,6 +40,8 @@ pub(crate) mod support;
 pub(crate) mod tasks;
 #[path = "thermal.rs"]
 pub(crate) mod thermal;
+#[path = "thermal_plant_completion.rs"]
+pub(crate) mod thermal_plant_completion;
 #[path = "watchdog.rs"]
 pub(crate) mod watchdog;
 
@@ -83,6 +85,8 @@ pub(crate) use support::*;
 pub(crate) use tasks::*;
 #[allow(unused_imports)]
 pub(crate) use thermal::*;
+#[allow(unused_imports)]
+pub(crate) use thermal_plant_completion::*;
 #[allow(unused_imports)]
 pub(crate) use watchdog::*;
 

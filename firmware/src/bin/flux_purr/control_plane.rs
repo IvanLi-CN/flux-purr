@@ -605,10 +605,7 @@ pub(crate) fn apply_manual_pps_config(
     {
         return Err(ManualPpsError::TerminalDisarmPending);
     }
-    if calibration.mode == CalibrationMode::ThermalPlant
-        && calibration.job.status == CalibrationJobStatus::Running
-        && manual_pps_requested
-    {
+    if thermal_plant_calibration_job_running(calibration) && manual_pps_requested {
         return Err(ManualPpsError::CalibrationInProgress);
     }
     if config.manual_pps_enabled == Some(false) {
@@ -715,7 +712,7 @@ pub(crate) fn apply_calibration_control_config(
 
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) fn thermal_plant_calibration_job_running(calibration: CalibrationRuntimeState) -> bool {
-    calibration.mode == CalibrationMode::ThermalPlant
+    calibration.job.kind == Some(CalibrationJobKind::ThermalPlant)
         && calibration.job.status == CalibrationJobStatus::Running
 }
 
@@ -1014,6 +1011,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
     calibration.scan_contract_confirmed = false;
     workspace.next_run_id = workspace.next_run_id.wrapping_add(1).max(1);
     workspace.job = Some(CalibrationThermalPlantAutoJob {
+        completion: ThermalPlantCompletion::default(),
         run_id: workspace.next_run_id,
         phase: ThermalPlantAutoPhase::Ambient,
         source_current_ma,
@@ -2519,12 +2517,12 @@ pub(crate) fn update_thermal_plant_calibration_job(
     let started_at = *job.started_at_ms.get_or_insert(input.now_ms);
     job.elapsed_ticks = (input.now_ms.saturating_sub(started_at) / HEATER_CONTROL_INTERVAL_MS)
         .min(u64::from(u32::MAX)) as u32;
-    if job.elapsed_ticks > THERMAL_PLANT_TOTAL_TIMEOUT_TICKS {
-        fail_thermal_plant_calibration(
-            calibration,
-            manual_pps,
-            ManualPpsError::ThermalPlantTimeout,
-        );
+    if let Some(error) = thermal_plant_stage_error(job, input) {
+        fail_thermal_plant_calibration(calibration, manual_pps, error);
+        return;
+    }
+    if job.completion.candidate.is_some() {
+        calibration.heater_enabled = false;
         return;
     }
     if let Some(error) = manual_pps.error {
@@ -2539,7 +2537,10 @@ pub(crate) fn update_thermal_plant_calibration_job(
         );
         return;
     }
-    if !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma) {
+    if !manual_pps.has_matching_pps_apdo(20_000, job.source_current_ma)
+        && job.phase != ThermalPlantAutoPhase::Cooling
+        && input.latest_temp_c < THERMAL_PLANT_TARGET_TEMP_C
+    {
         // FUSB302B clears its published capabilities while it re-queries the
         // source after a transient transport retry. Keep the calibration
         // session alive, but keep the heater off until a fresh APDO snapshot
@@ -2563,9 +2564,14 @@ pub(crate) fn update_thermal_plant_calibration_job(
         ThermalPlantAutoPhase::Ambient => {
             update_thermal_ambient_phase(calibration, manual_pps, job, input, recorded_temp_c)
         }
-        ThermalPlantAutoPhase::Heating => {
-            update_thermal_heating_phase(calibration, manual_pps, job, input, recorded_temp_c)
-        }
+        ThermalPlantAutoPhase::Heating => update_thermal_heating_phase(
+            calibration,
+            memory_config,
+            manual_pps,
+            job,
+            input,
+            recorded_temp_c,
+        ),
         ThermalPlantAutoPhase::Cooling => update_thermal_cooling_phase(
             calibration,
             memory_config,
@@ -2690,12 +2696,15 @@ fn record_thermal_scan_sample_or_fail(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn update_thermal_heating_phase(
     calibration: &mut CalibrationRuntimeState,
+    memory_config: &MemoryConfig,
     manual_pps: &mut ManualPpsState,
     job: &mut CalibrationThermalPlantAutoJob,
     input: CalibrationJobUpdateInput,
     recorded_temp_c: f32,
 ) -> bool {
-    if job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_HEAT_TIMEOUT_TICKS {
+    if job.elapsed_ticks.saturating_sub(job.phase_started_tick) >= THERMAL_PLANT_HEAT_TIMEOUT_TICKS
+        && input.latest_temp_c < THERMAL_PLANT_TARGET_TEMP_C
+    {
         fail_thermal_plant_calibration(
             calibration,
             manual_pps,
@@ -2722,7 +2731,7 @@ pub(crate) fn update_thermal_heating_phase(
         );
         return false;
     };
-    let output = scan.update(flux_purr_firmware::heater_supply::scan::ScanInput {
+    let mut output = scan.update(flux_purr_firmware::heater_supply::scan::ScanInput {
         now_ms: job
             .elapsed_ticks
             .saturating_mul(HEATER_CONTROL_INTERVAL_MS as u32),
@@ -2747,6 +2756,8 @@ pub(crate) fn update_thermal_heating_phase(
         return false;
     }
     let complete = scan.phase == flux_purr_firmware::heater_supply::scan::ScanPhase::Complete;
+    let cutoff = input.latest_temp_c >= THERMAL_PLANT_TARGET_TEMP_C;
+    continue_completed_supply_scan(scan, &mut output, memory_config, manual_pps, input);
     let points = scan.boundary.point_count;
     if (manual_pps.target_mv != Some(output.request_mv)
         || manual_pps.target_ma != Some(output.request_ma))
@@ -2781,12 +2792,13 @@ pub(crate) fn update_thermal_heating_phase(
         input,
         recorded_temp_c,
         recorded_duty_percent,
-        complete,
+        cutoff,
     ) {
         return false;
     }
     calibration.job.progress_percent = (2 + points.saturating_mul(2)).min(59);
-    if complete {
+    if cutoff {
+        job.completion.cutoff_reached = true;
         calibration.heater_enabled = false;
         job.phase = ThermalPlantAutoPhase::Cooling;
         job.phase_started_tick = job.elapsed_ticks;
@@ -2808,8 +2820,9 @@ pub(crate) fn update_thermal_cooling_phase(
     // Keep the calibration-owned PPS contract unchanged. Natural cooling is
     // measured with the heater off and without requesting a fan working floor.
     let cooling_complete = thermal_plant_cooling_complete(input.latest_temp_c, recorded_temp_c);
-    let timed_out =
-        job.elapsed_ticks.saturating_sub(job.phase_started_tick) > THERMAL_PLANT_COOL_TIMEOUT_TICKS;
+    let timed_out = job.elapsed_ticks.saturating_sub(job.phase_started_tick)
+        >= THERMAL_PLANT_COOL_TIMEOUT_TICKS
+        && !cooling_complete;
     if timed_out
         || !record_thermal_plant_transient_sample(
             job,
@@ -2853,6 +2866,15 @@ pub(crate) fn complete_thermal_plant_calibration(
     job: &mut CalibrationThermalPlantAutoJob,
     latest_rtd_raw_adc_mv: u16,
 ) -> bool {
+    if !job.completion.cutoff_reached {
+        fail_thermal_plant_calibration(
+            calibration,
+            manual_pps,
+            ManualPpsError::HeaterCurveCoverageInsufficient,
+        );
+        return false;
+    }
+    job.completion.fitting_started_tick = job.elapsed_ticks;
     let Some(boundary) = job
         .supply_scan
         .as_ref()
@@ -2870,11 +2892,7 @@ pub(crate) fn complete_thermal_plant_calibration(
         ^ u32::from(latest_rtd_raw_adc_mv)
         ^ job.elapsed_ticks
         ^ 0x5452_4e53;
-    // The five-minute 3A path reaches the minimum 100C coverage before
-    // cooling. At that span convection and radiation are not separately
-    // identifiable, so try the physically constrained convection-only fit
-    // first. The full three-coefficient fit remains available as a host-side
-    // fallback for richer traces, but is needlessly expensive on the MCU.
+    // Preserve the established fit order and physical residual gates.
     let fitted = fit_thermal_plant_transient_without_radiation(
         transaction_id,
         job.ambient_raw_rtd_adc_mv,
@@ -2911,13 +2929,13 @@ pub(crate) fn complete_thermal_plant_calibration(
         return false;
     }
     compact_supply_calibration_trace(job);
-    memory_config.active_heater_curve = HeaterCurveConfig::default();
-    memory_config.heater_curve_raw_observations = HeaterCurveRawObservations::default();
-    memory_config.heater_curve_transaction_id = None;
-    memory_config.heater_supply_boundary = Some(boundary);
-    memory_config.thermal_plant_transient_active = Some(transaction);
-    memory_config.thermal_plant_active = None;
-    memory_config.sanitize();
+    job.completion.candidate = Some(Box::new(
+        flux_purr_firmware::memory::ThermalPlantPersistence {
+            active: Some(transaction),
+            supply_boundary: Some(boundary),
+        },
+    ));
+    job.completion.persistence_started_tick = job.elapsed_ticks;
     manual_pps.clear();
     calibration.pps_enabled = false;
     calibration.pps_mv = None;
@@ -2926,12 +2944,8 @@ pub(crate) fn complete_thermal_plant_calibration(
     calibration.mode = CalibrationMode::Off;
     calibration.thermal_plant_completion_disarm_pending = true;
     calibration.job.samples_collected = job.sample_count;
-    calibration_job_complete(
-        calibration,
-        CalibrationJobKind::ThermalPlant,
-        job.sample_count,
-        None,
-    );
+    // The async commit path publishes success only after verified persistence.
+    calibration.job.progress_percent = 99;
     false
 }
 

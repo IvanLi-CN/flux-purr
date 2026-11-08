@@ -566,9 +566,11 @@ pub(crate) fn mock_thermal_plant_snapshot() -> ThermalPlantRunSnapshot {
         })
         .collect();
     ThermalPlantRunSnapshot {
+        supply_boundary_source: Some("attempt".into()),
         supply_boundary: Some(boundary),
         version: 2,
         attempt: Some(ThermalPlantRunAttempt {
+            failure_context: None,
             run_id: 7,
             status: CalibrationJobStatus::Completed,
             phase: Some(ThermalPlantRunPhase::Cooling),
