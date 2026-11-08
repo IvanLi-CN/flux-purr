@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fireEvent, fn, userEvent, within } from 'storybook/test'
 import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
@@ -111,7 +111,14 @@ export const IdleReady: Story = {
 
 export const Loading: Story = {
   name: 'Loading live snapshot',
-  args: { snapshot: emptySnapshot, loading: true },
+  args: { snapshot: completedSnapshot, loading: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.queryByRole('img', { name: 'RTD 理论温度—申请电压散点图' })).toBeNull()
+    await expect(canvas.queryByRole('img', { name: '加热和自然冷却温度曲线' })).toBeNull()
+    await expect(canvas.getAllByText('读取中').length).toBeGreaterThan(0)
+    await expect(canvas.queryByText('active 有效')).toBeNull()
+  },
 }
 
 export const LoadingRunning: Story = {
@@ -210,15 +217,90 @@ export const ObservedSixteenPoints: Story = {
     }
 
     await expect(canvas.queryByLabelText('2.85 A 温度—申请电压拟合曲线')).not.toBeInTheDocument()
-    await userEvent.click(points[0])
-    await expect(canvas.getByText(/29.8℃ · 申请 9.5 V/)).toBeVisible()
+    await expect(canvas.queryByText(/29.8℃ · 申请 9.5 V/)).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/合同 2.85 A · RTD 1324 mV/)).not.toBeInTheDocument()
+    await expect(canvasElement.querySelector('.thermal-chart__detail')).toBeNull()
+    const tableScroll = canvasElement.querySelector(
+      '.thermal-plant-run-card__table-scroll .simplebar-content-wrapper'
+    ) as HTMLElement
+    const tableWrap = canvasElement.querySelector(
+      '.thermal-plant-run-card__table-wrap'
+    ) as HTMLElement
+    const tableHead = tableScroll.querySelector('thead') as HTMLElement
+    await expect(tableScroll.scrollHeight).toBeGreaterThan(tableScroll.clientHeight)
+    await expect(getComputedStyle(tableScroll).overflowY).toBe('scroll')
+    await expect(getComputedStyle(tableHead).position).toBe('sticky')
+    await expect(getComputedStyle(tableHead).backgroundColor).toBe(
+      getComputedStyle(tableWrap).backgroundColor
+    )
+
+    const expectSelectedRowBelowStickyHeader = async () => {
+      const deadline = performance.now() + 1_000
+      let selectedRowRect: DOMRect | undefined
+      let tableScrollRect: DOMRect | undefined
+      let tableHeadRect: DOMRect | undefined
+      while (performance.now() < deadline) {
+        const selectedRow = tableScroll.querySelector('tr[aria-selected="true"]') as HTMLElement
+        tableScrollRect = tableScroll.getBoundingClientRect()
+        tableHeadRect = tableHead.getBoundingClientRect()
+        selectedRowRect = selectedRow.getBoundingClientRect()
+        if (
+          selectedRowRect.top >= tableHeadRect.bottom - 1 &&
+          selectedRowRect.bottom <= tableScrollRect.bottom + 1
+        ) {
+          return
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+      }
+      if (!selectedRowRect || !tableScrollRect || !tableHeadRect) {
+        throw new Error('selected observation geometry was not available')
+      }
+      await expect(selectedRowRect.top).toBeGreaterThanOrEqual(tableHeadRect.bottom - 1)
+      await expect(selectedRowRect.bottom).toBeLessThanOrEqual(tableScrollRect.bottom + 1)
+    }
+
     await userEvent.click(points[15])
-    await expect(canvas.getByText(/合同 2.85 A · RTD 1324 mV/)).toBeVisible()
+    await expect(points[15]).toHaveAttribute('aria-pressed', 'true')
+    await expectSelectedRowBelowStickyHeader()
+    const supplyRect = supplySvg.getBoundingClientRect()
+    fireEvent.pointerMove(supplySvg, {
+      clientX: supplyRect.left + supplyRect.width / 2,
+      clientY: supplyRect.top + supplyRect.height / 2,
+    })
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).not.toBeNull()
+    fireEvent.pointerDown(supplySvg, {
+      pointerType: 'mouse',
+      clientX: supplyRect.left + supplyRect.width / 2,
+      clientY: supplyRect.top + supplyRect.height / 2,
+    })
+    fireEvent.pointerLeave(supplySvg)
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).not.toBeNull()
+    fireEvent.pointerDown(document.body, { pointerType: 'mouse' })
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).toBeNull()
+    await userEvent.click(points[0])
+    await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+    await expectSelectedRowBelowStickyHeader()
     await points[3].focus()
     await userEvent.keyboard('{Enter}')
-    await expect(canvas.getByText(/58.3℃ · 申请 14.2 V/)).toBeVisible()
+    await expect(points[3]).toHaveAttribute('aria-pressed', 'true')
     await userEvent.click(canvas.getByRole('button', { name: '选择观测 1' }))
     await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+
+    traceSvg.focus()
+    fireEvent.keyDown(traceSvg, { key: 'ArrowRight' })
+    await expect(
+      canvasElement.querySelector('.thermal-plant-run-card__svg--trace ~ .thermal-chart__tooltip')
+    ).not.toBeNull()
+    await expect(
+      canvasElement.querySelector('.thermal-plant-run-card__svg--trace ~ .thermal-chart__tooltip')
+        ?.textContent
+    ).toContain('时间')
   },
 }
 export const NarrowObserved: Story = {
@@ -271,6 +353,9 @@ export const NarrowChart: Story = {
     if (!detail || !plot) throw new Error('Missing chart surface')
     const style = getComputedStyle(detail)
     await expect(style.whiteSpace).toBe('nowrap')
+    await expect(
+      getComputedStyle(chart?.querySelector('.thermal-plant-run-card__svg') as Element).touchAction
+    ).toBe('pan-y')
     await expect(detail.getBoundingClientRect().height).toBeLessThanOrEqual(
       Number.parseFloat(style.lineHeight) + 1
     )

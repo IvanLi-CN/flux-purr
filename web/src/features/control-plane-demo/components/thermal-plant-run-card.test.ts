@@ -107,6 +107,7 @@ describe('thermal plant run result presentation', () => {
 
   it('presents the supply boundary and transient evidence instead of legacy resistance data', () => {
     const snapshot = createDefaultThermalPlantSnapshot()
+    expect(snapshot.supplyBoundary?.points).toHaveLength(16)
     const markup = renderToStaticMarkup(
       createElement(ThermalPlantRunCard, { snapshot, onStartStop: () => undefined })
     )

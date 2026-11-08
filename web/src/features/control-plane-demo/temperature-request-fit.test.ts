@@ -14,6 +14,8 @@ describe('display-only temperature/request fits', () => {
     expect(fit.rmseV).toBeLessThan(1e-9)
     expect(fit.points[0].temperatureC).toBe(25)
     expect(fit.points.at(-1)?.temperatureC).toBe(220)
+    expect(fit.validPoints[0].temperatureC).toBe(30)
+    expect(fit.validPoints.at(-1)?.temperatureC).toBe(150)
     for (const point of fit.points)
       expect(point.requestV).toBeCloseTo(
         5 + point.temperatureC * 0.1 - point.temperatureC ** 2 * 0.0002,
@@ -35,6 +37,8 @@ describe('display-only temperature/request fits', () => {
     expect(fits[0].rmseV).toBeLessThan(1)
     expect(fits[0].points[0].temperatureC).toBe(25)
     expect(fits[0].points.at(-1)?.temperatureC).toBe(220)
+    expect(fits[0].validPoints[0].temperatureC).toBeCloseTo(29.8, 1)
+    expect(fits[0].validPoints.at(-1)?.temperatureC).toBeCloseTo(162.1, 1)
   })
   it('keeps separate current classes and declines insufficient temperature coverage', () => {
     const rows = [30, 60, 90].flatMap((temperatureC) => [
