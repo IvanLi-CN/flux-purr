@@ -1348,33 +1348,19 @@ impl ManualPpsState {
             .max(self.request_min_mv)
             .max(FUSB302B_PPS_MIN_MV);
         let bounded_max_mv = range.max_mv.min(self.request_max_mv).min(21_000);
-        let operational_max_mv = match (self.source_power_limit_mw, self.source_power_limit_ma) {
-            (Some(power_mw), Some(envelope_ma)) if envelope_ma >= scan_current_ma => {
-                let fixed_power_max_mv =
-                    (power_mw * 1_000 / u32::from(scan_current_ma)) as u16 / 100 * 100;
-                fixed_power_max_mv.min(bounded_max_mv)
-            }
-            (Some(_), Some(_)) => return None,
-            (None, None) => bounded_max_mv,
-            _ => return None,
-        };
-        if operational_max_mv < bounded_min_mv {
-            return None;
-        }
-        Some((bounded_min_mv, operational_max_mv, scan_current_ma))
+        (bounded_max_mv >= bounded_min_mv).then_some((
+            bounded_min_mv,
+            bounded_max_mv,
+            scan_current_ma,
+        ))
     }
 
     pub(crate) fn thermal_plant_source_power_limit_mw(&self) -> u32 {
-        self.source_power_limit_mw
-            .zip(self.source_power_limit_ma)
-            .filter(|(_, current_ma)| *current_ma >= 3_000)
-            .map_or(0, |(power_mw, _)| power_mw)
+        // Preserve the on-wire/EEPROM field; zero means no invented PPS cap.
+        0
     }
 
-    /// Return the operational APDO range used by the persisted whole-device
-    /// boundary. The boundary records the lower of the advertised APDO range
-    /// and the source power envelope at 3 A; matching it against the raw
-    /// advertised maximum would reject a valid 60 W boundary on a 21 V APDO.
+    /// Operational PPS bounds are derived only from the APDO and product range.
     fn automatic_boundary_source_limits(&self, apdo: ch224q::PpsApdo) -> (u16, u16) {
         let bounded_min_mv = apdo
             .min_mv
@@ -1468,18 +1454,10 @@ impl ManualPpsState {
         // product intentionally caps automatic heating at 3 A; comparing the
         // raw advertisement with a 3 A calibration would discard the valid
         // whole-device boundary and fall back to the theoretical model.
-        // The persisted boundary is keyed by the source capability used for
-        // the 3 A scan. The terminal point deliberately executes at 2.85 A
-        // to stay below the fixed-PDO power envelope, but that encoded
-        // current must still validate against the same 3 A boundary while a
-        // 20.5 V or 21 V terminal request is being confirmed.
-        let boundary_source_max_ma = if current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
-            && apdo.max_ma >= MAX_AUTOMATIC_HEATER_CONTRACT_MA
-        {
-            MAX_AUTOMATIC_HEATER_CONTRACT_MA
-        } else {
-            current_ma
-        };
+        if current_ma != MAX_AUTOMATIC_HEATER_CONTRACT_MA {
+            return None;
+        }
+        let boundary_source_max_ma = current_ma;
         let (boundary_source_min_mv, boundary_source_max_mv) =
             self.automatic_boundary_source_limits(apdo);
         let mut selected_current_ma = current_ma;
@@ -1506,7 +1484,7 @@ impl ManualPpsState {
                             .map(|temp| round_to_i16(temp * 100.0))
                     };
                     if let Some(point) = boundary.safe_point(query, &mut project_temperature) {
-                        selected_current_ma = point.request_current_ma;
+                        selected_current_ma = current_ma;
                         Some(point.tracking_request_mv)
                     } else {
                         boundary.safe_request_mv_or_cold_start(query, &mut project_temperature)
@@ -1611,59 +1589,14 @@ impl ManualPpsState {
         // Boundary validation must use that confirmed contract current; using
         // the transient load reading would reject the terminal contract and
         // leave the heater disabled until it falls back to the old voltage.
-        let candidate = self
-            .automatic_heater_pps_for_contract_with_rtd(
-                temp_c,
-                config,
-                active.voltage_mv,
-                active.operating_current_ma,
-                Some(range),
-                current_rtd_mv,
-            )
-            .or_else(|| {
-                // Once the terminal contract is confirmed, the heater may have
-                // been blanked long enough for the RTD lookup temperature to
-                // fall below the compact boundary's terminal point. The contract
-                // itself is still independently safe when it is the encoded
-                // 21 V/2.85 A endpoint of the advertised 60 W/3 A envelope. Keep
-                // the recovery path alive without accepting any other contract
-                // or exceeding the source power limit.
-                let terminal_power_mw =
-                    u32::from(active.voltage_mv) * u32::from(active.operating_current_ma) / 1_000;
-                if active.voltage_mv != AUTOMATIC_TERMINAL_VOLTAGE_MV
-                    || active.operating_current_ma != AUTOMATIC_TERMINAL_CURRENT_MA
-                    || self
-                        .source_power_limit_mw
-                        .is_none_or(|limit| terminal_power_mw > limit)
-                    || self
-                        .source_power_limit_ma
-                        .is_none_or(|limit| limit < MAX_AUTOMATIC_HEATER_CONTRACT_MA)
-                {
-                    return None;
-                }
-                self.capability_apdos
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, apdo)| {
-                        let apdo = (*apdo)?;
-                        let min_mv = apdo.min_mv.max(self.request_min_mv);
-                        let max_mv = apdo.max_mv.min(self.request_max_mv);
-                        (range.min_mv == apdo.min_mv
-                            && range.max_mv == apdo.max_mv
-                            && range.max_current_ma == apdo.max_ma
-                            && (min_mv..=max_mv).contains(&active.voltage_mv)
-                            && active.operating_current_ma <= apdo.max_ma)
-                            .then_some(AutomaticHeaterPpsCandidate {
-                                min_mv,
-                                max_mv,
-                                current_ma: active.operating_current_ma,
-                                allowed_mv: active.voltage_mv,
-                                power_mw: terminal_power_mw,
-                                advertisement_index: index,
-                                boundary_applied: true,
-                            })
-                    })
-            })?;
+        let candidate = self.automatic_heater_pps_for_contract_with_rtd(
+            temp_c,
+            config,
+            active.voltage_mv,
+            active.operating_current_ma,
+            Some(range),
+            current_rtd_mv,
+        )?;
         (candidate.min_mv..=candidate.allowed_mv)
             .contains(&active.voltage_mv)
             .then_some(candidate)

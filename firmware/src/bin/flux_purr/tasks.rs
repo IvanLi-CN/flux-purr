@@ -1974,15 +1974,7 @@ fn automatic_pps_request_is_safe<PWM>(
         return false;
     };
     request.mode() == PdContractRequestMode::Pps
-        && (request.operating_current_ma() >= MIN_HEATER_CONTRACT_MA
-            || (request.operating_current_ma() == AUTOMATIC_TERMINAL_CURRENT_MA
-                && u32::from(request.voltage_mv()) * u32::from(request.operating_current_ma())
-                    / 1_000
-                    <= context
-                        .memory_config
-                        .heater_supply_boundary
-                        .as_ref()
-                        .map_or(0, |boundary| boundary.source_power_limit_mw)))
+        && request.operating_current_ma() == MAX_AUTOMATIC_HEATER_CONTRACT_MA
         && (candidate.min_mv..=candidate.allowed_mv).contains(&request.voltage_mv())
 }
 

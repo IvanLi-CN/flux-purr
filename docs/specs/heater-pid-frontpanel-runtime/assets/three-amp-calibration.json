@@ -1,0 +1,531 @@
+{
+  "version": 2,
+  "supplyBoundarySource": "attempt",
+  "supplyBoundary": {
+    "formatVersion": 6,
+    "adc": {
+      "dividerSupplyMv": 3328,
+      "referenceMv": 850,
+      "referenceCode": 1900,
+      "initCode": 2127,
+      "efuseVersion": 1,
+      "attenuationDb": 6
+    },
+    "wifiStarted": false,
+    "cutoffReached": true,
+    "sourceMinMv": 5500,
+    "sourceMaxMv": 21000,
+    "sourceMaxMa": 3000,
+    "sourcePowerLimitMw": 0,
+    "advertisedMinMv": 3300,
+    "advertisedMaxMv": 21000,
+    "points": [
+      [
+        24350,
+        2349,
+        1045,
+        1240,
+        1039,
+        3000,
+        13000,
+        0,
+        1
+      ],
+      [
+        24950,
+        2364,
+        1052,
+        1270,
+        1063,
+        3000,
+        13500,
+        0,
+        1
+      ],
+      [
+        33000,
+        2425,
+        1079,
+        1293,
+        1083,
+        3000,
+        13500,
+        0,
+        1
+      ],
+      [
+        33600,
+        2429,
+        1080,
+        1339,
+        1119,
+        3000,
+        14000,
+        0,
+        1
+      ],
+      [
+        38750,
+        2470,
+        1099,
+        1343,
+        1122,
+        3000,
+        14000,
+        14700,
+        1
+      ],
+      [
+        43150,
+        2499,
+        1111,
+        1394,
+        1165,
+        3000,
+        14500,
+        0,
+        1
+      ],
+      [
+        44350,
+        2508,
+        1115,
+        1416,
+        1183,
+        3000,
+        14700,
+        0,
+        1
+      ],
+      [
+        50200,
+        2547,
+        1132,
+        1417,
+        1183,
+        3000,
+        14700,
+        15500,
+        1
+      ],
+      [
+        54550,
+        2578,
+        1145,
+        1488,
+        1241,
+        3000,
+        15500,
+        0,
+        1
+      ],
+      [
+        58650,
+        2604,
+        1157,
+        1514,
+        1262,
+        3000,
+        16000,
+        0,
+        1
+      ],
+      [
+        67150,
+        2649,
+        1176,
+        1554,
+        1295,
+        3000,
+        16000,
+        16500,
+        1
+      ],
+      [
+        71450,
+        2677,
+        1188,
+        1602,
+        1335,
+        3000,
+        16500,
+        0,
+        1
+      ],
+      [
+        74900,
+        2703,
+        1199,
+        1604,
+        1336,
+        3000,
+        16500,
+        0,
+        1
+      ],
+      [
+        75500,
+        2707,
+        1201,
+        1626,
+        1354,
+        3000,
+        17000,
+        0,
+        1
+      ],
+      [
+        81900,
+        2741,
+        1216,
+        1653,
+        1376,
+        3000,
+        17000,
+        17500,
+        1
+      ],
+      [
+        86250,
+        2765,
+        1226,
+        1692,
+        1407,
+        3000,
+        17500,
+        0,
+        1
+      ],
+      [
+        91500,
+        2790,
+        1237,
+        1720,
+        1431,
+        3000,
+        18000,
+        0,
+        1
+      ],
+      [
+        97850,
+        2824,
+        1251,
+        1756,
+        1461,
+        3000,
+        18000,
+        18500,
+        1
+      ],
+      [
+        102100,
+        2844,
+        1260,
+        1782,
+        1482,
+        3000,
+        18500,
+        0,
+        1
+      ],
+      [
+        105000,
+        2858,
+        1266,
+        1801,
+        1497,
+        3000,
+        18500,
+        19500,
+        1
+      ],
+      [
+        108650,
+        2874,
+        1273,
+        1819,
+        1512,
+        3000,
+        19000,
+        0,
+        1
+      ],
+      [
+        112000,
+        2892,
+        1280,
+        1837,
+        1527,
+        3000,
+        19000,
+        20000,
+        1
+      ],
+      [
+        117850,
+        2919,
+        1293,
+        1863,
+        1548,
+        3000,
+        19000,
+        20000,
+        1
+      ],
+      [
+        122400,
+        2938,
+        1300,
+        1893,
+        1572,
+        3000,
+        19500,
+        0,
+        1
+      ],
+      [
+        129350,
+        2968,
+        1314,
+        1928,
+        1601,
+        3000,
+        20000,
+        0,
+        1
+      ],
+      [
+        131750,
+        2979,
+        1318,
+        1938,
+        1609,
+        3000,
+        20000,
+        20600,
+        1
+      ],
+      [
+        138000,
+        3002,
+        1328,
+        1962,
+        1630,
+        3000,
+        20000,
+        20600,
+        1
+      ],
+      [
+        144350,
+        3030,
+        1340,
+        1997,
+        1659,
+        3000,
+        20500,
+        0,
+        1
+      ],
+      [
+        149600,
+        3047,
+        1347,
+        2020,
+        1676,
+        3000,
+        21000,
+        0,
+        1
+      ],
+      [
+        153650,
+        3060,
+        1353,
+        2035,
+        1689,
+        3000,
+        21000,
+        0,
+        1
+      ]
+    ]
+  },
+  "activeResult": {
+    "transactionId": 1348167743,
+    "curve": {
+      "points": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    "convectionMwPerC": 211.08168,
+    "radiationMwPerK4": 0.0,
+    "thermalCapacityMjPerC": 30753.62,
+    "transportDelayMs": 4500,
+    "heatResponse": null
+  },
+  "tracePage": {
+    "startSample": 0,
+    "nextSample": 16,
+    "totalSamples": 48,
+    "points": [
+      {
+        "sampleIndex": 0,
+        "elapsedMs": 3600,
+        "rawRtdAdcMv": 1035,
+        "temperatureCentiC": 3186,
+        "heaterVoltageMv": 20875,
+        "dutyPercent": 0,
+        "phase": "ambient"
+      },
+      {
+        "sampleIndex": 1,
+        "elapsedMs": 5650,
+        "rawRtdAdcMv": 1036,
+        "temperatureCentiC": 3226,
+        "heaterVoltageMv": 5250,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 2,
+        "elapsedMs": 25900,
+        "rawRtdAdcMv": 1057,
+        "temperatureCentiC": 4091,
+        "heaterVoltageMv": 12875,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 3,
+        "elapsedMs": 30100,
+        "rawRtdAdcMv": 1071,
+        "temperatureCentiC": 4678,
+        "heaterVoltageMv": 13250,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 4,
+        "elapsedMs": 36850,
+        "rawRtdAdcMv": 1092,
+        "temperatureCentiC": 5574,
+        "heaterVoltageMv": 13750,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 5,
+        "elapsedMs": 41000,
+        "rawRtdAdcMv": 1105,
+        "temperatureCentiC": 6138,
+        "heaterVoltageMv": 13500,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 6,
+        "elapsedMs": 45950,
+        "rawRtdAdcMv": 1120,
+        "temperatureCentiC": 6799,
+        "heaterVoltageMv": 14375,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 7,
+        "elapsedMs": 52400,
+        "rawRtdAdcMv": 1139,
+        "temperatureCentiC": 7650,
+        "heaterVoltageMv": 14125,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 8,
+        "elapsedMs": 58100,
+        "rawRtdAdcMv": 1156,
+        "temperatureCentiC": 8427,
+        "heaterVoltageMv": 15000,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 9,
+        "elapsedMs": 64700,
+        "rawRtdAdcMv": 1169,
+        "temperatureCentiC": 9030,
+        "heaterVoltageMv": 15625,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 10,
+        "elapsedMs": 69350,
+        "rawRtdAdcMv": 1183,
+        "temperatureCentiC": 9689,
+        "heaterVoltageMv": 15500,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 11,
+        "elapsedMs": 76950,
+        "rawRtdAdcMv": 1204,
+        "temperatureCentiC": 10697,
+        "heaterVoltageMv": 16375,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 12,
+        "elapsedMs": 83350,
+        "rawRtdAdcMv": 1219,
+        "temperatureCentiC": 11431,
+        "heaterVoltageMv": 16500,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 13,
+        "elapsedMs": 87450,
+        "rawRtdAdcMv": 1229,
+        "temperatureCentiC": 11927,
+        "heaterVoltageMv": 17000,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 14,
+        "elapsedMs": 99100,
+        "rawRtdAdcMv": 1254,
+        "temperatureCentiC": 13192,
+        "heaterVoltageMv": 17500,
+        "dutyPercent": 100,
+        "phase": "heating"
+      },
+      {
+        "sampleIndex": 15,
+        "elapsedMs": 105200,
+        "rawRtdAdcMv": 1266,
+        "temperatureCentiC": 13811,
+        "heaterVoltageMv": 18000,
+        "dutyPercent": 100,
+        "phase": "heating"
+      }
+    ]
+  },
+  "elfSha256": "0bcdda0286459b978cf9a233518a94b09665ef6e2c402e2089b7664515742816",
+  "sourceConfiguration": {
+    "powerWatts": 65,
+    "ppsLimitMa": 3000
+  }
+}

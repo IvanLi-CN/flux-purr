@@ -16,8 +16,7 @@ const A6_REPORT_TEMPLATE: &str = include_str!("thermal_a6_acceptance_template.ht
 const THREE_AMP_CURRENT_TOLERANCE_MA: u64 = 200;
 const THREE_AMP_REQUIRED_CONDUCTION_SAMPLES: usize = 2;
 const A6_TERMINAL_VOLTAGE_MV: u64 = 21_000;
-const A6_TERMINAL_CURRENT_MA: u64 = 2_850;
-const A6_MAX_SOURCE_POWER_MW: u64 = 60_000;
+const A6_TERMINAL_CURRENT_MA: u64 = 3_000;
 const A6_TERMINAL_VIN_MIN_MV: u64 = 18_900;
 const A6_TERMINAL_MIN_SOURCE_CURRENT_MA: u64 = 2_500;
 const A6_MAX_SAMPLE_GAP_MS: u64 = 2_000;
@@ -484,7 +483,7 @@ fn a6_report_data(
         .to_string();
     let data = json!({
         "title": format!("Flux Purr A6 3A 电源边界验收 / {}°C run", run.target_temp_c),
-        "subtitle": "阶段二：应用阶段一 active thermal-plant 模型后的正常自动加热；报告只使用阶段二原始同步采样，并在 21V/2.85A 的两点终端处结束。",
+        "subtitle": "阶段二：应用阶段一 active thermal-plant 模型后的正常自动加热；报告只使用阶段二原始同步采样，并在 21V/3A 的两点终端处结束。",
         "generatedAt": current_unix_millis(),
         "reviewPassed": report_passed,
         "reviewOutcome": if report_passed { "passed" } else { "failed" },
@@ -612,6 +611,7 @@ struct A6Validation {
     static_gate_violation_count: usize,
     approach_hold_intermediate_samples: usize,
     source_power_ok: bool,
+    contract_current_ok: bool,
     source_measurements_complete: bool,
     no_manual: bool,
     source_fresh: bool,
@@ -640,7 +640,6 @@ fn a6_terminal_pair(samples: &[Value]) -> Option<A6TerminalPair<'_>> {
                 && a6_source_current(sample).is_some_and(|value| {
                     (A6_TERMINAL_MIN_SOURCE_CURRENT_MA..3_000).contains(&value)
                 })
-                && a6_source_power(sample).is_some_and(|value| value <= A6_MAX_SOURCE_POWER_MW)
                 && a6_hotplate_mv(sample).is_some_and(|value| value >= A6_TERMINAL_VIN_MIN_MV)
                 && a6_source_status_ok(sample)
         })
@@ -661,6 +660,7 @@ fn a6_validate_samples(samples: &[Value], calibration_transaction_id: u64) -> A6
         monotonic: true,
         no_pwm: true,
         source_power_ok: true,
+        contract_current_ok: true,
         source_measurements_complete: true,
         no_manual: true,
         source_fresh: true,
@@ -692,6 +692,11 @@ fn a6_validate_samples(samples: &[Value], calibration_transaction_id: u64) -> A6
             out.monotonic &= monotonic;
             out.sample_gap_over_2s |= sample_gap_over_2s;
         }
+        if a6_duty(sample, "heaterPhysicalOutputPercent").is_some_and(|duty| duty > 0)
+            && a6_contract_ma(sample) != Some(3000)
+        {
+            out.contract_current_ok = false;
+        }
         let logical_is_static = matches!(a6_duty(sample, "heaterOutputPercent"), Some(0 | 100));
         let physical_is_static = matches!(
             a6_duty(sample, "heaterPhysicalOutputPercent"),
@@ -716,7 +721,7 @@ fn a6_validate_samples(samples: &[Value], calibration_transaction_id: u64) -> A6
         {
             out.no_manual = false;
         }
-        if a6_source_power(sample).is_none_or(|value| value > A6_MAX_SOURCE_POWER_MW) {
+        if a6_source_power(sample).is_none() {
             out.source_power_ok = false;
         }
         out.source_measurements_complete &= a6_source_voltage(sample).is_some()
@@ -807,9 +812,12 @@ fn a6_evidence(samples: &[Value], calibration_transaction_id: u64) -> A6Evidence
     if !validation.no_manual {
         out.failure_reasons.push("manual_pps_enabled".to_string());
     }
-    if !validation.source_power_ok {
+    if !validation.contract_current_ok {
         out.failure_reasons
-            .push("source_power_over_60w".to_string());
+            .push("three_amp_contract_changed".to_string());
+    }
+    if !validation.source_power_ok {
+        out.failure_reasons.push("source_power_missing".to_string());
     }
     if !validation.source_measurements_complete {
         out.failure_reasons
@@ -900,6 +908,7 @@ fn a6_complete_evidence(
         && validation.no_pwm
         && validation.no_manual
         && validation.source_power_ok
+        && validation.contract_current_ok
         && validation.source_measurements_complete
         && validation.source_fresh
         && validation.source_uptime_monotonic;
@@ -3569,9 +3578,9 @@ mod tests {
         let samples = vec![
             sample(0, 30.0, 13_000, 3_000, 2_900, 12_700, 37_000, 12_400),
             sample(500, 31.0, 20_000, 3_000, 2_845, 19_400, 55_000, 19_000),
-            sample(1_000, 179.0, 21_000, 2_850, 39, 21_000, 807, 20_869),
-            sample(1_500, 179.1, 21_000, 2_850, 2_779, 19_350, 53_780, 18_905),
-            sample(2_000, 179.2, 21_000, 2_850, 2_780, 19_350, 53_790, 18_905),
+            sample(1_000, 179.0, 21_000, 3_000, 39, 21_000, 807, 20_869),
+            sample(1_500, 179.1, 21_000, 3_000, 2_779, 19_350, 53_780, 18_905),
+            sample(2_000, 179.2, 21_000, 3_000, 2_780, 19_350, 53_790, 18_905),
         ];
 
         let evidence = a6_evidence(&samples, 1347967110);
@@ -3583,6 +3592,26 @@ mod tests {
         assert_eq!(
             A6_TERMINAL_MIN_SOURCE_CURRENT_MA, 2_500,
             "the terminal floor must exclude the PD ramp transient"
+        );
+
+        let mut above_sixty_watts = samples.clone();
+        for sample in &mut above_sixty_watts[3..] {
+            sample["sourceTelemetry"]["currentMa"] = json!(2950);
+            sample["sourceTelemetry"]["voltageMv"] = json!(21000);
+            sample["sourceTelemetry"]["powerMw"] = json!(61950);
+        }
+        assert!(
+            a6_evidence(&above_sixty_watts, 1347967110)
+                .failure_reasons
+                .is_empty()
+        );
+        let mut reduced_current = above_sixty_watts;
+        reduced_current[3]["status"]["pdContractCurrentMa"] = json!(2850);
+        assert!(
+            a6_evidence(&reduced_current, 1347967110)
+                .failure_reasons
+                .iter()
+                .any(|reason| reason == "three_amp_contract_changed")
         );
 
         let mut missing_transaction = samples.clone();
@@ -3731,17 +3760,17 @@ mod tests {
                 500, "warmup", 31.0, 20_000, 3_000, 2_845, 19_400, 55_000, 19_000, 100,
             ),
             sample(
-                1_000, "approach", 179.0, 21_000, 2_850, 2_500, 21_000, 52_500, 20_869, 75,
+                1_000, "approach", 179.0, 21_000, 3_000, 2_500, 21_000, 52_500, 20_869, 75,
             ),
             sample(
-                1_500, "approach", 179.1, 21_000, 2_850, 2_779, 19_350, 53_780, 18_905, 100,
+                1_500, "approach", 179.1, 21_000, 3_000, 2_779, 19_350, 53_780, 18_905, 100,
             ),
             sample(
-                2_000, "approach", 179.2, 21_000, 2_850, 2_780, 19_350, 53_790, 18_905, 100,
+                2_000, "approach", 179.2, 21_000, 3_000, 2_780, 19_350, 53_790, 18_905, 100,
             ),
         ];
         samples.push(sample(
-            2_500, "warmup", 205.0, 21_000, 2_850, 2_780, 19_350, 53_790, 18_905, 75,
+            2_500, "warmup", 205.0, 21_000, 3_000, 2_780, 19_350, 53_790, 18_905, 75,
         ));
 
         let evidence = a6_evidence(&samples, 1347967110);

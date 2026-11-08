@@ -6182,12 +6182,16 @@ pub(crate) fn ensure_isolapurr_thermal_capability(
     validate_isolapurr_device_identity(source_url, device_id)?;
     let required_power_watts = u64::from(source_power_watts);
     let requires_pps_5a = required_power_watts == THERMAL_SOURCE_100W_POWER_WATTS;
-    let required_pps3_limit_ma = if required_power_watts == 60 {
-        3_000
-    } else {
-        5_000
-    };
+    let required_pps3_limit_ma = if requires_pps_5a { 5_000 } else { 3_000 };
     let mut config = read_isolapurr_power_config(source_url)?;
+    if required_power_watts == 0 {
+        // A 3 A selection does not authorize changing the source's wattage.
+        return if isolapurr_power_config_has_thermal_capability(&config, 0, false) {
+            Ok(())
+        } else {
+            Err("isolapurr must advertise PPS with a 3000mA current limit; source configuration was preserved".into())
+        };
+    }
     if !isolapurr_power_config_has_thermal_capability(
         &config,
         required_power_watts,
@@ -6224,9 +6228,7 @@ pub(crate) fn ensure_isolapurr_thermal_capability(
         }
         config = read_isolapurr_power_config(source_url)?;
     }
-    if required_power_watts == 60
-        && isolapurr_power_config_manual_current_limit_ma(&config) != Some(3_000)
-    {
+    if !requires_pps_5a && isolapurr_power_config_manual_current_limit_ma(&config) != Some(3_000) {
         let response = isolapurr_cli_json(
             source_url,
             &[
@@ -6234,7 +6236,7 @@ pub(crate) fn ensure_isolapurr_thermal_capability(
                 "config",
                 "set",
                 "--power-watts",
-                "60",
+                &required_power_watts.to_string(),
                 "--current-limit-ma",
                 "3000",
                 "--pps3-limit-ma",
@@ -6244,7 +6246,7 @@ pub(crate) fn ensure_isolapurr_thermal_capability(
             ],
         )?;
         if !isolapurr_cli_write_succeeded(&response) {
-            return Err("isolapurr 60W current-limit command did not acknowledge success".into());
+            return Err("isolapurr 3A current-limit command did not acknowledge success".into());
         }
         config = read_isolapurr_power_config(source_url)?;
     }
@@ -6260,10 +6262,8 @@ pub(crate) fn ensure_isolapurr_thermal_capability(
             .into(),
         );
     }
-    if required_power_watts == 60
-        && isolapurr_power_config_manual_current_limit_ma(&config) != Some(3_000)
-    {
-        return Err("isolapurr 60W readback must confirm a 3000mA manual current limit".into());
+    if !requires_pps_5a && isolapurr_power_config_manual_current_limit_ma(&config) != Some(3_000) {
+        return Err("isolapurr 3A readback must confirm a 3000mA manual current limit".into());
     }
     Ok(())
 }
@@ -6366,15 +6366,16 @@ pub(crate) fn isolapurr_power_config_has_thermal_capability(
             .and_then(Value::as_u64)
     });
     let pd_pps_5a = isolapurr_pd_pps_5a(capability);
-    let pps3_limit_matches = if required_power_watts == 60 {
+    let pps3_limit_matches = if !requires_pps_5a {
         pps3_limit_ma == Some(3_000)
     } else {
         pps3_limit_ma.is_none_or(|limit| limit >= 5_000)
     };
-    json_u64_any(
-        capability.as_object().unwrap_or(&serde_json::Map::new()),
-        &["power_watts", "powerWatts"],
-    ) == Some(required_power_watts)
+    (required_power_watts == 0
+        || json_u64_any(
+            capability.as_object().unwrap_or(&serde_json::Map::new()),
+            &["power_watts", "powerWatts"],
+        ) == Some(required_power_watts))
         && capability.pointer("/protocols/pd").and_then(Value::as_bool) == Some(true)
         && capability.pointer("/pd/pps").and_then(Value::as_bool) == Some(true)
         && capability

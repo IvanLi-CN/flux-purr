@@ -1189,14 +1189,14 @@ fn calibration_request_preserves_the_advertised_apdo_through_the_capability_brid
 }
 
 #[test]
-fn thermal_plant_scan_respects_fixed_power_envelope_without_changing_apdo_identity() {
+fn thermal_plant_scan_uses_pps_envelope_without_a_fixed_pdo_wattage_cap() {
     let source = SourceCapabilities::from_pdos(&[
         fixed_source_capability(20_000, 3_000),
         pps_source_capability(5_000, 21_000, 3_000),
     ]);
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
-    assert_eq!(capabilities.source_power_limit_mw, Some(60_000));
-    assert_eq!(capabilities.source_power_limit_ma, Some(3_000));
+    assert_eq!(capabilities.source_power_limit_mw, None);
+    assert_eq!(capabilities.source_power_limit_ma, None);
 
     let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
     assert_eq!(
@@ -1209,12 +1209,12 @@ fn thermal_plant_scan_respects_fixed_power_envelope_without_changing_apdo_identi
     );
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 20_000, 3_000))
+        Some((5_500, 21_000, 3_000))
     );
 }
 
 #[test]
-fn thermal_plant_scan_caps_five_amp_apdo_to_fixed_three_amp_power_envelope() {
+fn thermal_plant_scan_uses_three_amp_across_five_amp_apdo_voltage_range() {
     let source = SourceCapabilities::from_pdos(&[
         fixed_source_capability(20_000, 3_000),
         pps_source_capability(5_000, 21_000, 5_000),
@@ -1224,12 +1224,12 @@ fn thermal_plant_scan_caps_five_amp_apdo_to_fixed_three_amp_power_envelope() {
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 20_000, 3_000))
+        Some((5_500, 21_000, 3_000))
     );
 }
 
 #[test]
-fn thermal_plant_scan_rejects_a_fixed_envelope_below_three_amp() {
+fn thermal_plant_scan_does_not_confuse_fixed_current_with_pps_current() {
     let source = SourceCapabilities::from_pdos(&[
         fixed_source_capability(20_000, 2_000),
         pps_source_capability(5_000, 21_000, 5_000),
@@ -1237,7 +1237,10 @@ fn thermal_plant_scan_rejects_a_fixed_envelope_below_three_amp() {
     let capabilities = fusb302b_adjustable_power_capabilities(source).unwrap();
     let manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
 
-    assert_eq!(manual.thermal_plant_source_limits(), None);
+    assert_eq!(
+        manual.thermal_plant_source_limits(),
+        Some((5_500, 21_000, 3_000))
+    );
 }
 
 #[test]
@@ -14657,30 +14660,28 @@ fn automatic_heater_observed_three_amp_boundary_can_raise_the_preset_ceiling() {
     .expect("the observed 3 A tracking boundary is usable");
     assert_eq!(candidate.current_ma, 3_000);
     assert_eq!(candidate.allowed_mv, 18_000);
-    assert_eq!(candidate.power_mw, 101_250);
+    assert_eq!(candidate.power_mw, 54_000);
     assert!(candidate.boundary_applied);
 }
 
 #[test]
-fn automatic_heater_accepts_power_safe_terminal_current_without_oversized_power() {
-    let candidate = automatic_heater_pps_candidate_with_limit(
-        ch224q::PpsApdo {
-            min_mv: 5_500,
-            max_mv: 21_000,
-            max_ma: 2_850,
-        },
-        5_500,
-        21_000,
-        HEATER_ADJUSTABLE_MAX_MV,
-        3.2,
-        0,
-        Some(21_000),
-    )
-    .expect("the calibrated 60 W terminal current is usable");
-    assert_eq!(candidate.current_ma, 2_850);
-    assert_eq!(candidate.allowed_mv, 21_000);
-    assert_eq!(candidate.power_mw, 59_850);
-    assert!(u32::from(candidate.allowed_mv) * u32::from(candidate.current_ma) / 1_000 <= 60_000);
+fn automatic_heater_rejects_a_reduced_current_terminal() {
+    assert!(
+        automatic_heater_pps_candidate_with_limit(
+            ch224q::PpsApdo {
+                min_mv: 5500,
+                max_mv: 21000,
+                max_ma: 2850
+            },
+            5500,
+            21000,
+            HEATER_ADJUSTABLE_MAX_MV,
+            3.2,
+            0,
+            Some(21000)
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -14744,8 +14745,8 @@ fn automatic_heater_boundary_matches_a_raw_apdo_below_the_fusb_floor() {
     manual.source_power_limit_mw = Some(60_000);
     manual.source_power_limit_ma = Some(3_000);
     let mut boundary = synthetic_supply_boundary();
-    boundary.source_power_limit_mw = 60_000;
-    boundary.source_max_mv = 20_000;
+    boundary.source_power_limit_mw = 0;
+    boundary.source_max_mv = 21_000;
     boundary.advertised_min_mv = 3_300;
     boundary.advertised_max_mv = 21_000;
     let minimum_coverage_point = boundary.points[0];
@@ -14779,7 +14780,8 @@ fn automatic_heater_boundary_uses_coldest_observed_floor_before_first_observatio
     manual.source_power_limit_mw = Some(60_000);
     manual.source_power_limit_ma = Some(3_000);
     let mut boundary = synthetic_supply_boundary();
-    boundary.source_power_limit_mw = 60_000;
+    boundary.source_power_limit_mw = 0;
+    boundary.source_max_mv = 21_000;
     boundary.advertised_min_mv = 3_300;
     boundary.advertised_max_mv = 21_000;
     let config = MemoryConfig {
@@ -14807,8 +14809,8 @@ fn automatic_heater_boundary_carries_the_colder_point_across_a_rounded_bin_edge(
     manual.source_power_limit_mw = Some(60_000);
     manual.source_power_limit_ma = Some(3_000);
     let mut boundary = synthetic_supply_boundary();
-    boundary.source_power_limit_mw = 60_000;
-    boundary.source_max_mv = 20_000;
+    boundary.source_power_limit_mw = 0;
+    boundary.source_max_mv = 21_000;
     boundary.advertised_min_mv = 3_300;
     boundary.advertised_max_mv = 21_000;
     boundary.points[0].rtd_mv = runtime_test_raw_rtd_adc_mv_for_temp(137.6);
@@ -14870,7 +14872,8 @@ fn automatic_heater_real_terminal_boundary_is_selected_at_the_live_edge() {
     let mut boundary = synthetic_supply_boundary();
     boundary.advertised_min_mv = 3_300;
     boundary.advertised_max_mv = 21_000;
-    boundary.source_power_limit_mw = 60_000;
+    boundary.source_power_limit_mw = 0;
+    boundary.source_max_mv = 21_000;
     boundary.point_count = 4;
     let base_point = boundary.points[0];
     boundary.points[..4].copy_from_slice(&[
@@ -14894,7 +14897,7 @@ fn automatic_heater_real_terminal_boundary_is_selected_at_the_live_edge() {
         },
         BoundaryPoint {
             rtd_mv: 1_349,
-            request_current_ma: 2_850,
+            request_current_ma: 3_000,
             tracking_request_mv: 21_000,
             flat_request_mv: 0,
             ..base_point
@@ -14919,7 +14922,7 @@ fn automatic_heater_real_terminal_boundary_is_selected_at_the_live_edge() {
         )
         .expect("the power-safe terminal point must escape the 20 V/3 A stall");
     assert!((handoff_temp_c - projected_terminal).abs() < 0.01);
-    assert_eq!(candidate.current_ma, 2_850);
+    assert_eq!(candidate.current_ma, 3_000);
     assert_eq!(candidate.allowed_mv, 21_000);
 
     assert_live_edge_terminal_requests(&manual, &config, handoff_temp_c);
@@ -14935,46 +14938,46 @@ fn assert_live_edge_terminal_requests(
             handoff_temp_c,
             config,
             20_100,
-            2_850,
+            3_000,
             Some(20_000),
             Some(1_349),
         )
         .expect("the terminal handoff must produce a valid PPS contract request");
     assert_eq!(request.voltage_mv(), 20_100);
-    assert_eq!(request.operating_current_ma(), 2_850);
+    assert_eq!(request.operating_current_ma(), 3_000);
 
     let terminal_request = manual
         .automatic_heater_request_contract_with_rtd(
             handoff_temp_c,
             config,
             21_000,
-            2_850,
+            3_000,
             Some(20_000),
             Some(1_349),
         )
         .expect("the terminal handoff endpoint must remain a valid PPS request");
     assert_eq!(terminal_request.voltage_mv(), 21_000);
-    assert_eq!(terminal_request.operating_current_ma(), 2_850);
+    assert_eq!(terminal_request.operating_current_ma(), 3_000);
 
     let terminal_step_while_temperature_dips = manual
         .automatic_heater_pps_for_contract_with_rtd(
             handoff_temp_c - 2.0,
             config,
             20_500,
-            2_850,
+            3_000,
             None,
             Some(1_348),
         )
         .expect("the encoded terminal step remains safe while its ticket is confirmed");
-    assert_eq!(terminal_step_while_temperature_dips.current_ma, 2_850);
-    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 21_000);
+    assert_eq!(terminal_step_while_temperature_dips.current_ma, 3_000);
+    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 20_000);
 
     let terminal_candidate_after_small_settle_blank = manual
         .automatic_heater_pps_for_contract_with_rtd(
             handoff_temp_c - 2.0,
             config,
             21_000,
-            2_850,
+            3_000,
             None,
             Some(1_330),
         )
@@ -14983,24 +14986,25 @@ fn assert_live_edge_terminal_requests(
         );
     assert_eq!(
         terminal_candidate_after_small_settle_blank.current_ma,
-        2_850
+        3_000
     );
     assert_eq!(
         terminal_candidate_after_small_settle_blank.allowed_mv,
         21_000
     );
+    let colder = manual
+        .automatic_heater_pps_for_contract_with_rtd(
+            handoff_temp_c - 20.0,
+            config,
+            21_000,
+            3_000,
+            None,
+            Some(1_330),
+        )
+        .expect("a colder measured ceiling remains available");
     assert!(
-        manual
-            .automatic_heater_pps_for_contract_with_rtd(
-                handoff_temp_c - 20.0,
-                config,
-                21_000,
-                2_850,
-                None,
-                Some(1_330),
-            )
-            .is_none(),
-        "a large temperature drop must not retain the terminal contract"
+        colder.allowed_mv < 21_000,
+        "a temperature drop must lower the ceiling"
     );
 }
 
@@ -19733,9 +19737,9 @@ fn automatic_voltage_response_does_not_promote_a_future_warm_boundary_point() {
         },
         wifi_started: false,
         source_min_mv: 5_500,
-        source_max_mv: 20_000,
+        source_max_mv: 21_000,
         source_max_ma: 3_000,
-        source_power_limit_mw: 60_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 3_300,
         advertised_max_mv: 21_000,
         point_count: 2,
@@ -19832,9 +19836,9 @@ fn automatic_voltage_response_accepts_the_cold_start_boundary_point() {
         },
         wifi_started: false,
         source_min_mv: 5_500,
-        source_max_mv: 20_000,
+        source_max_mv: 21_000,
         source_max_ma: 3_000,
-        source_power_limit_mw: 60_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 5_500,
         advertised_max_mv: 21_000,
         point_count: 2,
@@ -19980,9 +19984,9 @@ fn automatic_voltage_response_keeps_a_3a_boundary_sag_but_rejects_source_collaps
         },
         wifi_started: false,
         source_min_mv: 5_500,
-        source_max_mv: 20_000,
+        source_max_mv: 21_000,
         source_max_ma: 3_000,
-        source_power_limit_mw: 60_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 5_500,
         advertised_max_mv: 21_000,
         point_count: 1,
@@ -20165,9 +20169,9 @@ fn automatic_boundary_caps_previous_requests_across_warmup() {
         },
         wifi_started: false,
         source_min_mv: 5_500,
-        source_max_mv: 20_000,
+        source_max_mv: 21_000,
         source_max_ma: 3_000,
-        source_power_limit_mw: 60_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 3_300,
         advertised_max_mv: 21_000,
         point_count: 10,
@@ -20252,9 +20256,9 @@ fn persisted_three_amp_boundary_releases_the_next_voltage_at_its_observed_temper
         },
         wifi_started: false,
         source_min_mv: 5_500,
-        source_max_mv: 20_000,
+        source_max_mv: 21_000,
         source_max_ma: 3_000,
-        source_power_limit_mw: 60_000,
+        source_power_limit_mw: 0,
         advertised_min_mv: 5_500,
         advertised_max_mv: 21_000,
         point_count: 10,

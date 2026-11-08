@@ -263,13 +263,7 @@ impl SupplyBoundary {
             .copied()
             .filter(|point| {
                 if query.current_ma >= 3_000 {
-                    point.tracking_only
-                        && point.request_current_ma <= query.current_ma
-                        && (point.request_current_ma == 3_000
-                            || terminal_tracking_current_ma(
-                                self.source_power_limit_mw,
-                                point.tracking_request_mv,
-                            ) == Some(point.request_current_ma))
+                    point.tracking_only && point.request_current_ma == 3_000
                 } else {
                     (!point.tracking_only && Some(point.request_current_ma) == current_class)
                         || (point.tracking_only

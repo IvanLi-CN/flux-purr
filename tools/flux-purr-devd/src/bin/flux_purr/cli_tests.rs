@@ -7062,3 +7062,18 @@ fn interactive_buzzer_play_requires_an_explicit_replacement_of_running_audio() {
             .contains("The running session will not be stopped automatically.")
     );
 }
+
+#[test]
+fn three_amp_source_capability_has_no_implicit_wattage_requirement() {
+    assert_eq!(thermal_default_source_power_watts_for_bank("pps3a"), 0);
+    for watts in [45, 60, 63, 65, 100] {
+        let config = json!({"capability": {
+            "power_watts": watts, "protocols": {"pd": true},
+            "pd": {"pps": true, "fixed_voltages_mv": [5000, 20000]},
+            "current": {"pps3_limit_ma": 3000, "pd_pps_5a": false}
+        }});
+        assert!(isolapurr_power_config_has_thermal_capability(
+            &config, 0, false
+        ));
+    }
+}

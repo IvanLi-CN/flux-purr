@@ -91,248 +91,6 @@ fn power_safe_terminal_tracking_point_round_trips_and_is_valid() {
 }
 
 #[test]
-fn hot_lookup_selects_terminal_current_without_promoting_it_to_three_amp() {
-    let mut value = boundary();
-    value.source_max_mv = 20_000;
-    value.source_power_limit_mw = 60_000;
-    value.advertised_max_mv = 21_000;
-    value.point_count = 0;
-    value.points = [BoundaryPoint::default(); MAX_BOUNDARY_POINTS];
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 10_000,
-        rtd_code: 1_500,
-        rtd_mv: 1_000,
-        vin_code: 1_500,
-        vin_mv: 1_500,
-        request_current_ma: 3_000,
-        tracking_request_mv: 20_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 20_000,
-        rtd_code: 1_600,
-        rtd_mv: 1_200,
-        vin_code: 1_600,
-        vin_mv: 1_600,
-        request_current_ma: 2_850,
-        tracking_request_mv: 21_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-    let selected = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 15_000,
-                current_rtd_mv: Some(1_500),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_200 => Some(12_000),
-                1_500 => Some(15_000),
-                _ => None,
-            },
-        )
-        .expect("terminal tracking point is selected at its observed temperature");
-    assert_eq!(selected.tracking_request_mv, 21_000);
-    assert_eq!(selected.request_current_ma, 2_850);
-
-    let confirmed_terminal = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 12_000,
-                current_rtd_mv: Some(1_200),
-                current_request_mv: Some(21_000),
-                current_ma: 2_850,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_200 => Some(12_000),
-                _ => None,
-            },
-        )
-        .expect("confirmed terminal contract remains bound to its terminal point");
-    assert_eq!(confirmed_terminal.request_current_ma, 2_850);
-    assert_eq!(confirmed_terminal.tracking_request_mv, 21_000);
-}
-
-#[test]
-fn terminal_tracking_requires_live_edge_and_holds_pending_step() {
-    let mut value = boundary();
-    value.source_max_mv = 20_000;
-    value.source_power_limit_mw = 60_000;
-    value.advertised_max_mv = 21_000;
-    value.point_count = 0;
-    value.points = [BoundaryPoint::default(); MAX_BOUNDARY_POINTS];
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 10_000,
-        rtd_code: 1_000,
-        rtd_mv: 1_000,
-        vin_code: 1_000,
-        vin_mv: 1_000,
-        request_current_ma: 3_000,
-        tracking_request_mv: 20_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 20_000,
-        rtd_code: 1_100,
-        rtd_mv: 1_100,
-        vin_code: 1_100,
-        vin_mv: 1_100,
-        request_current_ma: 2_850,
-        tracking_request_mv: 21_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-
-    let edge = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 11_000,
-                current_rtd_mv: Some(1_099),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_099 | 1_100 => Some(11_000),
-                _ => None,
-            },
-        )
-        .expect("the operational point remains safe before the terminal edge");
-    assert_eq!(edge.tracking_request_mv, 20_000);
-
-    let reached = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 11_000,
-                current_rtd_mv: Some(1_100),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_100 => Some(11_000),
-                _ => None,
-            },
-        )
-        .expect("the terminal point becomes eligible at the live RTD edge");
-    assert_eq!(reached.tracking_request_mv, 21_000);
-
-    let pending = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 11_000,
-                current_rtd_mv: Some(1_099),
-                current_request_mv: Some(20_500),
-                current_ma: 2_850,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_099 | 1_100 => Some(11_000),
-                _ => None,
-            },
-        )
-        .expect("the one-step terminal request remains safe across one ADC code");
-    assert_eq!(pending.tracking_request_mv, 21_000);
-}
-
-#[test]
-fn terminal_tracking_bridges_a_sub_three_degree_thermal_gap() {
-    let mut value = boundary();
-    value.source_max_mv = 20_000;
-    value.source_power_limit_mw = 60_000;
-    value.advertised_max_mv = 21_000;
-    value.point_count = 0;
-    value.points = [BoundaryPoint::default(); MAX_BOUNDARY_POINTS];
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 10_000,
-        rtd_code: 1_000,
-        rtd_mv: 1_000,
-        vin_code: 1_000,
-        vin_mv: 1_000,
-        request_current_ma: 3_000,
-        tracking_request_mv: 20_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 20_000,
-        rtd_code: 1_100,
-        rtd_mv: 1_100,
-        vin_code: 1_100,
-        vin_mv: 1_100,
-        request_current_ma: 2_850,
-        tracking_request_mv: 21_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-
-    let pre_terminal = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 10_800,
-                current_rtd_mv: Some(1_099),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_099 | 1_100 => Some(11_000),
-                _ => None,
-            },
-        )
-        .expect("the power-safe terminal point bridges a sub-three-degree thermal gap");
-    assert_eq!(pre_terminal.tracking_request_mv, 21_000);
-}
-
-#[test]
 fn confirmed_tracking_request_survives_a_narrow_temperature_dip() {
     let mut value = SupplyBoundary {
         adc: BoundaryAdcMetadata {
@@ -417,113 +175,6 @@ fn confirmed_tracking_request_survives_a_narrow_temperature_dip() {
         )
         .expect("the colder point remains safe");
     assert_eq!(colder.tracking_request_mv, 10_000);
-}
-
-#[test]
-fn terminal_handoff_can_escape_a_twelve_degree_three_amp_thermal_stall() {
-    let mut value = boundary();
-    value.source_max_mv = 20_000;
-    value.source_power_limit_mw = 60_000;
-    value.advertised_max_mv = 21_000;
-    value.point_count = 0;
-    value.points = [BoundaryPoint::default(); MAX_BOUNDARY_POINTS];
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 10_000,
-        rtd_code: 1_500,
-        rtd_mv: 1_000,
-        vin_code: 1_500,
-        vin_mv: 1_500,
-        request_current_ma: 3_000,
-        tracking_request_mv: 20_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-    assert!(value.retain(BoundaryPoint {
-        elapsed_ms: 20_000,
-        rtd_code: 1_600,
-        rtd_mv: 1_200,
-        vin_code: 1_600,
-        vin_mv: 1_600,
-        request_current_ma: 2_850,
-        tracking_request_mv: 21_000,
-        tracking_only: true,
-        ..BoundaryPoint::default()
-    }));
-
-    let selected = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 11_000,
-                current_rtd_mv: Some(1_100),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_200 => Some(12_000),
-                _ => None,
-            },
-        )
-        .expect("terminal handoff remains available within the measured twelve-degree gap");
-    assert_eq!(selected.tracking_request_mv, 21_000);
-    assert_eq!(selected.request_current_ma, 2_850);
-
-    let colder = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 10_990,
-                current_rtd_mv: Some(1_099),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_200 => Some(12_000),
-                _ => None,
-            },
-        )
-        .expect("the terminal point remains available within the bounded handoff gap");
-    assert_eq!(colder.tracking_request_mv, 21_000);
-    assert_eq!(colder.request_current_ma, 2_850);
-
-    let outside_window = value
-        .safe_point(
-            BoundaryQuery {
-                temperature_centi_c: 10_799,
-                current_rtd_mv: Some(1_079),
-                current_request_mv: Some(20_000),
-                current_ma: 3_000,
-                wifi_started: true,
-                source_min_mv: 5_500,
-                source_max_mv: 21_000,
-                operational_source_min_mv: 5_500,
-                operational_source_max_mv: 20_000,
-                source_max_ma: 3_000,
-                source_power_limit_mw: 60_000,
-            },
-            |raw| match raw {
-                1_000 => Some(10_000),
-                1_200 => Some(12_000),
-                _ => None,
-            },
-        )
-        .expect("the colder tracking point remains safe outside the terminal window");
-    assert_eq!(outside_window.tracking_request_mv, 20_000);
-    assert_eq!(outside_window.request_current_ma, 3_000);
 }
 
 #[test]
@@ -1387,4 +1038,50 @@ fn dynamic_scan_keeps_three_amp_tracking_points_across_warmup() {
         "dynamic scan did not complete, phase={:?}, T={temperature}, points={:?}",
         job.phase, job.boundary
     );
+}
+
+#[test]
+fn three_amp_lookup_never_selects_legacy_reduced_current_terminal() {
+    let mut value = boundary();
+    value.source_max_mv = 20_000;
+    value.source_power_limit_mw = 60_000;
+    value.advertised_max_mv = 21_000;
+    value.point_count = 0;
+    for (rtd_mv, tracking_request_mv, request_current_ma) in
+        [(1000, 20000, 3000), (1200, 21000, 2850)]
+    {
+        assert!(value.retain(BoundaryPoint {
+            elapsed_ms: 10_000,
+            rtd_code: rtd_mv,
+            rtd_mv,
+            vin_code: 1500,
+            vin_mv: 1500,
+            request_current_ma,
+            tracking_request_mv,
+            tracking_only: true,
+            ..BoundaryPoint::default()
+        }));
+    }
+    for temperature_centi_c in [10_000, 11_000, 12_000, 15_000] {
+        let point = value
+            .safe_point(
+                BoundaryQuery {
+                    temperature_centi_c,
+                    current_rtd_mv: Some(1500),
+                    current_request_mv: Some(20_000),
+                    current_ma: 3000,
+                    wifi_started: true,
+                    source_min_mv: 5500,
+                    source_max_mv: 21000,
+                    operational_source_min_mv: 5500,
+                    operational_source_max_mv: 20000,
+                    source_max_ma: 3000,
+                    source_power_limit_mw: 60000,
+                },
+                |raw| Some(raw as i16 * 10),
+            )
+            .expect("existing 3 A observation remains available");
+        assert_eq!(point.request_current_ma, 3000);
+        assert_eq!(point.tracking_request_mv, 20000);
+    }
 }
