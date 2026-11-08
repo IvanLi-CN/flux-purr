@@ -216,10 +216,16 @@ export const ObservedSixteenPoints: Story = {
     const tableScroll = canvasElement.querySelector(
       '.thermal-plant-run-card__table-scroll .simplebar-content-wrapper'
     ) as HTMLElement
+    const tableWrap = canvasElement.querySelector(
+      '.thermal-plant-run-card__table-wrap'
+    ) as HTMLElement
     const tableHead = tableScroll.querySelector('thead') as HTMLElement
     await expect(tableScroll.scrollHeight).toBeGreaterThan(tableScroll.clientHeight)
     await expect(getComputedStyle(tableScroll).overflowY).toBe('scroll')
     await expect(getComputedStyle(tableHead).position).toBe('sticky')
+    await expect(getComputedStyle(tableHead).backgroundColor).toBe(
+      getComputedStyle(tableWrap).backgroundColor
+    )
     await userEvent.click(points[0])
     await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
     const supplyRect = supplySvg.getBoundingClientRect()

@@ -11427,7 +11427,7 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--industrial-panel);
+  background: var(--industrial-bg);
 }
 .thermal-plant-run-card__table-scroll tr[aria-selected="true"] {
   background: color-mix(in oklch, var(--industrial-accent) 12%, transparent);
