@@ -117,22 +117,8 @@ pub(crate) fn fusb302b_adjustable_power_capabilities(
     let mut capabilities = ch224q::AdjustablePowerCapabilities::default();
     let mut has_usable_pps_apdo = false;
 
-    if let Some((power_mw, current_ma)) = source_capabilities
-        .fixed
-        .into_iter()
-        .flatten()
-        .filter(|pdo| pdo.voltage_mv >= GUARANTEED_HEATER_MIN_MV)
-        .map(|pdo| {
-            (
-                (u32::from(pdo.voltage_mv) * u32::from(pdo.max_ma)) / 1_000,
-                pdo.max_ma,
-            )
-        })
-        .max_by_key(|(power_mw, _)| *power_mw)
-    {
-        capabilities.source_power_limit_mw = Some(power_mw);
-        capabilities.source_power_limit_ma = Some(current_ma);
-    }
+    // Fixed PDO power is not a PPS power limit. Use the advertised APDO
+    // voltage/current envelope without inventing a cross-PDO wattage cap.
 
     for apdo in source_capabilities.pps.into_iter().flatten() {
         let min_mv = apdo.min_mv.max(FUSB302B_PPS_MIN_MV);

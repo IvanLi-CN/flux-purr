@@ -60,6 +60,8 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。
+- CI 通过 GitHub 官方资产 API 下载固定的 Xtensa Rust `1.95.0.0`、rust-src、GCC `15.2.0_20250920` 和 LLVM `esp-20.1.1_20250829`，与 espup `v0.16.0` 在该配置下选择的组件一致。四份资产的 ID 与 SHA-256 固定，全部校验后才解压并调用上游 Rust 安装脚本；不依赖持续返回 504 的普通 release 下载地址。
+- 工具链安装仅允许在 GitHub-hosted Linux x86_64 job 内执行，使用该 job 的 `RUNNER_TEMP`，拒绝复用或删除已有半安装目录。只有已识别的 API 传输错误允许最多三次下载，退避 5 秒、15 秒；权限、摘要、归档、安装及版本校验失败直接阻断，成功后才发布环境变量。既有 Xtensa Clippy 和完整产品构建继续执行；不在开发者主机安装、卸载或修改全局工具链。
 - 产品运行及真机 HIL 必须使用保留全部默认功能的固件，包括 Wi-Fi、HTTP、USB 控制和蜂鸣器。固件 crate 的 release 编译优化由 workspace 的 `opt-level = "z"` 与 `codegen-units = 1` 固定；单个代码生成单元用于缩小完整功能镜像，不改变其他 package 的代码生成单元配置。镜像必须满足既有 2 MiB factory-app 分区与启动栈预算；编译成功不能替代实际 app image 的分区大小检查。镜像超限必须通过构建或代码优化解决，不得裁剪必备功能，也不得把 no-network 编译检查产物替代为真机测试固件。
 - Rust 风格合同由 `cargo fmt --all -- --check`、`bun run check:rust:style`、
   firmware/devd 的严格 Clippy 以及产品固件的 `cargo +esp clippy`

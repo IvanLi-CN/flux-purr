@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
+python3 -m unittest discover -s "${root_dir}/.github/scripts" -p 'test_setup_xtensa*.py'
 python3 - "${root_dir}" <<'PY'
 from pathlib import Path
 import sys

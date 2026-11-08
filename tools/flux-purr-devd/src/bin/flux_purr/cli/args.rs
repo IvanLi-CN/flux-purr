@@ -1085,7 +1085,7 @@ pub(crate) struct ThermalSelfTestArgs {
     #[arg(
         long = "source-power-watts",
         default_value_t = 0,
-        help = "Requested bench-source capability power ceiling used for thermal HIL source setup. Defaults to the resolved thermal profile mode/bank ceiling."
+        help = "Requested bench-source capability power ceiling used for thermal HIL source setup. The 3 A bank preserves the existing source power configuration; the 5 A bank defaults to 100 W."
     )]
     pub(crate) source_power_watts: u16,
     #[arg(

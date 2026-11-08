@@ -176,3 +176,9 @@ The 5c25a71 nine-target run exposed an interrupted-export identity defect: after
 A separate import regression shows that the legacy candidate model drops global wire settings and reconstructs them from the first point. V2 seed import now bypasses that projection, preserving independent settings and point values, and verifies any declared candidate hash before obtaining a device lease. This corrects profile identity and prevents reuse of the stale interrupted export; it does not change the controller, search strategy, PD service or thermal qualification gates.
 
 Commit `0dfafa26` implements the owner-approved coast guards. Authorized no-backup flash and exact-artifact HIL confirm the candidate-materialization readbacks and independently confirm 60°C. The default scope fails at 240°C after 15 trials using two distinct complete points; trace and five-file digests verify, with no saved candidate and heater-off cleanup. A retained 0.05°C adjacent-observation drop threshold still imposes a control-frequency-dependent release condition. A host diagnostic demonstrates coast retention during smooth 0.5°C/s cooling at 20Hz; this is a separate production-control question, not permission to alter the existing gate or claim that the hardware cannot qualify. See [coast guard HIL](HIL-COAST-GUARDS.md).
+
+## 3A 电流合同与冷态覆盖
+
+3A 方案以固定合同电流和 APDO 范围定义，取消 Fixed PDO 推导的 PPS 瓦数限制及降流终点。首次冷态带载探测减少自身温升，低温与热态观测使用 5°C 粒度。两次热端失败不再代表低于 APDO 上限的扫描已完成；回归须推进到恢复后的稳定带载阶段，避免仅验证恢复入口而遗漏提前结束分支。历史 EEPROM 编码与原始 HIL 记录保持可读，旧降流结果不构成当前方案资格。
+
+3A 供电合同、60W 来源、精确产物及应用后加热复核见 [HIL-3A-CONTRACT-CORRECTION.md](./HIL-3A-CONTRACT-CORRECTION.md)。

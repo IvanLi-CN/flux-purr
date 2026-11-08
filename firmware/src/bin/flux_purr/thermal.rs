@@ -124,19 +124,6 @@ pub(crate) fn production_thermal_controller(
         (ThermalProfileMode::Auto, _) | (_, ThermalProfileBank::Pps3a) => 3_000,
         (_, ThermalProfileBank::Pps5a) => 5_000,
     };
-    let active_contract_is_safe_terminal = power_state.active.is_some_and(|active| {
-        mode != ThermalProfileMode::W100
-            && active.mode == PdContractRequestMode::Pps
-            && active.voltage_mv == AUTOMATIC_TERMINAL_VOLTAGE_MV
-            && active.operating_current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
-            && manual_pps
-                .source_power_limit_ma
-                .is_some_and(|limit| limit >= MAX_AUTOMATIC_HEATER_CONTRACT_MA)
-            && manual_pps.source_power_limit_mw.is_some_and(|limit| {
-                u32::from(active.voltage_mv) * u32::from(active.operating_current_ma) / 1_000
-                    <= limit
-            })
-    });
     if contract_continuous
         && power_state.available
         && power_state.failure.is_none()
@@ -146,7 +133,7 @@ pub(crate) fn production_thermal_controller(
                 // any higher, safety-bounded PPS contract; the 12 V startup
                 // request is not a thermal-output eligibility threshold.
                 && active.voltage_mv > FUSB302B_PPS_MIN_MV
-                && (active.operating_current_ma >= required_ma || active_contract_is_safe_terminal)
+                && active.operating_current_ma >= required_ma
         })
         && manual_pps.has_matching_pps_apdo(20_000, required_ma)
     {

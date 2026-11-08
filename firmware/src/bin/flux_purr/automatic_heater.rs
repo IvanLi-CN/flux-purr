@@ -6,10 +6,10 @@ use super::*;
 /// broader adapter limit from `MAX_HEATER_CONTRACT_MA`.
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const MAX_AUTOMATIC_HEATER_CONTRACT_MA: u16 = 3_000;
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) const AUTOMATIC_TERMINAL_VOLTAGE_MV: u16 = 21_000;
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const AUTOMATIC_TERMINAL_CURRENT_MA: u16 = 2_850;
+pub(crate) const AUTOMATIC_TERMINAL_CURRENT_MA: u16 = 3_000;
 
 #[cfg(any(target_arch = "xtensa", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,10 +73,8 @@ pub(crate) fn automatic_heater_controller_current_ma(
     if candidate_current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
         && observation.contract.current_ma >= candidate_current_ma
     {
-        // During the safety transition to the power-safe 21 V terminal, the
-        // MOS gate is blanked before the new contract settles. The measured
-        // source current can therefore be near zero even though the
-        // confirmed contract still grants the terminal current budget.
+        // Gate blanking can make load current zero while the confirmed
+        // 3 A contract still grants the controller its input budget.
         return candidate_current_ma;
     }
     candidate_current_ma.min(observation.current_ma)
@@ -311,17 +309,6 @@ pub(crate) fn automatic_heater_fixed_request_with_boundary(
     if !source_apdo_matches_boundary {
         return None;
     }
-    let source_power_limit_mw = source_capabilities
-        .fixed
-        .iter()
-        .flatten()
-        .filter(|(voltage_mv, _)| *voltage_mv >= GUARANTEED_HEATER_MIN_MV)
-        .map(|(voltage_mv, current_ma)| u32::from(*voltage_mv) * u32::from(*current_ma) / 1_000)
-        .max()
-        .unwrap_or(0);
-    if source_power_limit_mw != boundary.source_power_limit_mw {
-        return None;
-    }
     let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()?;
     let temperature_centi_c = round_to_i16(current_temp_c * 100.0);
     automatic_heater_fixed_request_with_safety(
@@ -350,11 +337,7 @@ pub(crate) fn automatic_heater_fixed_request_with_boundary(
             else {
                 return false;
             };
-            request_ma <= boundary.source_max_ma
-                && voltage_mv <= safe_voltage_mv
-                && (boundary.source_power_limit_mw == 0
-                    || u32::from(voltage_mv) * u32::from(request_ma) / 1_000
-                        <= boundary.source_power_limit_mw)
+            request_ma <= boundary.source_max_ma && voltage_mv <= safe_voltage_mv
         },
     )
 }

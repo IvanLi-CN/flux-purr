@@ -359,7 +359,8 @@ pub(crate) struct BenchSourceLiveTelemetry {
     pub(crate) status: String,
 }
 
-pub(crate) const THERMAL_SOURCE_3A_POWER_WATTS: u64 = 60;
+// Zero preserves the source power configuration; the 3 A bank is current-only.
+pub(crate) const THERMAL_SOURCE_3A_POWER_WATTS: u64 = 0;
 pub(crate) const THERMAL_SOURCE_100W_POWER_WATTS: u64 = 100;
 pub(crate) const THERMAL_SOURCE_MIN_READY_VOLTAGE_MV: u64 = 5_000;
 // devd keeps a serial worker exclusive for up to its 12s RPC deadline. A

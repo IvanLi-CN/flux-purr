@@ -53,7 +53,7 @@
   <section class="grid">
     <article class="panel wide"><div class="panel-head"><h2>阶段二连续原始采样</h2><span class="note">横轴：阶段二 elapsed time (s)</span></div><div class="chart"><canvas id="thermalVoltage"></canvas></div></article>
     <article class="panel"><div class="panel-head"><h3>电源实测电压 / 电流</h3><span class="note">左：V，右：A</span></div><div class="chart"><canvas id="source"></canvas></div></article>
-    <article class="panel"><div class="panel-head"><h3>电源实测功率</h3><span class="note">上限：60W</span></div><div class="chart"><canvas id="power"></canvas></div></article>
+    <article class="panel"><div class="panel-head"><h3>电源实测功率</h3><span class="note">实测值</span></div><div class="chart"><canvas id="power"></canvas></div></article>
     <article class="panel wide"><div class="panel-head"><h2>验收关键事实</h2><span class="note">Warmup/扫描仅允许 0%/100%；Approach/Hold 的中间 duty 单独展示</span></div><div id="facts" class="facts"></div></article>
     <article class="panel wide"><div class="panel-head"><h2>失败原因</h2><span class="note">通过时为空</span></div><ul id="failures" class="errors"></ul></article>
     <article class="panel wide"><div class="panel-head"><h2>阶段二原始样本</h2><span class="note">不省略时间、电压、电流、功率或门控字段</span></div><div class="table-wrap"><table id="samples"></table></div></article>
@@ -80,7 +80,7 @@ const facts=[
  ['阶段二起始温度',fmtC(DATA.startTempC)],['样本数',String(samples.length)],['样本时长',DATA.durationSeconds==null?'—':fmt(DATA.durationSeconds,1)+' s'],
  ['近 3A 起点',`${fmtC(t3.startTempC)} / ${fmtA(t3.sourceCurrentA)}`],['近 3A 终点',`${fmtC(t3.lastTempC)} / ${fmtA(t3.lastSourceCurrentA)}`],['终端 T_21V',fmtC(terminal.tempC)],
  ['终端申请',`${fmtV(terminal.requestV)} / ${fmtA(terminal.contractA)}`],['终端实测',`${fmtV(terminal.sourceV)} / ${fmtA(terminal.sourceI)}`],['终端功率',fmtW(terminal.sourceP)],
-    ['首次低于 2.8A',DATA.firstBelow28A?`${fmtC(DATA.firstBelow28A.tempC)} / ${fmtA(DATA.firstBelow28A.sourceI)}`:'未发生'],['模型身份',String(DATA.calibrationTransactionId??'—')],['Source 能力',`${DATA.sourcePowerWatts||'—'} W / ${fmtA((DATA.sourceCurrentLimitMa||0)/1000)}`],['Warmup 静态门控',DATA.staticGateEvidence?.complete?'通过':`${DATA.staticGateEvidence?.violationCount??'—'} 个违规`],['Approach/Hold 中间门控',`${DATA.staticGateEvidence?.approachHoldIntermediateSamples??0} 个（非全速阶段）`]
+    ['首次低于 2.8A',DATA.firstBelow28A?`${fmtC(DATA.firstBelow28A.tempC)} / ${fmtA(DATA.firstBelow28A.sourceI)}`:'未发生'],['模型身份',String(DATA.calibrationTransactionId??'—')],['申请电流方案',fmtA((DATA.sourceCurrentLimitMa||0)/1000)],['Warmup 静态门控',DATA.staticGateEvidence?.complete?'通过':`${DATA.staticGateEvidence?.violationCount??'—'} 个违规`],['Approach/Hold 中间门控',`${DATA.staticGateEvidence?.approachHoldIntermediateSamples??0} 个（非全速阶段）`]
 ];
 $("facts").innerHTML=facts.map(([l,v])=>`<div class="fact"><label>${l}</label><strong>${v}</strong></div>`).join('');
 $("failures").innerHTML=(DATA.failureReasons||[]).length?(DATA.failureReasons||[]).map(v=>`<li>${v}</li>`).join(''):'<li class="pass-text">无</li>';
@@ -91,19 +91,19 @@ function draw(id, series, leftLabel, rightLabel, leftColor, rightColor, refLines
   const canvas=$(id), box=canvas.getBoundingClientRect(), ratio=window.devicePixelRatio||1, w=Math.max(320,box.width), h=Math.max(220,box.height); canvas.width=w*ratio; canvas.height=h*ratio; const c=canvas.getContext('2d'); c.scale(ratio,ratio);
   const pad={l:52,r:52,t:18,b:30}, pw=w-pad.l-pad.r, ph=h-pad.t-pad.b; const xs=samples.map(s=>s.t); const xmin=xs[0]??0, xmax=xs.at(-1)??1; const x=v=>pad.l+(v-xmin)/Math.max(1,xmax-xmin)*pw;
   const valuesFor=axis=>series.flatMap(q=>q.axis===axis?samples.map(s=>Number(s[q.key])).filter(Number.isFinite):[]);
-  const range=values=>({min:Math.min(0,...values),max:Math.max(1,...values)}); const left=range(valuesFor('left')), right=range(valuesFor('right'));
+  const range=values=>({min:Math.min(0,...values),max:Math.max(1,...values)}); const left=range([...valuesFor('left'),...refLines.filter(r=>(r.axis||'left')==='left').map(r=>r.value)]), right=range([...valuesFor('right'),...refLines.filter(r=>r.axis==='right').map(r=>r.value)]);
   const y=(v,axis)=>{const r=axis==='right'?right:left;return pad.t+(r.max-v)/Math.max(1,r.max-r.min)*ph;};
   c.fillStyle='#fff'; c.fillRect(0,0,w,h); c.strokeStyle='#e4eaed'; c.fillStyle='#65737c'; c.font='11px ui-monospace,monospace';
   for(let i=0;i<5;i++){const yy=pad.t+i*ph/4;c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.textAlign='right';c.fillText(fmt(left.max-(left.max-left.min)*i/4,1),pad.l-7,yy+4);if(valuesFor('right').length){c.textAlign='left';c.fillText(fmt(right.max-(right.max-right.min)*i/4,2),w-pad.r+7,yy+4);}}
   c.textAlign='center'; for(let i=0;i<5;i++){const xx=pad.l+i*pw/4;c.strokeStyle='#edf1f2';c.beginPath();c.moveTo(xx,pad.t);c.lineTo(xx,h-pad.b);c.stroke();c.fillStyle='#65737c';c.fillText(fmt(xmin+(xmax-xmin)*i/4,0)+'s',xx,h-9);}
-  for(const ref of refLines){const yy=y(ref.value,ref.axis||'left');c.strokeStyle=ref.color;c.setLineDash([5,4]);c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.setLineDash([]);c.fillStyle=ref.color;c.textAlign='left';c.fillText(ref.label,pad.l+4,yy-4);}
+  for(const ref of refLines){const yy=y(ref.value,ref.axis||'left');c.strokeStyle=ref.color;c.setLineDash([5,4]);c.beginPath();c.moveTo(pad.l,yy);c.lineTo(w-pad.r,yy);c.stroke();c.setLineDash([]);c.fillStyle=ref.color;const onRight=ref.axis==='right';c.textAlign=onRight?'right':'left';c.fillText(ref.label,onRight?w-pad.r-4:pad.l+4,yy+12);}
   for(const q of series){c.strokeStyle=q.color;c.lineWidth=1.6;c.beginPath();let started=false;for(const s of samples){const v=Number(s[q.key]);if(!Number.isFinite(v)){started=false;continue;}const xx=x(s.t), yy=y(v,q.axis||'left');if(!started){c.moveTo(xx,yy);started=true;}else c.lineTo(xx,yy);}c.stroke();}
   c.textAlign='left';c.fillStyle=leftColor;c.fillText(leftLabel,pad.l,14);c.textAlign='right';c.fillStyle=rightColor;c.fillText(rightLabel,w-pad.r,14);
 }
 function renderCharts(){
   draw('thermalVoltage',[{key:'temp',axis:'left',color:'#c73636'},{key:'requestV',axis:'right',color:'#1769aa'}],'板温 (°C)','申请电压 (V)','#c73636','#1769aa',[{value:220,axis:'left',label:'220°C cutoff',color:'#c73636'},{value:21,axis:'right',label:'21V terminal',color:'#1769aa'}]);
   draw('source',[{key:'sourceV',axis:'left',color:'#1769aa'},{key:'sourceI',axis:'right',color:'#167e83'}],'源端电压 (V)','源端电流 (A)','#1769aa','#167e83',[{value:3,axis:'right',label:'3.0A',color:'#c73636'},{value:2.8,axis:'right',label:'2.8A',color:'#d07b00'}]);
-  draw('power',[{key:'sourceP',axis:'left',color:'#8a4d9e'}],'源端功率 (W)','实测输入功率','#8a4d9e','#8a4d9e',[{value:60,axis:'left',label:'60W',color:'#c73636'}]);
+  draw('power',[{key:'sourceP',axis:'left',color:'#8a4d9e'}],'源端功率 (W)','实测输入功率','#8a4d9e','#8a4d9e');
 }
 renderCharts(); window.addEventListener('resize',renderCharts);
 </script>
