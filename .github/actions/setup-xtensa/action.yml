@@ -1,5 +1,5 @@
 name: Setup Xtensa toolchain
-description: Install the pinned ESP32-S3 Xtensa Rust toolchain without querying the broken release-list endpoint.
+description: Install checksum-pinned ESP32-S3 tools through official GitHub asset APIs.
 
 inputs:
   version:
@@ -16,24 +16,16 @@ runs:
   steps:
     - shell: bash
       env:
-        ESPUP_VERSION: 0.16.0
         GH_TOKEN: ${{ github.token }}
         XTENSA_TOOLCHAIN_VERSION: ${{ inputs.version }}
         XTENSA_BUILD_TARGETS: ${{ inputs.buildtargets }}
       run: |
         set -euo pipefail
 
-        host_target="$(rustup show | grep 'Default host' | sed -e 's/.* //')"
-        espup_archive="espup-${host_target}.zip"
-        python3 "${{ github.action_path }}/download.py" \
-          "$ESPUP_VERSION" "$host_target" "$RUNNER_TEMP/$espup_archive"
-        unzip -o "$RUNNER_TEMP/$espup_archive" -d "$HOME/.cargo/bin"
-        chmod +x "$HOME/.cargo/bin/espup"
-
-        export ESPUP_EXPORT_FILE="$HOME/exports"
-        bash "${{ github.action_path }}/install.sh" \
-          "$HOME/.cargo/bin/espup" "$XTENSA_TOOLCHAIN_VERSION" "$XTENSA_BUILD_TARGETS"
-        source "$ESPUP_EXPORT_FILE"
+        export_file="$RUNNER_TEMP/xtensa-exports"
+        python3 "${{ github.action_path }}/toolchain.py" \
+          "$XTENSA_TOOLCHAIN_VERSION" "$XTENSA_BUILD_TARGETS" "$export_file"
+        source "$export_file"
 
         echo "$PATH" >> "$GITHUB_PATH"
         if [[ -n "${LIBCLANG_PATH:-}" ]]; then
