@@ -95,14 +95,13 @@ if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
   EDGEONE_MAX_ATTEMPTS=3 \
   EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
   bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${successful_capture_failure_log}" 2>&1; then
-  echo "expected successful CLI with output capture failure to stop" >&2
-  exit 1
+  successful_capture_status=0
 else
   successful_capture_status=$?
 fi
 test "$(<"${count_file}")" = 1
-test "${successful_capture_status}" = 1
-grep -Fq "output capture failed" "${successful_capture_failure_log}"
+test "${successful_capture_status}" = 0
+grep -Fq "treating CLI success as authoritative" "${successful_capture_failure_log}"
 
 : > "${count_file}"
 unknown_postdeploy_failure_log="${test_root}/unknown-postdeploy-failure.log"
@@ -121,7 +120,45 @@ else
 fi
 test "$(<"${count_file}")" = 1
 test "${unknown_postdeploy_status}" = 7
-grep -Fq "before a retryable endpoint preflight" "${unknown_postdeploy_failure_log}"
+grep -Fq "ambiguous remote state" "${unknown_postdeploy_failure_log}"
+
+: > "${count_file}"
+mixed_preflight_failure_log="${test_root}/mixed-preflight-failure.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=mixed-preflight \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${mixed_preflight_failure_log}" 2>&1; then
+  echo "expected mixed preflight output to stop without retry" >&2
+  exit 1
+else
+  mixed_preflight_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${mixed_preflight_status}" = 7
+grep -Fq "before a retryable endpoint preflight" "${mixed_preflight_failure_log}"
+
+: > "${count_file}"
+partial_preflight_failure_log="${test_root}/partial-preflight-failure.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=partial-preflight \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${partial_preflight_failure_log}" 2>&1; then
+  echo "expected partial preflight output to stop without retry" >&2
+  exit 1
+else
+  partial_preflight_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${partial_preflight_status}" = 7
+grep -Fq "before a retryable endpoint preflight" "${partial_preflight_failure_log}"
 
 : > "${count_file}"
 postdeploy_failure_log="${test_root}/postdeploy-failure.log"

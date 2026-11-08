@@ -18,7 +18,7 @@ failure_stage="${EDGEONE_TEST_FAILURE_STAGE:-preflight}"
 if (( count <= fail_until )); then
   case "${failure_stage}" in
     preflight)
-      echo "[cli] Validating API endpoint..."
+      echo "[cli] Using provided API token for deployment..."
       echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
       ;;
@@ -33,6 +33,15 @@ if (( count <= fail_until )); then
       echo "[cli] Validating API endpoint..."
       echo "[cli] EdgeOne accepted the deployment request; status unavailable." >&2
       echo "[cli] AxiosError: timeout of 15000ms exceeded" >&2
+      ;;
+    mixed-preflight)
+      echo "[cli] Using provided API token for deployment..."
+      echo "[cli] unexpected phase output: response body truncated." >&2
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    partial-preflight)
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
       ;;
     permanent)
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2

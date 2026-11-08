@@ -77,14 +77,50 @@ run_deploy() {
 
 deployment_started() {
   grep -Eiq \
-    'Uploading folder to EdgeOne COS|Creating deployment in .* environment|Created deployment with Deployment ID|Waiting for deployment to complete|Deployment in progress|Deploy Success|Deploy URL:|Console URL:' \
+    'Uploading folder to EdgeOne COS|Creating deployment in .* environment|Created deployment with Deployment ID|Waiting for deployment to complete|Deployment in progress|Deploy Success|Deploy URL:|Console URL:|Deployment failed after remote acceptance|accepted .*deployment|deployment .*accepted|status unavailable|remote state|response body unavailable' \
     "$1"
 }
 
 retryable_preflight_failure() {
-  grep -Eiq \
-    'check and set region failed:.*(AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up)' \
-    "$1"
+  local line
+  local saw_preflight_context=0
+  local saw_transport_failure=0
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    if [[ -z "${line}" ]]; then
+      continue
+    fi
+
+    if (( saw_transport_failure == 1 )); then
+      if printf '%s\n' "${line}" | grep -Eiq \
+        'Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN'; then
+        continue
+      fi
+      return 1
+    fi
+
+    if printf '%s\n' "${line}" | grep -Eiq \
+      'check and set region failed:.*(AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up)'; then
+      if (( saw_preflight_context == 0 )); then
+        return 1
+      fi
+      saw_transport_failure=1
+      continue
+    fi
+
+    if printf '%s\n' "${line}" | grep -Eiq \
+      'Resolving dependencies|Resolved, downloaded and extracted|Saved lockfile|Using provided API token for deployment|Project .*already exists|Deploying .* environment|Validating API endpoint|Using Project ID:'; then
+      saw_preflight_context=1
+      continue
+    fi
+
+    return 1
+  done < "$1"
+
+  if (( saw_preflight_context == 1 && saw_transport_failure == 1 )); then
+    return 0
+  fi
+  return 1
 }
 
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
@@ -97,10 +133,11 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   fi
 
   if (( attempt_output_ok == 0 )); then
-    echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
     if (( status == 0 )); then
-      exit 1
+      echo "EdgeOne CLI succeeded, but output capture failed; treating CLI success as authoritative and automatic retry is disabled for ${target_label}." >&2
+      exit 0
     fi
+    echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
     exit "${status}"
   fi
 
