@@ -9,9 +9,33 @@ fi
 count=$((count + 1))
 printf '%s\n' "${count}" > "${EDGEONE_TEST_COUNT_FILE}"
 
+if [[ -n "${EDGEONE_TEST_ARGS_FILE:-}" ]]; then
+  printf '%s\n' "$*" >> "${EDGEONE_TEST_ARGS_FILE}"
+fi
+
 fail_until="${EDGEONE_TEST_FAIL_UNTIL:-0}"
+failure_stage="${EDGEONE_TEST_FAILURE_STAGE:-preflight}"
 if (( count <= fail_until )); then
-  echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+  case "${failure_stage}" in
+    preflight)
+      echo "[cli] Validating API endpoint..."
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    post-deploy)
+      echo "[cli] Validating API endpoint..."
+      echo "[cli] Using Project ID: makers-test"
+      echo "[cli] Uploading folder to EdgeOne COS..."
+      echo "[cli] Creating deployment in Production environment..."
+      echo "[cli] Deployment failed after remote acceptance." >&2
+      ;;
+    permanent)
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    *)
+      echo "unsupported test failure stage: ${failure_stage}" >&2
+      exit 2
+      ;;
+  esac
   exit 7
 fi
 

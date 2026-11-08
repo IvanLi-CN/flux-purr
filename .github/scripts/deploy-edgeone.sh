@@ -30,6 +30,8 @@ cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"
 bunx_bin="${EDGEONE_BUNX_BIN:-bunx}"
 max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"
 retry_delays_text="${EDGEONE_RETRY_DELAYS_SECONDS:-30 60}"
+attempt_logs_dir="$(mktemp -d)"
+trap 'rm -rf -- "${attempt_logs_dir}"' EXIT
 
 if ! [[ "${max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
   echo "EDGEONE_MAX_ATTEMPTS must be a positive integer" >&2
@@ -50,26 +52,60 @@ for delay in "${retry_delays[@]:0:required_delays}"; do
   fi
 done
 
-for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-  echo "EdgeOne deployment attempt ${attempt}/${max_attempts} for ${target_label}."
-  if "${bunx_bin}" "edgeone@${cli_version}" makers deploy \
+run_deploy() {
+  local output_file="$1"
+  local status
+
+  set +e
+  "${bunx_bin}" "edgeone@${cli_version}" makers deploy \
     "${deploy_directory}" \
     -n "${project_name}" \
     -e production \
-    -t "${EDGEONE_API_TOKEN}"; then
+    -t "${EDGEONE_API_TOKEN}" 2>&1 | tee "${output_file}"
+  status=${PIPESTATUS[0]}
+  set -e
+  return "${status}"
+}
+
+deployment_started() {
+  grep -Eiq \
+    'Uploading folder to EdgeOne COS|Creating deployment in .* environment|Created deployment with Deployment ID|Waiting for deployment to complete|Deployment in progress|Deploy Success|Deploy URL:|Console URL:' \
+    "$1"
+}
+
+retryable_preflight_failure() {
+  grep -Eiq \
+    'Validating API endpoint|check and set region failed|AxiosError: timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up' \
+    "$1"
+}
+
+for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+  attempt_log="${attempt_logs_dir}/attempt-${attempt}.log"
+  echo "EdgeOne deployment attempt ${attempt}/${max_attempts} for ${target_label}."
+  if run_deploy "${attempt_log}"; then
     echo "EdgeOne deployment succeeded for ${target_label}."
     exit 0
   else
     status=$?
   fi
 
+  if deployment_started "${attempt_log}"; then
+    echo "EdgeOne deployment reached an ambiguous remote state; automatic retry is disabled for ${target_label}." >&2
+    exit "${status}"
+  fi
+
+  if ! retryable_preflight_failure "${attempt_log}"; then
+    echo "EdgeOne deployment failed before a retryable endpoint preflight for ${target_label}; automatic retry is disabled." >&2
+    exit "${status}"
+  fi
+
   if (( attempt == max_attempts )); then
-    echo "EdgeOne deployment failed after ${max_attempts} attempts for ${target_label}." >&2
+    echo "EdgeOne deployment failed after ${max_attempts} preflight attempts for ${target_label}." >&2
     echo "The CLI token error is non-diagnostic; inspect preceding output for endpoint, timeout, or authentication details." >&2
     exit "${status}"
   fi
 
   delay="${retry_delays[attempt - 1]}"
-  echo "EdgeOne deployment attempt ${attempt} failed with exit ${status}; retrying in ${delay}s." >&2
+  echo "EdgeOne preflight attempt ${attempt} failed with exit ${status}; retrying in ${delay}s." >&2
   sleep "${delay}"
 done
