@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState } from 'react'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, fireEvent, fn, userEvent, within } from 'storybook/test'
 import {
   createDefaultThermalPlantSnapshot,
   createEmptyThermalPlantSnapshot,
@@ -210,15 +210,43 @@ export const ObservedSixteenPoints: Story = {
     }
 
     await expect(canvas.queryByLabelText('2.85 A 温度—申请电压拟合曲线')).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/29.8℃ · 申请 9.5 V/)).not.toBeInTheDocument()
+    await expect(canvas.queryByText(/合同 2.85 A · RTD 1324 mV/)).not.toBeInTheDocument()
+    await expect(canvasElement.querySelector('.thermal-chart__detail')).toBeNull()
+    const tableScroll = canvasElement.querySelector(
+      '.thermal-plant-run-card__table-scroll .simplebar-content-wrapper'
+    ) as HTMLElement
+    const tableHead = tableScroll.querySelector('thead') as HTMLElement
+    await expect(tableScroll.scrollHeight).toBeGreaterThan(tableScroll.clientHeight)
+    await expect(getComputedStyle(tableScroll).overflowY).toBe('scroll')
+    await expect(getComputedStyle(tableHead).position).toBe('sticky')
     await userEvent.click(points[0])
-    await expect(canvas.getByText(/29.8℃ · 申请 9.5 V/)).toBeVisible()
+    await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+    const supplyRect = supplySvg.getBoundingClientRect()
+    fireEvent.pointerMove(supplySvg, {
+      clientX: supplyRect.left + supplyRect.width / 2,
+      clientY: supplyRect.top + supplyRect.height / 2,
+    })
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).not.toBeNull()
     await userEvent.click(points[15])
-    await expect(canvas.getByText(/合同 2.85 A · RTD 1324 mV/)).toBeVisible()
+    await expect(points[15]).toHaveAttribute('aria-pressed', 'true')
     await points[3].focus()
     await userEvent.keyboard('{Enter}')
-    await expect(canvas.getByText(/58.3℃ · 申请 14.2 V/)).toBeVisible()
+    await expect(points[3]).toHaveAttribute('aria-pressed', 'true')
     await userEvent.click(canvas.getByRole('button', { name: '选择观测 1' }))
     await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
+
+    traceSvg.focus()
+    fireEvent.keyDown(traceSvg, { key: 'ArrowRight' })
+    await expect(
+      canvasElement.querySelector('.thermal-plant-run-card__svg--trace ~ .thermal-chart__tooltip')
+    ).not.toBeNull()
+    await expect(
+      canvasElement.querySelector('.thermal-plant-run-card__svg--trace ~ .thermal-chart__tooltip')
+        ?.textContent
+    ).toContain('时间')
   },
 }
 export const NarrowObserved: Story = {

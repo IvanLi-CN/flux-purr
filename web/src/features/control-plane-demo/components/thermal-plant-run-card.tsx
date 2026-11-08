@@ -11,8 +11,13 @@ import {
   Zap,
 } from 'lucide-react'
 import { useState } from 'react'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
+import {
+  chartValueAtPointer,
+  clampChartValue,
+  interpolateLinear,
+  tooltipPlacement,
+} from './chart-interaction'
 import { thermalChartStyle } from './thermal-chart-style'
 import { SupplyObservationTable, TemperatureRequestChart } from './thermal-supply-observations'
 import { useResponsiveSvgHeight } from './use-responsive-svg-height'
@@ -245,17 +250,8 @@ export function ThermalPlantRunCard({
               <span>{presentation.traceStatus}</span>
             </div>
             <TraceChart points={trace} loading={loading} running={isRunning} />
-            <div className="thermal-chart__footer">
-              <ScrollArea className="thermal-chart__detail-scroll">
-                <output className="thermal-chart__detail">
-                  {loading
-                    ? '读取中'
-                    : trace.length
-                      ? `温度 ${(trace[trace.length - 1].temperatureCentiC / 100).toFixed(1)}℃ · 时间 ${formatElapsed(trace[trace.length - 1].elapsedMs)} · ${phaseLabel[trace[trace.length - 1].phase]}`
-                      : '等待温度采样'}
-                </output>
-              </ScrollArea>
-              <span className="thermal-chart__axis-title">时间 / mm:ss</span>
+            <div className="thermal-chart__footer thermal-chart__footer--axis-only">
+              <output className="thermal-chart__axis-title">时间 / mm:ss</output>
             </div>
           </section>
         </div>
@@ -502,6 +498,7 @@ function TraceChart({
 }) {
   const { width, initialHeight, inset } = thermalChartStyle
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
+  const [hoverX, setHoverX] = useState<number | null>(null)
   if (points.length < 2)
     return (
       <ChartPlaceholder
@@ -542,6 +539,28 @@ function TraceChart({
   const completionPoint = positions[positions.length - 1]
   const tickLabel = (temperature: number) =>
     Math.round(plotBottom - ((temperature - minT) / Math.max(maxT - minT, 1)) * plotHeight)
+  const hoverValue =
+    hoverX === null
+      ? null
+      : interpolateLinear(
+          points.map((point) => ({ x: point.elapsedMs, y: point.temperatureCentiC / 100 })),
+          hoverX
+        )
+  const hoverIndex =
+    hoverX === null
+      ? -1
+      : points.reduce((best, point, index) => {
+          const bestDistance = Math.abs(points[best]?.elapsedMs - hoverX)
+          const distance = Math.abs(point.elapsedMs - hoverX)
+          return distance < bestDistance ? index : best
+        }, 0)
+  const hoverPhase = hoverIndex >= 0 ? points[hoverIndex].phase : null
+  const hoverPixelX = hoverX === null ? null : inset.left + (hoverX / maxElapsed) * plotWidth
+  const hoverPlacement = hoverPixelX === null ? 'center' : tooltipPlacement(hoverPixelX, width)
+  const updateHover = (event: { clientX: number; clientY: number }, svg: SVGSVGElement) => {
+    const position = chartValueAtPointer(event, svg, width, height)
+    setHoverX(clampChartValue(((position.x - inset.left) / plotWidth) * maxElapsed, 0, maxElapsed))
+  }
   return (
     <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
       <svg
@@ -549,7 +568,25 @@ function TraceChart({
         preserveAspectRatio="xMidYMid meet"
         viewBox={`0 0 ${width} ${height}`}
         role="img"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: The SVG is an intentional keyboard chart surface.
+        tabIndex={0}
         aria-label="加热和自然冷却温度曲线"
+        onPointerMove={(event) => updateHover(event, event.currentTarget)}
+        onPointerDown={(event) => updateHover(event, event.currentTarget)}
+        onPointerLeave={() => setHoverX(null)}
+        onPointerUp={(event) => {
+          if (event.pointerType !== 'mouse') setHoverX(null)
+        }}
+        onPointerCancel={() => setHoverX(null)}
+        onKeyDown={(event) => {
+          if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+          event.preventDefault()
+          const step = maxElapsed / Math.max(points.length - 1, 1)
+          const next = hoverX ?? points[0].elapsedMs
+          setHoverX(
+            clampChartValue(next + (event.key === 'ArrowRight' ? step : -step), 0, maxElapsed)
+          )
+        }}
       >
         <text x={inset.left} y={18}>
           温度 / ℃
@@ -623,6 +660,23 @@ function TraceChart({
             className="thermal-plant-run-card__point thermal-plant-run-card__point--cooling"
           />
         ) : null}
+        {hoverPixelX !== null && hoverValue !== null ? (
+          <>
+            <line
+              x1={hoverPixelX}
+              y1={inset.top}
+              x2={hoverPixelX}
+              y2={plotBottom}
+              className="thermal-chart__hover-line"
+            />
+            <circle
+              cx={hoverPixelX}
+              cy={plotBottom - ((hoverValue - minT) / Math.max(maxT - minT, 1)) * plotHeight}
+              r="4"
+              className="thermal-chart__hover-point"
+            />
+          </>
+        ) : null}
         <text x={inset.left - 8} y={tickLabel(maxT) + 3} textAnchor="end">
           {Math.round(maxT)}
         </text>
@@ -644,6 +698,22 @@ function TraceChart({
           {formatElapsed(maxElapsed)}
         </text>
       </svg>
+      {hoverX !== null ? (
+        <output
+          className={`thermal-chart__tooltip thermal-chart__tooltip--${hoverPlacement}`}
+          style={{ left: `${((hoverPixelX ?? inset.left) / width) * 100}%` }}
+          aria-live="polite"
+        >
+          <strong>时间 {formatElapsed(hoverX)}</strong>
+          {hoverValue === null || hoverPhase === null ? (
+            <span>该位置无有效轨迹数据</span>
+          ) : (
+            <span>
+              {hoverValue.toFixed(1)}℃ · {phaseLabel[hoverPhase]}
+            </span>
+          )}
+        </output>
+      ) : null}
     </div>
   )
 }

@@ -1,7 +1,14 @@
+import { useCallback, useState } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { SupplyBoundary } from '../contracts'
 import { theoreticalRtdTemperatureForAdcMv } from '../rtd-calibration-display'
 import { fitTemperatureRequestCurves } from '../temperature-request-fit'
+import {
+  chartValueAtPointer,
+  clampChartValue,
+  interpolateLinear,
+  tooltipPlacement,
+} from './chart-interaction'
 import { thermalChartStyle } from './thermal-chart-style'
 import { useResponsiveSvgHeight } from './use-responsive-svg-height'
 
@@ -41,6 +48,7 @@ export function TemperatureRequestChart({
 }: ObservationProps & { running: boolean }) {
   const { width, initialHeight, inset } = thermalChartStyle
   const { containerRef, viewBoxHeight: height } = useResponsiveSvgHeight(width, initialHeight)
+  const [hoverX, setHoverX] = useState<number | null>(null)
   const observations = boundary?.points ?? []
   const points = observations.flatMap((point, index) => {
     const temp = temperature(point, boundary)
@@ -66,6 +74,24 @@ export function TemperatureRequestChart({
   const right = width - inset.right
   const bottom = height - inset.bottom
   const top = inset.top
+  const plotWidth = right - left
+  const plotHeight = bottom - top
+  const updateHover = (event: { clientX: number; clientY: number }, svg: SVGSVGElement) => {
+    const position = chartValueAtPointer(event, svg, width, height)
+    setHoverX(clampChartValue(minV + ((position.x - left) / plotWidth) * (maxV - minV), minV, maxV))
+  }
+  const hoverPixelX = hoverX === null ? null : left + ((hoverX - minV) / (maxV - minV)) * plotWidth
+  const hoverValues =
+    hoverX === null
+      ? []
+      : fits.flatMap((fit) => {
+          const value = interpolateLinear(
+            fit.points.map((point) => ({ x: point.requestV, y: point.temperatureC })),
+            hoverX
+          )
+          return value === null ? [] : [{ currentMa: fit.currentMa, temperatureC: value }]
+        })
+  const hoverPlacement = hoverPixelX === null ? 'center' : tooltipPlacement(hoverPixelX, width)
   return (
     <div className="thermal-supply-chart">
       <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
@@ -84,20 +110,25 @@ export function TemperatureRequestChart({
             viewBox={`0 0 ${width} ${height}`}
             className="thermal-plant-run-card__svg"
             aria-label="RTD 理论温度—申请电压散点图"
-            onPointerDown={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect()
-              const x = ((event.clientX - rect.left) / rect.width) * width
-              const y = ((event.clientY - rect.top) / rect.height) * height
-              const nearest = points.reduce(
-                (best, item) => {
-                  const px = left + ((voltage(item.point) - minV) / (maxV - minV)) * (right - left)
-                  const py = bottom - ((item.temp - minT) / (maxT - minT)) * (bottom - top)
-                  const distance = Math.hypot(x - px, y - py)
-                  return distance < best.distance ? { index: item.index, distance } : best
-                },
-                { index: selectedIndex, distance: Number.POSITIVE_INFINITY }
+            role="img"
+            // biome-ignore lint/a11y/noNoninteractiveTabindex: The SVG is an intentional keyboard chart surface.
+            tabIndex={0}
+            onPointerMove={(event) => updateHover(event, event.currentTarget)}
+            onPointerDown={(event) => updateHover(event, event.currentTarget)}
+            onPointerLeave={() => setHoverX(null)}
+            onPointerUp={(event) => {
+              if (event.pointerType !== 'mouse') setHoverX(null)
+            }}
+            onPointerCancel={() => setHoverX(null)}
+            onKeyDown={(event) => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+              event.preventDefault()
+              const step = (maxV - minV) / 80
+              const selectedPoint = points.find((point) => point.index === selectedIndex)
+              const next = hoverX ?? voltage(selectedPoint?.point ?? points[0].point)
+              setHoverX(
+                clampChartValue(next + (event.key === 'ArrowRight' ? step : -step), minV, maxV)
               )
-              onSelect(nearest.index)
             }}
           >
             <title>
@@ -152,6 +183,26 @@ export function TemperatureRequestChart({
                   .join(' ')}
               />
             ))}
+            {hoverPixelX !== null ? (
+              <>
+                <line
+                  x1={hoverPixelX}
+                  x2={hoverPixelX}
+                  y1={top}
+                  y2={bottom}
+                  className="thermal-chart__hover-line"
+                />
+                {hoverValues.map((value) => (
+                  <circle
+                    key={value.currentMa}
+                    cx={hoverPixelX}
+                    cy={bottom - ((value.temperatureC - minT) / (maxT - minT)) * plotHeight}
+                    r="4"
+                    className="thermal-chart__hover-point"
+                  />
+                ))}
+              </>
+            ) : null}
             {points.map(({ point, index, temp }) => {
               const x = left + ((voltage(point) - minV) / (maxV - minV)) * (right - left)
               const y = bottom - ((temp - minT) / (maxT - minT)) * (bottom - top)
@@ -184,20 +235,27 @@ export function TemperatureRequestChart({
             })}
           </svg>
         )}
-      </div>
-      <div className="thermal-chart__footer">
-        <ScrollArea className="thermal-chart__detail-scroll">
+        {hoverX !== null ? (
           <output
+            className={`thermal-chart__tooltip thermal-chart__tooltip--${hoverPlacement}`}
+            style={{ left: `${((hoverPixelX ?? left) / width) * 100}%` }}
             aria-live="polite"
-            className="thermal-supply-chart__detail thermal-chart__detail"
-            title={`○ 3.00 A · ◇ 其他合同限流 · — 同合同拟合（仅供审查，至少三个温度点）${fits.map((fit) => ` · ${(fit.currentMa / 1000).toFixed(2)} A RMS ${fit.rmseV.toFixed(2)} V`).join('')}`}
           >
-            {observations[selectedIndex]
-              ? description(observations[selectedIndex], boundary)
-              : '选择观测查看详情'}
+            <strong>申请 {hoverX.toFixed(1)} V</strong>
+            {hoverValues.length > 0 ? (
+              hoverValues.map((value) => (
+                <span key={value.currentMa}>
+                  {value.temperatureC.toFixed(1)}℃ · 合同 {(value.currentMa / 1000).toFixed(2)} A
+                </span>
+              ))
+            ) : (
+              <span>该位置无有效拟合数据</span>
+            )}
           </output>
-        </ScrollArea>
-        <span className="thermal-chart__axis-title">申请电压 / V</span>
+        ) : null}
+      </div>
+      <div className="thermal-chart__footer thermal-chart__footer--axis-only">
+        <output className="thermal-chart__axis-title">申请电压 / V</output>
       </div>
     </div>
   )
@@ -211,6 +269,21 @@ export function SupplyObservationTable({
   source,
 }: ObservationProps & { source?: 'attempt' | 'active' | null }) {
   const points = boundary?.points ?? []
+  const selectedRowRef = useCallback((row: HTMLTableRowElement | null) => {
+    if (!row) return
+    const scrollContainer = row
+      .closest<HTMLElement>('.thermal-plant-run-card__table-scroll')
+      ?.querySelector<HTMLElement>('.simplebar-content-wrapper')
+    if (!scrollContainer) return
+
+    const rowRect = row.getBoundingClientRect()
+    const containerRect = scrollContainer.getBoundingClientRect()
+    if (rowRect.top < containerRect.top) {
+      scrollContainer.scrollTop -= containerRect.top - rowRect.top
+    } else if (rowRect.bottom > containerRect.bottom) {
+      scrollContainer.scrollTop += rowRect.bottom - containerRect.bottom
+    }
+  }, [])
   return (
     <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
       <div className="thermal-plant-run-card__section-heading">
@@ -238,7 +311,11 @@ export function SupplyObservationTable({
           </thead>
           <tbody>
             {points.map((point, index) => (
-              <tr key={`${point[0]}-${index}`} aria-selected={selectedIndex === index}>
+              <tr
+                key={`${point[0]}-${index}`}
+                ref={selectedIndex === index ? selectedRowRef : undefined}
+                aria-selected={selectedIndex === index}
+              >
                 <td>
                   <button
                     type="button"
