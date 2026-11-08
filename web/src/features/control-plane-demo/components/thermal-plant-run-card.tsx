@@ -154,7 +154,7 @@ export function ThermalPlantRunCard({
   const isRunning = runtimeRunning ?? presentation.isRunning
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
-  const selectionKey = `${deviceId ?? 'unknown-device'}:${attempt?.runId ?? 'active'}:${snapshot.supplyBoundarySource ?? 'unknown'}`
+  const selectionKey = `${deviceId ?? 'unknown-device'}:${attempt?.runId ?? 'active'}:${snapshot.activeResult?.transactionId ?? 'none'}:${snapshot.supplyBoundarySource ?? 'unknown'}`
   const [selection, setSelection] = useState({ key: selectionKey, index: 0 })
   const selected =
     selection.key === selectionKey && selection.index < boundaryPoints.length ? selection.index : 0
@@ -539,7 +539,7 @@ function TraceChart({
     document.addEventListener('pointerdown', closeOnOutsidePointer)
     return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
   }, [isPinned])
-  if (points.length < 2)
+  if (unavailable)
     return (
       <ChartPlaceholder
         loading={loading}

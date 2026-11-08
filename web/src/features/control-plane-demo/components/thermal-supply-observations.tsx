@@ -106,7 +106,7 @@ export function TemperatureRequestChart({
       ? []
       : fits.flatMap((fit) => {
           const value = interpolateLinear(
-            fit.points.map((point) => ({ x: point.requestV, y: point.temperatureC })),
+            fit.validPoints.map((point) => ({ x: point.requestV, y: point.temperatureC })),
             hoverX
           )
           return value === null ? [] : [{ currentMa: fit.currentMa, temperatureC: value }]

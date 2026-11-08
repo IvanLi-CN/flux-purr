@@ -111,7 +111,14 @@ export const IdleReady: Story = {
 
 export const Loading: Story = {
   name: 'Loading live snapshot',
-  args: { snapshot: emptySnapshot, loading: true },
+  args: { snapshot: completedSnapshot, loading: true },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.queryByRole('img', { name: 'RTD 理论温度—申请电压散点图' })).toBeNull()
+    await expect(canvas.queryByRole('img', { name: '加热和自然冷却温度曲线' })).toBeNull()
+    await expect(canvas.getAllByText('读取中').length).toBeGreaterThan(0)
+    await expect(canvas.queryByText('active 有效')).toBeNull()
+  },
 }
 
 export const LoadingRunning: Story = {
