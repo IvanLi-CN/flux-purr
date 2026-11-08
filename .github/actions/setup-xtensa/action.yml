@@ -33,11 +33,8 @@ runs:
         chmod +x "$HOME/.cargo/bin/espup"
 
         export ESPUP_EXPORT_FILE="$HOME/exports"
-        "$HOME/.cargo/bin/espup" install \
-          --targets "$XTENSA_BUILD_TARGETS" \
-          --toolchain-version "$XTENSA_TOOLCHAIN_VERSION" \
-          --skip-version-parse \
-          --name esp
+        bash "${{ github.action_path }}/install.sh" \
+          "$HOME/.cargo/bin/espup" "$XTENSA_TOOLCHAIN_VERSION" "$XTENSA_BUILD_TARGETS"
         source "$ESPUP_EXPORT_FILE"
 
         echo "$PATH" >> "$GITHUB_PATH"
