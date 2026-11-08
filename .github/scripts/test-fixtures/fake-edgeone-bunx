@@ -19,6 +19,7 @@ if (( count <= fail_until )); then
   case "${failure_stage}" in
     preflight)
       echo "[cli] Validating API endpoint..."
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
       ;;
     post-deploy)

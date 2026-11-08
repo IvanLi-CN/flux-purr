@@ -79,8 +79,10 @@ assert 'cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"' in edgeone_helper
 assert 'max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"' in edgeone_helper
 assert "deployment_started" in edgeone_helper
 assert "retryable_preflight_failure" in edgeone_helper
+assert "PIPESTATUS" in edgeone_helper
+assert "tee_status" in edgeone_helper
 assert "automatic retry is disabled" in edgeone_helper
-assert "The CLI token error is non-diagnostic" in edgeone_helper
+assert "endpoint or network failure" in edgeone_helper
 assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
 assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
 assert 'bash .github/scripts/deploy-edgeone.sh web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release

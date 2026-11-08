@@ -54,7 +54,9 @@ done
 
 run_deploy() {
   local output_file="$1"
+  local -a pipeline_status
   local status
+  local tee_status
 
   set +e
   "${bunx_bin}" "edgeone@${cli_version}" makers deploy \
@@ -62,8 +64,14 @@ run_deploy() {
     -n "${project_name}" \
     -e production \
     -t "${EDGEONE_API_TOKEN}" 2>&1 | tee "${output_file}"
-  status=${PIPESTATUS[0]}
+  pipeline_status=("${PIPESTATUS[@]}")
+  status="${pipeline_status[0]}"
+  tee_status="${pipeline_status[1]}"
   set -e
+  attempt_output_ok=1
+  if (( tee_status != 0 )); then
+    attempt_output_ok=0
+  fi
   return "${status}"
 }
 
@@ -75,7 +83,7 @@ deployment_started() {
 
 retryable_preflight_failure() {
   grep -Eiq \
-    'Validating API endpoint|check and set region failed|AxiosError: timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up' \
+    'AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up' \
     "$1"
 }
 
@@ -89,6 +97,11 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
     status=$?
   fi
 
+  if (( attempt_output_ok == 0 )); then
+    echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
+    exit "${status}"
+  fi
+
   if deployment_started "${attempt_log}"; then
     echo "EdgeOne deployment reached an ambiguous remote state; automatic retry is disabled for ${target_label}." >&2
     exit "${status}"
@@ -96,12 +109,15 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
 
   if ! retryable_preflight_failure "${attempt_log}"; then
     echo "EdgeOne deployment failed before a retryable endpoint preflight for ${target_label}; automatic retry is disabled." >&2
+    if grep -Eiq 'Invalid EDGEONE_PAGES_API_TOKEN|invalid.*token' "${attempt_log}"; then
+      echo "The CLI reported a token or configuration error without transport evidence; verify the token scope and project configuration." >&2
+    fi
     exit "${status}"
   fi
 
   if (( attempt == max_attempts )); then
     echo "EdgeOne deployment failed after ${max_attempts} preflight attempts for ${target_label}." >&2
-    echo "The CLI token error is non-diagnostic; inspect preceding output for endpoint, timeout, or authentication details." >&2
+    echo "The CLI reported an endpoint or network failure; inspect preceding output for timeout, reset, refusal, or DNS details." >&2
     exit "${status}"
   fi
 
