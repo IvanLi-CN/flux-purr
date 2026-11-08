@@ -10,9 +10,9 @@ import {
   TimerReset,
   Zap,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SupplyBoundary, ThermalPlantRunSnapshot, ThermalPlantTracePoint } from '../contracts'
-import defaultSupplyBoundaryJson from '../fixtures/supply-observations.json'
+import defaultSupplyBoundaryJson from '../fixtures/supply-observations.json' with { type: 'json' }
 import {
   chartValueAtPointer,
   clampChartValue,
@@ -129,6 +129,7 @@ export function ThermalPlantRunCardStatus({
 
 export function ThermalPlantRunCard({
   snapshot,
+  deviceId,
   disabled,
   unsupported = false,
   loading = false,
@@ -138,6 +139,7 @@ export function ThermalPlantRunCard({
   onStartStop,
 }: {
   snapshot: ThermalPlantRunSnapshot
+  deviceId?: string
   disabled?: boolean
   unsupported?: boolean
   loading?: boolean
@@ -152,7 +154,7 @@ export function ThermalPlantRunCard({
   const isRunning = runtimeRunning ?? presentation.isRunning
   const boundary = snapshot.supplyBoundary
   const boundaryPoints = boundary?.points ?? []
-  const selectionKey = `${attempt?.runId ?? 'active'}:${snapshot.supplyBoundarySource ?? 'unknown'}`
+  const selectionKey = `${deviceId ?? 'unknown-device'}:${attempt?.runId ?? 'active'}:${snapshot.supplyBoundarySource ?? 'unknown'}`
   const [selection, setSelection] = useState({ key: selectionKey, index: 0 })
   const selected =
     selection.key === selectionKey && selection.index < boundaryPoints.length ? selection.index : 0
@@ -271,6 +273,7 @@ export function ThermalPlantRunCard({
               boundary={boundary}
               loading={loading}
               running={isRunning}
+              interactionKey={selectionKey}
               selectedIndex={selected}
               onSelect={setSelectedIndex}
             />
@@ -281,7 +284,12 @@ export function ThermalPlantRunCard({
               <h3>温度轨迹</h3>
               <span>{presentation.traceStatus}</span>
             </div>
-            <TraceChart points={trace} loading={loading} running={isRunning} />
+            <TraceChart
+              points={trace}
+              loading={loading}
+              running={isRunning}
+              interactionKey={selectionKey}
+            />
             <div className="thermal-chart__footer thermal-chart__footer--axis-only">
               <output className="thermal-chart__axis-title">时间 / mm:ss</output>
             </div>
@@ -295,6 +303,7 @@ export function ThermalPlantRunCard({
             selectedIndex={selected}
             onSelect={setSelectedIndex}
             source={snapshot.supplyBoundarySource}
+            selectionIdentity={selectionKey}
           />
 
           <footer className="thermal-plant-run-card__footer">
@@ -502,14 +511,34 @@ function TraceChart({
   points,
   loading,
   running,
+  interactionKey,
 }: {
   points: ThermalPlantTracePoint[]
   loading: boolean
   running: boolean
+  interactionKey?: string
 }) {
   const { width, initialHeight, inset } = thermalChartStyle
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(width, initialHeight)
   const [hoverX, setHoverX] = useState<number | null>(null)
+  const [isPinned, setIsPinned] = useState(false)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const unavailable = loading || points.length < 2
+  useEffect(() => {
+    if (!unavailable && interactionKey === undefined) return
+    setHoverX(null)
+    setIsPinned(false)
+  }, [unavailable, interactionKey])
+  useEffect(() => {
+    if (!isPinned) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (svgRef.current?.contains(event.target as Node)) return
+      setIsPinned(false)
+      setHoverX(null)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [isPinned])
   if (points.length < 2)
     return (
       <ChartPlaceholder
@@ -575,6 +604,7 @@ function TraceChart({
   return (
     <div ref={containerRef} className="thermal-plant-run-card__chart-canvas">
       <svg
+        ref={svgRef}
         className="thermal-plant-run-card__svg thermal-plant-run-card__svg--trace"
         preserveAspectRatio="xMidYMid meet"
         viewBox={`0 0 ${width} ${height}`}
@@ -583,12 +613,23 @@ function TraceChart({
         tabIndex={0}
         aria-label="加热和自然冷却温度曲线"
         onPointerMove={(event) => updateHover(event, event.currentTarget)}
-        onPointerDown={(event) => updateHover(event, event.currentTarget)}
-        onPointerLeave={() => setHoverX(null)}
-        onPointerUp={(event) => {
-          if (event.pointerType !== 'mouse') setHoverX(null)
+        onPointerDown={(event) => {
+          updateHover(event, event.currentTarget)
+          if (event.pointerType === 'mouse') setIsPinned(true)
         }}
-        onPointerCancel={() => setHoverX(null)}
+        onPointerLeave={() => {
+          if (!isPinned) setHoverX(null)
+        }}
+        onPointerUp={(event) => {
+          if (event.pointerType !== 'mouse') {
+            setIsPinned(false)
+            setHoverX(null)
+          }
+        }}
+        onPointerCancel={() => {
+          setIsPinned(false)
+          setHoverX(null)
+        }}
         onKeyDown={(event) => {
           if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
           event.preventDefault()

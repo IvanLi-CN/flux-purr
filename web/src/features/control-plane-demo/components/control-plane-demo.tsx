@@ -8115,6 +8115,7 @@ function CalibrationView({
             <ScrollArea className="industrial-calibration-tabs__scroll-area" autoHide>
               <section className="industrial-calibration-mode-panel" aria-label="加热曲线标定">
                 <ThermalPlantRunCard
+                  deviceId={device.id}
                   snapshot={thermalPlantRun}
                   unsupported={thermalPlantRunUnsupported}
                   loading={thermalPlantRunLoading}

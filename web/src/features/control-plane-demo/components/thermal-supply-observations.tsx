@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { SupplyBoundary } from '../contracts'
 import { theoreticalRtdTemperatureForAdcMv } from '../rtd-calibration-display'
@@ -16,6 +16,7 @@ type Observation = SupplyBoundary['points'][number]
 type ObservationProps = {
   boundary?: SupplyBoundary | null
   loading: boolean
+  interactionKey?: string
   selectedIndex: number
   onSelect: (index: number) => void
 }
@@ -43,12 +44,15 @@ export function TemperatureRequestChart({
   boundary,
   loading,
   running,
+  interactionKey,
   selectedIndex,
   onSelect,
 }: ObservationProps & { running: boolean }) {
   const { width, initialHeight, inset } = thermalChartStyle
   const { containerRef, viewBoxHeight: height } = useResponsiveSvgHeight(width, initialHeight)
   const [hoverX, setHoverX] = useState<number | null>(null)
+  const [isPinned, setIsPinned] = useState(false)
+  const svgRef = useRef<SVGSVGElement | null>(null)
   const observations = boundary?.points ?? []
   const points = observations.flatMap((point, index) => {
     const temp = temperature(point, boundary)
@@ -64,6 +68,22 @@ export function TemperatureRequestChart({
     })),
     { minC: minT, maxC: maxT }
   )
+  const unavailable = loading || points.length === 0
+  useEffect(() => {
+    if (!unavailable && interactionKey === undefined) return
+    setHoverX(null)
+    setIsPinned(false)
+  }, [interactionKey, unavailable])
+  useEffect(() => {
+    if (!isPinned) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (svgRef.current?.contains(event.target as Node)) return
+      setIsPinned(false)
+      setHoverX(null)
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer)
+  }, [isPinned])
   const voltages = [
     ...points.map(({ point }) => voltage(point)),
     ...fits.flatMap((fit) => fit.points.map((point) => point.requestV)),
@@ -107,6 +127,7 @@ export function TemperatureRequestChart({
           </output>
         ) : (
           <svg
+            ref={svgRef}
             viewBox={`0 0 ${width} ${height}`}
             className="thermal-plant-run-card__svg"
             aria-label="RTD 理论温度—申请电压散点图"
@@ -114,12 +135,23 @@ export function TemperatureRequestChart({
             // biome-ignore lint/a11y/noNoninteractiveTabindex: The SVG is an intentional keyboard chart surface.
             tabIndex={0}
             onPointerMove={(event) => updateHover(event, event.currentTarget)}
-            onPointerDown={(event) => updateHover(event, event.currentTarget)}
-            onPointerLeave={() => setHoverX(null)}
-            onPointerUp={(event) => {
-              if (event.pointerType !== 'mouse') setHoverX(null)
+            onPointerDown={(event) => {
+              updateHover(event, event.currentTarget)
+              if (event.pointerType === 'mouse') setIsPinned(true)
             }}
-            onPointerCancel={() => setHoverX(null)}
+            onPointerLeave={() => {
+              if (!isPinned) setHoverX(null)
+            }}
+            onPointerUp={(event) => {
+              if (event.pointerType !== 'mouse') {
+                setIsPinned(false)
+                setHoverX(null)
+              }
+            }}
+            onPointerCancel={() => {
+              setIsPinned(false)
+              setHoverX(null)
+            }}
             onKeyDown={(event) => {
               if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
               event.preventDefault()
@@ -235,7 +267,7 @@ export function TemperatureRequestChart({
             })}
           </svg>
         )}
-        {hoverX !== null ? (
+        {!unavailable && hoverX !== null ? (
           <output
             className={`thermal-chart__tooltip thermal-chart__tooltip--${hoverPlacement}`}
             style={{ left: `${((hoverPixelX ?? left) / width) * 100}%` }}
@@ -267,7 +299,11 @@ export function SupplyObservationTable({
   selectedIndex,
   onSelect,
   source,
-}: ObservationProps & { source?: 'attempt' | 'active' | null }) {
+  selectionIdentity,
+}: ObservationProps & {
+  source?: 'attempt' | 'active' | null
+  selectionIdentity?: string
+}) {
   const points = boundary?.points ?? []
   const selectedRowRef = useRef<HTMLTableRowElement | null>(null)
   // biome-ignore lint/correctness/useExhaustiveDependencies: boundary points can mount after the selected index.
@@ -306,7 +342,7 @@ export function SupplyObservationTable({
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [points.length, selectedIndex])
+  }, [points.length, selectedIndex, selectionIdentity])
   return (
     <section className="thermal-plant-run-card__table-wrap" aria-label="供电边界采样">
       <div className="thermal-plant-run-card__section-heading">

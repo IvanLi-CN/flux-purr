@@ -1920,7 +1920,7 @@
   }
 
   .thermal-plant-run-card__table-scroll {
-    overflow: hidden;
+    overflow: auto;
   }
 
   .thermal-plant-run-card__table-scroll--loading {
@@ -11524,7 +11524,8 @@
   font-size: 0.68rem;
   line-height: 1.35;
   pointer-events: none;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .thermal-chart__tooltip strong {
   font-family: "JetBrains Mono", monospace;

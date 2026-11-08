@@ -263,6 +263,19 @@ export const ObservedSixteenPoints: Story = {
     await expect(
       canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
     ).not.toBeNull()
+    fireEvent.pointerDown(supplySvg, {
+      pointerType: 'mouse',
+      clientX: supplyRect.left + supplyRect.width / 2,
+      clientY: supplyRect.top + supplyRect.height / 2,
+    })
+    fireEvent.pointerLeave(supplySvg)
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).not.toBeNull()
+    fireEvent.pointerDown(document.body, { pointerType: 'mouse' })
+    await expect(
+      canvasElement.querySelector('.thermal-supply-chart .thermal-chart__tooltip')
+    ).toBeNull()
     await userEvent.click(points[0])
     await expect(points[0]).toHaveAttribute('aria-pressed', 'true')
     await expectSelectedRowBelowStickyHeader()
