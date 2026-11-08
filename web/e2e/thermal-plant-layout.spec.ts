@@ -135,6 +135,7 @@ test.describe('thermal plant result layout', () => {
         const rect = node.getBoundingClientRect()
         return { y: rect.y, bottom: rect.bottom }
       }
+      const header = element.querySelector<HTMLElement>('.thermal-plant-run-card__header')
       const surface = element.getBoundingClientRect()
       const styles = getComputedStyle(element)
       return {
@@ -143,18 +144,14 @@ test.describe('thermal plant result layout', () => {
         metrics: read('.thermal-plant-run-card__metrics'),
         body: read('.thermal-plant-run-card__body'),
         gridTemplateRows: styles.gridTemplateRows,
-        headerPosition: getComputedStyle(
-          element.querySelector('.thermal-plant-run-card__header') ?? element
-        ).position,
+        headerPosition: header ? getComputedStyle(header).position : null,
       }
     })
-    expect(shortHeightLayout.headerPosition).toBe('absolute')
+    expect(shortHeightLayout.headerPosition).toBeNull()
     expect(shortHeightLayout.gridTemplateRows.split(' ').length).toBe(2)
     expect((shortHeightLayout.metrics?.y ?? 0) - (shortHeightLayout.surface?.y ?? 0)).toBeLessThan(
       2
     )
-    expect(shortHeightLayout.header?.y ?? 0).toBeLessThan(shortHeightLayout.metrics?.bottom ?? 0)
-    expect(shortHeightLayout.header?.bottom ?? 0).toBeGreaterThan(shortHeightLayout.metrics?.y ?? 0)
     expect(
       (shortHeightLayout.body?.y ?? 0) - (shortHeightLayout.metrics?.bottom ?? 0)
     ).toBeLessThan(16)
