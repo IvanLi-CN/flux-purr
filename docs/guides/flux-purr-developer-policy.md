@@ -61,6 +61,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 
 - 非硬件验证先于任何真机/HIL 操作完成。
 - CI 使用固定版本的 Xtensa 安装器与工具链。只有已识别的网络下载错误允许在同一 setup 步骤内最多三次安装，退避 15 秒、45 秒；再次安装前通过 espup 清理该临时 runner 的半安装 `esp` 工具链。配置错误、清理错误及日志错误直接失败，不跳过 Clippy 或固件构建；该恢复脚本拒绝在非 GitHub Actions 环境执行。
+- espup ZIP 下载失败后，使用同一固定版本资产的 GitHub 官方 API 作为备用入口；发布元数据中的 SHA-256、ZIP 完整性和文件清单全部通过后，才允许解压安装。备用下载或校验失败仍阻断 CI，不接受未校验或半下载的安装器。
 - 产品运行及真机 HIL 必须使用保留全部默认功能的固件，包括 Wi-Fi、HTTP、USB 控制和蜂鸣器。固件 crate 的 release 编译优化由 workspace 的 `opt-level = "z"` 与 `codegen-units = 1` 固定；单个代码生成单元用于缩小完整功能镜像，不改变其他 package 的代码生成单元配置。镜像必须满足既有 2 MiB factory-app 分区与启动栈预算；编译成功不能替代实际 app image 的分区大小检查。镜像超限必须通过构建或代码优化解决，不得裁剪必备功能，也不得把 no-network 编译检查产物替代为真机测试固件。
 - Rust 风格合同由 `cargo fmt --all -- --check`、`bun run check:rust:style`、
   firmware/devd 的严格 Clippy 以及产品固件的 `cargo +esp clippy`

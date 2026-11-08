@@ -17,6 +17,7 @@ runs:
     - shell: bash
       env:
         ESPUP_VERSION: 0.16.0
+        GH_TOKEN: ${{ github.token }}
         XTENSA_TOOLCHAIN_VERSION: ${{ inputs.version }}
         XTENSA_BUILD_TARGETS: ${{ inputs.buildtargets }}
       run: |
@@ -24,11 +25,8 @@ runs:
 
         host_target="$(rustup show | grep 'Default host' | sed -e 's/.* //')"
         espup_archive="espup-${host_target}.zip"
-        espup_url="https://github.com/esp-rs/espup/releases/download/v${ESPUP_VERSION}/${espup_archive}"
-
-        curl --fail --location --retry 3 --retry-all-errors --connect-timeout 30 \
-          --output "$RUNNER_TEMP/$espup_archive" \
-          "$espup_url"
+        python3 "${{ github.action_path }}/download.py" \
+          "$ESPUP_VERSION" "$host_target" "$RUNNER_TEMP/$espup_archive"
         unzip -o "$RUNNER_TEMP/$espup_archive" -d "$HOME/.cargo/bin"
         chmod +x "$HOME/.cargo/bin/espup"
 
