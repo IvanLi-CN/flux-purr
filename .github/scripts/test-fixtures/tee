@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
 
-cat >/dev/null
+tee_target="${1:?tee output path is required}"
+sed -n 'p' >"${tee_target}"
 exit 1

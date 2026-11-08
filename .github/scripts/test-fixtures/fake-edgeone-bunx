@@ -40,6 +40,11 @@ if (( count <= fail_until )); then
       echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
       ;;
+    same-line-mixed-preflight)
+      echo "[cli] Using provided API token for deployment...; unexpected phase output: response body truncated."
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
     partial-preflight)
       echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
       ;;

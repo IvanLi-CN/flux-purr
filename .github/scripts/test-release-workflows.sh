@@ -85,6 +85,8 @@ assert "automatic retry is disabled" in edgeone_helper
 assert "endpoint or network failure" in edgeone_helper
 assert "check and set region failed" in edgeone_helper
 assert "saw_preflight_context" in edgeone_helper
+assert "normalize_cli_line" in edgeone_helper
+assert "^[1-3]$" in edgeone_helper
 assert "unexpected phase output" not in edgeone_helper
 assert edgeone_helper.index("if (( attempt_output_ok == 0 ))") < edgeone_helper.index("if (( status == 0 ))")
 assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")

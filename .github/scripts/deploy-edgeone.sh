@@ -33,8 +33,8 @@ retry_delays_text="${EDGEONE_RETRY_DELAYS_SECONDS:-30 60}"
 attempt_logs_dir="$(mktemp -d)"
 trap 'rm -rf -- "${attempt_logs_dir}"' EXIT
 
-if ! [[ "${max_attempts}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "EDGEONE_MAX_ATTEMPTS must be a positive integer" >&2
+if ! [[ "${max_attempts}" =~ ^[1-3]$ ]]; then
+  echo "EDGEONE_MAX_ATTEMPTS must be an integer from 1 to 3" >&2
   exit 2
 fi
 
@@ -46,8 +46,8 @@ if (( ${#retry_delays[@]} < required_delays )); then
 fi
 
 for delay in "${retry_delays[@]:0:required_delays}"; do
-  if ! [[ "${delay}" =~ ^[0-9]+$ ]]; then
-    echo "EDGEONE_RETRY_DELAYS_SECONDS values must be non-negative integers" >&2
+  if ! [[ "${delay}" =~ ^[0-9]{1,3}$ ]] || (( 10#${delay} > 300 )); then
+    echo "EDGEONE_RETRY_DELAYS_SECONDS values must be integers from 0 to 300" >&2
     exit 2
   fi
 done
@@ -81,26 +81,36 @@ deployment_started() {
     "$1"
 }
 
+normalize_cli_line() {
+  local line="$1"
+
+  line="$(printf '%s\n' "${line}" | sed -E $'s/\033\\[[0-9;]*m//g')"
+  printf '%s\n' "${line}" | sed -E \
+    's/^[[:space:]]*\[cli\][[:space:]]*(\[[^][]*\][[:space:]]*)?//'
+}
+
 retryable_preflight_failure() {
   local line
+  local normalized_line
   local saw_preflight_context=0
   local saw_transport_failure=0
 
   while IFS= read -r line || [[ -n "${line}" ]]; do
-    if [[ -z "${line}" ]]; then
+    normalized_line="$(normalize_cli_line "${line}")"
+    if [[ -z "${normalized_line}" ]]; then
       continue
     fi
 
     if (( saw_transport_failure == 1 )); then
-      if printf '%s\n' "${line}" | grep -Eiq \
-        'Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN'; then
+      if printf '%s\n' "${normalized_line}" | grep -Eiq \
+        '^[[:space:]]*Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN\.[[:space:]]*(Please provide a valid API token with --token or login first with "edgeone login"\. For more information, please refer to https://edgeone\.ai/document/[0-9]+)?[[:space:]]*$'; then
         continue
       fi
       return 1
     fi
 
-    if printf '%s\n' "${line}" | grep -Eiq \
-      'check and set region failed:.*(AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up)'; then
+    if printf '%s\n' "${normalized_line}" | grep -Eiq \
+      '^[[:space:]]*check and set region failed:[[:space:]]*(AxiosError:[[:space:]]+timeout([[:space:]]+of[[:space:]]+[0-9]+ms[[:space:]]+exceeded)?|AxiosError:[[:space:]]+Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up)[[:space:]]*$'; then
       if (( saw_preflight_context == 0 )); then
         return 1
       fi
@@ -108,8 +118,8 @@ retryable_preflight_failure() {
       continue
     fi
 
-    if printf '%s\n' "${line}" | grep -Eiq \
-      'Resolving dependencies|Resolved, downloaded and extracted|Saved lockfile|Using provided API token for deployment|Project .*already exists|Deploying .* environment|Validating API endpoint|Using Project ID:'; then
+    if printf '%s\n' "${normalized_line}" | grep -Eiq \
+      '^[[:space:]]*(Resolving dependencies|Resolved, downloaded and extracted \[[0-9]+\]|Saved lockfile|Using provided API token for deployment\.\.\.|Validating API endpoint\.\.\.)[[:space:]]*$'; then
       saw_preflight_context=1
       continue
     fi
@@ -137,7 +147,11 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
       echo "EdgeOne CLI succeeded, but output capture failed; treating CLI success as authoritative and automatic retry is disabled for ${target_label}." >&2
       exit 0
     fi
-    echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
+    if deployment_started "${attempt_log}"; then
+      echo "EdgeOne deployment reached an ambiguous remote state, but output capture failed; automatic retry is disabled for ${target_label}." >&2
+    else
+      echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
+    fi
     exit "${status}"
   fi
 

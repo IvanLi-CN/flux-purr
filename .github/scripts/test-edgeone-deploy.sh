@@ -48,6 +48,40 @@ test "${bounded_status}" = 7
 grep -Fq "endpoint or network failure" "${bounded_failure_log}"
 
 : > "${count_file}"
+too_many_attempts_log="${test_root}/too-many-attempts.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_MAX_ATTEMPTS=4 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${too_many_attempts_log}" 2>&1; then
+  echo "expected an attempt limit above three to be rejected" >&2
+  exit 1
+else
+  too_many_attempts_status=$?
+fi
+test "${too_many_attempts_status}" = 2
+test ! -s "${count_file}"
+grep -Fq "integer from 1 to 3" "${too_many_attempts_log}"
+
+: > "${count_file}"
+too_many_delay_log="${test_root}/too-many-delay.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_MAX_ATTEMPTS=2 \
+  EDGEONE_RETRY_DELAYS_SECONDS='301' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${too_many_delay_log}" 2>&1; then
+  echo "expected a retry delay above 300 seconds to be rejected" >&2
+  exit 1
+else
+  too_many_delay_status=$?
+fi
+test "${too_many_delay_status}" = 2
+test ! -s "${count_file}"
+grep -Fq "integers from 0 to 300" "${too_many_delay_log}"
+
+: > "${count_file}"
 permanent_failure_log="${test_root}/permanent-failure.log"
 if EDGEONE_API_TOKEN='<REDACTED>' \
   EDGEONE_BUNX_BIN="${fake_bunx}" \
@@ -85,6 +119,26 @@ fi
 test "$(<"${count_file}")" = 1
 test "${capture_failure_status}" = 7
 grep -Fq "output capture failed" "${capture_failure_log}"
+
+: > "${count_file}"
+remote_capture_failure_log="${test_root}/remote-capture-failure.log"
+if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
+  EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=post-deploy \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${remote_capture_failure_log}" 2>&1; then
+  echo "expected remote output capture failure to stop without retry" >&2
+  exit 1
+else
+  remote_capture_failure_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${remote_capture_failure_status}" = 7
+grep -Fq "ambiguous remote state" "${remote_capture_failure_log}"
 
 : > "${count_file}"
 successful_capture_failure_log="${test_root}/successful-capture-failure.log"
@@ -140,6 +194,25 @@ fi
 test "$(<"${count_file}")" = 1
 test "${mixed_preflight_status}" = 7
 grep -Fq "before a retryable endpoint preflight" "${mixed_preflight_failure_log}"
+
+: > "${count_file}"
+same_line_mixed_preflight_failure_log="${test_root}/same-line-mixed-preflight-failure.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=same-line-mixed-preflight \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${same_line_mixed_preflight_failure_log}" 2>&1; then
+  echo "expected same-line mixed preflight output to stop without retry" >&2
+  exit 1
+else
+  same_line_mixed_preflight_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${same_line_mixed_preflight_status}" = 7
+grep -Fq "before a retryable endpoint preflight" "${same_line_mixed_preflight_failure_log}"
 
 : > "${count_file}"
 partial_preflight_failure_log="${test_root}/partial-preflight-failure.log"
