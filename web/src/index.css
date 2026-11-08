@@ -1297,7 +1297,7 @@
   min-width: 0;
   min-height: 0;
   shape-rendering: geometricPrecision;
-  touch-action: none;
+  touch-action: pan-y;
 }
 
 .thermal-plant-run-card__svg--boundary {

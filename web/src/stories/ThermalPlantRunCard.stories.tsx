@@ -353,6 +353,9 @@ export const NarrowChart: Story = {
     if (!detail || !plot) throw new Error('Missing chart surface')
     const style = getComputedStyle(detail)
     await expect(style.whiteSpace).toBe('nowrap')
+    await expect(
+      getComputedStyle(chart?.querySelector('.thermal-plant-run-card__svg') as Element).touchAction
+    ).toBe('pan-y')
     await expect(detail.getBoundingClientRect().height).toBeLessThanOrEqual(
       Number.parseFloat(style.lineHeight) + 1
     )
