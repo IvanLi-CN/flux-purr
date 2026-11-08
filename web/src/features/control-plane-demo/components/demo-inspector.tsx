@@ -109,6 +109,7 @@ const actionLabels: Record<DemoActionKind, string> = {
 
 interface DemoInspectorSelectProps {
   label: string
+  labelHelp?: ReactNode
   ariaLabel: string
   value: string
   options: readonly { value: string; label: string; disabled?: boolean }[]
@@ -176,6 +177,7 @@ function DemoInspectorHelp({ label, title, className, children }: DemoInspectorH
 
 function DemoInspectorSelect({
   label,
+  labelHelp,
   ariaLabel,
   value,
   options,
@@ -183,7 +185,10 @@ function DemoInspectorSelect({
 }: DemoInspectorSelectProps) {
   return (
     <div className="demo-inspector__select">
-      <span className="demo-inspector__select-label">{label}</span>
+      <div className="demo-inspector__select-label">
+        <span>{label}</span>
+        {labelHelp}
+      </div>
       <Select value={value} onValueChange={onValueChange}>
         <SelectTrigger className="demo-inspector__select-trigger" aria-label={ariaLabel}>
           <SelectValue />
@@ -282,6 +287,15 @@ function DemoInspectorContent({
       <p className="demo-inspector__scope-hint">Applies across this demo session.</p>
       <DemoInspectorSelect
         label="Persona"
+        labelHelp={
+          <DemoInspectorHelp
+            className="demo-inspector__help--permission"
+            label="查看当前 Persona 权限"
+            title="Persona permissions"
+          >
+            {persona.permissions}. {persona.description}
+          </DemoInspectorHelp>
+        }
         ariaLabel="Persona"
         value={state.demoPersona}
         onValueChange={(value) =>
@@ -289,13 +303,6 @@ function DemoInspectorContent({
         }
         options={demoPersonas.map((item) => ({ value: item.id, label: item.label }))}
       />
-      <DemoInspectorHelp
-        className="demo-inspector__help--permission"
-        label="查看当前 Persona 权限"
-        title="Persona permissions"
-      >
-        {persona.permissions}. {persona.description}
-      </DemoInspectorHelp>
     </fieldset>
   )
 

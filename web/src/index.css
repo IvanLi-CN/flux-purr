@@ -10567,6 +10567,7 @@
 
   .demo-inspector__header-actions {
     display: flex;
+    align-items: center;
     gap: 0.4rem;
   }
 
@@ -10866,7 +10867,9 @@
   }
 
   .demo-inspector__select-label {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
   }
 
   .demo-inspector__select-trigger {
@@ -10970,24 +10973,26 @@
 
   .demo-inspector__help-trigger {
     display: inline-grid;
-    width: 2.75rem;
-    height: 2.75rem;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
     place-items: center;
-    border: 1px solid var(--industrial-panel-border-strong);
-    border-radius: 14px;
-    background: var(--industrial-panel-tint);
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
     color: var(--industrial-muted-text);
-    box-shadow: var(--industrial-surface-shadow);
+    box-shadow: none;
     cursor: pointer;
     transition:
       color 160ms ease,
-      box-shadow 160ms ease,
-      transform 160ms ease;
+      background-color 160ms ease;
   }
 
-  .demo-inspector__help--header .demo-inspector__help-trigger {
-    width: 3rem;
-    height: 3rem;
+  @media (pointer: coarse) {
+    .demo-inspector__help-trigger {
+      width: 2.75rem;
+      height: 2.75rem;
+    }
   }
 
   .demo-inspector__help--header .demo-inspector__help-trigger > svg {
@@ -10998,11 +11003,11 @@
   .demo-inspector__help-trigger:hover,
   .demo-inspector__help-trigger[aria-expanded="true"] {
     color: var(--industrial-accent);
+    background: color-mix(in oklch, var(--industrial-accent) 8%, transparent);
   }
 
   .demo-inspector__help-trigger:active {
-    box-shadow: var(--industrial-surface-inset);
-    transform: translateY(1px);
+    background: color-mix(in oklch, var(--industrial-accent) 14%, transparent);
   }
 
   .demo-inspector__help-panel {
@@ -11036,10 +11041,13 @@
     overflow-wrap: anywhere;
   }
 
-  .demo-inspector__help--permission {
-    justify-content: flex-end;
-    width: 100%;
-    margin-top: 0.42rem;
+  .demo-inspector__group[data-scope="global"] .demo-inspector__scope-hint {
+    margin-bottom: 0.25rem;
+  }
+
+  .demo-inspector__help--permission .demo-inspector__help-panel {
+    right: auto;
+    left: 0;
   }
 
   .demo-inspector__help--header .demo-inspector__help-panel {
