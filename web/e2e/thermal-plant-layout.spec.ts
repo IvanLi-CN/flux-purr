@@ -9,8 +9,8 @@ test.describe('thermal plant result layout', () => {
 
     const resultCard = page.getByRole('article', { name: '自动热模型标定结果' })
     await expect(resultCard).toBeVisible({ timeout: 10_000 })
-    await expect(resultCard.getByText('供电边界曲线')).toBeVisible()
-    await expect(resultCard.getByText('供电边界采样')).toBeVisible()
+    await expect(resultCard.getByText('温度—申请电压')).toBeVisible()
+    await expect(resultCard.getByRole('heading', { name: '供电观测' })).toBeVisible()
     await expect(
       resultCard
         .getByRole('table', { name: '供电边界采样' })
@@ -19,7 +19,7 @@ test.describe('thermal plant result layout', () => {
     ).toBeVisible()
     await expect(resultCard.getByText('R(T)', { exact: false })).toHaveCount(0)
 
-    const boundaryChart = resultCard.locator('svg[aria-label="供电边界曲线"]')
+    const boundaryChart = resultCard.locator('svg[aria-label="RTD 理论温度—申请电压散点图"]')
     const traceChart = resultCard.locator('svg[aria-label="加热和自然冷却温度曲线"]')
     const chartAspectDifference = (chart: typeof boundaryChart) => async () =>
       chart.evaluate((svg) => {
@@ -165,8 +165,8 @@ test.describe('thermal plant result layout', () => {
     const mobileChartHeight = await boundaryChart.evaluate(
       (svg) => svg.getBoundingClientRect().height
     )
-    expect(mobileChartHeight).toBeGreaterThan(100)
-    expect(mobileChartHeight).toBeLessThan(220)
+    expect(mobileChartHeight).toBeGreaterThan(200)
+    expect(mobileChartHeight).toBeLessThan(260)
 
     await page.setViewportSize({ width: 1440, height: 900 })
     await expect.poll(boundaryAspectDifference).toBeLessThan(0.03)

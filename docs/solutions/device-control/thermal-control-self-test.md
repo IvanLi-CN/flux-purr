@@ -401,3 +401,5 @@ If the local daemon stops serving the active hardware path:
 - `docs/specs/heater-pid-frontpanel-runtime/SPEC.md`
 - `docs/specs/real-control-plane-runtime/SPEC.md`
 - repository-maintained accepted and preliminary thermal bundles
+
+最终 ACTIVE 标记的异步写入与读回可能跨越总时限，只有校验完成时间早于截止时刻才可发布成功。超时或发布失败须撤回同代 PREPARED Commit；撤回失败属于持久化 I/O 故障，维持安全锁。内存激活使用校验完成时间，不能用之后的记账时刻误判已成功的保存；候选等待保存时仍按任务 Running 状态检查传感器与风扇，不能依赖已切为 Off 的控制模式。

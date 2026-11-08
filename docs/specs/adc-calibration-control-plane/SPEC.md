@@ -319,7 +319,7 @@ The thermal-model result surface retains the coefficient metrics and run trace w
 
 ## 完整温区采集与供电观测审查
 
-完整标定遵循 [ADR 0022](../../adr/0022-full-range-thermal-plant-calibration.md)。阶段时限分别为 300000ms，总流程为 660000ms；阶段截止时刻满足目标可推进，否则失败。全流程超时不激活未提交候选。旧有效 EEPROM 记录可继续读取，但不得标为完整温区新标定。
+完整标定遵循 [ADR 0022](../../adr/0022-full-range-thermal-plant-calibration.md)。阶段时限分别为 300000ms，总流程为 660000ms；阶段截止时刻满足目标可推进，否则失败。全流程超时不激活未提交候选。保存成功以最终 ACTIVE 标记写入及读回校验完成的时刻判定；若异步发布跨过总截止时刻或发布失败，须将该代标记撤回 PREPARED Commit，撤回 I/O 失败沿用持久化故障锁，不承诺物理存储完好。等待保存期间仍检查传感器与风扇安全条件，失败尝试不能随后被候选激活。旧有效 EEPROM 记录可继续读取，但不得标为完整温区新标定。
 
 `thermal_plant_run` 保持 version=2，增加可选 `attempt.failureContext`（stage、elapsedMs、stageElapsedMs、condition）和 `supplyBoundarySource=attempt|active`。失败上下文记录 ambient/heating/cooling/fitting/persistence 阶段及固定终态耗时；旧端缺字段时保留原错误并显示来源未标注。
 

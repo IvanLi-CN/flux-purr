@@ -108,6 +108,12 @@ pub(crate) fn finish_thermal_plant_persistence(
     now_ms: u64,
     verified: bool,
 ) -> bool {
+    if calibration.job.kind != Some(CalibrationJobKind::ThermalPlant)
+        || calibration.job.status != CalibrationJobStatus::Running
+    {
+        job.completion.candidate = None;
+        return false;
+    }
     job.elapsed_ticks = (now_ms.saturating_sub(job.started_at_ms.unwrap_or(now_ms))
         / HEATER_CONTROL_INTERVAL_MS)
         .min(u64::from(u32::MAX)) as u32;
@@ -231,7 +237,7 @@ fn runtime_finish_thermal_commit(
     candidate_config: &MemoryConfig,
     commit_domains: PersistDomainMask,
     finished_ms: u64,
-    result: Result<(), MemoryCommitFailure>,
+    result: Result<u64, MemoryCommitFailure>,
 ) {
     let started_at_ms = state
         .thermal_plant_workspace
@@ -240,12 +246,15 @@ fn runtime_finish_thermal_commit(
         .unwrap()
         .started_at_ms
         .unwrap_or(finished_ms);
+    let saved_at_ms = result.as_ref().map_or(finished_ms, |verified_at_ms| {
+        verified_at_ms.saturating_sub(state.runtime_started_ms)
+    });
     let activated = finish_thermal_plant_persistence(
         &mut state.calibration_runtime_state,
         &mut state.manual_pps_state,
         state.thermal_plant_workspace.job.as_mut().unwrap(),
         &mut state.memory_config,
-        finished_ms,
+        saved_at_ms,
         result.is_ok(),
     );
     if activated {
@@ -360,21 +369,39 @@ fn fail_pending_thermal_persistence(
     });
 }
 
-#[cfg(target_arch = "xtensa")]
-pub(crate) fn runtime_fail_thermal_plant_job(
-    state: &mut RuntimeLoopState,
-    error: ManualPpsError,
-    condition: &'static str,
-) {
-    if let Some(job) = state.thermal_plant_workspace.job.as_mut() {
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn enforce_thermal_plant_safety(
+    calibration: &mut CalibrationRuntimeState,
+    manual: &mut ManualPpsState,
+    workspace: &mut CalibrationThermalPlantWorkspace,
+    sensor_fault: bool,
+    fan_enabled: bool,
+) -> bool {
+    if calibration.job.kind != Some(CalibrationJobKind::ThermalPlant)
+        || calibration.job.status != CalibrationJobStatus::Running
+    {
+        return false;
+    }
+    let (error, condition) = if sensor_fault {
+        (
+            ManualPpsError::SupplyScan(
+                flux_purr_firmware::heater_supply::scan::ScanFailure::InvalidSample,
+            ),
+            "rtd_sensor_healthy",
+        )
+    } else if fan_enabled {
+        (
+            ManualPpsError::ThermalPlantProjectionInvalid,
+            "passive_fan_off",
+        )
+    } else {
+        return false;
+    };
+    if let Some(job) = workspace.job.as_mut() {
         job.completion.failure_condition = Some(condition);
     }
-    calibration_job_fail(
-        &mut state.calibration_runtime_state,
-        error,
-        true,
-        &mut state.manual_pps_state,
-    );
+    calibration_job_fail(calibration, error, true, manual);
+    true
 }
 
 #[cfg(target_arch = "xtensa")]

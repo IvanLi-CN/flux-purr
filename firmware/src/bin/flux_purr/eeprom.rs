@@ -1377,7 +1377,7 @@ pub(crate) struct CommitMemoryConfigInput<'a> {
 pub(crate) async fn commit_memory_config_now(
     i2c: &mut I2c<'_>,
     input: CommitMemoryConfigInput<'_>,
-) -> Result<(), MemoryCommitFailure> {
+) -> Result<u64, MemoryCommitFailure> {
     let CommitMemoryConfigInput {
         deadline_ms,
         memory_sequence,
@@ -1387,7 +1387,7 @@ pub(crate) async fn commit_memory_config_now(
         record_staging,
     } = input;
     if domains_to_write.is_empty() {
-        return Ok(());
+        return Ok(Instant::now().as_millis());
     }
     let mut expected_config = memory_config.clone();
     expected_config.sanitize();
@@ -1436,20 +1436,7 @@ pub(crate) async fn commit_memory_config_now(
         },
     )
     .await?;
-    if deadline_ms.is_some_and(|deadline| Instant::now().as_millis() >= deadline) {
-        return Err(MemoryCommitFailure {
-            error: MemoryCommitError::DeadlineExceeded,
-            phase: "deadline",
-            attempt: 1,
-            sequence: next_sequence,
-            domain: PersistDomain::ThermalPlant,
-            slot: marker_slot,
-        });
-    }
-    // ACTIVE is the publication point for the whole snapshot. Do not expose
-    // this generation until both double-slot and single-slot domains have
-    // completed their write/readback verification.
-    write_layout_marker_record(
+    let verified_at_ms = publish_commit_marker(
         i2c,
         LayoutMarkerWriteInput {
             generation: next_sequence,
@@ -1460,10 +1447,101 @@ pub(crate) async fn commit_memory_config_now(
             persistence_log_sink,
             record_staging,
         },
+        deadline_ms,
     )
     .await?;
     *memory_sequence = next_sequence;
-    Ok(())
+    Ok(verified_at_ms)
+}
+
+// The receipt records when ACTIVE readback actually completed, so later RAM
+// bookkeeping cannot turn a successfully saved result into a timeout.
+#[cfg(any(target_arch = "xtensa", test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TimedPublicationError<E> {
+    Io(E),
+    Deadline,
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) async fn publish_marker_before_deadline<E>(
+    deadline_ms: Option<u64>,
+    mut now_ms: impl FnMut() -> u64,
+    mut write_verified: impl core::ops::AsyncFnMut(
+        flux_purr_firmware::memory::LayoutMarkerStatus,
+    ) -> Result<(), E>,
+) -> Result<u64, TimedPublicationError<E>> {
+    use flux_purr_firmware::memory::LayoutMarkerStatus;
+    if deadline_ms.is_some_and(|deadline| now_ms() >= deadline) {
+        return Err(TimedPublicationError::Deadline);
+    }
+    let result = write_verified(LayoutMarkerStatus::Active).await;
+    let verified_at_ms = now_ms();
+    let expired = deadline_ms.is_some_and(|deadline| verified_at_ms >= deadline);
+    if deadline_ms.is_some() && (result.is_err() || expired) {
+        // A write or readback can fail after ACTIVE reached storage. Demote the
+        // same generation before returning failure; PREPARED Commit is never
+        // eligible for boot recovery. An abort I/O fault keeps the fault lock.
+        write_verified(LayoutMarkerStatus::Prepared)
+            .await
+            .map_err(TimedPublicationError::Io)?;
+    }
+    result.map_err(TimedPublicationError::Io)?;
+    if expired {
+        return Err(TimedPublicationError::Deadline);
+    }
+    Ok(verified_at_ms)
+}
+
+#[cfg(target_arch = "xtensa")]
+async fn publish_commit_marker(
+    i2c: &mut I2c<'_>,
+    input: LayoutMarkerWriteInput<'_>,
+    deadline_ms: Option<u64>,
+) -> Result<u64, MemoryCommitFailure> {
+    let LayoutMarkerWriteInput {
+        generation,
+        kind,
+        slot,
+        persistence_log_sink,
+        record_staging,
+        ..
+    } = input;
+    publish_marker_before_deadline(
+        deadline_ms,
+        || Instant::now().as_millis(),
+        async |status| {
+            write_layout_marker_record(
+                i2c,
+                LayoutMarkerWriteInput {
+                    generation,
+                    status,
+                    kind,
+                    slot,
+                    phase: if status == LayoutMarkerStatus::Active {
+                        "active"
+                    } else {
+                        "deadline-abort"
+                    },
+                    persistence_log_sink,
+                    record_staging,
+                },
+            )
+            .await
+        },
+    )
+    .await
+    .map_err(|error| match error {
+        TimedPublicationError::Io(error) => error,
+        TimedPublicationError::Deadline => MemoryCommitFailure {
+            error: MemoryCommitError::DeadlineExceeded,
+            phase: "deadline",
+            attempt: 1,
+            sequence: generation,
+            domain: PersistDomain::ThermalPlant,
+            slot,
+        },
+    })
 }
 
 #[cfg(target_arch = "xtensa")]

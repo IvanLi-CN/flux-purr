@@ -20851,3 +20851,6 @@ fn full_range_scan_completion_at_169c_keeps_heating_without_rescan() {
         ))
     );
 }
+
+#[path = "thermal_plant_publication_tests.rs"]
+mod thermal_plant_publication_tests;

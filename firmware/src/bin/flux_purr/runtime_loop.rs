@@ -1292,6 +1292,7 @@ pub(crate) async fn runtime_retry_persistence_io(
         },
     )
     .await
+    .map(|_| ())
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1806,27 +1807,16 @@ pub(crate) fn runtime_update_calibration_job(
         state.latest_rtd_raw_adc_mv,
         state.latest_vin_raw_adc_mv,
     );
-    let thermal_plant_was_running = state.calibration_runtime_state.mode
-        == CalibrationMode::ThermalPlant
-        && state.calibration_runtime_state.job.kind == Some(CalibrationJobKind::ThermalPlant)
+    let thermal_plant_was_running = state.calibration_runtime_state.job.kind
+        == Some(CalibrationJobKind::ThermalPlant)
         && state.calibration_runtime_state.job.status == CalibrationJobStatus::Running;
-    if state.current_rtd_fault.is_some() && thermal_plant_was_running {
-        runtime_fail_thermal_plant_job(
-            state,
-            ManualPpsError::SupplyScan(
-                flux_purr_firmware::heater_supply::scan::ScanFailure::InvalidSample,
-            ),
-            "rtd_sensor_healthy",
-        );
-    } else if thermal_plant_was_running
-        && (state.fan_command.enabled || state.overtemp_forced_fan_active)
-    {
-        runtime_fail_thermal_plant_job(
-            state,
-            ManualPpsError::ThermalPlantProjectionInvalid,
-            "passive_fan_off",
-        );
-    } else {
+    if !enforce_thermal_plant_safety(
+        &mut state.calibration_runtime_state,
+        &mut state.manual_pps_state,
+        state.thermal_plant_workspace,
+        state.current_rtd_fault.is_some(),
+        state.fan_command.enabled || state.overtemp_forced_fan_active,
+    ) {
         runtime_update_calibration_job_state(state, calibration_live_rtd_temp_c, elapsed_ms);
     }
     if thermal_plant_was_running {
@@ -2786,7 +2776,7 @@ pub(crate) async fn runtime_commit_deferred_memory(state: &mut RuntimeLoopState,
     )
     .await;
     match commit_result {
-        Ok(()) => copy_persisted_domains(
+        Ok(_) => copy_persisted_domains(
             &mut state.last_persisted_memory_config,
             &state.memory_config,
             commit_domains,
