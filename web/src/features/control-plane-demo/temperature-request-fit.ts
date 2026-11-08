@@ -9,6 +9,7 @@ export interface TemperatureRequestFit {
   degree: number
   rmseV: number
   points: Array<{ temperatureC: number; requestV: number }>
+  validPoints: Array<{ temperatureC: number; requestV: number }>
 }
 
 // Display-only least squares, evaluated over the complete chart temperature range.
@@ -51,6 +52,11 @@ export function fitTemperatureRequestCurves(
       rows.reduce((sum, row) => sum + (predict(row.temperatureC) - row.requestV) ** 2, 0) /
         rows.length
     )
+    const samplePoints = (startC: number, endC: number) =>
+      Array.from({ length: 81 }, (_, index) => {
+        const temperatureC = startC + ((endC - startC) * index) / 80
+        return { temperatureC, requestV: predict(temperatureC) }
+      })
     const displayMinT = Math.min(temperatureRange.minC, minT)
     const displayMaxT = Math.max(temperatureRange.maxC, maxT)
     return [
@@ -58,10 +64,8 @@ export function fitTemperatureRequestCurves(
         currentMa,
         degree,
         rmseV,
-        points: Array.from({ length: 81 }, (_, index) => {
-          const temperatureC = displayMinT + ((displayMaxT - displayMinT) * index) / 80
-          return { temperatureC, requestV: predict(temperatureC) }
-        }),
+        points: samplePoints(displayMinT, displayMaxT),
+        validPoints: samplePoints(minT, maxT),
       },
     ]
   })

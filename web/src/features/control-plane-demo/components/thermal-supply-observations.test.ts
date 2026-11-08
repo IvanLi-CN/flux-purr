@@ -7,11 +7,24 @@ import {
   rtdAdcMvForTemperature,
   theoreticalRtdTemperatureForAdcMv,
 } from '../rtd-calibration-display'
+import { interpolateLinear } from './chart-interaction'
 import { SupplyObservationTable, TemperatureRequestChart } from './thermal-supply-observations'
 
 const boundary = observed as SupplyBoundary
 
 describe('raw RTD supply observations', () => {
+  it('interpolates only within the supplied curve range', () => {
+    const samples = [
+      { x: 10, y: 25 },
+      { x: 20, y: 50 },
+      { x: 30, y: 75 },
+    ]
+    expect(interpolateLinear(samples, 15)).toBe(37.5)
+    expect(interpolateLinear(samples, 10)).toBe(25)
+    expect(interpolateLinear(samples, 5)).toBeNull()
+    expect(interpolateLinear(samples, 35)).toBeNull()
+  })
+
   it('computes low temperature points with their own divider supply', () => {
     expect(theoreticalRtdTemperatureForAdcMv(1030, 3328)).toBeCloseTo(29.8, 1)
     expect(theoreticalRtdTemperatureForAdcMv(1098, 3328)).toBeCloseTo(58.3, 1)
