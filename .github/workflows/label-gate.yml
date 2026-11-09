@@ -7,7 +7,6 @@ on:
 
 concurrency:
   group: label-gate-${{ github.event.pull_request.number }}
-  queue: max
 
 permissions:
   contents: read

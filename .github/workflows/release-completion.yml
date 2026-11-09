@@ -7,7 +7,6 @@ on:
 
 concurrency:
   group: release-completion-${{ github.event.pull_request.number || github.ref }}
-  queue: max
 
 permissions:
   checks: read

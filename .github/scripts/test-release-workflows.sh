@@ -125,7 +125,9 @@ assert "checks: read" in completion
 assert "source-checks.json" in completion
 assert "Verify VERSION and release completion" in completion
 for required_workflow in (label_gate, completion):
-    assert "queue: max" in required_workflow
+    assert "queue: max" not in required_workflow
+    assert "concurrency:" in required_workflow
+    assert "group:" in required_workflow
     assert "cancel-in-progress: true" not in required_workflow
     assert "gh api \"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}\" --jq '.labels'" in required_workflow
     assert "uses: actions/checkout@v4" in required_workflow
