@@ -76,6 +76,8 @@ jobs:
           echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"
           test "${OPERATION}" = publish || test "${OPERATION}" = recover
           source_sha_hint="$(git show -s --format=%B "${MAIN_INPUT}" | awk -F': ' '$1 == "Release-Source-SHA" { print $2; exit }')"
+          source_sha_unavailable=0
+          recovery_version=""
           if [ -n "${source_sha_hint}" ] && ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
             if [[ ! "${source_sha_hint}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "Release-Source-SHA is not a full commit SHA: ${source_sha_hint}" >&2
@@ -83,26 +85,43 @@ jobs:
             fi
             if ! git fetch --force --no-tags origin "${source_sha_hint}" 2>/dev/null || ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
               pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha_hint}/pulls" --jq '.[0].number' 2>/dev/null || true)"
-              test -n "${pr_number}" || {
-                echo "cannot resolve a pull request ref for Release-Source-SHA ${source_sha_hint}" >&2
-                exit 1
-              }
-              git fetch --force --no-tags origin "refs/pull/${pr_number}/head"
+              if [ -n "${pr_number}" ]; then
+                git fetch --force --no-tags origin "refs/pull/${pr_number}/head"
+              fi
             fi
-            git cat-file -e "${source_sha_hint}^{commit}"
+            if ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
+              recovery_version="$(git show "${MAIN_INPUT}:VERSION" 2>/dev/null | tr -d '\n' || true)"
+              recovery_tag_target="$(git rev-parse "refs/tags/v${recovery_version}^{commit}" 2>/dev/null || true)"
+              if [ "${OPERATION}" = recover ] && [ "${recovery_tag_target}" = "${MAIN_INPUT}" ]; then
+                source_sha_unavailable=1
+                echo "Release source ${source_sha_hint} is unavailable; using exact existing recovery tag v${recovery_version}."
+              else
+                echo "cannot recover Release-Source-SHA ${source_sha_hint}" >&2
+                exit 1
+              fi
+            fi
           fi
-          preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
-          prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
-          if [ "${prepared}" != true ]; then
-            reason="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-            echo "release_reason=${reason}" >> "$GITHUB_OUTPUT"
-            echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation (${reason})"
-            exit 0
+          if [ "${source_sha_unavailable}" = 1 ]; then
+            version="${recovery_version}"
+            preparation_sha="${MAIN_INPUT}"
+          else
+            preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
+            prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
+            if [ "${prepared}" != true ]; then
+              reason="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+              echo "release_reason=${reason}" >> "$GITHUB_OUTPUT"
+              echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation (${reason})"
+              exit 0
+            fi
+            version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
           fi
-          version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
-          preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
-          test "$(python3 scripts/product-version.py --mode release --source-sha "${MAIN_INPUT}")" = "${version}"
+          if [ "${source_sha_unavailable}" = 1 ]; then
+            test "$(git show "${MAIN_INPUT}:VERSION" | tr -d '\n')" = "${version}"
+          else
+            test "$(python3 scripts/product-version.py --mode release --source-sha "${MAIN_INPUT}")" = "${version}"
+          fi
           tag_args=(verify-tag --version "${version}" --expected-sha "${MAIN_INPUT}")
           if [ "${OPERATION}" = recover ]; then
             tag_args+=(--allow-existing)
