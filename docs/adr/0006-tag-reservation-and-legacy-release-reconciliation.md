@@ -28,6 +28,9 @@ and discover the same kind of ownership conflict only after building assets.
   existing tag's peeled commit equals that exact input and the commit carries
   the same `VERSION`. This legacy path is restricted to recovery and does not
   relax normal publish validation or accept a different tag owner.
+- Recovery source and pull-request fetches are best-effort lookups. If they are
+  unavailable, the exact existing tag identity remains the only accepted
+  fallback; a normal publish still fails closed.
 - The historical `v0.23.0` tag, release, and assets remain unchanged and are
   audit-only. No retroactive `0.23.0` release is created. The first complete
   release on the current chain is the ordinary patch `0.23.1` prepared and
