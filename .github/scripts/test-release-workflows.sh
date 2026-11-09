@@ -61,6 +61,7 @@ assert "git push origin \"${PRODUCT_TAG}\"" in release
 assert "git fetch --force --tags origin" in prepare
 assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release
 assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
+assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
 assert "def verify_tag" in release_chain
@@ -74,7 +75,9 @@ assert "operation=recover" not in release
 assert "release_snapshot.py" not in release
 assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
 assert "Deploy published public demo archive to EdgeOne" in release
-assert release.count("bash .github/scripts/deploy-edgeone.sh") == 2
+assert "Prepare EdgeOne deployment helper" in release
+assert 'git show "${CONTROLLER_SHA}:.github/scripts/deploy-edgeone.sh" > "${helper_path}"' in release
+assert release.count('bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh"') == 2
 assert "npx --yes edgeone@1.6.18 makers deploy" not in release
 assert '"edgeone@${cli_version}" makers deploy' in edgeone_helper
 assert 'cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"' in edgeone_helper
@@ -93,11 +96,11 @@ assert "unexpected phase output" not in edgeone_helper
 assert edgeone_helper.index("if (( attempt_output_ok == 0 ))") < edgeone_helper.index("if (( status == 0 ))")
 assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
 assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bash .github/scripts/deploy-edgeone.sh web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release
+assert 'bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release
 assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed' in release
 assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber' in release
 assert 'archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bash .github/scripts/deploy-edgeone.sh web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production' in release
+assert 'bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production' in release
 assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed' in release
 assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber' in release
 assert "web-production-bundle" not in ci_main

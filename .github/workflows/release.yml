@@ -73,6 +73,7 @@ jobs:
           else
             git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"
           fi
+          echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"
           test "${OPERATION}" = publish || test "${OPERATION}" = recover
           preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
           prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
@@ -249,6 +250,18 @@ jobs:
           if not any(name.startswith("flux-purr-release-manifest-") for name in required): raise SystemExit("missing release manifest")
           PY
 
+      - name: Prepare EdgeOne deployment helper
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          CONTROLLER_SHA: ${{ steps.release.outputs.controller_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_path="${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh"
+          git show "${CONTROLLER_SHA}:.github/scripts/deploy-edgeone.sh" > "${helper_path}"
+          chmod 700 "${helper_path}"
+          test -x "${helper_path}"
+
       - name: Deploy published Web archive to EdgeOne
         if: steps.release.outputs.enabled == 'true'
         env:
@@ -269,7 +282,7 @@ jobs:
           rm -rf web-dist
           mkdir web-dist
           tar -xzf "${archive}" -C web-dist
-          bash .github/scripts/deploy-edgeone.sh web-dist "${EDGEONE_PROJECT_NAME}" web-production
+          bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-dist "${EDGEONE_PROJECT_NAME}" web-production
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber
 
@@ -293,6 +306,6 @@ jobs:
           rm -rf web-demo-dist
           mkdir web-demo-dist
           tar -xzf "${archive}" -C web-demo-dist
-          bash .github/scripts/deploy-edgeone.sh web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production
+          bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber
