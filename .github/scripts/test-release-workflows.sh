@@ -26,6 +26,7 @@ assert "needs: classify" in ci_pr
 assert ci_pr.count("ref: ${{ github.event.pull_request.head.sha || github.sha }}") == 5
 assert "prepared-integration" in ci_main
 assert "git diff --quiet" in ci_main
+assert "  web:\n    name: Web checks\n    needs: classify\n    if: needs.classify.outputs.kind == 'source'\n    runs-on: ubuntu-24.04" in ci_main
 assert "Prepare product version" in prepare
 assert "workflows: [CI PR, Label Gate]" in prepare
 assert "contents: write" in prepare
@@ -51,6 +52,7 @@ assert "refs/heads/main" not in prepare
 assert "verification_sha" in prepare
 assert "verify-prepared" in prepare
 assert "verify-merged-prepared" in release
+assert "if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}" in release
 assert "verify-tag" in release
 assert release.index("verify-tag") < release.index("Checkout merged product source")
 assert "--allow-existing" in release
