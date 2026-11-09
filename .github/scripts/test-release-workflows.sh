@@ -65,6 +65,10 @@ assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
 assert 'commits/${source_sha_hint}/pulls' in release
 assert 'refs/pull/${pr_number}/head' in release
 assert 'git fetch --force --no-tags origin "${source_sha_hint}"' in release
+assert 'source_sha_unavailable=0' in release
+assert 'exact existing recovery tag' in release
+assert 'refs/tags/v${recovery_version}^{commit}' in release
+assert 'git show "${MAIN_INPUT}:VERSION" | tr -d' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
 assert "verify_squashed_prepared_release" in release_chain
