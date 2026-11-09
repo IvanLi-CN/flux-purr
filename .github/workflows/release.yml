@@ -68,6 +68,12 @@ jobs:
           git fetch --force origin main --tags
           main_sha="$(git rev-parse origin/main)"
           test -n "${MAIN_INPUT}"
+          if ! git cat-file -e "${MAIN_INPUT}^{commit}" 2>/dev/null; then
+            recovery_tag_ref="$(git ls-remote --tags origin | awk -v target="${MAIN_INPUT}" '$1 == target { ref=$2; sub(/\^\{\}$/, "", ref); print ref; exit }')"
+            if [ -n "${recovery_tag_ref}" ]; then
+              git fetch --force --no-tags origin "${recovery_tag_ref}:${recovery_tag_ref}"
+            fi
+          fi
           if [ "${EVENT_NAME}" = workflow_run ]; then
             test "${MAIN_INPUT}" = "${main_sha}"
           else
