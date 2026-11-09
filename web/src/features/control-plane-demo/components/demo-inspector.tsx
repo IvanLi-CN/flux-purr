@@ -85,22 +85,58 @@ interface DemoInspectorContentProps {
   onPlacementChange: (placement: DemoInspectorPlacement) => void
 }
 
-const scenes: Array<{ id: DemoSceneId; label: string; description: string }> = [
-  { id: 'normal', label: 'Nominal operator', description: 'Online bench with writable telemetry' },
-  { id: 'degraded', label: 'Degraded handoff', description: 'Lease and network handoff fault' },
-  { id: 'offline', label: 'Offline device', description: 'Unavailable mock target' },
+type DemoModuleKind = 'overview' | 'settings' | 'calibration' | 'update'
+
+const scenes: Array<{
+  id: DemoSceneId
+  label: string
+  description: string
+  modules: DemoModuleKind[]
+}> = [
+  {
+    id: 'normal',
+    label: 'Nominal operator',
+    description: 'Online bench with writable telemetry',
+    modules: ['overview', 'settings', 'calibration', 'update'],
+  },
+  {
+    id: 'degraded',
+    label: 'Degraded handoff',
+    description: 'Lease and network handoff fault',
+    modules: ['overview', 'settings'],
+  },
+  {
+    id: 'offline',
+    label: 'Offline device',
+    description: 'Unavailable mock target',
+    modules: ['overview', 'settings'],
+  },
   {
     id: 'blocked-artifact',
     label: 'Artifact blocked',
     description: 'Dry-check compatibility gate blocked',
+    modules: ['update', 'settings'],
   },
   {
     id: 'calibration-loading',
     label: 'Calibration loading',
     description: 'Thermal snapshot read in progress',
+    modules: ['calibration'],
   },
-  { id: 'calibration-active', label: 'Calibration running', description: 'Leave guard active' },
+  {
+    id: 'calibration-active',
+    label: 'Calibration running',
+    description: 'Leave guard active',
+    modules: ['calibration'],
+  },
 ]
+
+function moduleKind(path: string): DemoModuleKind {
+  if (path.includes('/calibration/')) return 'calibration'
+  if (path.includes('/settings/')) return 'settings'
+  if (path.endsWith('/update')) return 'update'
+  return 'overview'
+}
 
 const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
   normal: {
@@ -317,6 +353,9 @@ function DemoInspectorContent({
 }: DemoInspectorContentProps) {
   const update = (partial: Partial<DemoInspectorState>) => onStateChange(partial)
   const currentScene = scenes.find((scene) => scene.id === state.demoScene) ?? scenes[0]
+  const availableScenes = scenes.filter((scene) =>
+    scene.modules.includes(moduleKind(currentModule))
+  )
   const currentTarget = devices.find((device) => device.id === selectedDeviceId) ?? devices[0]
   const persona = demoPersonas.find((item) => item.id === state.demoPersona) ?? demoPersonas[0]
   const preset = presetParameters[state.demoScene]
@@ -334,7 +373,16 @@ function DemoInspectorContent({
         label="Module"
         ariaLabel="Current demo module"
         value={currentModule}
-        onValueChange={onModuleChange}
+        onValueChange={(nextModule) => {
+          const nextScenes = scenes.filter((scene) =>
+            scene.modules.includes(moduleKind(nextModule))
+          )
+          if (!nextScenes.some((scene) => scene.id === state.demoScene)) {
+            const nextPreset = nextScenes[0]?.id
+            if (nextPreset) update({ demoScene: nextPreset, ...presetParameters[nextPreset] })
+          }
+          onModuleChange(nextModule)
+        }}
         options={moduleOptions}
       />
     </fieldset>
@@ -352,8 +400,11 @@ function DemoInspectorContent({
           const nextPreset = value as DemoSceneId
           update({ demoScene: nextPreset, ...presetParameters[nextPreset] })
         }}
-        options={scenes.map((scene) => ({ value: scene.id, label: scene.label }))}
+        options={availableScenes.map((scene) => ({ value: scene.id, label: scene.label }))}
       />
+      <span className="demo-inspector__hint">
+        {availableScenes.length} presets available for this module
+      </span>
       {presetModified ? (
         <span className="demo-inspector__hint">Modified mock parameters</span>
       ) : null}
