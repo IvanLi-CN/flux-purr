@@ -491,9 +491,10 @@ function App() {
           )
           const nextPathname =
             sceneChanged && !options?.preserveRoute
-              ? isCalibrationDemoScene(mergedState.demoScene)
-                ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
-                : `/devices/${nextScenario.selectedDeviceId}/overview`
+              ? inspectorPathnameRef.current.replace(
+                  /^(\/devices\/)[^/]+(\/.*)$/,
+                  `$1${encodeURIComponent(nextScenario.selectedDeviceId)}$2`
+                )
               : inspectorPathnameRef.current
           const completed = await settleInspectorNavigation(
             () =>
