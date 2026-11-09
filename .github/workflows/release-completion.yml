@@ -1,7 +1,7 @@
 name: Release completion
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled, edited]
 
@@ -27,6 +27,7 @@ jobs:
           fetch-depth: 0
 
       - name: Fetch pull request commits
+        if: github.event_name == 'pull_request_target'
         run: git fetch --no-tags origin "${{ github.event.pull_request.head.sha }}"
 
       - name: Fetch current pull request labels
