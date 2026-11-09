@@ -84,7 +84,14 @@ jobs:
           source_sha_hint="$(git show -s --format=%B "${MAIN_INPUT}" | awk -F': ' '$1 == "Release-Source-SHA" { print $2; exit }')"
           source_sha_unavailable=0
           recovery_version="$(git show "${MAIN_INPUT}:VERSION" 2>/dev/null | tr -d '\n' || true)"
-          if [ -n "${source_sha_hint}" ] && ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
+          recovery_tag_target="$(git rev-parse "refs/tags/v${recovery_version}^{commit}" 2>/dev/null || true)"
+          if [ "${OPERATION}" = recover ] && [ -n "${recovery_version}" ] && [ "${recovery_tag_target}" = "${MAIN_INPUT}" ]; then
+            source_sha_unavailable=1
+            version="${recovery_version}"
+            preparation_sha="${MAIN_INPUT}"
+            echo "Legacy release ${MAIN_INPUT} is accepted only for exact recovery tag v${recovery_version}."
+          fi
+          if [ "${source_sha_unavailable}" = 0 ] && [ -n "${source_sha_hint}" ] && ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
             if [[ ! "${source_sha_hint}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "Release-Source-SHA is not a full commit SHA: ${source_sha_hint}" >&2
               exit 1
