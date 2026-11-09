@@ -92,7 +92,7 @@ jobs:
             if ! git fetch --force --no-tags origin "${source_sha_hint}" 2>/dev/null || ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
               pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha_hint}/pulls" --jq '.[0].number' 2>/dev/null || true)"
               if [ -n "${pr_number}" ]; then
-                git fetch --force --no-tags origin "refs/pull/${pr_number}/head"
+                git fetch --force --no-tags origin "refs/pull/${pr_number}/head" || true
               fi
             fi
             if ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then

@@ -65,6 +65,7 @@ assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
 assert 'commits/${source_sha_hint}/pulls' in release
 assert 'refs/pull/${pr_number}/head' in release
 assert 'git fetch --force --no-tags origin "${source_sha_hint}"' in release
+assert 'git fetch --force --no-tags origin "refs/pull/${pr_number}/head" || true' in release
 assert 'git ls-remote --tags origin' in release
 assert 'recovery_tag_ref' in release
 assert 'source_sha_unavailable=0' in release
