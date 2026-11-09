@@ -27,7 +27,9 @@ and discover the same kind of ownership conflict only after building assets.
 - An explicit recovery may also reuse a historical release commit when the
   existing tag's peeled commit equals that exact input and the commit carries
   the same `VERSION`. This legacy path is restricted to recovery and does not
-  relax normal publish validation or accept a different tag owner.
+  relax normal publish validation or accept a different tag owner. The exact
+  tag identity takes precedence over source metadata while resolving that
+  recovery.
 - Recovery source and pull-request fetches are best-effort lookups. If they are
   unavailable, the exact existing tag identity remains the only accepted
   fallback; a normal publish still fails closed.
