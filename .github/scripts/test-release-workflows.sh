@@ -69,6 +69,9 @@ assert 'git ls-remote --tags origin' in release
 assert 'recovery_tag_ref' in release
 assert 'source_sha_unavailable=0' in release
 assert 'exact existing recovery tag' in release
+assert 'Legacy release ${MAIN_INPUT} is accepted only for exact recovery tag v${recovery_version}.' in release
+assert 'cannot verify merged prepared release ${MAIN_INPUT}' in release
+assert 'if [ "${prepared}" = true ]; then' in release
 assert 'refs/tags/v${recovery_version}^{commit}' in release
 assert 'git show "${MAIN_INPUT}:VERSION" | tr -d' in release
 assert "verify_merged_prepared_release" in release_chain

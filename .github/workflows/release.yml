@@ -83,7 +83,7 @@ jobs:
           test "${OPERATION}" = publish || test "${OPERATION}" = recover
           source_sha_hint="$(git show -s --format=%B "${MAIN_INPUT}" | awk -F': ' '$1 == "Release-Source-SHA" { print $2; exit }')"
           source_sha_unavailable=0
-          recovery_version=""
+          recovery_version="$(git show "${MAIN_INPUT}:VERSION" 2>/dev/null | tr -d '\n' || true)"
           if [ -n "${source_sha_hint}" ] && ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
             if [[ ! "${source_sha_hint}" =~ ^[0-9a-f]{40}$ ]]; then
               echo "Release-Source-SHA is not a full commit SHA: ${source_sha_hint}" >&2
@@ -96,7 +96,6 @@ jobs:
               fi
             fi
             if ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
-              recovery_version="$(git show "${MAIN_INPUT}:VERSION" 2>/dev/null | tr -d '\n' || true)"
               recovery_tag_target="$(git rev-parse "refs/tags/v${recovery_version}^{commit}" 2>/dev/null || true)"
               if [ "${OPERATION}" = recover ] && [ "${recovery_tag_target}" = "${MAIN_INPUT}" ]; then
                 source_sha_unavailable=1
@@ -111,17 +110,39 @@ jobs:
             version="${recovery_version}"
             preparation_sha="${MAIN_INPUT}"
           else
-            preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
-            prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
-            if [ "${prepared}" != true ]; then
-              reason="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
-              echo "enabled=false" >> "$GITHUB_OUTPUT"
-              echo "release_reason=${reason}" >> "$GITHUB_OUTPUT"
-              echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation (${reason})"
-              exit 0
+            if preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"; then
+              prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
+              if [ "${prepared}" != true ]; then
+                reason="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')"
+                recovery_tag_target="$(git rev-parse "refs/tags/v${recovery_version}^{commit}" 2>/dev/null || true)"
+                if [ "${OPERATION}" = recover ] && [ -n "${recovery_version}" ] && [ "${recovery_tag_target}" = "${MAIN_INPUT}" ]; then
+                  source_sha_unavailable=1
+                  version="${recovery_version}"
+                  preparation_sha="${MAIN_INPUT}"
+                  echo "Legacy release ${MAIN_INPUT} is accepted only for exact recovery tag v${recovery_version}."
+                else
+                  echo "enabled=false" >> "$GITHUB_OUTPUT"
+                  echo "release_reason=${reason}" >> "$GITHUB_OUTPUT"
+                  echo "Main commit ${MAIN_INPUT} is not a merged product VERSION preparation (${reason})"
+                  exit 0
+                fi
+              fi
+              if [ "${prepared}" = true ]; then
+                version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+                preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
+              fi
+            else
+              recovery_tag_target="$(git rev-parse "refs/tags/v${recovery_version}^{commit}" 2>/dev/null || true)"
+              if [ "${OPERATION}" = recover ] && [ -n "${recovery_version}" ] && [ "${recovery_tag_target}" = "${MAIN_INPUT}" ]; then
+                source_sha_unavailable=1
+                version="${recovery_version}"
+                preparation_sha="${MAIN_INPUT}"
+                echo "Legacy release ${MAIN_INPUT} is accepted only for exact recovery tag v${recovery_version}."
+              else
+                echo "cannot verify merged prepared release ${MAIN_INPUT}" >&2
+                exit 1
+              fi
             fi
-            version="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
-            preparation_sha="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["preparationSha"])')"
           fi
           if [ "${source_sha_unavailable}" = 1 ]; then
             test "$(git show "${MAIN_INPUT}:VERSION" | tr -d '\n')" = "${version}"
