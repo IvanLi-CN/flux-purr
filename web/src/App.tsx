@@ -121,6 +121,22 @@ function App() {
           ),
     [demoSession.actions, demoSession.events, inspectorState, isLive, routedDeviceId]
   )
+  const demoModuleOptions = useMemo(() => {
+    const deviceId =
+      routeState?.kind === 'device' ? routeState.deviceId : activeScenario.selectedDeviceId
+    const base = `/devices/${encodeURIComponent(deviceId)}`
+    return [
+      { value: `${base}/overview`, label: 'Overview' },
+      { value: `${base}/settings/presets`, label: 'Settings · Presets' },
+      { value: `${base}/settings/fan`, label: 'Settings · Fan' },
+      { value: `${base}/settings/wifi`, label: 'Settings · WiFi' },
+      { value: `${base}/calibration/heater-curve`, label: 'Calibration · Heater curve' },
+      { value: `${base}/calibration/rtd-adc`, label: 'Calibration · RTD ADC' },
+      { value: `${base}/calibration/vin-adc`, label: 'Calibration · VIN ADC' },
+      { value: `${base}/calibration/firmware-tuning`, label: 'Calibration · Firmware tuning' },
+      { value: `${base}/update`, label: 'Firmware update' },
+    ]
+  }, [activeScenario.selectedDeviceId, routeState])
 
   useEffect(() => {
     const routedDeviceId = routeState?.kind === 'device' ? routeState.deviceId : null
@@ -475,9 +491,10 @@ function App() {
           )
           const nextPathname =
             sceneChanged && !options?.preserveRoute
-              ? isCalibrationDemoScene(mergedState.demoScene)
-                ? `/devices/${nextScenario.selectedDeviceId}/calibration/heater-curve`
-                : `/devices/${nextScenario.selectedDeviceId}/overview`
+              ? inspectorPathnameRef.current.replace(
+                  /^(\/devices\/)[^/]+(\/.*)$/,
+                  `$1${encodeURIComponent(nextScenario.selectedDeviceId)}$2`
+                )
               : inspectorPathnameRef.current
           const completed = await settleInspectorNavigation(
             () =>
@@ -617,6 +634,16 @@ function App() {
           devices={activeScenario.devices}
           selectedDeviceId={
             routeState?.kind === 'device' ? routeState.deviceId : activeScenario.selectedDeviceId
+          }
+          currentModule={location.pathname}
+          moduleOptions={demoModuleOptions}
+          onModuleChange={(nextPath) =>
+            void navigate({
+              to: nextPath as '/',
+              search: search,
+              replace: true,
+              ignoreBlocker: true,
+            })
           }
           onStateChange={(next) => void updateInspectorState(next)}
           onSelectDevice={(deviceId) => void selectInspectorDevice(deviceId)}
