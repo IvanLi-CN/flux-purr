@@ -81,6 +81,42 @@ deployment_started() {
     "$1"
 }
 
+emit_failure_class() {
+  echo "EDGEONE_FAILURE_CLASS=$1" >&2
+}
+
+classify_failure() {
+  local output_file="$1"
+
+  if deployment_started "${output_file}"; then
+    echo "deployment_ambiguous"
+    return
+  fi
+
+  if grep -Eiq \
+    'API request failed \((401|403)\)|\b(Unauthorized|AccessDenied|AUTH_[A-Z0-9_]+|TOKEN_[A-Z0-9_]+)\b' \
+    "${output_file}"; then
+    echo "credential_rejected"
+    return
+  fi
+
+  if grep -Eiq \
+    'PROJECT_[A-Z0-9_]+|project[[:space:]_-]+(not found|does not exist|permission denied)|permission[[:space:]]+(denied|不足)|invalid project' \
+    "${output_file}"; then
+    echo "project_or_permission"
+    return
+  fi
+
+  if grep -Eiq \
+    'AxiosError: timeout|AxiosError: Network Error|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|socket hang up|API request failed \((5[0-9]{2})\)' \
+    "${output_file}"; then
+    echo "endpoint_unavailable"
+    return
+  fi
+
+  echo "auth_or_endpoint_ambiguous"
+}
+
 normalize_cli_line() {
   local line="$1"
 
@@ -148,6 +184,11 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
       exit 0
     fi
     if deployment_started "${attempt_log}"; then
+      emit_failure_class "deployment_ambiguous"
+    else
+      emit_failure_class "auth_or_endpoint_ambiguous"
+    fi
+    if deployment_started "${attempt_log}"; then
       echo "EdgeOne deployment reached an ambiguous remote state, but output capture failed; automatic retry is disabled for ${target_label}." >&2
     else
       echo "EdgeOne CLI output capture failed; automatic retry is disabled for ${target_label}." >&2
@@ -161,19 +202,23 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   fi
 
   if deployment_started "${attempt_log}"; then
+    emit_failure_class "deployment_ambiguous"
     echo "EdgeOne deployment reached an ambiguous remote state; automatic retry is disabled for ${target_label}." >&2
     exit "${status}"
   fi
 
   if ! retryable_preflight_failure "${attempt_log}"; then
+    failure_class="$(classify_failure "${attempt_log}")"
+    emit_failure_class "${failure_class}"
     echo "EdgeOne deployment failed before a retryable endpoint preflight for ${target_label}; automatic retry is disabled." >&2
-    if grep -Eiq 'Invalid EDGEONE_PAGES_API_TOKEN|invalid.*token' "${attempt_log}"; then
-      echo "The CLI reported a token or configuration error without transport evidence; verify the token scope and project configuration." >&2
+    if [[ "${failure_class}" == "auth_or_endpoint_ambiguous" ]]; then
+      echo "EdgeOne CLI could not distinguish credential rejection from endpoint failure; token invalidity is unproven." >&2
     fi
     exit "${status}"
   fi
 
   if (( attempt == max_attempts )); then
+    emit_failure_class "endpoint_unavailable"
     echo "EdgeOne deployment failed after ${max_attempts} preflight attempts for ${target_label}." >&2
     echo "The CLI reported an endpoint or network failure; inspect preceding output for timeout, reset, refusal, or DNS details." >&2
     exit "${status}"

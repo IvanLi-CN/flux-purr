@@ -51,6 +51,18 @@ if (( count <= fail_until )); then
     permanent)
       echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
       ;;
+    ambiguous-endpoints)
+      if [[ -n "${EDGEONE_TEST_INTERNAL_EVIDENCE_FILE:-}" ]]; then
+        printf '%s\n' 'endpoint-1: 522' 'endpoint-2: 522' > "${EDGEONE_TEST_INTERNAL_EVIDENCE_FILE}"
+      fi
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    auth-rejected)
+      echo "[cli] API request failed (401): Unauthorized" >&2
+      ;;
+    project-permission)
+      echo "[cli] PROJECT_ACCESS_DENIED: project permission denied" >&2
+      ;;
     *)
       echo "unsupported test failure stage: ${failure_stage}" >&2
       exit 2

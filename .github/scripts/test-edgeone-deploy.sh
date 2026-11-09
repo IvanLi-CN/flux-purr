@@ -45,6 +45,7 @@ else
 fi
 test "$(<"${count_file}")" = 2
 test "${bounded_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=endpoint_unavailable" "${bounded_failure_log}"
 grep -Fq "endpoint or network failure" "${bounded_failure_log}"
 
 : > "${count_file}"
@@ -98,7 +99,72 @@ else
 fi
 test "$(<"${count_file}")" = 1
 test "${permanent_status}" = 7
-grep -Fq "token or configuration error without transport evidence" "${permanent_failure_log}"
+grep -Fq "EDGEONE_FAILURE_CLASS=auth_or_endpoint_ambiguous" "${permanent_failure_log}"
+grep -Fq "token invalidity is unproven" "${permanent_failure_log}"
+if grep -Eqi 'token (is )?invalid([.![:space:]]|$)' "${permanent_failure_log}"; then
+  echo "ambiguous EdgeOne output must not claim token invalidity" >&2
+  exit 1
+fi
+
+: > "${count_file}"
+ambiguous_endpoints_evidence="${test_root}/ambiguous-endpoints-evidence.log"
+ambiguous_endpoints_log="${test_root}/ambiguous-endpoints.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_INTERNAL_EVIDENCE_FILE="${ambiguous_endpoints_evidence}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=ambiguous-endpoints \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${ambiguous_endpoints_log}" 2>&1; then
+  echo "expected ambiguous two-endpoint failures to stop without retry" >&2
+  exit 1
+else
+  ambiguous_endpoints_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${ambiguous_endpoints_status}" = 7
+test "$(<"${ambiguous_endpoints_evidence}")" = $'endpoint-1: 522\nendpoint-2: 522'
+grep -Fq "EDGEONE_FAILURE_CLASS=auth_or_endpoint_ambiguous" "${ambiguous_endpoints_log}"
+
+: > "${count_file}"
+auth_rejected_log="${test_root}/auth-rejected.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=auth-rejected \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${auth_rejected_log}" 2>&1; then
+  echo "expected explicit EdgeOne auth rejection to fail" >&2
+  exit 1
+else
+  auth_rejected_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${auth_rejected_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=credential_rejected" "${auth_rejected_log}"
+
+: > "${count_file}"
+project_permission_log="${test_root}/project-permission.log"
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_BUNX_BIN="${fake_bunx}" \
+  EDGEONE_TEST_COUNT_FILE="${count_file}" \
+  EDGEONE_TEST_FAIL_UNTIL=1 \
+  EDGEONE_TEST_FAILURE_STAGE=project-permission \
+  EDGEONE_MAX_ATTEMPTS=3 \
+  EDGEONE_RETRY_DELAYS_SECONDS='0 0' \
+  bash "${deploy_script}" "${test_root}/site" makers-project web-production >"${project_permission_log}" 2>&1; then
+  echo "expected explicit EdgeOne project permission failure" >&2
+  exit 1
+else
+  project_permission_status=$?
+fi
+test "$(<"${count_file}")" = 1
+test "${project_permission_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=project_or_permission" "${project_permission_log}"
 
 : > "${count_file}"
 capture_failure_log="${test_root}/capture-failure.log"
@@ -138,6 +204,7 @@ else
 fi
 test "$(<"${count_file}")" = 1
 test "${remote_capture_failure_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=deployment_ambiguous" "${remote_capture_failure_log}"
 grep -Fq "ambiguous remote state" "${remote_capture_failure_log}"
 
 : > "${count_file}"
@@ -174,6 +241,7 @@ else
 fi
 test "$(<"${count_file}")" = 1
 test "${unknown_postdeploy_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=deployment_ambiguous" "${unknown_postdeploy_failure_log}"
 grep -Fq "ambiguous remote state" "${unknown_postdeploy_failure_log}"
 
 : > "${count_file}"
@@ -250,6 +318,7 @@ else
 fi
 test "$(<"${count_file}")" = 1
 test "${postdeploy_status}" = 7
+grep -Fq "EDGEONE_FAILURE_CLASS=deployment_ambiguous" "${postdeploy_failure_log}"
 grep -Fq "ambiguous remote state" "${postdeploy_failure_log}"
 
 echo "EdgeOne deployment retry tests passed"
