@@ -151,3 +151,10 @@ methods below; measured loaded power requires a separate test claim.
 - Method: release build, netlist inspection, and separately authorized HIL.
 - covers: `REQ-FUSB-HARDWARE`
 - Pass condition: the release artifact builds against the public PHY boundary, hardware evidence preserves the FUSB302B topology, and any physical-source interoperability claim is backed by an authorized HIL receipt.
+
+## Visual Evidence
+
+Confirmed `ui_demo` mock-only page evidence for the source-capability power label and its responsive layout:
+
+- Desktop: [pd-source-capability-power-desktop.png](assets/pd-source-capability-power-desktop.png)
+- Mobile: [pd-source-capability-power-mobile.png](assets/pd-source-capability-power-mobile.png)
