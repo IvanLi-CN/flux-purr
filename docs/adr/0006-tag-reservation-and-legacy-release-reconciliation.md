@@ -24,6 +24,10 @@ and discover the same kind of ownership conflict only after building assets.
   may reuse an existing tag only when its peeled commit equals the requested
   merged `main` SHA. The post-build tag creation remains non-forced and repeats
   the ownership check to handle races.
+- An explicit recovery may also reuse a historical release commit when the
+  existing tag's peeled commit equals that exact input and the commit carries
+  the same `VERSION`. This legacy path is restricted to recovery and does not
+  relax normal publish validation or accept a different tag owner.
 - The historical `v0.23.0` tag, release, and assets remain unchanged and are
   audit-only. No retroactive `0.23.0` release is created. The first complete
   release on the current chain is the ordinary patch `0.23.1` prepared and
