@@ -101,10 +101,10 @@ export const InteractionSmoke: Story = {
     const body = within(canvasElement.ownerDocument.body)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
     await userEvent.click(await canvas.findByRole('combobox', { name: 'Scenario preset' }))
-    await userEvent.click(await body.findByRole('option', { name: 'Degraded handoff' }))
+    await userEvent.click(await body.findByRole('option', { name: 'Overview · Offline device' }))
     await expect(
       await canvas.findByRole('combobox', { name: 'Scenario preset' })
-    ).toHaveTextContent('Degraded handoff')
+    ).toHaveTextContent('Overview · Offline device')
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
@@ -195,6 +195,6 @@ export const ResetState: Story = {
     await userEvent.click(await canvas.findByRole('button', { name: 'Reset current case' }))
     await expect(
       await canvas.findByRole('combobox', { name: 'Scenario preset' })
-    ).toHaveTextContent('Nominal operator')
+    ).toHaveTextContent('Overview · Base')
   },
 }

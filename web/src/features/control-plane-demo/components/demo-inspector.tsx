@@ -131,6 +131,48 @@ const scenes: Array<{
   },
 ]
 
+const presetCatalog: Array<{
+  id: string
+  module: DemoModuleKind
+  scene: DemoSceneId
+  label: string
+}> = [
+  { id: 'overview-base', module: 'overview', scene: 'normal', label: 'Overview · Base' },
+  { id: 'settings-base', module: 'settings', scene: 'normal', label: 'Settings · Base' },
+  { id: 'calibration-base', module: 'calibration', scene: 'normal', label: 'Calibration · Base' },
+  { id: 'update-base', module: 'update', scene: 'normal', label: 'Update · Base' },
+  {
+    id: 'settings-degraded',
+    module: 'settings',
+    scene: 'degraded',
+    label: 'Settings · Degraded handoff',
+  },
+  {
+    id: 'overview-offline',
+    module: 'overview',
+    scene: 'offline',
+    label: 'Overview · Offline device',
+  },
+  {
+    id: 'update-blocked-artifact',
+    module: 'update',
+    scene: 'blocked-artifact',
+    label: 'Update · Artifact blocked',
+  },
+  {
+    id: 'calibration-loading',
+    module: 'calibration',
+    scene: 'calibration-loading',
+    label: 'Calibration · Loading',
+  },
+  {
+    id: 'calibration-active',
+    module: 'calibration',
+    scene: 'calibration-active',
+    label: 'Calibration · Running',
+  },
+]
+
 function moduleKind(path: string): DemoModuleKind {
   if (path.includes('/calibration/')) return 'calibration'
   if (path.includes('/settings/')) return 'settings'
@@ -353,9 +395,11 @@ function DemoInspectorContent({
 }: DemoInspectorContentProps) {
   const update = (partial: Partial<DemoInspectorState>) => onStateChange(partial)
   const currentScene = scenes.find((scene) => scene.id === state.demoScene) ?? scenes[0]
-  const availableScenes = scenes.filter((scene) =>
-    scene.modules.includes(moduleKind(currentModule))
+  const availablePresets = presetCatalog.filter(
+    (preset) => preset.module === moduleKind(currentModule)
   )
+  const currentPreset =
+    availablePresets.find((preset) => preset.scene === state.demoScene) ?? availablePresets[0]
   const currentTarget = devices.find((device) => device.id === selectedDeviceId) ?? devices[0]
   const persona = demoPersonas.find((item) => item.id === state.demoPersona) ?? demoPersonas[0]
   const preset = presetParameters[state.demoScene]
@@ -395,15 +439,16 @@ function DemoInspectorContent({
       <DemoInspectorSelect
         label="Preset"
         ariaLabel="Scenario preset"
-        value={state.demoScene}
+        value={currentPreset?.id ?? ''}
         onValueChange={(value) => {
-          const nextPreset = value as DemoSceneId
-          update({ demoScene: nextPreset, ...presetParameters[nextPreset] })
+          const nextPreset = availablePresets.find((preset) => preset.id === value)
+          if (!nextPreset) return
+          update({ demoScene: nextPreset.scene, ...presetParameters[nextPreset.scene] })
         }}
-        options={availableScenes.map((scene) => ({ value: scene.id, label: scene.label }))}
+        options={availablePresets.map((preset) => ({ value: preset.id, label: preset.label }))}
       />
       <span className="demo-inspector__hint">
-        {availableScenes.length} presets available for this module
+        {availablePresets.length} presets available for this module
       </span>
       {presetModified ? (
         <span className="demo-inspector__hint">Modified mock parameters</span>
