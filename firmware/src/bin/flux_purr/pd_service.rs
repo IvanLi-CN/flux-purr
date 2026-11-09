@@ -103,6 +103,11 @@ impl PdServiceSnapshot {
             Self {
                 observation: None,
                 active: None,
+                source: SourceCapabilitiesView {
+                    fixed: [None; MAX_SOURCE_PDOS],
+                    pps: [None; MAX_SOURCE_PDOS],
+                },
+                capabilities: None,
                 ..self
             }
         } else {

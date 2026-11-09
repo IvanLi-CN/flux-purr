@@ -613,7 +613,7 @@ pub(crate) fn mock_identity(id: &str) -> Identity {
         reset_reason: None,
         board: "esp32-s3".to_string(),
         api_version: "2026-11-09".to_string(),
-        protocol_version: "flux-purr.usb.v1".to_string(),
+        protocol_version: "flux-purr.usb.v2".to_string(),
         hostname: id.to_string(),
         capabilities: [
             "identity",
@@ -844,7 +844,7 @@ pub(crate) fn native_placeholder_identity() -> Identity {
         reset_reason: None,
         board: "unknown".to_string(),
         api_version: "2026-11-09".to_string(),
-        protocol_version: "flux-purr.usb.v1".to_string(),
+        protocol_version: "flux-purr.usb.v2".to_string(),
         hostname: String::new(),
         capabilities: [
             "identity",

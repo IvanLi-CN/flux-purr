@@ -305,17 +305,7 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
 }
 
 pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
-    let valid = identity.firmware_kind == Some(FirmwareKind::Product)
-        && !identity.device_id.trim().is_empty()
-        && identity.api_version == "2026-11-09"
-        && identity.protocol_version == "flux-purr.usb.v1"
-        && ["identity", "network", "status"].iter().all(|capability| {
-            identity
-                .capabilities
-                .iter()
-                .any(|value| value == capability)
-        });
-    if valid {
+    if is_compatible_product_identity(identity) {
         Ok(())
     } else {
         Err(HttpError::bad_request(
@@ -323,6 +313,30 @@ pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), Ht
             "The LAN endpoint did not identify as a compatible Flux Purr device.",
         ))
     }
+}
+
+pub(crate) fn validate_native_serial_identity(identity: &Identity) -> Result<(), HttpError> {
+    if is_compatible_product_identity(identity) {
+        Ok(())
+    } else {
+        Err(HttpError::bad_request(
+            "unknown_device",
+            "The serial endpoint did not identify as a compatible Flux Purr device.",
+        ))
+    }
+}
+
+fn is_compatible_product_identity(identity: &Identity) -> bool {
+    identity.firmware_kind == Some(FirmwareKind::Product)
+        && !identity.device_id.trim().is_empty()
+        && identity.api_version == "2026-11-09"
+        && identity.protocol_version == "flux-purr.usb.v2"
+        && ["identity", "network", "status"].iter().all(|capability| {
+            identity
+                .capabilities
+                .iter()
+                .any(|value| value == capability)
+        })
 }
 
 pub(crate) async fn reset_lan_pairing(
@@ -561,6 +575,7 @@ pub(crate) async fn device_identity(
                     return Err(error);
                 }
             };
+        validate_native_serial_identity(&identity)?;
         let mut state_lock = state.lock()?;
         if let Some(device) = state_lock.devices.get_mut(&device_id) {
             device.identity = identity.clone();
@@ -687,6 +702,7 @@ pub(crate) async fn device_status(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
+        validate_native_serial_identity(&target.identity)?;
         let status = match serial_request_payload::<ControlPlaneStatus>(
             &state,
             &target,
@@ -736,6 +752,7 @@ pub(crate) async fn device_thermal_status(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
+        validate_native_serial_identity(&target.identity)?;
         let status = match serial_request_payload::<ThermalStatus>(
             &state,
             &target,

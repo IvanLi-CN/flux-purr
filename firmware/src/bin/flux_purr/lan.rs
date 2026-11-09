@@ -126,18 +126,18 @@ pub(crate) fn pd_status_projection(
     ch224q_source_capability_power_mw: Option<u32>,
 ) -> (Option<PdStatusObservation>, Option<u32>) {
     match controller {
-        ControllerKind::Fusb302b => fusb_snapshot.map_or((None, None), |snapshot| {
-            (
-                snapshot.settled_observation(),
-                snapshot.source.maximum_power_mw(),
-            )
-        }),
-        ControllerKind::Ch224q => (
-            cached_observation,
-            cached_observation
-                .filter(|observation| observation.status.pd_active)
-                .and(ch224q_source_capability_power_mw),
-        ),
+        ControllerKind::Fusb302b => fusb_snapshot
+            .filter(|snapshot| snapshot.service_available)
+            .and_then(|snapshot| {
+                snapshot
+                    .settled_observation()
+                    .map(|observation| (Some(observation), snapshot.source.maximum_power_mw()))
+            })
+            .unwrap_or((None, None)),
+        ControllerKind::Ch224q => cached_observation
+            .filter(|observation| observation.status.pd_active)
+            .map(|observation| (Some(observation), ch224q_source_capability_power_mw))
+            .unwrap_or((None, None)),
         ControllerKind::Unknown => (cached_observation, None),
     }
 }

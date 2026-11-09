@@ -857,7 +857,7 @@ export function artifactToManifest(artifact: FirmwareArtifact): FirmwareArtifact
     targetChip: artifact.target,
     profile: artifact.profile,
     features: artifact.features ?? [],
-    protocol: artifact.protocol ?? 'flux-purr.usb.v1',
+    protocol: artifact.protocol ?? 'flux-purr.usb.v2',
     files: artifact.files ?? [],
   }
 }

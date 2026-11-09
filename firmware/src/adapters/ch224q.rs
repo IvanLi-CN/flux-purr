@@ -184,20 +184,24 @@ impl AdjustablePowerCapabilities {
         let mut capabilities = Self::default();
         let mut parsed_source_cap = false;
 
-        if let Some((pdo_offset, pdo_count)) = source_cap_pdo_window(bytes) {
-            parsed_source_cap = true;
-            for pdo_index in 0..pdo_count {
-                let offset = pdo_offset + pdo_index * 4;
-                Self::merge_power_data_object(
-                    &mut capabilities,
-                    u32::from_le_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
-                    ]),
-                );
+        match source_cap_pdo_window(bytes) {
+            Ok(Some((pdo_offset, pdo_count))) => {
+                parsed_source_cap = true;
+                for pdo_index in 0..pdo_count {
+                    let offset = pdo_offset + pdo_index * 4;
+                    Self::merge_power_data_object(
+                        &mut capabilities,
+                        u32::from_le_bytes([
+                            bytes[offset],
+                            bytes[offset + 1],
+                            bytes[offset + 2],
+                            bytes[offset + 3],
+                        ]),
+                    );
+                }
             }
+            Ok(None) => {}
+            Err(()) => return capabilities,
         }
 
         if !parsed_source_cap {
@@ -337,19 +341,25 @@ const fn pps_candidate_is_better(
     false
 }
 
-fn source_cap_pdo_window(bytes: &[u8]) -> Option<(usize, usize)> {
+fn source_cap_pdo_window(bytes: &[u8]) -> Result<Option<(usize, usize)>, ()> {
     if bytes.len() < 2 {
-        return None;
+        return Ok(None);
     }
 
     let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if !source_cap_is_source_capabilities(header) {
+        return Ok(None);
+    }
     let pdo_count = source_cap_pdo_count(header);
     let pdo_offset = if source_cap_is_extended(header) { 4 } else { 2 };
-    if pdo_count == 0 || bytes.len() < pdo_offset + pdo_count * 4 {
-        return None;
+    if pdo_count == 0 {
+        return Ok(None);
+    }
+    if bytes.len() < pdo_offset + pdo_count * 4 {
+        return Err(());
     }
 
-    Some((pdo_offset, pdo_count))
+    Ok(Some((pdo_offset, pdo_count)))
 }
 
 const fn source_cap_pdo_count(header: u16) -> usize {
@@ -358,6 +368,10 @@ const fn source_cap_pdo_count(header: u16) -> usize {
 
 const fn source_cap_is_extended(header: u16) -> bool {
     (header & (1 << 15)) != 0
+}
+
+const fn source_cap_is_source_capabilities(header: u16) -> bool {
+    (header & 0x1f) == 1
 }
 
 const fn pd_object_type(raw: u32) -> u32 {
@@ -533,6 +547,23 @@ mod tests {
         let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
 
         assert!(!capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, None);
+        assert_eq!(capabilities.pps_max_mv, None);
+        assert_eq!(capabilities.pps_max_ma, None);
+    }
+
+    #[test]
+    fn rejects_truncated_source_cap_header_without_raw_pdo_fallback() {
+        let header = (1_u16 << 12) | 1;
+        let mut bytes = [0_u8; 6];
+        bytes[0..2].copy_from_slice(&header.to_le_bytes());
+        bytes[2..6].copy_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+        bytes[4] = 0x2c;
+        bytes[5] = 0x01;
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes[..5]);
+
+        assert_eq!(capabilities.source_capability_power_mw, None);
         assert_eq!(capabilities.pps_min_mv, None);
         assert_eq!(capabilities.pps_max_mv, None);
         assert_eq!(capabilities.pps_max_ma, None);

@@ -282,7 +282,7 @@ describe('firmware workspace hierarchy', () => {
       })
     )
 
-    expect(markup).toContain('源能力上限 63W')
+    expect(markup).toContain('源能力上限 105W')
     expect(markup).toContain('20V requested')
     expect(markup).toContain('合同')
   })

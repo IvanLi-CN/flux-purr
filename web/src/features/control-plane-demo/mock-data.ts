@@ -68,7 +68,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       pdController: 'fusb302b',
       pdContractKind: 'pps',
       pdContractCurrentMa: 5000,
-      pdSourceCapabilityPowerMw: 63000,
+      pdSourceCapabilityPowerMw: 105000,
       pdPerformanceGuaranteed: true,
       pdDegradedReason: null,
       manualPpsEnabled: false,
@@ -300,7 +300,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       compatibility: 'match',
       hash: 'sha256:7b8c...42af',
       progressPercent: 64,
-      protocol: 'flux-purr.usb.v1',
+      protocol: 'flux-purr.usb.v2',
       features: ['web_serial', 'monitor'],
     },
     {
@@ -311,7 +311,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       compatibility: 'warning',
       hash: 'sha256:92da...a103',
       progressPercent: 18,
-      protocol: 'flux-purr.usb.v1',
+      protocol: 'flux-purr.usb.v2',
       features: ['web_serial'],
     },
     {

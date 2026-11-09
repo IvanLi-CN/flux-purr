@@ -1770,6 +1770,9 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
         .pd_port
         .capabilities()
         .or_else(|| adjustable_capabilities_from_view(state.power_state.source_capabilities));
+    if capabilities.is_none() && calibration_fusb_capability_refresh_pending(state) {
+        return false;
+    }
     if capabilities == state.last_fusb302b_power_capabilities {
         return false;
     }

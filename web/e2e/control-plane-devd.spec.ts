@@ -293,7 +293,7 @@ test.describe('control plane live devd bridge', () => {
               targetChip: 'esp32s3',
               profile: 'release + web_serial',
               features: ['web_serial'],
-              protocol: 'flux-purr.usb.v1',
+              protocol: 'flux-purr.usb.v2',
               files: [
                 {
                   kind: 'elf',
@@ -1132,7 +1132,7 @@ function identity(capabilities: string[]) {
     gitSha: 'e2e',
     board: 'esp32-s3',
     apiVersion: '2026-11-09',
-    protocolVersion: 'flux-purr.usb.v1',
+    protocolVersion: 'flux-purr.usb.v2',
     hostname: 'flux-purr-e2e',
     capabilities,
   }

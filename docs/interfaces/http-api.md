@@ -14,6 +14,8 @@ Source of truth for this implementation scope:
 
 All transports expose the same domain model. Field names use `camelCase` on HTTP/JSON.
 
+The product USB JSONL contract is `flux-purr.usb.v2`. The version bump records the incompatible compact thermal-status change from the legacy `cp` key to the optional `scp` source-capability-power key; hosts must validate the identity API/protocol versions before decoding compact status frames.
+
 ### `Identity`
 
 Product firmware includes optional `resetReason`, the hardware-recorded cause of the current boot (for example `chip_power_on`, `core_software`, `core_mwdt0`, `system_brownout`, or `core_usb_jtag`). It remains readable for the lifetime of that boot independently of early boot log capture. Older firmware and mocks may omit it; unavailable hardware reasons are `unknown`, not inferred from connection or PD state.
@@ -26,7 +28,7 @@ Product firmware includes optional `resetReason`, the hardware-recorded cause of
   "gitSha": "8b8b17c",
   "board": "esp32-s3",
   "apiVersion": "2026-11-09",
-  "protocolVersion": "flux-purr.usb.v1",
+  "protocolVersion": "flux-purr.usb.v2",
   "hostname": "flux-purr-s3-001",
   "capabilities": ["identity", "status", "network", "wifi_config", "monitor", "firmware_check", "calibration"]
 }
@@ -235,7 +237,7 @@ renderer for the linked fan chart. See the
   "targetChip": "esp32s3",
   "profile": "release + web_serial",
   "features": ["web_serial"],
-  "protocol": "flux-purr.usb.v1",
+  "protocol": "flux-purr.usb.v2",
   "files": [
     {
       "kind": "elf",
@@ -641,7 +643,7 @@ Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
       "id": "firmware",
       "version": "0.22.1",
       "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
-      "protocolVersions": ["flux-purr.usb.v1"],
+      "protocolVersions": ["flux-purr.usb.v2"],
       "assets": [
         {
           "name": "flux-purr-firmware-v0.2.0.tar.gz",
@@ -678,7 +680,7 @@ Each frame is UTF-8 JSON followed by `\n`.
 ```json
 {
   "type": "hello",
-  "protocolVersion": "flux-purr.usb.v1",
+  "protocolVersion": "flux-purr.usb.v2",
   "framing": "jsonl",
   "identity": { "deviceId": "flux-purr-s3-001" },
   "capabilities": ["identity", "status", "network", "wifi_config", "monitor"]

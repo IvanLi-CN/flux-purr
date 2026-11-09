@@ -90,6 +90,7 @@ Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fie
 - `pdContractCurrentMa`: negotiated upper current limit
 - `pdSourceCapabilityPowerMw`: maximum power advertised by one currently observed source PDO/APDO, calculated from that object's maximum voltage and current; omitted when source-capability evidence is unavailable
 - `pdSourceCapabilityPowerMw` and the FUSB contract observation are projected from one service snapshot; when that snapshot is unavailable, both values are omitted rather than combining a fresh capability with a cached contract. A cached CH224Q capability is valid only while its cached PD observation is active, and malformed source objects whose calculated power rounds to zero are ignored.
+- The product USB JSONL contract is `flux-purr.usb.v2`; its compact thermal-status source-capability field is the optional `scp` key. A host must reject an identity with a different API or USB protocol version before decoding compact status, so the removed legacy `cp` meaning cannot be silently misread.
 - `pdPerformanceGuaranteed`: performance-tier flag
 - `pdDegradedReason`: absent when guaranteed, otherwise a finite reason
 

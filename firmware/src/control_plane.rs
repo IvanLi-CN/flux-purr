@@ -29,7 +29,7 @@ use crate::{
 };
 
 pub const CONTROL_PLANE_API_VERSION: &str = "2026-11-09";
-pub const USB_PROTOCOL_VERSION: &str = "flux-purr.usb.v1";
+pub const USB_PROTOCOL_VERSION: &str = "flux-purr.usb.v2";
 pub const USB_FRAMING: &str = "jsonl";
 pub const DEVICE_ID_MAX_LEN: usize = 48;
 pub const BUILD_ID_MAX_LEN: usize = 48;

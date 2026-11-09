@@ -1926,6 +1926,18 @@ impl ManualPpsState {
         &mut self,
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     ) {
+        if capabilities.is_none() {
+            let had_override = self.enabled
+                || self.target_mv.is_some()
+                || self.target_ma.is_some()
+                || self.applied_mv.is_some();
+            if had_override {
+                self.fail(ManualPpsError::PdNotReady);
+            } else {
+                self.invalidate_source_capability();
+            }
+            return;
+        }
         let previous = *self;
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
         refreshed.pending_power_ticket = previous.pending_power_ticket;
@@ -1954,7 +1966,13 @@ impl ManualPpsState {
     }
 
     pub(crate) fn invalidate_source_capability(&mut self) {
+        self.capability_min_mv = None;
+        self.capability_max_mv = None;
+        self.capability_max_ma = None;
+        self.capability_apdos = [None; ch224q::MAX_PPS_APDOS];
         self.source_capability_power_mw = None;
+        self.source_power_limit_mw = None;
+        self.source_power_limit_ma = None;
     }
 
     pub(crate) fn clear(&mut self) {

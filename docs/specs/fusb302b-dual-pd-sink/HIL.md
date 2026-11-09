@@ -189,12 +189,15 @@ point, including its current limit:
   set -euo pipefail
   REQUEST_MV='<selected-contract-mv>'
   REQUEST_MA='<selected-contract-ma>'
+  SOURCE_CAPABILITY_MW='<source-capability-power-mw>'
   for sample in $(seq 1 60); do
     target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
       | jq -ec --argjson mv "$REQUEST_MV" --argjson ma "$REQUEST_MA" \
+          --argjson source_cap_mw "$SOURCE_CAPABILITY_MW" \
           'select(.pdState == "ready" and .pdContractKind == "pps"
             and .pdContractMv == $mv and .pdContractCurrentMa == $ma
             and .pdSourceCapabilityPowerMw != null
+            and .pdSourceCapabilityPowerMw == $source_cap_mw
             and .pdSourceCapabilityPowerMw >= ($mv * $ma / 1000)
             and ($mv != 20000 or $ma != 5000 or .pdPerformanceGuaranteed == true)
             and .heaterPhysicalOutputPercent == 0)

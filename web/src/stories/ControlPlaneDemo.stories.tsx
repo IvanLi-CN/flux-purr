@@ -118,7 +118,7 @@ export const MobileReview: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(await canvas.findByText(/源能力上限 63W/)).toBeVisible()
+    await expect(await canvas.findByText(/源能力上限 105W/)).toBeVisible()
   },
 }
 
@@ -1782,7 +1782,7 @@ const bridgeVerifiedIdentity: Identity = {
   gitSha: '0123456789abcdef',
   board: 'esp32s3_frontpanel',
   apiVersion: '2026-11-09',
-  protocolVersion: 'flux-purr.usb.v1',
+  protocolVersion: 'flux-purr.usb.v2',
   capabilities: ['identity', 'network', 'status', 'monitor'],
 }
 
@@ -2644,7 +2644,7 @@ const identity = {
   gitSha: 'story',
   board: 'esp32-s3',
   apiVersion: '2026-11-09',
-  protocolVersion: 'flux-purr.usb.v1',
+  protocolVersion: 'flux-purr.usb.v2',
   hostname: 'flux-purr-s3-001',
   capabilities: [
     'identity',

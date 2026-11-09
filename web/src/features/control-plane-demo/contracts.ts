@@ -1,5 +1,5 @@
 export const CONTROL_PLANE_API_VERSION = '2026-11-09'
-export const USB_PROTOCOL_VERSION = 'flux-purr.usb.v1'
+export const USB_PROTOCOL_VERSION = 'flux-purr.usb.v2'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
 export type NetworkState =

@@ -1,3 +1,4 @@
+import { validateControlPlaneIdentity } from './bridge-device-connection'
 import type {
   ApiErrorEnvelope,
   CalibrationConfigRequest,
@@ -117,6 +118,17 @@ export interface WebSerialProbe {
   identity: Identity
   network: NetworkSummary
   status: ControlPlaneStatus
+}
+
+function requireSupportedWebSerialIdentity(identity: Identity): Identity {
+  if (!validateControlPlaneIdentity(identity).ok) {
+    throw new ControlPlaneClientError(
+      'Web Serial 设备身份或协议版本不兼容。',
+      'web_serial_unknown_device',
+      false
+    )
+  }
+  return identity
 }
 
 interface UsbResponseWire {
@@ -353,10 +365,12 @@ export class WebSerialControlPlaneClient {
       if (remaining <= 0) throw runtimeInitializationTimeoutError()
       return Math.min(WEB_SERIAL_RPC_TIMEOUT_MS, remaining)
     }
-    const identity = await this.requestPayload<Identity>(
-      'identity',
-      createUsbRequestFrame('get_identity'),
-      timeout()
+    const identity = requireSupportedWebSerialIdentity(
+      await this.requestPayload<Identity>(
+        'identity',
+        createUsbRequestFrame('get_identity'),
+        timeout()
+      )
     )
     const network = await this.requestPayload<NetworkSummary>(
       'network',
@@ -384,10 +398,12 @@ export class WebSerialControlPlaneClient {
 
   private async probeAfterInitialization(): Promise<WebSerialProbe> {
     const deadline = Date.now() + WEB_SERIAL_INITIALIZATION_TIMEOUT_MS
-    const identity = await this.requestPayloadAfterRuntimeReady<Identity>(
-      'identity',
-      createUsbRequestFrame('get_identity'),
-      deadline
+    const identity = requireSupportedWebSerialIdentity(
+      await this.requestPayloadAfterRuntimeReady<Identity>(
+        'identity',
+        createUsbRequestFrame('get_identity'),
+        deadline
+      )
     )
     const network = await this.requestPayloadAfterRuntimeReady<NetworkSummary>(
       'network',
