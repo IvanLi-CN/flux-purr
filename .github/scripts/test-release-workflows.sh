@@ -62,6 +62,8 @@ assert "git fetch --force --tags origin" in prepare
 assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release
 assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
 assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
+assert 'commits/${source_sha_hint}/pulls' in release
+assert 'refs/pull/${pr_number}/head' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
 assert "verify_squashed_prepared_release" in release_chain
