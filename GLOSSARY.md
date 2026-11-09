@@ -43,3 +43,11 @@ _Avoid_：演示场景、日志消息
 **离散供电观测（Discrete Supply Observation）**：供电观测表中的一条原始采样记录，可由图表中的离散点选中。
 
 **选中观测（Selected Observation）**：当前被图表或供电观测表选中的离散供电观测；图表点和表格行保持同步高亮。
+
+**凭据拒绝（Credential Rejection）**：远端明确确认提交的身份凭据未被接受的失败结果；仅凭模糊的客户端文案不能得出该结论。
+
+**Endpoint 不可用（Endpoint Unavailable）**：请求在部署开始前因服务端 5xx、连接超时、连接重置、连接拒绝或 DNS 等通信问题无法完成的状态。
+
+**部署状态不确定（Deployment Ambiguous）**：上传或远端接受部署请求后，客户端无法确认远端最终状态的结果；此状态要求停止自动重试。
+
+**认证或 Endpoint 未能判定（Auth or Endpoint Ambiguous）**：客户端输出不足以区分凭据拒绝和 Endpoint 不可用的失败结果；该术语不表示凭据已经失效。
