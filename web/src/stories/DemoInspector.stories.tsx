@@ -27,6 +27,16 @@ function InspectorStory({
         state={state}
         devices={scenario.devices}
         selectedDeviceId={scenario.selectedDeviceId}
+        currentModule="/devices/fp-lab-01/overview"
+        moduleOptions={[
+          { value: '/devices/fp-lab-01/overview', label: 'Overview' },
+          { value: '/devices/fp-lab-01/settings/wifi', label: 'Settings · WiFi' },
+          {
+            value: '/devices/fp-lab-01/calibration/heater-curve',
+            label: 'Calibration · Heater curve',
+          },
+        ]}
+        onModuleChange={() => undefined}
         onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
         onSelectDevice={setSelectedDeviceId}
         shareUrl="https://flux-purr-demo.ivanli.cc/devices/fp-lab-01/overview"
@@ -90,25 +100,28 @@ export const InteractionSmoke: Story = {
     const canvas = within(canvasElement)
     const body = within(canvasElement.ownerDocument.body)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
-    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current scene' }))
-    await userEvent.click(await body.findByRole('option', { name: 'Degraded' }))
-    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
-      'Degraded'
-    )
-    await userEvent.click(await canvas.findByRole('checkbox', { name: 'Simulate network timeout' }))
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Scenario preset' }))
+    await userEvent.click(await body.findByRole('option', { name: 'Degraded handoff' }))
+    await expect(
+      await canvas.findByRole('combobox', { name: 'Scenario preset' })
+    ).toHaveTextContent('Degraded handoff')
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
-    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current target' }))
+    await userEvent.click(await canvas.findByRole('checkbox', { name: 'Simulate network timeout' }))
+    await expect(
+      await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
+    ).not.toBeChecked()
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current device fixture' }))
     await expect(
       await body.findByRole('option', { name: /USB Config Fixture.*WiFi 可配置/ })
     ).toHaveAttribute('data-value', 'fp-wifi-usb-04')
     await userEvent.keyboard('{Escape}')
-    const permissionHelp = await canvas.findByRole('button', { name: '查看当前 Persona 权限' })
+    const permissionHelp = await canvas.findByRole('button', { name: '查看当前用户角色权限' })
     await userEvent.click(permissionHelp)
-    await expect(await canvas.findByRole('note', { name: 'Persona permissions' })).toBeVisible()
+    await expect(await canvas.findByRole('note', { name: 'Role permissions' })).toBeVisible()
     await userEvent.keyboard('{Escape}')
-    await expect(canvas.queryByRole('note', { name: 'Persona permissions' })).toBeNull()
+    await expect(canvas.queryByRole('note', { name: 'Role permissions' })).toBeNull()
     await userEvent.click(await canvas.findByRole('button', { name: '查看 Demo Inspector 说明' }))
     await expect(await canvas.findByRole('note', { name: 'Demo scope' })).toBeVisible()
   },
@@ -180,8 +193,8 @@ export const ResetState: Story = {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
     await userEvent.click(await canvas.findByRole('button', { name: 'Reset current case' }))
-    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
-      'Normal'
-    )
+    await expect(
+      await canvas.findByRole('combobox', { name: 'Scenario preset' })
+    ).toHaveTextContent('Nominal operator')
   },
 }
