@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${EDGEONE_TEST_COUNT_FILE:?EDGEONE_TEST_COUNT_FILE is required}"
+count=0
+if [[ -s "${EDGEONE_TEST_COUNT_FILE}" ]]; then
+  count="$(<"${EDGEONE_TEST_COUNT_FILE}")"
+fi
+count=$((count + 1))
+printf '%s\n' "${count}" > "${EDGEONE_TEST_COUNT_FILE}"
+
+if [[ -n "${EDGEONE_TEST_ARGS_FILE:-}" ]]; then
+  printf '%s\n' "$*" >> "${EDGEONE_TEST_ARGS_FILE}"
+fi
+
+fail_until="${EDGEONE_TEST_FAIL_UNTIL:-0}"
+failure_stage="${EDGEONE_TEST_FAILURE_STAGE:-preflight}"
+if (( count <= fail_until )); then
+  case "${failure_stage}" in
+    preflight)
+      echo "[cli] Using provided API token for deployment..."
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    post-deploy)
+      echo "[cli] Validating API endpoint..."
+      echo "[cli] Using Project ID: makers-test"
+      echo "[cli] Uploading folder to EdgeOne COS..."
+      echo "[cli] Creating deployment in Production environment..."
+      echo "[cli] Deployment failed after remote acceptance." >&2
+      ;;
+    unknown-post-deploy)
+      echo "[cli] Validating API endpoint..."
+      echo "[cli] EdgeOne accepted the deployment request; status unavailable." >&2
+      echo "[cli] AxiosError: timeout of 15000ms exceeded" >&2
+      ;;
+    mixed-preflight)
+      echo "[cli] Using provided API token for deployment..."
+      echo "[cli] unexpected phase output: response body truncated." >&2
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    same-line-mixed-preflight)
+      echo "[cli] Using provided API token for deployment...; unexpected phase output: response body truncated."
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    partial-preflight)
+      echo "[cli] check and set region failed: AxiosError: timeout of 15000ms exceeded" >&2
+      ;;
+    permanent)
+      echo "[cli] Deployment failed: Invalid EDGEONE_PAGES_API_TOKEN." >&2
+      ;;
+    *)
+      echo "unsupported test failure stage: ${failure_stage}" >&2
+      exit 2
+      ;;
+  esac
+  exit 7
+fi
+
+echo "[cli] Deploy Success"

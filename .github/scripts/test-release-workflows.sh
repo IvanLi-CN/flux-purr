@@ -2,6 +2,7 @@
 set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
+bash "${root_dir}/.github/scripts/test-edgeone-deploy.sh"
 python3 -m unittest discover -s "${root_dir}/.github/scripts" -p 'test_setup_xtensa*.py'
 python3 - "${root_dir}" <<'PY'
 from pathlib import Path
@@ -17,6 +18,7 @@ quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
 label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
 release_chain = (root / ".github/scripts/release_chain.py").read_text(encoding="utf-8")
 notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encoding="utf-8")
+edgeone_helper = (root / ".github/scripts/deploy-edgeone.sh").read_text(encoding="utf-8")
 
 assert "Release preparation validation" in ci_pr
 assert "kind=prepared" in ci_pr
@@ -70,15 +72,30 @@ assert "operation=recover" not in release
 assert "release_snapshot.py" not in release
 assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
 assert "Deploy published public demo archive to EdgeOne" in release
-assert release.count("bunx edgeone@1.6.18 makers deploy") == 2
+assert release.count("bash .github/scripts/deploy-edgeone.sh") == 2
 assert "npx --yes edgeone@1.6.18 makers deploy" not in release
+assert '"edgeone@${cli_version}" makers deploy' in edgeone_helper
+assert 'cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"' in edgeone_helper
+assert 'max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"' in edgeone_helper
+assert "deployment_started" in edgeone_helper
+assert "retryable_preflight_failure" in edgeone_helper
+assert "PIPESTATUS" in edgeone_helper
+assert "tee_status" in edgeone_helper
+assert "automatic retry is disabled" in edgeone_helper
+assert "endpoint or network failure" in edgeone_helper
+assert "check and set region failed" in edgeone_helper
+assert "saw_preflight_context" in edgeone_helper
+assert "normalize_cli_line" in edgeone_helper
+assert "^[1-3]$" in edgeone_helper
+assert "unexpected phase output" not in edgeone_helper
+assert edgeone_helper.index("if (( attempt_output_ok == 0 ))") < edgeone_helper.index("if (( status == 0 ))")
 assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
 assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bunx edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"' in release
+assert 'bash .github/scripts/deploy-edgeone.sh web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release
 assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed' in release
 assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber' in release
 assert 'archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bunx edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"' in release
+assert 'bash .github/scripts/deploy-edgeone.sh web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production' in release
 assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed' in release
 assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber' in release
 assert "web-production-bundle" not in ci_main
