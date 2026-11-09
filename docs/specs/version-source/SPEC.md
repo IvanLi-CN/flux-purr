@@ -14,7 +14,7 @@
 
 - 根目录 `VERSION` 成为 Flux Purr 唯一的产品版本源。
 - 开发构建自动从不变的 `VERSION` 生成可区分的开发显示版本。
-- 每个已通过完整 PR CI 的产品源提交各自形成一个准备提交、正常 `main` 合并提交、tag、资产集合和回滚边界。
+- 每个已通过完整 PR CI 的产品源提交各自形成一个准备提交、受保护的 `main` 合并提交、tag、资产集合和回滚边界；合并提交可以保留准备提交为第二父提交，也可以是 GitHub squash merge，只要 squash 正文保留完整 release metadata 且相对 `Release-Source-SHA` 只改变 `VERSION`。
 - firmware、`devd`、CLI、Web build metadata、firmware bundle 与 release manifest 使用同一个版本解析规则。
 - 准备提交不重复完整 CI；它只在已经验证的源提交之后写入 `VERSION`。发布资产从其正常 `main` 合并提交构建一次。
 - 保留 `Validate PR labels` 作为合并前的必需门禁；准备提交的 trailers 固化已验证 intent，避免发布时重新读取可变 PR 标签。
@@ -47,6 +47,7 @@
 - [0003-version-file-is-the-product-version-source](../../adr/0003-version-file-is-the-product-version-source.md)
 - [0005-pr-local-version-preparation](../../adr/0005-pr-local-version-preparation.md)
 - [0006-tag-reservation-and-legacy-release-reconciliation](../../adr/0006-tag-reservation-and-legacy-release-reconciliation.md)
+- [0023-squash-merged-product-release-identity](../../adr/0023-squash-merged-product-release-identity.md)
 
 ## 需求（Requirements）
 
@@ -59,9 +60,9 @@
 - 每个通过完整 PR CI 且 release intent 启用的产品源提交必须单独发布。准备提交必须在 PR 合并前完成；多个源提交不得共用一个产品版本。`type:docs`/`type:skip` 明确表示不发布产品资产。
 - 准备提交必须以已验证源提交为唯一父提交，diff 只能包含 `VERSION`，并带 `Release-Source-SHA`、`Product-Version` 和冻结 label intent metadata。该 metadata 只用于顺序验证与审计，不是版本输入。
 - 在启用 signed-commit ruleset 时，准备提交必须通过 GitHub 的 `createCommitOnBranch` mutation 创建，使 GitHub 自动签名并验证该提交；工作流必须在签名未被验证时失败关闭，不得引入发布私钥、口令或绕过规则。
-- Release controller 必须从正常合并后的 `main` 提交构建、tag、发布并验证完整资产；它绝不向 `main` push。发布失败时不得压缩、重算或替换版本；recovery 只能继续同一个 main SHA。
+- Release controller 必须从受保护合并后的 `main` 提交构建、tag、发布并验证完整资产；它绝不向 `main` push。发布失败时不得压缩、重算或替换版本；recovery 只能继续同一个 main SHA。
 - 每个 PR 必须恰好有一个 `type:*` 和一个 `channel:*` 标签；`Validate PR labels` 必须拒绝缺失、重复或未知的 release-intent 标签，并将结果冻结到对应 PR head。
-- `Release Product` 只能消费带有效准备提交的 main 合并提交；`type:docs`/`type:skip` 跳过产品发布，`type:patch + channel:stable` 唯一允许自动写入 `nextPatch(VERSION)`，`type:minor`、`type:major` 或 `channel:rc` 必须等待受控 `exact` 操作写入精确 VERSION 文本。label、metadata 与 channel 不得计算或解析数字版本。
+- `Release Product` 只能消费带有效准备身份的 main 合并提交；普通 merge 必须保留准备提交为第二父提交，squash merge 必须保留完整 release metadata 并相对 source 只改变 `VERSION`。`type:docs`/`type:skip` 跳过产品发布，`type:patch + channel:stable` 唯一允许自动写入 `nextPatch(VERSION)`，`type:minor`、`type:major` 或 `channel:rc` 必须等待受控 `exact` 操作写入精确 VERSION 文本。label、metadata 与 channel 不得计算或解析数字版本。
 - 所有版本化产物必须由该 main 合并提交构建。firmware identity、firmware bundle identity、`devd` `/health`、`flux-purr-devd --version`、`flux-purr --version`、Web build metadata、release manifest 和资产文件名必须一致表达该版本；source SHA 必须指向该 main 合并提交。
 - package manifest 的 `0.1.0` 或其他 package metadata、Git tag、workflow inputs 与既有 manifest 不得作为版本回退或版本覆盖；snapshot 中的 labels 不得写入或覆盖数字版本。
 - `CI PR` 对产品源提交运行完整矩阵；准备提交只运行结构验证。`CI Main` 对其正常 merge 进行结构验证，`Release Product` 从该 merge 构建一次资产，并且仅从这些已验证发布资产部署 EdgeOne production 与 public demo。每个产品源提交仍只运行一次完整 CI、一次发布资产构建和一组发布部署；部署 helper 仅可对同一归档在部署开始前由 EdgeOne 明确标识为 `check and set region` 阶段的 transport-level 失败执行有限重试；输出捕获不完整或部署阶段不明确时不得自动重试，CLI 已返回成功时保留该成功结论，CLI 非零时保留失败状态，并且只在成功后写入 release marker。
@@ -95,8 +96,8 @@
 1. 产品 PR 的源提交完成完整 PR CI 和 `Validate PR labels`。
 2. `Prepare product version` 从受信任的 `main` policy checkout 检查当前 PR head、base 和 checks。自动 patch 写入 `nextPatch(VERSION)`；major、minor 或 RC intent 只接受受控 `exact` 写入精确 VERSION 文本。
 3. 工作流在同一 PR 分支追加以源提交为父、且只修改 `VERSION` 的准备提交；其 trailers 固化 source SHA、产品版本与 validated intent。
-4. `Release completion` 验证准备提交、当前 base 与 labels，并只读核验准备提交父提交的完整 CI 结果。PR 以 merge commit 正常合入 `main`，该 merge 的 tree 必须等于准备提交的 tree。
-5. `CI Main` 结构验证该 merge；`Release Product` 只在其第二父提交是带完整 release trailers 的准备提交时继续。它从该 merge checkout，重新解析 `VERSION`，构建 Web、public demo、firmware 与 host-tools，生成、发布并校验资产、manifest 和 `vX.Y.Z` tag，然后通过共享部署 helper 从这些归档分别部署 EdgeOne production 与 public demo；helper 只对部署开始前有明确 `check and set region` transport-level 证据的失败执行有限重试，任何输出捕获不完整、或已出现上传、创建 deployment、成功/URL 信号的情况都不自动重试；CLI 已返回成功时保留该成功结论，CLI 非零时保留失败状态，并在成功后写入对应 marker。
+4. `Release completion` 验证准备提交、当前 base 与 labels，并只读核验准备提交父提交的完整 CI 结果。PR 以受保护 merge 合入 `main`；普通 merge 保留准备提交为第二父提交并保持相同 tree，squash merge 则保留完整 release metadata 且相对 source 只改变 `VERSION`。
+5. `CI Main` 结构验证该 merge；`Release Product` 只在其保留完整 release identity、源祖先关系和 VERSION-only 差异时继续。它从该 merge checkout，重新解析 `VERSION`，构建 Web、public demo、firmware 与 host-tools，生成、发布并校验资产、manifest 和 `vX.Y.Z` tag，然后通过共享部署 helper 从这些归档分别部署 EdgeOne production 与 public demo；helper 只对部署开始前有明确 `check and set region` transport-level 证据的失败执行有限重试，任何输出捕获不完整、或已出现上传、创建 deployment、成功/URL 信号的情况都不自动重试；CLI 已返回成功时保留该成功结论，CLI 非零时保留失败状态，并在成功后写入对应 marker。
 
 #### Recovery
 
@@ -202,7 +203,7 @@ None.
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
-- 风险：`main` 必须将产品 PR 以 merge commit 合入，且 `Release completion` 必须列为远端 required check；否则 workflow 无法证明受保护 merge 保留了准备提交。此配置不授予 bypass 或新增身份。
+- 风险：`main` 必须将产品 PR 通过受保护 merge 合入，且 `Release completion` 必须列为远端 required check；squash merge 还必须保留完整 release metadata，否则 workflow 必须失败关闭。此配置不授予 bypass 或新增身份。
 - 风险：发布失败后 VERSION 已在 `main` 锁定。recovery 失败时不得准备下一产品版本；不得用合并多个提交来绕过。
 - 假设：`type:docs` 和 `type:skip` 明确表示不生成产品版本；其余产品 PR 各自获得独立版本边界。
 - 迁移边界：根 `VERSION=0.23.0`，历史 `v0.23.0` tag/release 保持不可变且仅作审计记录；首个完整新链路发布是一次正常 patch PR 的 `0.23.1`，不得追溯重发 `0.23.0`。
