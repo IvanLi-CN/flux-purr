@@ -68,7 +68,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
       pdController: 'fusb302b',
       pdContractKind: 'pps',
       pdContractCurrentMa: 5000,
-      pdSourceCapabilityPowerMw: 105000,
+      pdSourceCapabilityPowerMw: 63000,
       pdPerformanceGuaranteed: true,
       pdDegradedReason: null,
       manualPpsEnabled: false,

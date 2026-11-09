@@ -6886,6 +6886,7 @@ function DashboardView({
 
         <div className="industrial-signal-stack">
           <StatusCard
+            className="industrial-status-card--pd"
             label="PD contract"
             value={formatVolts(device.pdContractMv)}
             detail={formatPdContractDetail(device, powerCapabilityMa)}
@@ -10052,9 +10053,20 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   )
 }
 
-function StatusCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+function StatusCard({
+  label,
+  value,
+  detail,
+  className,
+}: {
+  label: string
+  value: string
+  detail: string
+  className?: string
+}) {
+  const cardClassName = ['industrial-status-card', className].filter(Boolean).join(' ')
   return (
-    <article className="industrial-status-card">
+    <article className={cardClassName}>
       <p className="industrial-label">{label}</p>
       <strong>{value}</strong>
       <span>{detail}</span>

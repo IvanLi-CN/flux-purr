@@ -5058,6 +5058,19 @@ fn manual_pps_failure_clears_requested_current() {
 }
 
 #[test]
+fn manual_pps_pd_not_ready_clears_source_capability() {
+    let mut manual_pps =
+        ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+            source_capability_power_mw: Some(63_000),
+            ..Default::default()
+        }));
+
+    manual_pps.fail(ManualPpsError::PdNotReady);
+
+    assert_eq!(manual_pps.source_capability_power_mw, None);
+}
+
+#[test]
 fn manual_pps_current_validation_uses_matching_apdo() {
     let mut manual_pps =
         ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
@@ -17317,6 +17330,49 @@ fn pd_status_reports_source_capability_without_using_requested_voltage() {
     assert_eq!(status.pd_contract_current_ma, 3_000);
     assert_eq!(status.pd_source_capability_power_mw, Some(63_000));
     assert_ne!(status.pd_source_capability_power_mw, Some(60_000));
+}
+
+#[test]
+fn pd_status_projection_uses_one_fusb_snapshot_for_contract_and_capability() {
+    let cached_contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+    let cached_observation = PdStatusObservation {
+        status_raw: 1 << 3,
+        status: Status::from_register(1 << 3),
+        current_raw: 0,
+        current_ma: cached_contract.current_ma,
+        contract_voltage_mv: Some(cached_contract.voltage_mv),
+        contract: cached_contract,
+    };
+    let snapshot_contract = Contract::observed(ContractKind::Pps, 21_000, 3_000);
+    let snapshot_observation = PdStatusObservation {
+        current_ma: snapshot_contract.current_ma,
+        contract_voltage_mv: Some(snapshot_contract.voltage_mv),
+        contract: snapshot_contract,
+        ..cached_observation
+    };
+    let mut source = SourceCapabilitiesView::default();
+    source.pps[0] = Some(PpsAdjustmentRange {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_current_ma: 3_000,
+    });
+    let snapshot = PdServiceSnapshot {
+        observation: Some(snapshot_observation),
+        source,
+        controller: ControllerKind::Fusb302b,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+
+    let (observation, source_power_mw) = pd_status_projection(
+        ControllerKind::Fusb302b,
+        Some(snapshot),
+        Some(cached_observation),
+        Some(105_000),
+    );
+
+    assert_eq!(observation, Some(snapshot_observation));
+    assert_eq!(source_power_mw, Some(63_000));
 }
 
 #[test]

@@ -297,6 +297,9 @@ fn record_source_capability_power(
         return;
     }
     let power_mw = (u32::from(voltage_mv) * u32::from(max_ma)) / 1_000;
+    if power_mw == 0 {
+        return;
+    }
     capabilities.source_capability_power_mw = Some(
         capabilities
             .source_capability_power_mw
@@ -559,6 +562,15 @@ mod tests {
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
         assert_eq!(capabilities.source_capability_power_mw, Some(30_000));
+    }
+
+    #[test]
+    fn ignores_sub_milliwatt_source_capability() {
+        let fixed_50mv_10ma = (1_u32 << 10) | 1_u32;
+        let capabilities =
+            AdjustablePowerCapabilities::from_pd_power_data(&fixed_50mv_10ma.to_le_bytes());
+
+        assert_eq!(capabilities.source_capability_power_mw, None);
     }
 
     #[test]

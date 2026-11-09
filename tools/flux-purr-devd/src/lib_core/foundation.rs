@@ -696,7 +696,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
         pd_controller: Some("fusb302b".to_string()),
         pd_contract_kind: Some("pps".to_string()),
         pd_contract_current_ma: Some(3_000),
-        pd_source_capability_power_mw: Some(105_000),
+        pd_source_capability_power_mw: Some(63_000),
         pd_performance_guaranteed: Some(true),
         pd_degraded_reason: None,
         pd_last_protocol_fault: None,

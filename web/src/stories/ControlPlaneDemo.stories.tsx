@@ -116,6 +116,10 @@ export const MobileReview: Story = {
   globals: {
     viewport: { value: 'mobile1', isRotated: false },
   },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findByText(/源能力上限 63W/)).toBeVisible()
+  },
 }
 
 export const InteractionSmoke: Story = {

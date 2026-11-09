@@ -997,6 +997,9 @@ pub(crate) fn reconcile_pd_contract_intent_with_pending_automatic_pps(
         manual_pps_state.fail(ManualPpsError::PdNotReady);
         needs_redraw = true;
     }
+    if !current_pd_contract_ready {
+        manual_pps_state.invalidate_source_capability();
+    }
     needs_redraw
 }
 
@@ -1950,6 +1953,10 @@ impl ManualPpsState {
         self.automatic_restore_confirmed = false;
     }
 
+    pub(crate) fn invalidate_source_capability(&mut self) {
+        self.source_capability_power_mw = None;
+    }
+
     pub(crate) fn clear(&mut self) {
         let had_override = self.enabled
             || self.target_mv.is_some()
@@ -1976,6 +1983,9 @@ impl ManualPpsState {
         self.target_ma = None;
         self.applied_mv = None;
         self.error = Some(error);
+        if error == ManualPpsError::PdNotReady {
+            self.invalidate_source_capability();
+        }
         self.automatic_restore_pending = true;
         self.automatic_restore_confirmed = false;
     }

@@ -81,15 +81,18 @@ pub(crate) fn control_runtime_status_context(
     heater_fault_latched: Option<HeaterFaultReason>,
     attention_pending: bool,
 ) -> UsbRuntimeStatusContext {
-    let source_capability_power_mw = match context.pd_controller {
-        ControllerKind::Fusb302b => context.pd_port.snapshot().source.maximum_power_mw(),
-        ControllerKind::Ch224q => manual_pps.source_capability_power_mw,
-        ControllerKind::Unknown => None,
-    };
+    let fusb_snapshot =
+        (context.pd_controller == ControllerKind::Fusb302b).then(|| context.pd_port.snapshot());
+    let (last_pd_observation, source_capability_power_mw) = pd_status_projection(
+        context.pd_controller,
+        fusb_snapshot,
+        context.last_pd_observation,
+        manual_pps.source_capability_power_mw,
+    );
     UsbRuntimeStatusContext {
         elapsed_ms: context.elapsed_ms,
         pd_controller: context.pd_controller,
-        last_pd_observation: context.last_pd_observation,
+        last_pd_observation,
         heater_power_backend: *context.heater_power_backend,
         pid_snapshot: context.pid_snapshot,
         heater_control_timing: context.heater_control_timing,
@@ -112,6 +115,30 @@ pub(crate) fn control_runtime_status_context(
         latest_rtd_raw_adc_max_mv: context.latest_rtd_raw_adc_max_mv,
         latest_vin_raw_adc_mv: context.latest_vin_raw_adc_mv,
         vin_mv: context.latest_vin_mv,
+    }
+}
+
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+pub(crate) fn pd_status_projection(
+    controller: ControllerKind,
+    fusb_snapshot: Option<PdServiceSnapshot>,
+    cached_observation: Option<PdStatusObservation>,
+    ch224q_source_capability_power_mw: Option<u32>,
+) -> (Option<PdStatusObservation>, Option<u32>) {
+    match controller {
+        ControllerKind::Fusb302b => fusb_snapshot.map_or((None, None), |snapshot| {
+            (
+                snapshot.settled_observation(),
+                snapshot.source.maximum_power_mw(),
+            )
+        }),
+        ControllerKind::Ch224q => (
+            cached_observation,
+            cached_observation
+                .filter(|observation| observation.status.pd_active)
+                .and(ch224q_source_capability_power_mw),
+        ),
+        ControllerKind::Unknown => (cached_observation, None),
     }
 }
 

@@ -449,10 +449,15 @@ impl SourceCapabilitiesView {
             .into_iter()
             .flatten()
             .map(|(voltage_mv, max_ma)| (u32::from(voltage_mv) * u32::from(max_ma)) / 1_000)
+            .filter(|power_mw| *power_mw > 0)
             .chain(
-                self.pps.into_iter().flatten().map(|range| {
-                    (u32::from(range.max_mv) * u32::from(range.max_current_ma)) / 1_000
-                }),
+                self.pps
+                    .into_iter()
+                    .flatten()
+                    .map(|range| {
+                        (u32::from(range.max_mv) * u32::from(range.max_current_ma)) / 1_000
+                    })
+                    .filter(|power_mw| *power_mw > 0),
             )
             .max()
     }
@@ -879,6 +884,19 @@ mod tests {
         ]);
 
         assert_eq!(capabilities.view().maximum_power_mw(), Some(100_000));
+    }
+
+    #[test]
+    fn source_capability_power_ignores_sub_milliwatt_objects() {
+        let mut view = SourceCapabilitiesView::default();
+        view.fixed[0] = Some((50, 10));
+        view.pps[0] = Some(PpsAdjustmentRange {
+            min_mv: 50,
+            max_mv: 50,
+            max_current_ma: 10,
+        });
+
+        assert_eq!(view.maximum_power_mw(), None);
     }
 
     #[test]
