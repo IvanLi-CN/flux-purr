@@ -40,6 +40,74 @@ fn local_control_endpoint_rejects_network_transports() {
     assert!(validate_local_control_endpoint("/tmp/flux-purr-devd.sock").is_ok());
 }
 
+#[test]
+fn product_identity_validation_rejects_legacy_control_plane_versions() {
+    let identity = Identity {
+        firmware_kind: Some(FirmwareKind::Product),
+        device_id: "flux-purr-s3-001".into(),
+        firmware_version: "0.1.0".into(),
+        build_id: "build".into(),
+        git_sha: "abc".into(),
+        reset_reason: None,
+        board: "esp32-s3".into(),
+        api_version: "2026-11-09".into(),
+        protocol_version: "flux-purr.usb.v2".into(),
+        hostname: "flux-purr-s3-001".into(),
+        capabilities: vec!["identity".into(), "network".into(), "status".into()],
+    };
+
+    assert!(validate_lan_bridge_identity(&identity).is_ok());
+    assert!(validate_native_serial_identity(&identity).is_ok());
+    assert!(
+        validate_lan_bridge_identity(&Identity {
+            protocol_version: "flux-purr.usb.v1".into(),
+            ..identity.clone()
+        })
+        .is_err()
+    );
+    assert!(
+        validate_native_serial_identity(&Identity {
+            api_version: "2026-05-29".into(),
+            ..identity
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn compact_thermal_status_exports_source_capability_power_only() {
+    let status: ThermalStatus = serde_json::from_value(json!({
+        "m": "sampling",
+        "u": 1,
+        "t": 25.0,
+        "tt": 200,
+        "he": false,
+        "ho": 0,
+        "hp": 0,
+        "v": 20_000,
+        "i": 3_000,
+        "r": 250,
+        "vin": 500,
+        "pr": 20_000,
+        "pc": 20_000,
+        "ps": "PPS",
+        "pk": "pps",
+        "ci": 3_000,
+        "scp": 105_000,
+        "sp": 100_000,
+        "sa": 5_000,
+        "ph": null,
+        "g": false,
+        "ct": null,
+        "ft": null,
+    }))
+    .unwrap();
+
+    let value = status.into_value();
+    assert_eq!(value["pdSourceCapabilityPowerMw"], json!(105_000));
+    assert!(value.get("pdContractPowerMw").is_none());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn local_control_managed_socket_round_trip_returns_one_response() {
@@ -74,7 +142,7 @@ fn test_flash_artifact() -> FirmwareArtifact {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec![],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "elf".to_string(),
             path: "firmware.elf".to_string(),
@@ -850,7 +918,7 @@ fn artifact_verify_checks_hash_and_size() {
         target_chip: "esp32s3".to_string(),
         profile: "debug".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "app".to_string(),
             path: "firmware.bin".to_string(),
@@ -879,7 +947,7 @@ fn artifact_verify_reports_hash_mismatch() {
         target_chip: "esp32s3".to_string(),
         profile: "debug".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "app".to_string(),
             path: "firmware.bin".to_string(),
@@ -906,7 +974,7 @@ fn artifact_verify_rejects_paths_outside_artifact_root() {
         target_chip: "esp32s3".to_string(),
         profile: "debug".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "app".to_string(),
             path: "../firmware.bin".to_string(),
@@ -935,7 +1003,7 @@ fn artifact_verify_rejects_empty_file_list() {
         target_chip: "esp32s3".to_string(),
         profile: "debug".to_string(),
         features: Vec::new(),
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: Vec::new(),
     };
 
@@ -1122,7 +1190,7 @@ fn real_flash_args_flash_elf_and_hard_reset() {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "elf".to_string(),
             path: "firmware.elf".to_string(),
@@ -1182,7 +1250,7 @@ fn real_flash_args_write_raw_app_bin_with_partition_table_and_reset() {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "app".to_string(),
             path: "firmware.bin".to_string(),
@@ -1252,7 +1320,7 @@ fn non_native_serial_ports_keep_the_default_reset_mode() {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec![],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![],
     };
     assert_eq!(
@@ -1272,7 +1340,7 @@ fn usbmodem_flash_retries_usb_reset_before_default_reset_without_manual_boot_mod
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec![],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![],
     };
 
@@ -1537,7 +1605,7 @@ fn flash_end_recovery_reset_is_explicit_and_uses_the_authorized_usb_port() {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec![],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![],
     };
 
@@ -4135,7 +4203,7 @@ fn test_artifact_with_file(root: &Path, relative_path: &str, bytes: &[u8]) -> Fi
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: vec![ArtifactFile {
             kind: "app".to_string(),
             path: relative_path.to_string(),
@@ -4410,7 +4478,7 @@ fn runtime_verification_requires_product_firmware_kind() {
         reset_reason: None,
         board: "esp32-s3".into(),
         api_version: "2026-11-09".into(),
-        protocol_version: "flux-purr.usb.v1".into(),
+        protocol_version: "flux-purr.usb.v2".into(),
         hostname: "device".into(),
         capabilities: vec![],
     };
