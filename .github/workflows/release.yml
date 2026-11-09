@@ -81,12 +81,14 @@ jobs:
               echo "Release-Source-SHA is not a full commit SHA: ${source_sha_hint}" >&2
               exit 1
             fi
-            pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha_hint}/pulls" --jq '.[0].number' 2>/dev/null || true)"
-            test -n "${pr_number}" || {
-              echo "cannot resolve a pull request ref for Release-Source-SHA ${source_sha_hint}" >&2
-              exit 1
-            }
-            git fetch --force --no-tags origin "refs/pull/${pr_number}/head"
+            if ! git fetch --force --no-tags origin "${source_sha_hint}" 2>/dev/null || ! git cat-file -e "${source_sha_hint}^{commit}" 2>/dev/null; then
+              pr_number="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${source_sha_hint}/pulls" --jq '.[0].number' 2>/dev/null || true)"
+              test -n "${pr_number}" || {
+                echo "cannot resolve a pull request ref for Release-Source-SHA ${source_sha_hint}" >&2
+                exit 1
+              }
+              git fetch --force --no-tags origin "refs/pull/${pr_number}/head"
+            fi
             git cat-file -e "${source_sha_hint}^{commit}"
           fi
           preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
