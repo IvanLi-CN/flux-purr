@@ -64,6 +64,8 @@ assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
 assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
 assert "verify_merged_prepared_release" in release_chain
 assert "verify_prepared_commit" in release_chain
+assert "verify_squashed_prepared_release" in release_chain
+assert '"preparationMode": "squashed"' in release_chain
 assert "def verify_tag" in release_chain
 assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
 assert "latest_check_outcomes" in (root / ".github/scripts/release_completion.py").read_text(encoding="utf-8")

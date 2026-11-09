@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,15 @@ class ReleaseChainError(RuntimeError):
 
 VALID_TYPES = {"type:patch", "type:minor", "type:major"}
 VALID_CHANNELS = {"stable", "rc"}
+RELEASE_METADATA_KEYS = {
+    "Release-Source-SHA",
+    "Product-Version",
+    "Release-Intent-Type",
+    "Release-Intent-Channel",
+    "Release-Intent-Action",
+    "Release-Intent-Components",
+}
+FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def release_action(type_label: str, channel: str) -> str:
@@ -118,18 +128,37 @@ def trailers(commit: str) -> dict[str, str]:
     return values
 
 
-def prepared_intent(commit: str) -> dict[str, str]:
-    """Return the immutable PR-label intent copied into a preparation commit."""
-    values = trailers(commit)
+def message_fields(commit: str) -> dict[str, str]:
+    """Read release identity fields preserved in a squash commit message."""
+    values: dict[str, str] = {}
+    for line in git_raw("show", "-s", "--format=%B", commit).splitlines():
+        line = line.strip()
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key not in RELEASE_METADATA_KEYS:
+            continue
+        value = value.strip()
+        if not value:
+            raise ReleaseChainError(f"release metadata field {key} must not be empty")
+        if key in values and values[key] != value:
+            raise ReleaseChainError(f"release metadata field {key} has conflicting values")
+        values[key] = value
+    return values
+
+
+def validated_intent(values: dict[str, str], context: str) -> dict[str, str]:
+    """Validate the immutable PR-label intent copied into a release identity."""
     type_label = values.get("Release-Intent-Type", "")
     channel = values.get("Release-Intent-Channel", "")
     action = values.get("Release-Intent-Action", "")
     if type_label not in VALID_TYPES:
-        raise ReleaseChainError("VERSION preparation commit is missing a valid Release-Intent-Type trailer")
+        raise ReleaseChainError(f"{context} is missing a valid Release-Intent-Type")
     if channel not in VALID_CHANNELS:
-        raise ReleaseChainError("VERSION preparation commit is missing a valid Release-Intent-Channel trailer")
+        raise ReleaseChainError(f"{context} is missing a valid Release-Intent-Channel")
     if action != release_action(type_label, channel):
-        raise ReleaseChainError("VERSION preparation commit has an invalid Release-Intent-Action trailer")
+        raise ReleaseChainError(f"{context} has an invalid Release-Intent-Action")
     components = values.get("Release-Intent-Components", "none")
     return {
         "typeLabel": type_label,
@@ -137,6 +166,10 @@ def prepared_intent(commit: str) -> dict[str, str]:
         "action": action,
         "components": components,
     }
+
+
+def prepared_intent(commit: str) -> dict[str, str]:
+    return validated_intent(trailers(commit), "VERSION preparation commit")
 
 
 def is_strictly_newer(candidate: str, current: str) -> bool:
@@ -187,10 +220,15 @@ def verify_merged_prepared_release(commit: str) -> dict[str, str]:
     A regular PR merge can have the same tree as its second parent.  It is a
     release merge only when that parent explicitly identifies itself as a
     VERSION preparation commit.  Once either identifying trailer exists, any
-    malformed preparation is a hard error rather than a silent skip.
+    malformed preparation is a hard error rather than a silent skip. GitHub
+    squash merges have one parent, so they use the same immutable identity
+    fields copied into the squash message and require a VERSION-only diff from
+    the recorded source commit.
     """
     merge_sha = git("rev-parse", f"{commit}^{{commit}}")
     parents = git("show", "-s", "--format=%P", merge_sha).split()
+    if len(parents) == 1:
+        return verify_squashed_prepared_release(merge_sha, parents[0])
     if len(parents) != 2:
         return {"prepared": "false", "reason": "not_merge_commit"}
     if subprocess.run(
@@ -218,6 +256,54 @@ def verify_merged_prepared_release(commit: str) -> dict[str, str]:
             "prepared": "true",
             "mergeSha": merge_sha,
             "preparationSha": preparation_sha,
+        }
+    )
+    return values
+
+
+def verify_squashed_prepared_release(merge_sha: str, merge_parent: str) -> dict[str, str]:
+    """Verify a product release preserved by a GitHub squash merge."""
+    metadata = message_fields(merge_sha)
+    if not metadata:
+        return {"prepared": "false", "reason": "not_merge_commit"}
+    if set(metadata) != RELEASE_METADATA_KEYS:
+        missing = sorted(RELEASE_METADATA_KEYS - set(metadata))
+        raise ReleaseChainError(
+            "squash-merged VERSION preparation has incomplete release metadata: "
+            + ", ".join(missing)
+        )
+
+    source_sha = metadata["Release-Source-SHA"]
+    if not FULL_SHA_RE.fullmatch(source_sha):
+        raise ReleaseChainError("squash-merged Release-Source-SHA must be a full commit SHA")
+    if not is_ancestor(merge_parent, source_sha):
+        raise ReleaseChainError(
+            f"squashed release source {source_sha} is not based on merged main parent {merge_parent}"
+        )
+
+    names = git("diff", "--name-only", f"{source_sha}..{merge_sha}").splitlines()
+    if names != ["VERSION"]:
+        raise ReleaseChainError(
+            f"squashed VERSION preparation must change only VERSION from source, got {names}"
+        )
+    version = commit_version(merge_sha)
+    if metadata["Product-Version"] != version:
+        raise ReleaseChainError(
+            f"squashed Product-Version is {metadata['Product-Version']}, expected VERSION {version}"
+        )
+    values = {
+        "releaseSha": merge_sha,
+        "sourceSha": source_sha,
+        "version": version,
+        "tag": f"v{version}",
+    }
+    values.update(validated_intent(metadata, "squash-merged release metadata"))
+    values.update(
+        {
+            "prepared": "true",
+            "mergeSha": merge_sha,
+            "preparationSha": merge_sha,
+            "preparationMode": "squashed",
         }
     )
     return values

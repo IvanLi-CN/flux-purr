@@ -91,6 +91,31 @@ assert merged_values["mergeSha"] == merged_release
 assert merged_values["preparationSha"] == release
 assert merged_values["version"] == "0.22.1"
 
+# GitHub squash merges have one parent but preserve the prepared commit's
+# release metadata in the generated commit message.  The release identity is
+# valid only when the squash changes VERSION relative to its recorded source.
+run("git", "checkout", "-q", "-b", "squash-release-main", source)
+run("git", "merge", "--squash", "prepared-release")
+run(
+    "git",
+    "commit",
+    "--signoff",
+    "-m",
+    "chore(release): v0.22.1",
+    "-m",
+    f"Release-Source-SHA: {source}\nProduct-Version: 0.22.1\n"
+    "Release-Intent-Type: type:patch\nRelease-Intent-Channel: stable\n"
+    "Release-Intent-Action: automatic\nRelease-Intent-Components: none",
+)
+squashed_release = run("git", "rev-parse", "HEAD")
+squashed_values = module.verify_merged_prepared_release(squashed_release)
+assert squashed_values["prepared"] == "true"
+assert squashed_values["mergeSha"] == squashed_release
+assert squashed_values["preparationSha"] == squashed_release
+assert squashed_values["preparationMode"] == "squashed"
+assert squashed_values["sourceSha"] == source
+assert squashed_values["version"] == "0.22.1"
+
 # A prepared commit is based on the PR source, which may be ahead of the
 # merged main parent. The merge verifier must validate that ancestry instead
 # of requiring the preparation parent to equal the main parent.
