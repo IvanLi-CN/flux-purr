@@ -27,6 +27,16 @@ function InspectorStory({
         state={state}
         devices={scenario.devices}
         selectedDeviceId={scenario.selectedDeviceId}
+        currentModule="/devices/fp-lab-01/overview"
+        moduleOptions={[
+          { value: '/devices/fp-lab-01/overview', label: 'Overview' },
+          { value: '/devices/fp-lab-01/settings/wifi', label: 'Settings · WiFi' },
+          {
+            value: '/devices/fp-lab-01/calibration/heater-curve',
+            label: 'Calibration · Heater curve',
+          },
+        ]}
+        onModuleChange={() => undefined}
         onStateChange={(partial) => setState((current) => ({ ...current, ...partial }))}
         onSelectDevice={setSelectedDeviceId}
         shareUrl="https://flux-purr-demo.ivanli.cc/devices/fp-lab-01/overview"
@@ -91,14 +101,17 @@ export const InteractionSmoke: Story = {
     const body = within(canvasElement.ownerDocument.body)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
     await userEvent.click(await canvas.findByRole('combobox', { name: 'Current scene' }))
-    await userEvent.click(await body.findByRole('option', { name: 'Degraded' }))
+    await userEvent.click(await body.findByRole('option', { name: 'Overview · Offline device' }))
     await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
-      'Degraded'
+      'Overview · Offline device'
     )
-    await userEvent.click(await canvas.findByRole('checkbox', { name: 'Simulate network timeout' }))
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
+    await userEvent.click(await canvas.findByRole('checkbox', { name: 'Simulate network timeout' }))
+    await expect(
+      await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
+    ).not.toBeChecked()
     await userEvent.click(await canvas.findByRole('combobox', { name: 'Current target' }))
     await expect(
       await body.findByRole('option', { name: /USB Config Fixture.*WiFi 可配置/ })

@@ -49,6 +49,9 @@ interface DemoInspectorProps {
   state: DemoInspectorState
   devices: readonly DeviceTarget[]
   selectedDeviceId: string
+  currentModule: string
+  moduleOptions: readonly { value: string; label: string }[]
+  onModuleChange: (value: string) => void
   onStateChange: (partial: Partial<DemoInspectorState>) => void
   onSelectDevice: (deviceId: string) => void
   shareUrl: string
@@ -62,6 +65,9 @@ interface DemoInspectorContentProps {
   state: DemoInspectorState
   devices: readonly DeviceTarget[]
   selectedDeviceId: string
+  currentModule: string
+  moduleOptions: readonly { value: string; label: string }[]
+  onModuleChange: (value: string) => void
   onStateChange: (partial: Partial<DemoInspectorState>) => void
   onSelectDevice: (deviceId: string) => void
   shareUrl: string
@@ -79,14 +85,123 @@ interface DemoInspectorContentProps {
   onPlacementChange: (placement: DemoInspectorPlacement) => void
 }
 
-const scenes: Array<{ id: DemoSceneId; label: string; description: string }> = [
-  { id: 'normal', label: 'Normal', description: 'Nominal mock bench' },
-  { id: 'degraded', label: 'Degraded', description: 'Lease and handoff fault' },
-  { id: 'offline', label: 'Offline', description: 'Unavailable mock target' },
-  { id: 'blocked-artifact', label: 'Artifact gate', description: 'Dry-check blocked' },
-  { id: 'calibration-loading', label: 'Loading', description: 'Thermal snapshot read in progress' },
-  { id: 'calibration-active', label: 'Calibration', description: 'Leave guard active' },
+type DemoModuleKind = 'overview' | 'settings' | 'calibration' | 'update'
+
+const scenes: Array<{
+  id: DemoSceneId
+  label: string
+  description: string
+  modules: DemoModuleKind[]
+}> = [
+  {
+    id: 'normal',
+    label: 'Nominal operator',
+    description: 'Online bench with writable telemetry',
+    modules: ['overview', 'settings', 'calibration', 'update'],
+  },
+  {
+    id: 'degraded',
+    label: 'Degraded handoff',
+    description: 'Lease and network handoff fault',
+    modules: ['overview', 'settings'],
+  },
+  {
+    id: 'offline',
+    label: 'Offline device',
+    description: 'Unavailable mock target',
+    modules: ['overview', 'settings'],
+  },
+  {
+    id: 'blocked-artifact',
+    label: 'Artifact blocked',
+    description: 'Dry-check compatibility gate blocked',
+    modules: ['update', 'settings'],
+  },
+  {
+    id: 'calibration-loading',
+    label: 'Calibration loading',
+    description: 'Thermal snapshot read in progress',
+    modules: ['calibration'],
+  },
+  {
+    id: 'calibration-active',
+    label: 'Calibration running',
+    description: 'Leave guard active',
+    modules: ['calibration'],
+  },
 ]
+
+const presetCatalog: Array<{
+  id: string
+  module: DemoModuleKind
+  scene: DemoSceneId
+  label: string
+}> = [
+  { id: 'normal', module: 'overview', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'settings', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'calibration', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'update', scene: 'normal', label: 'Normal' },
+  { id: 'degraded', module: 'overview', scene: 'degraded', label: 'Degraded handoff' },
+  {
+    id: 'degraded',
+    module: 'settings',
+    scene: 'degraded',
+    label: 'Settings · Degraded handoff',
+  },
+  {
+    id: 'offline',
+    module: 'overview',
+    scene: 'offline',
+    label: 'Overview · Offline device',
+  },
+  {
+    id: 'blocked-artifact',
+    module: 'update',
+    scene: 'blocked-artifact',
+    label: 'Update · Artifact blocked',
+  },
+  {
+    id: 'calibration-loading',
+    module: 'calibration',
+    scene: 'calibration-loading',
+    label: 'Calibration · Loading',
+  },
+  {
+    id: 'calibration-active',
+    module: 'calibration',
+    scene: 'calibration-active',
+    label: 'Calibration · Running',
+  },
+]
+
+function moduleKind(path: string): DemoModuleKind {
+  if (path.includes('/calibration/')) return 'calibration'
+  if (path.includes('/settings/')) return 'settings'
+  if (path.endsWith('/update')) return 'update'
+  return 'overview'
+}
+
+const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
+  normal: {
+    demoPersona: 'operator',
+    demoLease: 'none',
+    demoNetwork: 'healthy',
+    demoArtifact: 'ready',
+    demoWifiCapability: 'default',
+    demoLogs: 'normal',
+    demoTelemetry: 'available',
+  },
+  degraded: { demoPersona: 'operator', demoLease: 'conflict', demoNetwork: 'timeout' },
+  offline: {
+    demoPersona: 'observer',
+    demoNetwork: 'timeout',
+    demoWifiCapability: 'unavailable',
+    demoTelemetry: 'unavailable',
+  },
+  'blocked-artifact': { demoPersona: 'maintainer', demoArtifact: 'blocked' },
+  'calibration-loading': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'calibration-active': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+}
 
 const placementOptions: Array<{
   id: DemoInspectorPlacement
@@ -260,6 +375,9 @@ function DemoInspectorContent({
   state,
   devices,
   selectedDeviceId,
+  currentModule,
+  moduleOptions,
+  onModuleChange,
   onStateChange,
   onSelectDevice,
   shareUrl,
@@ -278,15 +396,76 @@ function DemoInspectorContent({
 }: DemoInspectorContentProps) {
   const update = (partial: Partial<DemoInspectorState>) => onStateChange(partial)
   const currentScene = scenes.find((scene) => scene.id === state.demoScene) ?? scenes[0]
+  const availablePresets = presetCatalog.filter(
+    (preset) => preset.module === moduleKind(currentModule)
+  )
+  const currentPreset =
+    availablePresets.find((preset) => preset.scene === state.demoScene) ?? availablePresets[0]
   const currentTarget = devices.find((device) => device.id === selectedDeviceId) ?? devices[0]
   const persona = demoPersonas.find((item) => item.id === state.demoPersona) ?? demoPersonas[0]
+  const preset = presetParameters[state.demoScene]
+  const presetModified = Object.entries(preset).some(
+    ([key, value]) => state[key as keyof DemoInspectorState] !== value
+  )
+
+  const moduleSettings = (
+    <fieldset className="demo-inspector__group" data-scope="global">
+      <legend>Demo environment</legend>
+      <p className="demo-inspector__scope-hint">
+        Choose where the demo opens, then load or refine a scenario.
+      </p>
+      <DemoInspectorSelect
+        label="Module"
+        ariaLabel="Current demo module"
+        value={currentModule}
+        onValueChange={(nextModule) => {
+          const nextScenes = scenes.filter((scene) =>
+            scene.modules.includes(moduleKind(nextModule))
+          )
+          if (!nextScenes.some((scene) => scene.id === state.demoScene)) {
+            const nextPreset = nextScenes[0]?.id
+            if (nextPreset) update({ demoScene: nextPreset, ...presetParameters[nextPreset] })
+          }
+          onModuleChange(nextModule)
+        }}
+        options={moduleOptions}
+      />
+    </fieldset>
+  )
 
   const globalSettings = (
     <fieldset className="demo-inspector__group" data-scope="global">
-      <legend>Global demo settings</legend>
-      <p className="demo-inspector__scope-hint">Applies across this demo session.</p>
+      <legend>Scenario preset</legend>
+      <p className="demo-inspector__scope-hint">Loads a starting point for the mock parameters.</p>
       <DemoInspectorSelect
-        label="Persona"
+        label="Preset"
+        ariaLabel="Current scene"
+        value={currentPreset?.id ?? ''}
+        onValueChange={(value) => {
+          const nextPreset = availablePresets.find((preset) => preset.id === value)
+          if (!nextPreset) return
+          update({ demoScene: nextPreset.scene, ...presetParameters[nextPreset.scene] })
+        }}
+        options={availablePresets.map((preset) => ({ value: preset.id, label: preset.label }))}
+      />
+      <span className="demo-inspector__hint">
+        {availablePresets.length} presets available for this module
+      </span>
+      {presetModified ? (
+        <span className="demo-inspector__hint">Modified mock parameters</span>
+      ) : null}
+    </fieldset>
+  )
+
+  const currentCase = (
+    <fieldset className="demo-inspector__group" data-scope="case">
+      <legend>Mock parameters</legend>
+      <p className="demo-inspector__scope-hint">
+        Adjust the loaded preset to test a specific state.
+      </p>
+      <DemoInspectorSelect
+        label="User role"
+        ariaLabel="Persona"
         labelHelp={
           <DemoInspectorHelp
             className="demo-inspector__help--permission"
@@ -296,35 +475,18 @@ function DemoInspectorContent({
             {persona.permissions}. {persona.description}
           </DemoInspectorHelp>
         }
-        ariaLabel="Persona"
         value={state.demoPersona}
         onValueChange={(value) =>
           update({ demoPersona: value as DemoInspectorState['demoPersona'] })
         }
         options={demoPersonas.map((item) => ({ value: item.id, label: item.label }))}
       />
-    </fieldset>
-  )
-
-  const currentCase = (
-    <fieldset className="demo-inspector__group" data-scope="case">
-      <legend>Current demo case</legend>
-      <p className="demo-inspector__scope-hint">
-        Scene, target, and simulated conditions for this route.
-      </p>
-      <DemoInspectorSelect
-        label="Scene"
-        ariaLabel="Current scene"
-        value={state.demoScene}
-        onValueChange={(value) => update({ demoScene: value as DemoSceneId })}
-        options={scenes.map((scene) => ({ value: scene.id, label: scene.label }))}
-      />
       <div className="demo-inspector__selection-summary" aria-live="polite">
-        <strong>{currentScene.label}</strong>
+        <strong>{currentScene.label} preset</strong>
         <span>{currentScene.description}</span>
       </div>
       <DemoInspectorSelect
-        label="Target"
+        label="Device fixture"
         ariaLabel="Current target"
         value={selectedDeviceId}
         onValueChange={onSelectDevice}
@@ -565,7 +727,8 @@ function DemoInspectorContent({
 
       {placement === 'bottom' && viewport.width > drawerMaxViewport ? (
         <div className="demo-inspector__bottom-columns">
-          <ScrollArea className="demo-inspector__bottom-column" ariaLabel="Global demo settings">
+          <ScrollArea className="demo-inspector__bottom-column" ariaLabel="Demo environment">
+            {moduleSettings}
             {globalSettings}
           </ScrollArea>
           <ScrollArea className="demo-inspector__bottom-column" ariaLabel="Current demo case">
@@ -584,6 +747,7 @@ function DemoInspectorContent({
         </div>
       ) : (
         <ScrollArea className="demo-inspector__scroll">
+          {moduleSettings}
           {globalSettings}
           {currentCase}
           {networkSafety}
@@ -602,6 +766,9 @@ export function DemoInspector({
   state,
   devices,
   selectedDeviceId,
+  currentModule,
+  moduleOptions,
+  onModuleChange,
   onStateChange,
   onSelectDevice,
   shareUrl,
@@ -771,6 +938,9 @@ export function DemoInspector({
       state={state}
       devices={devices}
       selectedDeviceId={selectedDeviceId}
+      currentModule={currentModule}
+      moduleOptions={moduleOptions}
+      onModuleChange={onModuleChange}
       onStateChange={onStateChange}
       onSelectDevice={onSelectDevice}
       shareUrl={shareUrl}
