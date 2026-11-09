@@ -11597,3 +11597,7 @@
     width: 100%;
   }
 }
+
+.demo-inspector__scroll .simplebar-track.simplebar-vertical {
+  right: -0.75rem;
+}
