@@ -272,6 +272,21 @@ describe('firmware workspace hierarchy', () => {
     expect(markup).not.toContain('>租约<')
   })
 
+  it('keeps the source capability distinction in the dashboard status card', () => {
+    const markup = renderToStaticMarkup(
+      createElement(ControlPlaneDemo, {
+        scenario: controlPlaneScenario,
+        allowDemoControls: true,
+        devd: { enabled: false },
+        webSerial: { enabled: false },
+      })
+    )
+
+    expect(markup).toContain('源能力上限 105W')
+    expect(markup).toContain('20V requested')
+    expect(markup).toContain('合同')
+  })
+
   it('treats firmware maintenance as an independent workspace without device navigation', () => {
     const markup = renderToStaticMarkup(
       createElement(ControlPlaneDemo, {

@@ -14,6 +14,8 @@ Source of truth for this implementation scope:
 
 All transports expose the same domain model. Field names use `camelCase` on HTTP/JSON.
 
+The product USB JSONL contract is `flux-purr.usb.v2`. The version bump records the incompatible compact thermal-status change from the legacy `cp` key to the optional `scp` source-capability-power key; hosts must validate the identity API/protocol versions before decoding compact status frames.
+
 ### `Identity`
 
 Product firmware includes optional `resetReason`, the hardware-recorded cause of the current boot (for example `chip_power_on`, `core_software`, `core_mwdt0`, `system_brownout`, or `core_usb_jtag`). It remains readable for the lifetime of that boot independently of early boot log capture. Older firmware and mocks may omit it; unavailable hardware reasons are `unknown`, not inferred from connection or PD state.
@@ -25,8 +27,8 @@ Product firmware includes optional `resetReason`, the hardware-recorded cause of
   "buildId": "s3-7f31c9",
   "gitSha": "8b8b17c",
   "board": "esp32-s3",
-  "apiVersion": "2026-05-23",
-  "protocolVersion": "flux-purr.usb.v1",
+  "apiVersion": "2026-11-09",
+  "protocolVersion": "flux-purr.usb.v2",
   "hostname": "flux-purr-s3-001",
   "capabilities": ["identity", "status", "network", "wifi_config", "monitor", "firmware_check", "calibration"]
 }
@@ -101,7 +103,7 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
   "pdController": "fusb302b",
   "pdContractKind": "pps",
   "pdContractCurrentMa": 3000,
-  "pdContractPowerMw": 60000,
+  "pdSourceCapabilityPowerMw": 105000,
   "pdPerformanceGuaranteed": true,
   "pdDegradedReason": null,
   "manualPpsEnabled": false,
@@ -120,7 +122,7 @@ During firmware boot, before EEPROM restoration and WiFi task startup complete, 
 `pdState`: `negotiating | ready | fallback_5v | fault`.
 `fanDisplayState`: `OFF | AUTO | RUN | SAFE`. `postHeatCoolingMode` is `off | normal | fast` and `heatingFanGuardMode` is `off | low | medium | high`. `fanPolicySource` is `idle | post_heat | heating_guard | safety`; `fanOutputLevel` is the abstract `off | low | medium | high | limited` board output level. These fields never expose voltage, PWM, or fan tach data. `activeCoolingEnabled` remains a derived compatibility projection of `postHeatCoolingMode`.
 `presetsC` has exactly 10 entries; a numeric entry is an enabled preset temperature in Celsius, and `null` means the slot is disabled (`---` on the front panel).
-`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. The measured voltage does not determine Fixed/PPS contract validity; a PPS source may deliver a lower voltage during normal current limiting without canceling that contract. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. New `pdContractCurrentMa` and `pdContractPowerMw` are contractual upper-bound fields; neither is a physical current measurement or hardware over-current guarantee. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot establish the performance guarantee. Protected calibration requires an advertised APDO covering `20V / >=3A`; it first confirms an unloaded high-voltage 3A contract, then uses the product rapid path to record confirmed full-conduction 3A voltage observations with 500mV coarse movement away from a loaded boundary and 100mV final-bracket steps after a 500ms electrical observation interval, followed by heating to 220°C and passive cooling to 80°C, fitting, and verified persistence within eleven minutes. FUSB302BMPX applies the `5V..28V` PD guard before selecting its live APDO (currently `5V..21V`) and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
+`voltageMv` is the calibrated measured VIN input voltage. `pdContractMv` is the accepted PD contract voltage. The measured voltage does not determine Fixed/PPS contract validity; a PPS source may deliver a lower voltage during normal current limiting without canceling that contract. `currentMa` retains its legacy controller telemetry/capability meaning and is not a verified live VBUS-load measurement. `pdContractCurrentMa` is the negotiated current limit. `pdSourceCapabilityPowerMw` is the maximum power of one currently observed source PDO/APDO, calculated from that object's advertised maximum voltage and current. It is omitted when the controller has no usable source-capability evidence; it never combines endpoints from different objects, uses the requested operating voltage, or claims measured VBUS load power. `pdController` is `ch224q | fusb302b | unknown`; `pdContractKind` is `fixed | pps | none`. `pdPerformanceGuaranteed=true` requires a ready PPS contract of at least `20V` and `3A`. A lower-voltage PPS or fixed contract can operate in degraded mode, identified by `pdDegradedReason`, but cannot establish the performance guarantee. Protected calibration requires an advertised APDO covering `20V / >=3A`; it first confirms an unloaded high-voltage 3A contract, then uses the product rapid path to record confirmed full-conduction 3A voltage observations with 500mV coarse movement away from a loaded boundary and 100mV final-bracket steps after a 500ms electrical observation interval, followed by heating to 220°C and passive cooling to 80°C, fitting, and verified persistence within eleven minutes. FUSB302BMPX applies the `5V..28V` PD guard before selecting its live APDO (currently `5V..21V`) and exposes its capability fields; a failed identity, reset, detach, I2C fault, or absent `PS_RDY` reports `heaterLockReason=pd-contract-unavailable` and keeps heating off without blocking Dashboard or runtime status.
 Fixed standby selection and the explicit USB `flash_preparation` operations use protocol-confirmed contract and applied-output facts. They do not use `voltageMv`, `vinRawAdcMv`, ADC calibration, VIN freshness, or a VIN tolerance/dwell check. Source-side VBUS measurements used in HIL are independent evidence and do not add a host flash gate.
 `rtdRawAdcMv` and `vinRawAdcMv` retain their existing contract names but expose eFuse curve-calibrated millivolt readings before the project-level A/B calibration fit. They are not hardware ADC codes. `adcDiagnostics` is a read-only, optional diagnostic object so hosts remain compatible with older firmware. Its RTD mean/min/max/spread and VIN mean are 12-bit codes obtained through `AdcCalBasic` from the same conversions used for curve-calibrated mV; firmware always masks off upper SAR status bits before diagnostics and curve conversion. `calibrationSource=runtime_fallback` means required eFuse calibration data is missing; temperature-accuracy validation must stop, and firmware does not substitute the assumed 1100 mV gain reference. VBUS, VIN, ambient temperature, uptime, and an initial reading are never calibration references for this object.
 
@@ -235,7 +237,7 @@ renderer for the linked fan chart. See the
   "targetChip": "esp32s3",
   "profile": "release + web_serial",
   "features": ["web_serial"],
-  "protocol": "flux-purr.usb.v1",
+  "protocol": "flux-purr.usb.v2",
   "files": [
     {
       "kind": "elf",
@@ -641,7 +643,7 @@ Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
       "id": "firmware",
       "version": "0.22.1",
       "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
-      "protocolVersions": ["flux-purr.usb.v1"],
+      "protocolVersions": ["flux-purr.usb.v2"],
       "assets": [
         {
           "name": "flux-purr-firmware-v0.2.0.tar.gz",
@@ -678,7 +680,7 @@ Each frame is UTF-8 JSON followed by `\n`.
 ```json
 {
   "type": "hello",
-  "protocolVersion": "flux-purr.usb.v1",
+  "protocolVersion": "flux-purr.usb.v2",
   "framing": "jsonl",
   "identity": { "deviceId": "flux-purr-s3-001" },
   "capabilities": ["identity", "status", "network", "wifi_config", "monitor"]

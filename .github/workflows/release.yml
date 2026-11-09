@@ -28,6 +28,7 @@ permissions:
 jobs:
   release:
     name: Release Product
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -72,6 +73,7 @@ jobs:
           else
             git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"
           fi
+          echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"
           test "${OPERATION}" = publish || test "${OPERATION}" = recover
           preparation_json="$(python3 .github/scripts/release_chain.py verify-merged-prepared --commit "${MAIN_INPUT}")"
           prepared="$(printf '%s' "${preparation_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prepared"])')"
@@ -175,7 +177,7 @@ jobs:
           tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
           cp build-info.json VERSION release-assets/
           web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; version=os.environ["PRODUCT_VERSION"]; print(json.dumps({"id":"web","version":version,"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+version+".tar.gz","flux-purr-web-demo-v"+version+".tar.gz"]}))')"
-          firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v1"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
+          firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v2"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           host_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.devd-local-cbor.v1","flux-purr.devd-http.v1"],"assets":["flux-purr-host-tools-linux-x64-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           manifest="release-assets/flux-purr-release-manifest-${PRODUCT_TAG}.json"
           python3 .github/scripts/product_release_manifest.py \
@@ -248,6 +250,18 @@ jobs:
           if not any(name.startswith("flux-purr-release-manifest-") for name in required): raise SystemExit("missing release manifest")
           PY
 
+      - name: Prepare EdgeOne deployment helper
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          CONTROLLER_SHA: ${{ steps.release.outputs.controller_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_path="${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh"
+          git show "${CONTROLLER_SHA}:.github/scripts/deploy-edgeone.sh" > "${helper_path}"
+          chmod 700 "${helper_path}"
+          test -x "${helper_path}"
+
       - name: Deploy published Web archive to EdgeOne
         if: steps.release.outputs.enabled == 'true'
         env:
@@ -268,7 +282,7 @@ jobs:
           rm -rf web-dist
           mkdir web-dist
           tar -xzf "${archive}" -C web-dist
-          bunx edgeone@1.6.18 makers deploy web-dist -n "${EDGEONE_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
+          bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-dist "${EDGEONE_PROJECT_NAME}" web-production
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber
 
@@ -292,6 +306,6 @@ jobs:
           rm -rf web-demo-dist
           mkdir web-demo-dist
           tar -xzf "${archive}" -C web-demo-dist
-          bunx edgeone@1.6.18 makers deploy web-demo-dist -n "${EDGEONE_DEMO_PROJECT_NAME}" -e production -t "${EDGEONE_API_TOKEN}"
+          bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production
           printf '%s\n' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed
           gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber

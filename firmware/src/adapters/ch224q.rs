@@ -166,6 +166,9 @@ pub struct AdjustablePowerCapabilities {
     pub pps_max_mv: Option<u16>,
     pub pps_max_ma: Option<u16>,
     pub pps_apdos: [Option<PpsApdo>; MAX_PPS_APDOS],
+    /// Maximum power advertised by one source PDO or APDO. This is source
+    /// capability metadata, not the persisted thermal source boundary below.
+    pub source_capability_power_mw: Option<u32>,
     /// Conservative source power envelope inferred from a high-voltage
     /// Fixed PDO when the controller exposes the complete PD source list.
     /// This is kept separate from APDO identity so exact PPS matching is
@@ -181,20 +184,24 @@ impl AdjustablePowerCapabilities {
         let mut capabilities = Self::default();
         let mut parsed_source_cap = false;
 
-        if let Some((pdo_offset, pdo_count)) = source_cap_pdo_window(bytes) {
-            parsed_source_cap = true;
-            for pdo_index in 0..pdo_count {
-                let offset = pdo_offset + pdo_index * 4;
-                Self::merge_power_data_object(
-                    &mut capabilities,
-                    u32::from_le_bytes([
-                        bytes[offset],
-                        bytes[offset + 1],
-                        bytes[offset + 2],
-                        bytes[offset + 3],
-                    ]),
-                );
+        match source_cap_pdo_window(bytes) {
+            Ok(Some((pdo_offset, pdo_count))) => {
+                parsed_source_cap = true;
+                for pdo_index in 0..pdo_count {
+                    let offset = pdo_offset + pdo_index * 4;
+                    Self::merge_power_data_object(
+                        &mut capabilities,
+                        u32::from_le_bytes([
+                            bytes[offset],
+                            bytes[offset + 1],
+                            bytes[offset + 2],
+                            bytes[offset + 3],
+                        ]),
+                    );
+                }
             }
+            Ok(None) => {}
+            Err(()) => return capabilities,
         }
 
         if !parsed_source_cap {
@@ -210,7 +217,18 @@ impl AdjustablePowerCapabilities {
     }
 
     fn merge_power_data_object(capabilities: &mut Self, raw: u32) {
-        if raw == 0 || pd_object_type(raw) != 0b11 {
+        if raw == 0 {
+            return;
+        }
+
+        if pd_object_type(raw) == 0 {
+            let voltage_mv = (((raw >> 10) & 0x3ff) as u16) * 50;
+            let max_ma = ((raw & 0x3ff) as u16) * 10;
+            record_source_capability_power(capabilities, voltage_mv, max_ma);
+            return;
+        }
+
+        if pd_object_type(raw) != 0b11 {
             return;
         }
 
@@ -228,6 +246,7 @@ impl AdjustablePowerCapabilities {
                     max_mv,
                     max_ma,
                 };
+                record_source_capability_power(capabilities, max_mv, max_ma);
                 capabilities.push_pps_apdo(pps_apdo);
                 capabilities.pps_covers_20v |= min_mv <= PPS_GATE_MV && max_mv >= PPS_GATE_MV;
                 if pps_candidate_is_better(
@@ -273,6 +292,25 @@ impl AdjustablePowerCapabilities {
     }
 }
 
+fn record_source_capability_power(
+    capabilities: &mut AdjustablePowerCapabilities,
+    voltage_mv: u16,
+    max_ma: u16,
+) {
+    if voltage_mv == 0 || max_ma == 0 {
+        return;
+    }
+    let power_mw = (u32::from(voltage_mv) * u32::from(max_ma)) / 1_000;
+    if power_mw == 0 {
+        return;
+    }
+    capabilities.source_capability_power_mw = Some(
+        capabilities
+            .source_capability_power_mw
+            .map_or(power_mw, |previous| previous.max(power_mw)),
+    );
+}
+
 const fn pps_candidate_is_better(
     previous_min_mv: Option<u16>,
     previous_max_mv: Option<u16>,
@@ -303,19 +341,25 @@ const fn pps_candidate_is_better(
     false
 }
 
-fn source_cap_pdo_window(bytes: &[u8]) -> Option<(usize, usize)> {
+fn source_cap_pdo_window(bytes: &[u8]) -> Result<Option<(usize, usize)>, ()> {
     if bytes.len() < 2 {
-        return None;
+        return Ok(None);
     }
 
     let header = u16::from_le_bytes([bytes[0], bytes[1]]);
+    if !source_cap_is_source_capabilities(header) {
+        return Ok(None);
+    }
     let pdo_count = source_cap_pdo_count(header);
     let pdo_offset = if source_cap_is_extended(header) { 4 } else { 2 };
-    if pdo_count == 0 || bytes.len() < pdo_offset + pdo_count * 4 {
-        return None;
+    if pdo_count == 0 {
+        return Ok(None);
+    }
+    if bytes.len() < pdo_offset + pdo_count * 4 {
+        return Err(());
     }
 
-    Some((pdo_offset, pdo_count))
+    Ok(Some((pdo_offset, pdo_count)))
 }
 
 const fn source_cap_pdo_count(header: u16) -> usize {
@@ -324,6 +368,10 @@ const fn source_cap_pdo_count(header: u16) -> usize {
 
 const fn source_cap_is_extended(header: u16) -> bool {
     (header & (1 << 15)) != 0
+}
+
+const fn source_cap_is_source_capabilities(header: u16) -> bool {
+    (header & 0x1f) == 1
 }
 
 const fn pd_object_type(raw: u32) -> u32 {
@@ -438,6 +486,7 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(3_300));
         assert_eq!(capabilities.pps_max_mv, Some(21_000));
         assert_eq!(capabilities.pps_max_ma, Some(3_000));
+        assert_eq!(capabilities.source_capability_power_mw, Some(63_000));
         assert_eq!(
             capabilities.pps_apdos[0],
             Some(PpsApdo {
@@ -482,6 +531,7 @@ mod tests {
         assert_eq!(capabilities.pps_min_mv, Some(5_000));
         assert_eq!(capabilities.pps_max_mv, Some(20_000));
         assert_eq!(capabilities.pps_max_ma, Some(5_000));
+        assert_eq!(capabilities.source_capability_power_mw, Some(100_000));
     }
 
     #[test]
@@ -497,6 +547,23 @@ mod tests {
         let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes);
 
         assert!(!capabilities.pps_covers_20v);
+        assert_eq!(capabilities.pps_min_mv, None);
+        assert_eq!(capabilities.pps_max_mv, None);
+        assert_eq!(capabilities.pps_max_ma, None);
+    }
+
+    #[test]
+    fn rejects_truncated_source_cap_header_without_raw_pdo_fallback() {
+        let header = (1_u16 << 12) | 1;
+        let mut bytes = [0_u8; 6];
+        bytes[0..2].copy_from_slice(&header.to_le_bytes());
+        bytes[2..6].copy_from_slice(&[0x00, 0x00, 0x00, 0x10]);
+        bytes[4] = 0x2c;
+        bytes[5] = 0x01;
+
+        let capabilities = AdjustablePowerCapabilities::from_pd_power_data(&bytes[..5]);
+
+        assert_eq!(capabilities.source_capability_power_mw, None);
         assert_eq!(capabilities.pps_min_mv, None);
         assert_eq!(capabilities.pps_max_mv, None);
         assert_eq!(capabilities.pps_max_ma, None);
@@ -525,6 +592,16 @@ mod tests {
         assert_eq!(capabilities.pps_max_mv, None);
         assert_eq!(capabilities.avs_min_mv, None);
         assert_eq!(capabilities.avs_max_mv, None);
+        assert_eq!(capabilities.source_capability_power_mw, Some(30_000));
+    }
+
+    #[test]
+    fn ignores_sub_milliwatt_source_capability() {
+        let fixed_50mv_10ma = (1_u32 << 10) | 1_u32;
+        let capabilities =
+            AdjustablePowerCapabilities::from_pd_power_data(&fixed_50mv_10ma.to_le_bytes());
+
+        assert_eq!(capabilities.source_capability_power_mw, None);
     }
 
     #[test]

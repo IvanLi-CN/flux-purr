@@ -250,7 +250,7 @@ const mockProbe: LanProbe = {
     gitSha: 'demo',
     board: 'esp32s3_frontpanel',
     apiVersion: 'v1',
-    protocolVersion: 'flux-purr.usb.v1',
+    protocolVersion: 'flux-purr.usb.v2',
     hostname: 'flux-purr-001122334455',
     capabilities: ['status', 'runtime', 'lan_http'],
   },

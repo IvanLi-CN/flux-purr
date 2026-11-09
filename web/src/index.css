@@ -8816,7 +8816,7 @@
     }
 
     .industrial-signal-stack {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.45rem;
     }
 
@@ -8826,6 +8826,17 @@
 
     .industrial-signal-stack .industrial-status-card span {
       display: none;
+    }
+
+    .industrial-signal-stack .industrial-status-card--pd {
+      grid-column: 1 / -1;
+    }
+
+    .industrial-signal-stack .industrial-status-card--pd span {
+      display: block;
+      font-size: 0.72rem;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
     }
 
     .industrial-secondary-actions {

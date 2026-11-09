@@ -44,7 +44,7 @@ export interface DeviceTarget {
   pdController?: 'ch224q' | 'fusb302b' | 'unknown' | null
   pdContractKind?: 'fixed' | 'pps' | 'none' | null
   pdContractCurrentMa?: number | null
-  pdContractPowerMw?: number | null
+  pdSourceCapabilityPowerMw?: number | null
   pdPerformanceGuaranteed?: boolean | null
   pdDegradedReason?: string | null
   manualPpsEnabled?: boolean

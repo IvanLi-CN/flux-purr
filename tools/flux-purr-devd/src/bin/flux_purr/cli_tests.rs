@@ -4772,7 +4772,7 @@ fn parses_single_artifact_manifest() {
         target_chip: "esp32s3".to_string(),
         profile: "release".to_string(),
         features: vec!["web_serial".to_string()],
-        protocol: "flux-purr.usb.v1".to_string(),
+        protocol: "flux-purr.usb.v2".to_string(),
         files: Vec::new(),
     };
     let dir = tempfile::tempdir().unwrap();

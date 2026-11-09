@@ -9,13 +9,7 @@ the powered device.
 
 ## Fixture and record
 
-Record the board revision, PPS source model, cable rating, firmware ELF
-SHA-256, CLI/devd Git SHA, test time, exact authorized USB port, status samples,
-and observed front-panel/source behavior. Keep the port and raw logs in the
-private test receipt, not in this procedure. `voltageMv` is the board's VIN
-reading and provides the physical-voltage check; an external VBUS meter may
-supplement it. `pdContractCurrentMa` and `pdContractPowerMw` are negotiated
-limits, not measured load current or power.
+Record the board revision, PPS source model, cable rating, firmware ELF SHA-256, CLI/devd Git SHA, test time, exact authorized USB port, status samples, and observed front-panel/source behavior. Keep the port and raw logs in the private test receipt, not in this procedure. `voltageMv` is the board's VIN reading and provides the physical-voltage check; an external VBUS meter may supplement it. `pdContractCurrentMa` is the negotiated current limit, and `pdSourceCapabilityPowerMw` is the maximum power advertised by one currently observed source PDO/APDO. Neither field is measured load current or power, and the capability field must not use the requested operating voltage.
 
 The fixture needs a PPS APDO covering 15 V, 17.3 V, and 20 V at 3 A, and 20 V
 at 5 A for the 100 W contract step. A missing capability makes that step **not
@@ -88,7 +82,7 @@ target/debug/flux-purr identity --devd "$SOCKET" --device "$DEVICE" --json \
 target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
   | jq '{uptimeSeconds, pdController, pdState, pdRequestMv,
          pdContractKind, pdContractMv,
-         pdContractCurrentMa, pdContractPowerMw, ppsCapabilityMinMv,
+         pdContractCurrentMa, pdSourceCapabilityPowerMw, ppsCapabilityMinMv,
          ppsCapabilityMaxMv, ppsCapabilityMaxMa, voltageMv,
          manualPpsEnabled, heaterEnabled, heaterPhysicalOutputPercent}'
 ```
@@ -101,8 +95,7 @@ not clear an owner-held setting just to manufacture an idle baseline.
 Confirm the front panel remains usable and the source does not cycle its output.
 Record a second status after at least 10 seconds: uptime must increase without
 a restart and the contract and VIN must remain stable. Save the confirmed idle
-contract kind, voltage, current, contractual power, source capability summary, and VIN for the
-later restoration comparison.
+contract kind, voltage, current, source capability summary, and VIN for the later restoration comparison.
 
 ## Manual PPS and restoration
 
@@ -115,15 +108,15 @@ and VIN; it is not the acceptance sample.
 | -------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | 15 V / 3 A           | `target/debug/flux-purr pd pps set --devd "$SOCKET" --device "$DEVICE" --volts 15.0 --amps 3.00 --json` | `pdContractMv=15000`, `pdContractCurrentMa=3000`, `manualPpsMv=15000`, `manualPpsMa=3000`                    |
 | Adjustable PPS / 3 A | Same command with `--volts 17.3 --amps 3.00`                                                            | `pdContractKind=pps`, `pdContractMv=17300`, `pdContractCurrentMa=3000`, VIN near 17.3 V                      |
-| 20 V / 3 A           | Same command with `--volts 20.0 --amps 3.00`                                                            | `pdContractMv=20000`, `pdContractCurrentMa=3000`, `pdContractPowerMw=60000`                                  |
-| 20 V / 5 A           | Same command with `--volts 20.0 --amps 5.00`                                                            | `pdContractMv=20000`, `pdContractCurrentMa=5000`, `pdContractPowerMw=100000`, `pdPerformanceGuaranteed=true` |
+| 20 V / 3 A           | Same command with `--volts 20.0 --amps 3.00`                                                            | `pdContractMv=20000`, `pdContractCurrentMa=3000`; with a 21 V / 3 A source APDO, `pdSourceCapabilityPowerMw=63000`, not 60000 |
+| 20 V / 5 A           | Same command with `--volts 20.0 --amps 5.00`                                                            | `pdContractMv=20000`, `pdContractCurrentMa=5000`; with a 21 V / 5 A source APDO, `pdSourceCapabilityPowerMw=105000`, `pdPerformanceGuaranteed=true` |
 
 Use this status projection for the settled and hold samples:
 
 ```sh
 target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
   | jq '{uptimeSeconds, pdState, pdContractKind, pdContractMv,
-         pdContractCurrentMa, pdContractPowerMw, pdPerformanceGuaranteed,
+         pdContractCurrentMa, pdSourceCapabilityPowerMw, pdPerformanceGuaranteed,
          manualPpsEnabled, manualPpsMv, manualPpsMa, voltageMv,
          heaterEnabled, heaterPhysicalOutputPercent}'
 ```
@@ -146,7 +139,7 @@ Normally release the override and confirm automatic idle within 10 seconds:
   IDLE_KIND='<recorded-automatic-idle-contract-kind>'
   IDLE_MV='<recorded-automatic-idle-contract-mv>'
   IDLE_MA='<recorded-automatic-idle-contract-ma>'
-  IDLE_POWER_MW='<recorded-automatic-idle-contract-power-mw>'
+  IDLE_SOURCE_CAPABILITY_POWER_MW='<recorded-automatic-idle-source-capability-power-mw>'
   deadline=$(( $(date +%s) + 10 ))
   target/debug/flux-purr pd pps clear --devd "$SOCKET" --device "$DEVICE" --json
   restored=false
@@ -154,14 +147,14 @@ Normally release the override and confirm automatic idle within 10 seconds:
     sample="$(target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json)"
     sampled_at="$(date +%s)"
     printf '%s\n' "$sample" | jq -c '{uptimeSeconds, pdState, pdContractKind,
-      pdContractMv, pdContractCurrentMa, pdContractPowerMw,
+      pdContractMv, pdContractCurrentMa, pdSourceCapabilityPowerMw,
       manualPpsEnabled, voltageMv, heaterEnabled, heaterPhysicalOutputPercent}'
     if printf '%s\n' "$sample" | jq -e --arg kind "$IDLE_KIND" \
       --argjson mv "$IDLE_MV" --argjson ma "$IDLE_MA" \
-      --argjson power "$IDLE_POWER_MW" \
+      --argjson power "$IDLE_SOURCE_CAPABILITY_POWER_MW" \
       'select(.manualPpsEnabled == false and .pdState == "ready"
         and .pdContractKind == $kind and .pdContractMv == $mv
-        and .pdContractCurrentMa == $ma and .pdContractPowerMw == $power
+        and .pdContractCurrentMa == $ma and .pdSourceCapabilityPowerMw == $power
         and .heaterEnabled == false and .heaterPhysicalOutputPercent == 0)' \
       >/dev/null && [ "$sampled_at" -le "$deadline" ]; then
       restored=true
@@ -196,16 +189,20 @@ point, including its current limit:
   set -euo pipefail
   REQUEST_MV='<selected-contract-mv>'
   REQUEST_MA='<selected-contract-ma>'
+  SOURCE_CAPABILITY_MW='<source-capability-power-mw>'
   for sample in $(seq 1 60); do
     target/debug/flux-purr status --devd "$SOCKET" --device "$DEVICE" --json \
       | jq -ec --argjson mv "$REQUEST_MV" --argjson ma "$REQUEST_MA" \
+          --argjson source_cap_mw "$SOURCE_CAPABILITY_MW" \
           'select(.pdState == "ready" and .pdContractKind == "pps"
             and .pdContractMv == $mv and .pdContractCurrentMa == $ma
-            and .pdContractPowerMw == ($mv * $ma / 1000)
+            and .pdSourceCapabilityPowerMw != null
+            and .pdSourceCapabilityPowerMw == $source_cap_mw
+            and .pdSourceCapabilityPowerMw >= ($mv * $ma / 1000)
             and ($mv != 20000 or $ma != 5000 or .pdPerformanceGuaranteed == true)
             and .heaterPhysicalOutputPercent == 0)
           | {uptimeSeconds, pdState, pdContractKind, pdContractMv,
-             pdContractCurrentMa, pdContractPowerMw, pdPerformanceGuaranteed,
+             pdContractCurrentMa, pdSourceCapabilityPowerMw, pdPerformanceGuaranteed,
              voltageMv, heaterPhysicalOutputPercent}'
     target/debug/flux-purr runtime get --devd "$SOCKET" --device "$DEVICE" --json \
       | jq -ec '{targetTempC, heaterEnabled}'
@@ -216,7 +213,7 @@ point, including its current limit:
 
 All reads must succeed. The front panel and source output must remain stable;
 status must retain a ready PPS contract at the selected voltage, VIN near the
-request, the selected contractual current/power and performance tier,
+request, the selected contractual current and source capability upper bound,
 increasing uptime, and zero physical heater output. This tests the
 user-visible effect of scheduling under ordinary control-plane work.
 
