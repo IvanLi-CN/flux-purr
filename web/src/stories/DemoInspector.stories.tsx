@@ -100,11 +100,11 @@ export const InteractionSmoke: Story = {
     const canvas = within(canvasElement)
     const body = within(canvasElement.ownerDocument.body)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
-    await userEvent.click(await canvas.findByRole('combobox', { name: 'Scenario preset' }))
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current scene' }))
     await userEvent.click(await body.findByRole('option', { name: 'Overview · Offline device' }))
-    await expect(
-      await canvas.findByRole('combobox', { name: 'Scenario preset' })
-    ).toHaveTextContent('Overview · Offline device')
+    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
+      'Overview · Offline device'
+    )
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).toBeChecked()
@@ -112,16 +112,16 @@ export const InteractionSmoke: Story = {
     await expect(
       await canvas.findByRole('checkbox', { name: 'Simulate network timeout' })
     ).not.toBeChecked()
-    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current device fixture' }))
+    await userEvent.click(await canvas.findByRole('combobox', { name: 'Current target' }))
     await expect(
       await body.findByRole('option', { name: /USB Config Fixture.*WiFi 可配置/ })
     ).toHaveAttribute('data-value', 'fp-wifi-usb-04')
     await userEvent.keyboard('{Escape}')
-    const permissionHelp = await canvas.findByRole('button', { name: '查看当前用户角色权限' })
+    const permissionHelp = await canvas.findByRole('button', { name: '查看当前 Persona 权限' })
     await userEvent.click(permissionHelp)
-    await expect(await canvas.findByRole('note', { name: 'Role permissions' })).toBeVisible()
+    await expect(await canvas.findByRole('note', { name: 'Persona permissions' })).toBeVisible()
     await userEvent.keyboard('{Escape}')
-    await expect(canvas.queryByRole('note', { name: 'Role permissions' })).toBeNull()
+    await expect(canvas.queryByRole('note', { name: 'Persona permissions' })).toBeNull()
     await userEvent.click(await canvas.findByRole('button', { name: '查看 Demo Inspector 说明' }))
     await expect(await canvas.findByRole('note', { name: 'Demo scope' })).toBeVisible()
   },
@@ -193,8 +193,8 @@ export const ResetState: Story = {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
     await userEvent.click(await canvas.findByRole('button', { name: 'Reset current case' }))
-    await expect(
-      await canvas.findByRole('combobox', { name: 'Scenario preset' })
-    ).toHaveTextContent('Overview · Base')
+    await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
+      'Normal'
+    )
   },
 }

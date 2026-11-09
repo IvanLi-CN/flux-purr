@@ -137,24 +137,25 @@ const presetCatalog: Array<{
   scene: DemoSceneId
   label: string
 }> = [
-  { id: 'overview-base', module: 'overview', scene: 'normal', label: 'Overview · Base' },
-  { id: 'settings-base', module: 'settings', scene: 'normal', label: 'Settings · Base' },
-  { id: 'calibration-base', module: 'calibration', scene: 'normal', label: 'Calibration · Base' },
-  { id: 'update-base', module: 'update', scene: 'normal', label: 'Update · Base' },
+  { id: 'normal', module: 'overview', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'settings', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'calibration', scene: 'normal', label: 'Normal' },
+  { id: 'normal', module: 'update', scene: 'normal', label: 'Normal' },
+  { id: 'degraded', module: 'overview', scene: 'degraded', label: 'Degraded handoff' },
   {
-    id: 'settings-degraded',
+    id: 'degraded',
     module: 'settings',
     scene: 'degraded',
     label: 'Settings · Degraded handoff',
   },
   {
-    id: 'overview-offline',
+    id: 'offline',
     module: 'overview',
     scene: 'offline',
     label: 'Overview · Offline device',
   },
   {
-    id: 'update-blocked-artifact',
+    id: 'blocked-artifact',
     module: 'update',
     scene: 'blocked-artifact',
     label: 'Update · Artifact blocked',
@@ -438,7 +439,7 @@ function DemoInspectorContent({
       <p className="demo-inspector__scope-hint">Loads a starting point for the mock parameters.</p>
       <DemoInspectorSelect
         label="Preset"
-        ariaLabel="Scenario preset"
+        ariaLabel="Current scene"
         value={currentPreset?.id ?? ''}
         onValueChange={(value) => {
           const nextPreset = availablePresets.find((preset) => preset.id === value)
@@ -464,12 +465,12 @@ function DemoInspectorContent({
       </p>
       <DemoInspectorSelect
         label="User role"
-        ariaLabel="User role"
+        ariaLabel="Persona"
         labelHelp={
           <DemoInspectorHelp
             className="demo-inspector__help--permission"
-            label="查看当前用户角色权限"
-            title="Role permissions"
+            label="查看当前 Persona 权限"
+            title="Persona permissions"
           >
             {persona.permissions}. {persona.description}
           </DemoInspectorHelp>
@@ -486,7 +487,7 @@ function DemoInspectorContent({
       </div>
       <DemoInspectorSelect
         label="Device fixture"
-        ariaLabel="Current device fixture"
+        ariaLabel="Current target"
         value={selectedDeviceId}
         onValueChange={onSelectDevice}
         options={devices.map((device) => ({

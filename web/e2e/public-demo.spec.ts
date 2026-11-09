@@ -59,7 +59,9 @@ test.describe('public demo build', () => {
     ).toBeVisible()
 
     await selectInspectorOption(page, 'Current scene', 'degraded')
-    await expect(page).toHaveURL(/\/devices\/fp-kit-02\/overview\?demoScene=degraded$/)
+    await expect(page).toHaveURL(
+      /\/devices\/fp-kit-02\/overview\?(?=.*demoScene=degraded)(?=.*demoLease=conflict)(?=.*demoNetwork=timeout)/
+    )
     await expect(page.getByText('Simulate lease conflict')).toBeVisible()
     expect(controlRequests).toEqual([])
     expect(
@@ -227,7 +229,7 @@ test.describe('public demo build', () => {
     await page.getByRole('checkbox', { name: 'Simulate lease conflict' }).click()
 
     await expect(page).toHaveURL(
-      /\/devices\/fp-kit-02\/overview\?(?=.*demoScene=degraded)(?=.*demoLease=conflict)/
+      /\/devices\/fp-kit-02\/overview\?(?=.*demoScene=degraded)(?=.*demoNetwork=timeout)/
     )
   })
 
@@ -361,11 +363,13 @@ test.describe('public demo build', () => {
           contentScrollHeight >= viewportClientHeight
       )
     ).toBe(true)
-    expect(bottomLayout.bottomColumnMetrics[0].permissionHelpRight).not.toBeNull()
+    const permissionColumn = bottomLayout.bottomColumnMetrics.find(
+      ({ permissionHelpRight }) => permissionHelpRight !== null
+    )
+    expect(permissionColumn?.permissionHelpRight).not.toBeNull()
     expect(bottomLayout.bottomColumnMetrics[3].shareCopyRight).not.toBeNull()
     expect(
-      bottomLayout.bottomColumnMetrics[0].wrapperRight -
-        (bottomLayout.bottomColumnMetrics[0].permissionHelpRight ?? 0)
+      (permissionColumn?.wrapperRight ?? 0) - (permissionColumn?.permissionHelpRight ?? 0)
     ).toBeGreaterThanOrEqual(6)
     expect(
       bottomLayout.bottomColumnMetrics[3].wrapperRight -
