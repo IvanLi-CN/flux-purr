@@ -8,6 +8,7 @@
 - [Bounded Power Commands With Terminal Tickets](../../adr/0013-bounded-power-commands-with-terminal-tickets.md)
 - [No Contract Replay After PD Failure](../../adr/0014-no-contract-replay-after-pd-failure.md)
 - [Flash Preparation And Fixed Idle Power](../../adr/0016-flash-preparation-and-fixed-idle-power.md)
+- [Full-Range Thermal Plant Calibration](../../adr/0022-full-range-thermal-plant-calibration.md)
 
 ## Context and Scope
 
@@ -87,7 +88,9 @@ Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fie
 - `pdController`: `fusb302b | unknown` (the legacy `ch224q` value remains decodable for transport compatibility only)
 - `pdContractKind`: `fixed | pps | none`
 - `pdContractCurrentMa`: negotiated upper current limit
-- `pdContractPowerMw`: negotiated upper power limit
+- `pdSourceCapabilityPowerMw`: maximum power advertised by one currently observed source PDO/APDO, calculated from that object's maximum voltage and current; omitted when source-capability evidence is unavailable
+- `pdSourceCapabilityPowerMw` and the FUSB contract observation are projected from one service snapshot; when that snapshot is unavailable, both values are omitted rather than combining a fresh capability with a cached contract. A cached CH224Q capability is valid only while its cached PD observation is active, and malformed source objects whose calculated power rounds to zero are ignored.
+- The product USB JSONL contract is `flux-purr.usb.v2`; its compact thermal-status source-capability field is the optional `scp` key. A host must reject an identity with a different API or USB protocol version before decoding compact status, so the removed legacy `cp` meaning cannot be silently misread.
 - `pdPerformanceGuaranteed`: performance-tier flag
 - `pdDegradedReason`: absent when guaranteed, otherwise a finite reason
 
@@ -150,3 +153,10 @@ methods below; measured loaded power requires a separate test claim.
 - Method: release build, netlist inspection, and separately authorized HIL.
 - covers: `REQ-FUSB-HARDWARE`
 - Pass condition: the release artifact builds against the public PHY boundary, hardware evidence preserves the FUSB302B topology, and any physical-source interoperability claim is backed by an authorized HIL receipt.
+
+## Visual Evidence
+
+Confirmed `ui_demo` mock-only page evidence for the source-capability power label and its responsive layout:
+
+- Desktop: [pd-source-capability-power-desktop.png](assets/pd-source-capability-power-desktop.png)
+- Mobile: [pd-source-capability-power-mobile.png](assets/pd-source-capability-power-mobile.png)

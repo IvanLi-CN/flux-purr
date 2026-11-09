@@ -14,8 +14,8 @@ const identity: Identity = {
   buildId: 'local-build',
   gitSha: '0123456789abcdef',
   board: 'esp32s3_frontpanel',
-  apiVersion: '2026-05-29',
-  protocolVersion: 'flux-purr.usb.v1',
+  apiVersion: '2026-11-09',
+  protocolVersion: 'flux-purr.usb.v2',
   capabilities: ['identity', 'network', 'status'],
 }
 

@@ -518,6 +518,7 @@ pub(crate) struct ManualPpsState {
     pub(crate) capability_max_mv: Option<u16>,
     pub(crate) capability_max_ma: Option<u16>,
     pub(crate) capability_apdos: [Option<ch224q::PpsApdo>; ch224q::MAX_PPS_APDOS],
+    pub(crate) source_capability_power_mw: Option<u32>,
     pub(crate) source_power_limit_mw: Option<u32>,
     pub(crate) source_power_limit_ma: Option<u16>,
     pub(crate) error: Option<ManualPpsError>,
@@ -545,6 +546,7 @@ impl Default for ManualPpsState {
             capability_max_mv: None,
             capability_max_ma: None,
             capability_apdos: [None; ch224q::MAX_PPS_APDOS],
+            source_capability_power_mw: None,
             source_power_limit_mw: None,
             source_power_limit_ma: None,
             error: None,
@@ -995,6 +997,9 @@ pub(crate) fn reconcile_pd_contract_intent_with_pending_automatic_pps(
         manual_pps_state.fail(ManualPpsError::PdNotReady);
         needs_redraw = true;
     }
+    if !current_pd_contract_ready {
+        manual_pps_state.invalidate_source_capability();
+    }
     needs_redraw
 }
 
@@ -1260,6 +1265,7 @@ impl ManualPpsState {
         let Some(capabilities) = capabilities else {
             return state;
         };
+        state.source_capability_power_mw = capabilities.source_capability_power_mw;
         let Some((min_mv, max_mv, max_ma)) = capabilities
             .pps_min_mv
             .zip(capabilities.pps_max_mv)
@@ -1920,6 +1926,18 @@ impl ManualPpsState {
         &mut self,
         capabilities: Option<ch224q::AdjustablePowerCapabilities>,
     ) {
+        if capabilities.is_none() {
+            let had_override = self.enabled
+                || self.target_mv.is_some()
+                || self.target_ma.is_some()
+                || self.applied_mv.is_some();
+            if had_override {
+                self.fail(ManualPpsError::PdNotReady);
+            } else {
+                self.invalidate_source_capability();
+            }
+            return;
+        }
         let previous = *self;
         let mut refreshed = Self::from_fusb302b_capabilities(capabilities);
         refreshed.pending_power_ticket = previous.pending_power_ticket;
@@ -1945,6 +1963,16 @@ impl ManualPpsState {
         self.error = None;
         self.automatic_restore_pending = false;
         self.automatic_restore_confirmed = false;
+    }
+
+    pub(crate) fn invalidate_source_capability(&mut self) {
+        self.capability_min_mv = None;
+        self.capability_max_mv = None;
+        self.capability_max_ma = None;
+        self.capability_apdos = [None; ch224q::MAX_PPS_APDOS];
+        self.source_capability_power_mw = None;
+        self.source_power_limit_mw = None;
+        self.source_power_limit_ma = None;
     }
 
     pub(crate) fn clear(&mut self) {
@@ -1973,6 +2001,9 @@ impl ManualPpsState {
         self.target_ma = None;
         self.applied_mv = None;
         self.error = Some(error);
+        if error == ManualPpsError::PdNotReady {
+            self.invalidate_source_capability();
+        }
         self.automatic_restore_pending = true;
         self.automatic_restore_confirmed = false;
     }

@@ -1,5 +1,5 @@
-export const CONTROL_PLANE_API_VERSION = '2026-05-29'
-export const USB_PROTOCOL_VERSION = 'flux-purr.usb.v1'
+export const CONTROL_PLANE_API_VERSION = '2026-11-09'
+export const USB_PROTOCOL_VERSION = 'flux-purr.usb.v2'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock'
 export type NetworkState =
@@ -82,7 +82,7 @@ export interface ControlPlaneStatus {
   pdController?: 'ch224q' | 'fusb302b' | 'unknown' | null
   pdContractKind?: 'fixed' | 'pps' | 'none' | null
   pdContractCurrentMa?: number | null
-  pdContractPowerMw?: number | null
+  pdSourceCapabilityPowerMw?: number | null
   pdPerformanceGuaranteed?: boolean | null
   pdDegradedReason?: string | null
   manualPpsEnabled?: boolean

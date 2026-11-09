@@ -346,7 +346,7 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
             },
             profile: profile.to_string(),
             features,
-            protocol: "flux-purr.usb.v1".to_string(),
+            protocol: "flux-purr.usb.v2".to_string(),
             files: vec![ArtifactFile {
                 kind: kind.to_string(),
                 path: path.to_string(),

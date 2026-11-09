@@ -1307,6 +1307,53 @@ fn fusb302b_capability_refresh_preserves_manual_pps_intent() {
 }
 
 #[test]
+fn losing_fusb302b_capabilities_clears_manual_intent_and_source_envelope() {
+    let capabilities = ch224q::AdjustablePowerCapabilities {
+        pps_min_mv: Some(5_500),
+        pps_max_mv: Some(21_000),
+        pps_max_ma: Some(5_000),
+        pps_apdos: [
+            Some(ch224q::PpsApdo {
+                min_mv: 5_500,
+                max_mv: 21_000,
+                max_ma: 5_000,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ],
+        source_capability_power_mw: Some(105_000),
+        source_power_limit_mw: Some(100_000),
+        source_power_limit_ma: Some(5_000),
+        ..Default::default()
+    };
+    let mut manual = ManualPpsState::from_fusb302b_capabilities(Some(capabilities));
+    manual
+        .enable(ManualPpsOwner::Debug, 17_500, Some(3_000))
+        .unwrap();
+    manual.applied_mv = Some(17_500);
+
+    manual.refresh_fusb302b_capabilities_preserving_intent(None);
+
+    assert!(!manual.enabled);
+    assert_eq!(manual.target_mv, None);
+    assert_eq!(manual.target_ma, None);
+    assert_eq!(manual.applied_mv, None);
+    assert_eq!(manual.error, Some(ManualPpsError::PdNotReady));
+    assert_eq!(manual.capability_min_mv, None);
+    assert_eq!(manual.capability_max_mv, None);
+    assert_eq!(manual.capability_max_ma, None);
+    assert!(manual.capability_apdos.iter().all(Option::is_none));
+    assert_eq!(manual.source_capability_power_mw, None);
+    assert_eq!(manual.source_power_limit_mw, None);
+    assert_eq!(manual.source_power_limit_ma, None);
+    assert!(manual.automatic_restore_pending);
+}
+
+#[test]
 fn automatic_heating_uses_a_current_ceiling_valid_across_the_pps_range() {
     let source = SourceCapabilities::from_pdos(&[
         pps_source_capability(5_000, 24_000, 3_000),
@@ -3029,6 +3076,7 @@ fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
         },
         heater_control_timing: HeaterControlTiming::default(),
         manual_pps: ManualPpsState::default(),
+        source_capability_power_mw: None,
         calibration: CalibrationRuntimeState::default(),
         fan_command: FanHardwareCommand::disabled(),
         fan_working_power_pending: false,
@@ -3633,7 +3681,7 @@ fn early_usb_control_answers_identity_before_runtime_ready() {
         } => {
             assert_eq!(request_id.as_str(), "boot-id");
             assert!(ok);
-            assert_eq!(identity.protocol_version.as_str(), "flux-purr.usb.v1");
+            assert_eq!(identity.protocol_version.as_str(), "flux-purr.usb.v2");
             assert_eq!(identity.device_id.as_str(), "a0f262f20d6c");
             assert_eq!(identity.hostname.as_str(), "flux-purr-a0f262f20d6c");
         }
@@ -4535,6 +4583,17 @@ fn runtime_status_reports_backend_request_when_manual_pps_is_disabled() {
 }
 
 #[test]
+fn manual_pps_state_retains_fixed_source_capability_without_pps() {
+    let state = ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+        source_capability_power_mw: Some(30_000),
+        ..Default::default()
+    }));
+
+    assert_eq!(state.capability_min_mv, None);
+    assert_eq!(state.source_capability_power_mw, Some(30_000));
+}
+
+#[test]
 fn manual_pps_config_validates_capability_and_updates_status_payload() {
     let mut request_id = heapless::String::new();
     request_id.push_str("manual-pps").unwrap();
@@ -5043,6 +5102,19 @@ fn manual_pps_failure_clears_requested_current() {
     assert_eq!(manual_pps.applied_mv, None);
     assert_eq!(manual_pps.error, Some(ManualPpsError::WriteFailed));
     assert!(manual_pps.consume_automatic_restore_pending());
+}
+
+#[test]
+fn manual_pps_pd_not_ready_clears_source_capability() {
+    let mut manual_pps =
+        ManualPpsState::from_capabilities(Some(ch224q::AdjustablePowerCapabilities {
+            source_capability_power_mw: Some(63_000),
+            ..Default::default()
+        }));
+
+    manual_pps.fail(ManualPpsError::PdNotReady);
+
+    assert_eq!(manual_pps.source_capability_power_mw, None);
 }
 
 #[test]
@@ -8094,7 +8166,7 @@ fn thermal_plant_waits_through_a_transient_missing_capability_snapshot() {
     // A FUSB302B source-capability refresh briefly publishes no APDO while
     // the source is still attached. The job must hold output off and resume
     // from its existing intent when the next snapshot arrives.
-    manual_pps.refresh_fusb302b_capabilities_preserving_intent(None);
+    manual_pps.hold_calibration_intent_for_capability_refresh();
     update_calibration_job_state_with_workspace(
         &mut calibration,
         &mut config,
@@ -17237,6 +17309,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
         UsbRuntimeStatusContext {
             pd_controller: ControllerKind::Fusb302b,
             last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(100_000),
             vin_mv: 20_000,
             ..test_usb_runtime_status_context()
         },
@@ -17245,7 +17318,7 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
     assert_eq!(status.pd_controller.as_str(), "fusb302b");
     assert_eq!(status.pd_contract_kind.as_str(), "fixed");
     assert_eq!(status.pd_contract_current_ma, 5_000);
-    assert_eq!(status.pd_contract_power_mw, 100_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(100_000));
     assert!(status.pd_performance_guaranteed);
     assert_eq!(status.pd_degraded_reason, None);
     assert!(!pd_contract_allows_calibration(
@@ -17273,6 +17346,145 @@ fn fusb302b_fixed_contract_status_is_explicit_and_blocks_calibration() {
     assert_eq!(
         effective_pd_contract_mv(&ManualPpsState::default(), Some(low_voltage), fallback),
         15_000
+    );
+}
+
+#[test]
+fn pd_status_reports_source_capability_without_using_requested_voltage() {
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+    let observation = PdStatusObservation {
+        status_raw: 1 << 3,
+        status: Status::from_register(1 << 3),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
+    };
+    let ui_state = FrontPanelUiState::new(FrontPanelRuntimeMode::App);
+    let status = usb_runtime_status(
+        &ui_state,
+        &MemoryConfig::default(),
+        UsbRuntimeStatusContext {
+            pd_controller: ControllerKind::Fusb302b,
+            last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(63_000),
+            vin_mv: 20_000,
+            ..test_usb_runtime_status_context()
+        },
+    );
+
+    assert_eq!(status.pd_contract_mv, 20_000);
+    assert_eq!(status.pd_contract_current_ma, 3_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(63_000));
+    assert_ne!(status.pd_source_capability_power_mw, Some(60_000));
+}
+
+#[test]
+fn pd_status_projection_uses_one_fusb_snapshot_for_contract_and_capability() {
+    let cached_contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+    let cached_observation = PdStatusObservation {
+        status_raw: 1 << 3,
+        status: Status::from_register(1 << 3),
+        current_raw: 0,
+        current_ma: cached_contract.current_ma,
+        contract_voltage_mv: Some(cached_contract.voltage_mv),
+        contract: cached_contract,
+    };
+    let snapshot_contract = Contract::observed(ContractKind::Pps, 21_000, 3_000);
+    let snapshot_observation = PdStatusObservation {
+        current_ma: snapshot_contract.current_ma,
+        contract_voltage_mv: Some(snapshot_contract.voltage_mv),
+        contract: snapshot_contract,
+        ..cached_observation
+    };
+    let mut source = SourceCapabilitiesView::default();
+    source.pps[0] = Some(PpsAdjustmentRange {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_current_ma: 3_000,
+    });
+    let snapshot = PdServiceSnapshot {
+        observation: Some(snapshot_observation),
+        source,
+        controller: ControllerKind::Fusb302b,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+
+    let (observation, source_power_mw) = pd_status_projection(
+        ControllerKind::Fusb302b,
+        Some(snapshot),
+        Some(cached_observation),
+        Some(105_000),
+    );
+
+    assert_eq!(observation, Some(snapshot_observation));
+    assert_eq!(source_power_mw, Some(63_000));
+}
+
+#[test]
+fn pd_status_projection_omits_fusb_state_without_a_settled_service_snapshot() {
+    let contract = Contract::observed(ContractKind::Pps, 21_000, 3_000);
+    let observation = PdStatusObservation {
+        status_raw: 1 << 3,
+        status: Status::from_register(1 << 3),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
+    };
+    let mut source = SourceCapabilitiesView::default();
+    source.pps[0] = Some(PpsAdjustmentRange {
+        min_mv: 5_000,
+        max_mv: 21_000,
+        max_current_ma: 3_000,
+    });
+    let base = PdServiceSnapshot {
+        observation: Some(observation),
+        source,
+        controller: ControllerKind::Fusb302b,
+        service_available: true,
+        ..PdServiceSnapshot::unavailable()
+    };
+
+    for snapshot in [
+        PdServiceSnapshot {
+            service_available: false,
+            ..base
+        },
+        PdServiceSnapshot {
+            transition_pending: true,
+            ..base
+        },
+        base.with_fresh_observation(PD_SNAPSHOT_MAX_AGE_MS + 1),
+    ] {
+        assert_eq!(
+            pd_status_projection(
+                ControllerKind::Fusb302b,
+                Some(snapshot),
+                Some(observation),
+                Some(105_000),
+            ),
+            (None, None)
+        );
+    }
+}
+
+#[test]
+fn pd_status_projection_omits_inactive_ch224q_cache() {
+    let contract = Contract::observed(ContractKind::Pps, 20_000, 3_000);
+    let inactive = PdStatusObservation {
+        status_raw: 0,
+        status: Status::from_register(0),
+        current_raw: 0,
+        current_ma: contract.current_ma,
+        contract_voltage_mv: Some(contract.voltage_mv),
+        contract,
+    };
+
+    assert_eq!(
+        pd_status_projection(ControllerKind::Ch224q, None, Some(inactive), Some(63_000),),
+        (None, None)
     );
 }
 
@@ -17329,13 +17541,14 @@ fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         UsbRuntimeStatusContext {
             pd_controller: ControllerKind::Fusb302b,
             last_pd_observation: Some(observation),
+            source_capability_power_mw: Some(105_000),
             vin_mv: 20_000,
             ..test_usb_runtime_status_context()
         },
     );
 
     assert_eq!(status.pd_contract_kind.as_str(), "pps");
-    assert_eq!(status.pd_contract_power_mw, 100_000);
+    assert_eq!(status.pd_source_capability_power_mw, Some(105_000));
     assert!(status.pd_performance_guaranteed);
     assert!(pd_contract_allows_calibration(
         ControllerKind::Fusb302b,
@@ -17597,7 +17810,7 @@ fn fusb302b_pending_contract_is_not_reported_as_ready() {
 
     assert_eq!(status.pd_contract_kind.as_str(), "none");
     assert_eq!(status.pd_contract_current_ma, 0);
-    assert_eq!(status.pd_contract_power_mw, 0);
+    assert_eq!(status.pd_source_capability_power_mw, None);
     assert!(!status.pd_performance_guaranteed);
     assert_eq!(
         status.pd_degraded_reason.as_deref(),

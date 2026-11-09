@@ -256,9 +256,21 @@ fn automatic_output_response_fault<PWM>(context: &mut HeaterPowerOutputContext<'
         if flux_purr_firmware::heater_supply::wifi_hardware_started().is_none() {
             return true;
         }
-        context
-            .manual_pps
-            .refresh_fusb302b_capabilities_preserving_intent(snapshot.capabilities);
+        match snapshot.capabilities {
+            Some(capabilities) => context
+                .manual_pps
+                .refresh_fusb302b_capabilities_preserving_intent(Some(capabilities)),
+            None if context.manual_pps.owner == ManualPpsOwner::Calibration
+                && fusb302b_capability_refresh_is_transient() =>
+            {
+                context
+                    .manual_pps
+                    .hold_calibration_intent_for_capability_refresh()
+            }
+            None => context
+                .manual_pps
+                .refresh_fusb302b_capabilities_preserving_intent(None),
+        }
     }
     let response_matches = context.pd_observation.is_none_or(|observed| {
         !automatic_response_sample_ready(context, observed.contract.voltage_mv)
@@ -2998,6 +3010,9 @@ pub(crate) struct UsbRuntimeStatusContext {
     pub(crate) heater_control_timing: HeaterControlTiming,
     pub(crate) heater_physical_output_percent: u8,
     pub(crate) manual_pps: ManualPpsState,
+    /// Maximum power advertised by one current source PDO/APDO. This is
+    /// distinct from the thermal source boundary used by heater control.
+    pub(crate) source_capability_power_mw: Option<u32>,
     #[cfg(test)]
     pub(crate) calibration: CalibrationRuntimeState,
     pub(crate) fan_command: FanHardwareCommand,

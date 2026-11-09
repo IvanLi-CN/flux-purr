@@ -562,7 +562,7 @@ export function createBootstrappingLiveDevdScenario(
       gitSha: 'unknown',
       board: 'esp32-s3',
       apiVersion: 'unknown',
-      protocolVersion: 'flux-purr.usb.v1',
+      protocolVersion: 'flux-purr.usb.v2',
       hostname: 'live-devd-bootstrapping',
       capabilities: ['identity', 'status', 'monitor'],
     },

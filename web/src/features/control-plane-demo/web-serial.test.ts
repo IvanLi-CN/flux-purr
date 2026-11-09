@@ -51,6 +51,19 @@ describe('web serial control-plane client', () => {
     await client.disconnect()
   })
 
+  it('rejects an incompatible direct Web Serial identity before probing status', async () => {
+    const fake = new FakeSerial('', (request) =>
+      responseFor(request, { ...identity, protocolVersion: 'flux-purr.usb.v1' })
+    )
+    const client = new WebSerialControlPlaneClient({ serial: fake })
+
+    await expect(client.connect()).rejects.toMatchObject({
+      code: 'web_serial_unknown_device',
+      retryable: false,
+    })
+    expect(fake.requests.map((request) => request.op)).toEqual(['get_identity'])
+  })
+
   it('reuses one browser-authorized port before opening the chooser', async () => {
     const serial = new AuthorizedSerial()
     const client = new WebSerialControlPlaneClient({
@@ -807,7 +820,10 @@ class RetriableCloseSerialPort implements BrowserSerialPort {
   }
 }
 
-function responseFor(request: Record<string, unknown>) {
+function responseFor(
+  request: Record<string, unknown>,
+  responseIdentity: typeof identity = identity
+) {
   const requestId = request.requestId
   if (request.type === 'thermal_tuning') {
     return {
@@ -824,7 +840,7 @@ function responseFor(request: Record<string, unknown>) {
     }
   }
   if (request.type === 'request' && request.op === 'get_identity') {
-    return { type: 'response', requestId, ok: true, result: { identity } }
+    return { type: 'response', requestId, ok: true, result: { identity: responseIdentity } }
   }
   if (request.type === 'request' && request.op === 'get_network') {
     return { type: 'response', requestId, ok: true, result: { network } }
@@ -1052,8 +1068,8 @@ const identity = {
   buildId: 'build-1',
   gitSha: 'abc',
   board: 'esp32-s3',
-  apiVersion: '2026-05-29',
-  protocolVersion: 'flux-purr.usb.v1',
+  apiVersion: '2026-11-09',
+  protocolVersion: 'flux-purr.usb.v2',
   hostname: 'flux-purr-s3-001',
   capabilities: ['identity', 'status', 'network', 'usb_jsonl', 'monitor'],
 }

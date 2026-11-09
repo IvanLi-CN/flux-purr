@@ -52,9 +52,10 @@ function bridgeCandidatePriority(device: DeviceTarget) {
   return 3
 }
 
-export type BridgeIdentityValidation = { ok: true } | { ok: false; reason: 'unknown_device' }
+export type ControlPlaneIdentityValidation = { ok: true } | { ok: false; reason: 'unknown_device' }
+export type BridgeIdentityValidation = ControlPlaneIdentityValidation
 
-export function validateBridgeDeviceIdentity(identity: Identity): BridgeIdentityValidation {
+export function validateControlPlaneIdentity(identity: Identity): ControlPlaneIdentityValidation {
   if (
     !identity.deviceId.trim() ||
     identity.apiVersion !== CONTROL_PLANE_API_VERSION ||
@@ -65,6 +66,10 @@ export function validateBridgeDeviceIdentity(identity: Identity): BridgeIdentity
   }
 
   return { ok: true }
+}
+
+export function validateBridgeDeviceIdentity(identity: Identity): BridgeIdentityValidation {
+  return validateControlPlaneIdentity(identity)
 }
 
 export function bridgeProbeToDeviceTarget(

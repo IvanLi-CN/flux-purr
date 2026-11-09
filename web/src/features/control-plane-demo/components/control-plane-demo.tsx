@@ -5495,7 +5495,7 @@ function applyLanStatus(device: DeviceTarget, status: ControlPlaneStatus): Devic
     pdController: status.pdController ?? null,
     pdContractKind: status.pdContractKind ?? null,
     pdContractCurrentMa: status.pdContractCurrentMa ?? null,
-    pdContractPowerMw: status.pdContractPowerMw ?? null,
+    pdSourceCapabilityPowerMw: status.pdSourceCapabilityPowerMw ?? null,
     pdPerformanceGuaranteed: status.pdPerformanceGuaranteed ?? null,
     pdDegradedReason: status.pdDegradedReason ?? null,
     manualPpsEnabled: status.manualPpsEnabled ?? false,
@@ -5709,13 +5709,14 @@ function formatPdContractDetail(device: DeviceTarget, fallbackCurrentMa: number)
   const controller = device.pdController ?? 'unknown'
   const contractKind = device.pdContractKind ?? 'none'
   const contractCurrentMa = device.pdContractCurrentMa ?? fallbackCurrentMa
-  const contractPowerMw = device.pdContractPowerMw ?? 0
-  const power = contractPowerMw > 0 ? `${(contractPowerMw / 1000).toFixed(0)}W` : '功率未知'
+  const sourceCapabilityPowerMw = device.pdSourceCapabilityPowerMw ?? 0
+  const sourceCapability =
+    sourceCapabilityPowerMw > 0 ? `${(sourceCapabilityPowerMw / 1000).toFixed(0)}W` : '能力未知'
   const quality = device.pdPerformanceGuaranteed
     ? '性能保证'
     : (device.pdDegradedReason ?? '降级运行')
 
-  return `${formatVolts(device.pdRequestMv)} requested / ${controller} ${contractKind} / 合同 ${formatAmps(contractCurrentMa)} ${power} / ${quality}`
+  return `${formatVolts(device.pdRequestMv)} requested / ${controller} ${contractKind} / 合同 ${formatAmps(contractCurrentMa)} / 源能力上限 ${sourceCapability} / ${quality}`
 }
 
 function temperatureBand(tempC: number) {
@@ -6885,6 +6886,7 @@ function DashboardView({
 
         <div className="industrial-signal-stack">
           <StatusCard
+            className="industrial-status-card--pd"
             label="PD contract"
             value={formatVolts(device.pdContractMv)}
             detail={formatPdContractDetail(device, powerCapabilityMa)}
@@ -10051,9 +10053,20 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
   )
 }
 
-function StatusCard({ label, value, detail }: { label: string; value: string; detail: string }) {
+function StatusCard({
+  label,
+  value,
+  detail,
+  className,
+}: {
+  label: string
+  value: string
+  detail: string
+  className?: string
+}) {
+  const cardClassName = ['industrial-status-card', className].filter(Boolean).join(' ')
   return (
-    <article className="industrial-status-card">
+    <article className={cardClassName}>
       <p className="industrial-label">{label}</p>
       <strong>{value}</strong>
       <span>{detail}</span>
