@@ -182,6 +182,26 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     else:
         raise AssertionError("incomplete component set must fail verification")
+    tampered_manifest = json.loads(json.dumps(manifest))
+    tampered_manifest["components"][0]["assets"][0]["channel"] = "rc"
+    (assets / "tampered.json").write_text(json.dumps(tampered_manifest), encoding="utf-8")
+    try:
+        verifier.verify(
+            argparse.Namespace(
+                asset_root=str(assets),
+                manifest="tampered.json",
+                version="0.30.8",
+                tag="v0.30.8",
+                source_sha="0" * 40,
+                intent="patch",
+                baseline="0.30.7",
+                reservation_id="v0.30.8@" + "0" * 40,
+            )
+        )
+    except verifier.AssetVerificationError:
+        pass
+    else:
+        raise AssertionError("tampered component metadata must fail verification")
     reconcile_spec = importlib.util.spec_from_file_location(
         "reconcile_release_assets", root / ".github/scripts/reconcile_release_assets.py"
     )

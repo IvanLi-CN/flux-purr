@@ -198,6 +198,19 @@ jobs:
           fi
           mv release-assets "${RUNNER_TEMP}/release-existing-assets"
           mkdir -p release-assets
+          python3 - "${RUNNER_TEMP}/release-existing-assets/${manifest}" "${RUNNER_TEMP}/release-existing-assets" > "${RUNNER_TEMP}/release-missing-assets.txt" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+          root = pathlib.Path(sys.argv[2])
+          for component in manifest["components"]:
+              for asset in component["assets"]:
+                  path = pathlib.Path(asset["path"])
+                  if not (root / path).is_file():
+                      print(path)
+          PY
           echo "status=partial" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Rust and Xtensa
@@ -236,37 +249,81 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          missing_assets="${RUNNER_TEMP}/release-missing-assets.txt"
+          if [ ! -f "${missing_assets}" ]; then
+            printf '%s\n' \
+              "flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw" \
+              "flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz" \
+              "flux-purr-web-v${PRODUCT_VERSION}.tar.gz" \
+              "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" \
+              "flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" > "${missing_assets}"
+          fi
+          if [ -d "${RUNNER_TEMP}/release-existing-assets" ]; then
+            cp -a "${RUNNER_TEMP}/release-existing-assets/." release-assets/
+          fi
+          asset_missing() { grep -Fxq "$1" "${missing_assets}"; }
+          need_firmware=false
+          need_web=false
+          need_host=false
+          if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"; then
+            need_firmware=true
+          fi
+          if asset_missing "flux-purr-web-v${PRODUCT_VERSION}.tar.gz" || asset_missing "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"; then
+            need_web=true
+          fi
+          if asset_missing "flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz"; then
+            need_host=true
+          fi
           info_json="$(python3 scripts/product-version.py --mode release --source-sha "${FLUX_PURR_SOURCE_SHA}" --format json)"
           printf '%s\n' "${info_json}" > build-info.json
           channel="$(printf '%s' "${info_json}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["channel"])')"
-          bash scripts/check-firmware-build.sh
-          cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins
+          if [ "${need_firmware}" = true ]; then
+            bash scripts/check-firmware-build.sh
+          fi
+          if [ "${need_firmware}" = true ] || [ "${need_host}" = true ]; then
+            cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins
+          fi
           mkdir -p release-assets
           bundle="release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"
-          target/release/flux-purr-build-firmware-bundle \
-            --elf firmware/target/xtensa-esp32s3-none-elf/release/flux-purr \
-            --partition-table firmware/partitions.csv \
-            --version "${PRODUCT_VERSION}" \
-            --source-sha "${FLUX_PURR_SOURCE_SHA}" \
-            --build-id "${FLUX_PURR_SOURCE_SHA:0:16}" \
-            --channel "${channel}" \
-            --output "${bundle}"
-          tar -czf "release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz" -C release-assets "$(basename "${bundle}")"
-          python3 tools/firmware-web-catalog/build_catalog.py \
-            --skip-remote \
-            --output-root web/public/firmware \
-            --current-bundle "${bundle}" \
-            --current-tag "${PRODUCT_TAG}" \
-            --current-published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          bun run --cwd web build
-          bun run --cwd web build:demo
-          tar -czf "release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz" -C web/dist .
-          tar -czf "release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" -C web/dist-demo .
-          mkdir -p host-tools/bin
-          cp target/release/flux-purr target/release/flux-purr-devd host-tools/bin/
-          cp build-info.json VERSION host-tools/
-          cp web/public/firmware/firmware-integrity-catalog.json host-tools/bin/
-          tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
+          if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"; then
+            target/release/flux-purr-build-firmware-bundle \
+              --elf firmware/target/xtensa-esp32s3-none-elf/release/flux-purr \
+              --partition-table firmware/partitions.csv \
+              --version "${PRODUCT_VERSION}" \
+              --source-sha "${FLUX_PURR_SOURCE_SHA}" \
+              --build-id "${FLUX_PURR_SOURCE_SHA:0:16}" \
+              --channel "${channel}" \
+              --output "${bundle}"
+          fi
+          if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz"; then
+            tar -czf "release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz" -C release-assets "$(basename "${bundle}")"
+          fi
+          if [ "${need_web}" = true ] || [ "${need_host}" = true ]; then
+            test -f "${bundle}"
+            python3 tools/firmware-web-catalog/build_catalog.py \
+              --skip-remote \
+              --output-root web/public/firmware \
+              --current-bundle "${bundle}" \
+              --current-tag "${PRODUCT_TAG}" \
+              --current-published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          if [ "${need_web}" = true ]; then
+            bun run --cwd web build
+            bun run --cwd web build:demo
+            if asset_missing "flux-purr-web-v${PRODUCT_VERSION}.tar.gz"; then
+              tar -czf "release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz" -C web/dist .
+            fi
+            if asset_missing "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"; then
+              tar -czf "release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" -C web/dist-demo .
+            fi
+          fi
+          if [ "${need_host}" = true ]; then
+            mkdir -p host-tools/bin
+            cp target/release/flux-purr target/release/flux-purr-devd host-tools/bin/
+            cp build-info.json VERSION host-tools/
+            cp web/public/firmware/firmware-integrity-catalog.json host-tools/bin/
+            tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
+          fi
           cp build-info.json VERSION release-assets/
           web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; version=os.environ["PRODUCT_VERSION"]; print(json.dumps({"id":"web","version":version,"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+version+".tar.gz","flux-purr-web-demo-v"+version+".tar.gz"]}))')"
           firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v2"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
@@ -409,6 +466,18 @@ jobs:
           fi
           archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"
           test -f "${archive}"
+          started_marker_path="release-assets/.edgeone-deploying"
+          if [ -f "${started_marker_path}" ]; then
+            started_sha="$(tr -d '\r\n' < "${started_marker_path}")"
+            if [ "${started_sha}" != "${RELEASE_SHA}" ]; then
+              echo "EdgeOne deployment-started marker belongs to ${started_sha}, expected ${RELEASE_SHA}" >&2
+              exit 1
+            fi
+            echo "EdgeOne production deployment is in an ambiguous prior state; operator review is required before retry." >&2
+            exit 1
+          fi
+          printf '%s\n' "${RELEASE_SHA}" > "${started_marker_path}"
+          gh release upload "${PRODUCT_TAG}" "${started_marker_path}"
           rm -rf web-dist
           mkdir web-dist
           tar -xzf "${archive}" -C web-dist
@@ -439,6 +508,18 @@ jobs:
             echo "EdgeOne public demo deployment marker matches this release identity; skip duplicate deployment"
             exit 0
           fi
+          started_marker_path="release-assets/.edgeone-demo-deploying"
+          if [ -f "${started_marker_path}" ]; then
+            started_sha="$(tr -d '\r\n' < "${started_marker_path}")"
+            if [ "${started_sha}" != "${RELEASE_SHA}" ]; then
+              echo "EdgeOne public demo deployment-started marker belongs to ${started_sha}, expected ${RELEASE_SHA}" >&2
+              exit 1
+            fi
+            echo "EdgeOne public demo deployment is in an ambiguous prior state; operator review is required before retry." >&2
+            exit 1
+          fi
+          printf '%s\n' "${RELEASE_SHA}" > "${started_marker_path}"
+          gh release upload "${PRODUCT_TAG}" "${started_marker_path}"
           archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"
           test -f "${archive}"
           rm -rf web-demo-dist

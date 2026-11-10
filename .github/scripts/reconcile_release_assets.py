@@ -61,7 +61,7 @@ def reconcile(args: argparse.Namespace) -> None:
             missing.append(str(Path("release-assets") / relative))
     built_manifest = built_root / args.manifest
     shutil.copy2(manifest_path, built_manifest)
-    for marker in (".edgeone-deployed", ".edgeone-demo-deployed"):
+    for marker in (".edgeone-deploying", ".edgeone-deployed", ".edgeone-demo-deploying", ".edgeone-demo-deployed"):
         source = existing_root / marker
         if source.is_file():
             shutil.copy2(source, built_root / marker)

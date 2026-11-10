@@ -51,6 +51,8 @@ assert "reconcile_release_assets.py" in release
 assert "status=missing" in release
 assert "status=partial" in release
 assert "release-upload-list.txt" in release
+assert "release-missing-assets.txt" in release
+assert "asset_missing()" in release
 assert "gh release create \"${PRODUCT_TAG}\" \"${manifest}\"" in release
 assert "gh release upload \"${PRODUCT_TAG}\" \"${upload_assets[@]}\"" in release
 assert "already exists; publish cannot mutate an existing identity" in release
@@ -58,6 +60,9 @@ assert "--clobber" not in release
 assert "Deploy published Web archive to EdgeOne" in release
 assert "Deploy published public demo archive to EdgeOne" in release
 assert "marker belongs to" in release
+assert "deployment-started marker" in release
+assert "operator review is required before retry" in release
+assert release.index('gh release upload "${PRODUCT_TAG}" "${started_marker_path}"') < release.index('bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh"')
 assert "release_chain.py" not in release
 assert "release_snapshot.py" not in release
 assert "commit_sha" not in release

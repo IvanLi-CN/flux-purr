@@ -14,6 +14,11 @@ class AssetVerificationError(RuntimeError):
     pass
 
 
+def canonical_sha256(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def required_asset_names(version: str) -> dict[str, set[str]]:
     return {
         "web": {
@@ -37,6 +42,9 @@ def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> li
     if not isinstance(components, list):
         raise AssetVerificationError("release manifest components must be a list")
     expected_components = required_asset_names(args.version)
+    expected_channel = "rc" if "-rc." in args.version else "stable"
+    if payload.get("channel") != expected_channel:
+        raise AssetVerificationError("release manifest has an invalid channel")
     by_id: dict[str, dict[str, object]] = {}
     entries: list[dict[str, object]] = []
     for component in components:
@@ -49,6 +57,12 @@ def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> li
             raise AssetVerificationError(f"release manifest has unexpected component: {component_id}")
         if component.get("version") != args.version or component.get("sourceSha") != args.source_sha:
             raise AssetVerificationError(f"release component {component_id} is not bound to this identity")
+        protocol_versions = component.get("protocolVersions")
+        if not isinstance(protocol_versions, list) or not all(isinstance(value, str) for value in protocol_versions):
+            raise AssetVerificationError(f"release component {component_id} has invalid protocol versions")
+        content_sha = component.get("contentSha256")
+        if not isinstance(content_sha, str):
+            raise AssetVerificationError(f"release component {component_id} has no content digest")
         assets = component.get("assets")
         if not isinstance(assets, list) or not assets:
             raise AssetVerificationError(f"release component {component_id} has no assets")
@@ -59,11 +73,28 @@ def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> li
             name = asset.get("name")
             if not isinstance(name, str) or name in names:
                 raise AssetVerificationError(f"release component {component_id} has duplicate asset names")
+            if asset.get("channel") != expected_channel:
+                raise AssetVerificationError(f"release asset {name} has an invalid channel")
             names.add(name)
             entries.append(asset)
         if not expected_components[component_id].issubset(names):
             missing = sorted(expected_components[component_id] - names)
             raise AssetVerificationError(f"release component {component_id} is missing assets: {missing}")
+        content_payload = {
+            "id": component_id,
+            "version": args.version,
+            "sourceSha": args.source_sha,
+            "protocolVersions": protocol_versions,
+            "assets": assets,
+        }
+        if content_sha != canonical_sha256(content_payload):
+            raise AssetVerificationError(f"release component {component_id} content digest is invalid")
+        changed = component.get("changedSincePrevious")
+        reason = component.get("updateReason")
+        if not isinstance(changed, bool) or reason not in {"content_changed", "unchanged_since_previous"}:
+            raise AssetVerificationError(f"release component {component_id} has invalid change metadata")
+        if (changed and reason != "content_changed") or (not changed and reason != "unchanged_since_previous"):
+            raise AssetVerificationError(f"release component {component_id} change metadata is inconsistent")
         by_id[component_id] = component
     if set(by_id) != set(expected_components):
         missing = sorted(set(expected_components) - set(by_id))
