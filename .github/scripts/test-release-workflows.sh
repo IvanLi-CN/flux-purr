@@ -25,7 +25,17 @@ assert "manual_release.py baseline" in release
 assert "manual_release.py classify" in release
 assert "manual_release.py identity" in release
 assert "git rev-parse origin/main" in release
-assert "git tag --list 'v*'" in release
+assert 'ref: ${{ github.sha }}' in release
+assert 'RELEASE_SOURCE_SHA: ${{ github.sha }}' in release
+assert "main advanced after dispatch" in release
+assert "git for-each-ref" in release
+assert "Flux-Purr-Release-Intent:" in release
+assert "--intent-file" in release
+assert "--baseline-file" in release
+assert "--reservation-file" in release
+assert "Flux-Purr-Trusted-Baseline:" in release
+assert "Flux-Purr-Reservation-ID:" in release
+assert "identity_baseline" in release
 assert 'if [ "${release_required}" != true ] && [ "${RELEASE_OPERATION}" != recover ]; then' in release
 assert "Recovery requested; continue to verify the existing release identity" in release
 assert "Reserve immutable release tag" in release
@@ -33,8 +43,14 @@ assert "git push origin \"${PRODUCT_TAG}\"" in release
 assert "Checkout release source and bind VERSION" in release
 assert "printf '%s\\n' \"${PRODUCT_VERSION}\" > VERSION" in release
 assert "gh release create" in release
+assert "Restore immutable release assets for recovery" in release
+assert "gh release download" in release
+assert "verify_release_assets.py" in release
+assert "already exists; publish cannot mutate an existing identity" in release
+assert "--clobber" not in release
 assert "Deploy published Web archive to EdgeOne" in release
 assert "Deploy published public demo archive to EdgeOne" in release
+assert "marker belongs to" in release
 assert "release_chain.py" not in release
 assert "release_snapshot.py" not in release
 assert "commit_sha" not in release
@@ -83,6 +99,9 @@ assert "workflow_run.conclusion == 'failure'" in notify
 assert "operation=recover" in notify
 assert "reservation" in notify
 assert "same-identity" in notify
+assert "canonical_tags" in notify
+assert "continue-on-error: true" in notify
+assert "always()" in notify
 
 assert '"edgeone@${cli_version}" makers deploy' in edgeone_helper
 assert 'max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"' in edgeone_helper

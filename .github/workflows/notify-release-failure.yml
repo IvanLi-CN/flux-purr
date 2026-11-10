@@ -22,6 +22,7 @@ jobs:
     steps:
       - name: Checkout trusted release helpers
         uses: actions/checkout@v4
+        continue-on-error: true
         with:
           ref: main
           fetch-depth: 0
@@ -38,18 +39,42 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --force --tags origin
-          release_tag="$(git tag --points-at "${MERGE_SHA}" --list 'v*' | head -n1 || true)"
+          release_tag=""
+          version="unknown"
+          reservation_id="unreserved@${MERGE_SHA}"
+          recovery_target="none: no immutable tag reservation was observed"
+          recovery_hint="do not use recover until a canonical release tag and durable intent are bound to this exact main SHA"
+          if git rev-parse --show-toplevel >/dev/null 2>&1; then
+            if git fetch --force --tags origin; then
+              canonical_tags="$(git tag --points-at "${MERGE_SHA}" --list 'v*' | python3 -c 'import re,sys; print("\n".join(tag for tag in sys.stdin.read().splitlines() if re.fullmatch(r"v\d+\.\d+\.\d+(?:-rc\.\d+)?", tag)))')"
+              canonical_count="$(printf '%s\n' "${canonical_tags}" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+              if [ "${canonical_count}" = 1 ]; then
+                release_tag="${canonical_tags}"
+              elif [ "${canonical_count}" -gt 1 ]; then
+                recovery_target="ambiguous: multiple canonical release tags point to ${MERGE_SHA}"
+                recovery_hint="operator review required; do not use recover until the tag identity is unambiguous"
+              fi
+            else
+              recovery_target="unknown: tag inventory fetch failed"
+              recovery_hint="operator review required; retry metadata collection before selecting recovery"
+            fi
+          fi
           if [ -n "${release_tag}" ]; then
             version="${release_tag#v}"
             reservation_id="${release_tag}@${MERGE_SHA}"
-            recovery_target="same-identity: ${release_tag}@${MERGE_SHA}"
-            recovery_hint="dispatch Release Product with operation=recover and the original release_target matching ${release_tag}"
-          else
+            tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${release_tag}" | head -n1 || true)"
+            tag_intent="$(printf '%s\n' "${tag_subject}" | sed -n 's/^Flux-Purr-Release-Intent: \([^;]*\);.*$/\1/p')"
+            tag_baseline="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Trusted-Baseline: \([^;]*\);.*$/\1/p')"
+            tag_reservation="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Reservation-ID: \([^;]*\)$/\1/p')"
+            if [ -n "${tag_intent}" ] && [ -n "${tag_baseline}" ] && [ "${tag_reservation}" = "${reservation_id}" ]; then
+              recovery_target="same-identity: ${release_tag}@${MERGE_SHA}"
+              recovery_hint="dispatch Release Product with operation=recover and release_target=${tag_intent}"
+            else
+              recovery_target="unrecoverable: ${release_tag} has no durable release intent metadata"
+              recovery_hint="do not use recover until the release identity metadata is restored or operator review authorizes a new boundary"
+            fi
+          elif git rev-parse --show-toplevel >/dev/null 2>&1; then
             version="$(git show "${MERGE_SHA}:VERSION" 2>/dev/null || printf '%s' unknown)"
-            reservation_id="unreserved@${MERGE_SHA}"
-            recovery_target="none: no immutable tag reservation was observed"
-            recovery_hint="do not use recover until a release tag is bound to this exact main SHA"
           fi
           artifact_names="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --jq '[.artifacts[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
           details="merge_sha=${MERGE_SHA}; version=${version}; release_tag=${release_tag:-unknown}; reservation_id=${reservation_id}; artifact_names=${artifact_names}; recovery_target=${recovery_target}; recovery_hint=${recovery_hint}"
@@ -61,14 +86,14 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
   notify_failure:
-    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
+    if: ${{ always() && github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
     needs: release_context
     permissions:
       id-token: write
     uses: IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b
     with:
       outcome: ${{ github.event.workflow_run.conclusion }}
-      summary: ${{ needs.release_context.outputs.summary }}
+      summary: ${{ needs.release_context.outputs.summary || format('title=Release Product failure; project={0}; status=failure; target_sha={1}; run_url={2}; recovery_target=operator review required', github.repository, github.event.workflow_run.head_sha, github.event.workflow_run.html_url) }}
 
   smoke_test:
     if: ${{ github.event_name == 'workflow_dispatch' }}

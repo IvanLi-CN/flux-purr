@@ -17,9 +17,9 @@
 | 输入 | 来源 | 规则 |
 | --- | --- | --- |
 | `release_target` | owner-confirmed manual dispatch input | 只接受 `patch`、`minor`、`major`、`rc` |
-| source SHA | dispatch 时 `origin/main` exact SHA | workflow checkout 后再次校验 `HEAD` 与 `origin/main` 一致 |
+| source SHA | `workflow_dispatch` event 的 `github.sha` | workflow pin 到该 SHA，并在构建前确认 `origin/main` 尚未前进；漂移时 fail closed |
 | trusted baseline | source SHA 可达的最高稳定 `vX.Y.Z` tag | 只接受稳定 final tag；没有历史 tag 时才使用 root `VERSION` 作为 bootstrap fallback |
-| tag inventory | fetched immutable tags | 用于 collision、RC 序号和 recovery identity 验证 |
+| tag inventory | fetched immutable tags 与 annotated intent metadata | 用于 collision、RC 序号和 recovery identity 验证 |
 
 caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy 结果。`SemVer change governance` 只在另有兼容性评估需求时作为可选输入，永远不决定 release eligibility、target 或 RC 序号。
 
@@ -35,11 +35,11 @@ caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy �
 
 有效 identity 至少绑定：`source_sha`、trusted baseline、owner intent、canonical version、reservation id、tag、artifact digests、GitHub Release、部署结果和 recovery target。reservation id 的当前实现为 `<tag>@<source_sha>`。
 
-`publish` 必须先检查 tag collision，然后创建并验证指向 exact source SHA 的 annotated tag，再构建资产。`recover` 不接受历史 `commit_sha` 入口，只能复用已经指向当前 exact source SHA 的唯一 release tag；stable intent 不能恢复 RC tag，RC intent 不能恢复 stable tag。tag、Release 或部署已经部分成功时，重试只能继续这个 identity。
+`publish` 必须先检查 tag collision，然后创建并验证指向 exact source SHA 的 annotated tag；tag annotation 必须持久化 owner intent、trusted baseline 和 reservation id，再构建资产。`recover` 不接受历史 `commit_sha` 入口，只能复用已经指向当前 exact source SHA 且 intent metadata 与 caller 一致的唯一 release tag；stable intent 不能恢复 RC tag，RC intent 不能恢复 stable tag。已有 Release 的 recovery 必须下载并验证既有 manifest 与 artifact digests，不能重建、覆盖或静默替换资产。tag、Release 或部署已经部分成功时，重试只能继续这个 identity。
 
 ### Build and delivery
 
-每种 artifact 只构建一次。firmware、devd、CLI、Web、bundle、manifest 和 Release 从同一个 runner `VERSION` 与 source SHA 生成；EdgeOne production/demo 复用已发布的 Web archive，不重新构建。Release、Deploy、Notify 分层，通知成功不等于 Release 或 Deploy 成功。
+每种 artifact 只构建一次。firmware、devd、CLI、Web、bundle、manifest 和 Release 从同一个 runner `VERSION` 与 source SHA 生成；same-identity recovery 只复用并验证既有资产，不重新构建或上传覆盖；EdgeOne production/demo 复用已发布的 Web archive，不重新构建。部署 marker 只有在内容等于当前 source SHA 时才能跳过部署，内容不匹配必须 fail closed。Release、Deploy、Notify 分层，通知成功不等于 Release 或 Deploy 成功。
 
 纯文档变更由 workflow 输出 skip，不能创建产品 Release；产品变更或文档与产品混合变更必须走完整 Release。workflow 失败时通知包含 version、merge/source SHA、reservation identity、tag（若已保留）和 same-identity recovery target。
 

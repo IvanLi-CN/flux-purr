@@ -49,6 +49,61 @@ def parse_tags(path: Path | None) -> dict[str, str]:
     return result
 
 
+def parse_intents(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise ManualReleaseError(f"invalid tag intent row: {line!r}")
+        tag, intent = parts
+        if intent not in INTENTS:
+            raise ManualReleaseError(f"tag {tag} has unsupported release intent: {intent}")
+        if tag in result:
+            raise ManualReleaseError(f"tag {tag} has duplicate release intent metadata")
+        result[tag] = intent
+    return result
+
+
+def parse_baselines(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise ManualReleaseError(f"invalid tag baseline row: {line!r}")
+        tag, baseline = parts
+        try:
+            parsed = VERSION.parse_version(baseline)
+        except VERSION.VersionError as error:
+            raise ManualReleaseError(f"tag {tag} has invalid trusted baseline: {baseline}") from error
+        if parsed["rc"] is not None:
+            raise ManualReleaseError(f"tag {tag} trusted baseline must be stable: {baseline}")
+        if tag in result:
+            raise ManualReleaseError(f"tag {tag} has duplicate trusted baseline metadata")
+        result[tag] = baseline
+    return result
+
+
+def parse_reservations(path: Path | None) -> dict[str, str]:
+    if path is None:
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise ManualReleaseError(f"invalid tag reservation row: {line!r}")
+        tag, reservation = parts
+        if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-rc\.\d+)?@[0-9a-f]{40}", reservation):
+            raise ManualReleaseError(f"tag {tag} has invalid reservation metadata: {reservation}")
+        if tag in result:
+            raise ManualReleaseError(f"tag {tag} has duplicate reservation metadata")
+        result[tag] = reservation
+    return result
+
+
 def version_tuple(value: str) -> tuple[int, int, int, int]:
     parsed = VERSION.parse_version(value)
     return (
@@ -152,7 +207,16 @@ def matching_tag(tags: dict[str, str], source_sha: str) -> tuple[str, str] | Non
     return matches[0] if matches else None
 
 
-def identity(intent: str, baseline: str, source_sha: str, tags: dict[str, str], operation: str) -> dict[str, str]:
+def identity(
+    intent: str,
+    baseline: str,
+    source_sha: str,
+    tags: dict[str, str],
+    operation: str,
+    tag_intents: dict[str, str] | None = None,
+    tag_baselines: dict[str, str] | None = None,
+    tag_reservations: dict[str, str] | None = None,
+) -> dict[str, str]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ManualReleaseError("source SHA must be a full lowercase hexadecimal commit SHA")
     if operation == "recover":
@@ -161,12 +225,31 @@ def identity(intent: str, baseline: str, source_sha: str, tags: dict[str, str], 
             raise ManualReleaseError("recovery requires an existing release tag pointing to the exact source SHA")
         tag, target = existing
         version = TAG_RE.fullmatch(tag).group("version")  # type: ignore[union-attr]
+        reserved_intent = (tag_intents or {}).get(tag)
+        if reserved_intent is None:
+            raise ManualReleaseError(f"release tag {tag} has no durable release intent metadata")
+        if reserved_intent != intent:
+            raise ManualReleaseError(
+                f"recovery intent {intent} does not match reserved release intent {reserved_intent} for {tag}"
+            )
+        reserved_baseline = (tag_baselines or {}).get(tag)
+        if reserved_baseline is None:
+            raise ManualReleaseError(f"release tag {tag} has no durable trusted baseline metadata")
+        expected_reservation = f"{tag}@{target}"
+        reserved_reservation = (tag_reservations or {}).get(tag)
+        if reserved_reservation is None:
+            raise ManualReleaseError(f"release tag {tag} has no durable reservation metadata")
+        if reserved_reservation != expected_reservation:
+            raise ManualReleaseError(
+                f"release tag {tag} reservation {reserved_reservation} does not match {expected_reservation}"
+            )
         if intent == "rc" and "-rc." not in version:
             raise ManualReleaseError("rc recovery requires an RC tag")
         if intent != "rc" and "-rc." in version:
             raise ManualReleaseError("stable recovery cannot use an RC tag")
         return {
             "intent": intent,
+            "baseline": reserved_baseline,
             "version": version,
             "tag": tag,
             "source_sha": target,
@@ -186,6 +269,7 @@ def identity(intent: str, baseline: str, source_sha: str, tags: dict[str, str], 
         raise ManualReleaseError(f"release tag {tag} is already owned by {owner}; use same-identity recovery")
     return {
         "intent": intent,
+        "baseline": baseline,
         "version": version,
         "tag": tag,
         "source_sha": source_sha,
@@ -213,6 +297,9 @@ def main(argv: list[str] | None = None) -> int:
     ident.add_argument("--baseline", required=True)
     ident.add_argument("--source-sha", required=True)
     ident.add_argument("--tags-file", type=Path, required=True)
+    ident.add_argument("--intent-file", type=Path)
+    ident.add_argument("--baseline-file", type=Path)
+    ident.add_argument("--reservation-file", type=Path)
     ident.add_argument("--operation", choices=("publish", "recover"), default="publish")
     args = parser.parse_args(argv)
     try:
@@ -226,7 +313,21 @@ def main(argv: list[str] | None = None) -> int:
             paths = args.paths_file.read_text(encoding="utf-8").splitlines()
             print(json.dumps({"document_only": document_only(paths), "release_required": release_required(paths), "paths": paths}, sort_keys=True))
         else:
-            print(json.dumps(identity(args.intent, args.baseline, args.source_sha, parse_tags(args.tags_file), args.operation), sort_keys=True))
+            print(
+                json.dumps(
+                    identity(
+                        args.intent,
+                        args.baseline,
+                        args.source_sha,
+                        parse_tags(args.tags_file),
+                        args.operation,
+                        parse_intents(args.intent_file),
+                        parse_baselines(args.baseline_file),
+                        parse_reservations(args.reservation_file),
+                    ),
+                    sort_keys=True,
+                )
+            )
         return 0
     except (ManualReleaseError, VERSION.VersionError, OSError, ValueError) as error:
         print(f"manual_release.py: {error}", file=sys.stderr)

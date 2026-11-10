@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -148,12 +149,22 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.intent not in RELEASE_INTENTS:
         raise ManifestError(f"Unsupported release intent: {args.intent}")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.source_sha):
+        raise ManifestError("Source SHA must be a full lowercase hexadecimal commit SHA")
+    if args.tag != f"v{args.version}":
+        raise ManifestError("Manifest tag must be v + the canonical manifest version")
+    if args.intent == "rc" and "-rc." not in args.version:
+        raise ManifestError("rc release intent requires an RC canonical version")
+    if args.intent != "rc" and "-rc." in args.version:
+        raise ManifestError("stable release intent cannot use an RC canonical version")
     if args.reservation_id != f"{args.tag}@{args.source_sha}":
         raise ManifestError("Reservation id must bind the release tag to the source SHA")
     try:
-        PRODUCT_VERSION.parse_version(args.baseline)
+        baseline = PRODUCT_VERSION.parse_version(args.baseline)
     except PRODUCT_VERSION.VersionError as exc:
         raise ManifestError(f"Invalid trusted baseline: {args.baseline}") from exc
+    if baseline["rc"] is not None:
+        raise ManifestError("Trusted baseline must be a stable final version")
     previous = read_previous(args.previous_manifest)
     previous_by_id = previous_components(previous)
     root = Path(args.asset_root)

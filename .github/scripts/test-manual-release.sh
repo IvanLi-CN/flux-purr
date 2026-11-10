@@ -10,6 +10,21 @@ v0.30.7 0000000000000000000000000000000000000001
 v0.30.8 0000000000000000000000000000000000000003
 v0.30.0-rc.1 0000000000000000000000000000000000000002
 EOF
+cat > "${tmp_dir}/tag-intents.txt" <<'EOF'
+v0.30.7 patch
+v0.30.8 patch
+v0.30.0-rc.1 rc
+EOF
+cat > "${tmp_dir}/tag-baselines.txt" <<'EOF'
+v0.30.7 0.30.6
+v0.30.8 0.30.7
+v0.30.0-rc.1 0.30.7
+EOF
+cat > "${tmp_dir}/tag-reservations.txt" <<'EOF'
+v0.30.7 v0.30.7@0000000000000000000000000000000000000001
+v0.30.8 v0.30.8@0000000000000000000000000000000000000003
+v0.30.0-rc.1 v0.30.0-rc.1@0000000000000000000000000000000000000002
+EOF
 
 resolve() {
   python3 "${root_dir}/.github/scripts/manual_release.py" resolve --intent "$1" --baseline 0.30.7 --tags-file "${tmp_dir}/tags.txt" \
@@ -46,12 +61,26 @@ grep -F "already has release tag" "${tmp_dir}/source-tag.out"
 
 python3 "${root_dir}/.github/scripts/manual_release.py" identity \
   --intent rc --baseline 0.30.7 --source-sha 0000000000000000000000000000000000000002 \
-  --tags-file "${tmp_dir}/tags.txt" --operation recover \
-  | python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["version"] == "0.30.0-rc.1"; assert value["reservation_status"] == "matching"'
+  --tags-file "${tmp_dir}/tags.txt" --intent-file "${tmp_dir}/tag-intents.txt" \
+  --baseline-file "${tmp_dir}/tag-baselines.txt" --reservation-file "${tmp_dir}/tag-reservations.txt" \
+  --operation recover \
+  | python3 -c 'import json,sys; value=json.load(sys.stdin); assert value["version"] == "0.30.0-rc.1"; assert value["baseline"] == "0.30.7"; assert value["reservation_status"] == "matching"'
+
+set +e
+python3 "${root_dir}/.github/scripts/manual_release.py" identity \
+  --intent minor --baseline 0.30.7 --source-sha 0000000000000000000000000000000000000003 \
+  --tags-file "${tmp_dir}/tags.txt" --intent-file "${tmp_dir}/tag-intents.txt" \
+  --baseline-file "${tmp_dir}/tag-baselines.txt" --reservation-file "${tmp_dir}/tag-reservations.txt" \
+  --operation recover > "${tmp_dir}/intent-mismatch.out" 2>&1
+status=$?
+set -e
+test "${status}" -ne 0
+grep -F "does not match reserved release intent patch" "${tmp_dir}/intent-mismatch.out"
 
 python3 - "${root_dir}" <<'PY'
 import argparse
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 import sys
@@ -84,6 +113,39 @@ with tempfile.TemporaryDirectory() as directory:
     assert manifest["releaseIntent"] == "patch"
     assert manifest["trustedBaseline"] == "0.30.7"
     assert manifest["reservationId"] == "v0.30.8@" + "0" * 40
+    (assets / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    verifier_spec = importlib.util.spec_from_file_location(
+        "verify_release_assets", root / ".github/scripts/verify_release_assets.py"
+    )
+    assert verifier_spec and verifier_spec.loader
+    verifier = importlib.util.module_from_spec(verifier_spec)
+    verifier_spec.loader.exec_module(verifier)
+    verifier.verify(
+        argparse.Namespace(
+            asset_root=str(assets),
+            manifest="manifest.json",
+            version="0.30.8",
+            tag="v0.30.8",
+            source_sha="0" * 40,
+            intent="patch",
+            baseline="0.30.7",
+            reservation_id="v0.30.8@" + "0" * 40,
+        )
+    )
+    try:
+        bad = argparse.Namespace(**{**vars(args), "tag": "v9.9.9"})
+        module.build_manifest(bad)
+    except module.ManifestError:
+        pass
+    else:
+        raise AssertionError("tag/version mismatch must fail")
+    try:
+        bad = argparse.Namespace(**{**vars(args), "baseline": "0.30.7-rc.1"})
+        module.build_manifest(bad)
+    except module.ManifestError:
+        pass
+    else:
+        raise AssertionError("RC trusted baseline must fail")
 PY
 
 echo "manual release policy tests passed"
