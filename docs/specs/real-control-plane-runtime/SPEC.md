@@ -143,7 +143,7 @@
 - `devd`/CLI LAN discovery 必须保留 mDNS TXT metadata 与显式 scan 的来源；operator 可从发现结果或手动 URL 配对。固件 DNS-SD announcement 的 PTR 是 shared `IN` record，SRV/TXT/A 才设置 cache-flush；hostname、service instance、A 地址与 TXT device metadata 必须由 host-testable encoder 生成。Web 的 DEVD Bridge / WiFi-LAN 路径必须读取 daemon 的已登记 LAN registry，并始终提供“刷新服务”与 CIDR 网段表单；读取 registry 不得触发网络扫描，mDNS refresh 和 CIDR scan 只能由 operator 显式提交。发现进行中两种入口必须禁用以防重复请求，失败时保留既有候选并展示独立错误；候选主文案使用 hostname，地址和配对状态仅作为次要信息。发现候选只允许保留在桥接选择面板；未完成配对、设备探测与 LAN lease 前，不得加入顶部设备列表或伪装成可控 target。DEVD LAN 候选的 `POST /lan/devices/{id}/connect` 必须在 daemon 内使用已保存 token 依次完成 identity、network、status 验证，并只在三者均有效后返回已登记 bridge target；Web 收到该 verified record 后不得再创建一条用于识别的 DEVD lease，以免同一浏览器与自身的后续控制会话产生伪冲突。写控制的 lease 仅在 bridge target 已注册后按既有控制路径获取。该链路只能调用 DEVD LAN discovery/connect endpoints，不得混入浏览器 direct-LAN session 或 USB device records。native USB target 的顶部主名称同样必须使用固件 `identity.hostname`，缺失时回退到固件 `deviceId`；USB product descriptor 只属于发现层元数据，不得作为硬件名称显示。设备选择器必须按固件稳定 `identityId/deviceId` 合并同一物理设备；每个设备只显示一张卡片，卡片同时显示设备名称、设备 ID 和最多三种固定公开连接方式：`WiFi / LAN`（浏览器直连，默认优先）、`Web Serial`、`桥接`（由 DEVD 负责发现并在浏览器直连不可用时兜底）。DEVD 的 USB 与 WiFi/LAN 仅作为桥接按钮的内部来源，不得拆成两个公开入口。只有用户点击具体连接方式按钮才切换 target，不能把同一设备的不同 transport 渲染为重复设备。CLI 的 LAN 输出、registry、events 与错误均必须脱敏 bearer token；只有持有 native USB/devd lease 的 token reset 可以撤销所有 LAN session。
 - DEVD bridge 对已配对 LAN record 的 runtime、calibration、calibration job 与 heater-curve 读写必须转发至设备 HTTP API，不能仅修改 daemon 的本地记录后报告成功。每次 bridge 写由 DEVD 创建短期设备 lease、让 LAN adapter 在远端串行读取当前 status revision、转发去除 daemon-local `leaseId` 的控制 payload，并在终态响应后释放该短期 lease。LAN WiFi provisioning 仍属于 USB/devd native target 的专属能力，bridge LAN 写入必须明确拒绝；设备返回的 HTTP 状态、`error.code`、`error.message` 与 `error.retryable` 必须透传，包括 `401`、`409 stale_write` 与 `409 lease_expired`，不得改写为本地 bridge error。
 - 所有 direct-LAN 写入在 `stale_write` 后只可回读一次与被拒绝资源相同的设备事实：runtime 与 calibration job 回读 `status`，calibration 回读 `calibration`，heater-curve 与保存动作回读 `heater-curve`；原写入保持被拒绝，Web 不得自动重放任何可能有副作用的请求，operator 确认后才能重新提交。GitHub PR CI 与 `CI Main` 必须运行 firmware format/clippy/build、devd/CLI tests、Web check/unit/Storybook/build 与 E2E；CI 在 Storybook/E2E 前安装 Chromium。EdgeOne production deploy 只能消费同一 main merge 的 `Release Product` 已发布并校验的 versioned Web archive；`CI Main` 与 workflow_dispatch 只做验证而不部署。
-- Browser Web Serial 必须在稳定页面生命周期预读取既有浏览器授权端口；首次显式连接可复用唯一的既有端口，否则必须在触发点击的用户手势内同步请求浏览器原生选择器，不得在该调用前等待异步任务。Add device 页面始终表示添加另一连接：即使 Web Serial 已连接，卡片仍可用并必须强制打开原生选择器；只有连接事务进行中才可禁用防重复。选中新端口后先关闭旧会话再切换，新选择被取消时保留当前已连接设备。浏览器原生选择取消必须成为明确、可重试的“浏览器未确认串口设备”结果，不能显示底层原始异常；连接中与结果反馈不得被持久 heater lock 提示覆盖。Browser Web Serial 与 DEVD 打开 USB Serial/JTAG 时不得写入 DTR 或 RTS，连接只可开始有界只读 JSONL probe；连接实现不得把复位当作初始化步骤。连接完成后必须以 USB JSONL 读取 identity、network、status，并按稳定 device ID 与 WiFi/LAN、Bridge 合并为同一物理设备。
+- Browser Web Serial 必须在稳定页面生命周期预读取既有浏览器授权端口；首次显式连接可复用唯一的既有端口，否则必须在触发点击的用户手势内同步请求浏览器原生选择器，不得在该调用前等待异步任务。Add device 页面始终表示添加另一连接：即使 Web Serial 已连接，卡片仍可用并必须强制打开原生选择器；只有连接事务进行中才可禁用防重复。选中新端口后先关闭旧会话再切换，新选择被取消时保留当前已连接设备。浏览器原生选择取消必须成为明确、可重试的“浏览器未确认串口设备”结果，不能显示底层原始异常；连接中与结果反馈不得被持久 heater lock 提示覆盖。Browser Web Serial 与 DEVD 打开 USB Serial/JTAG 时不得写入 DTR 或 RTS，连接只可开始有界只读 JSONL probe；连接实现不得把复位当作初始化步骤。连接完成后必须以 USB JSONL 读取 identity、network、status，并按稳定 device ID 与 WiFi/LAN、Bridge 合并为同一物理设备。成功 probe 返回的 Web Serial identity 是当前页面的权威目标：即使页面原先通过旧串口候选或设备 URL 打开，也必须切换当前选中设备并将路由重新绑定到该 identity；旧路由目标不得继续覆盖已连接的 Web Serial 目标。
 - Browser Web Serial 的连接成功必须结算同一通道此前残留的失败反馈：当前 target 已是 `connected` 时，“最近操作”不得继续显示 `Web Serial unavailable` 或先前 probe 超时；该结算不得覆盖 LAN、桥接或运行控制等无关操作的已完成反馈。
 - 浏览器必须在 localStorage 记忆已成功 probe 的 Web Serial 设备身份，只允许保存稳定 `deviceId`、hostname、firmware version 与 build ID，不得保存串口对象、运行状态、配对 token 或其他凭据。稳定 `deviceId` 是唯一身份必填项；缺失的 hostname 回退到 ID，缺失的 firmware/build 元数据保存为 `unknown`，不得丢弃已确认设备。记忆记录在设备列表中投影为离线 Web Serial 通道；用户从设备卡片选择该通道时优先复用唯一已授权端口，但必须重新读取固件 identity 后才标记在线。实际 `deviceId` 相同才恢复原设备通道；不同时必须保留原离线记录，并把实际硬件注册、选中为另一台设备。Add device 的强制 chooser 语义不受快速重连影响。
 - Web Serial 身份记忆必须在成功的 identity/network/status probe 同一连接事务内写入，不能依赖后续 UI effect；页面重新挂载、开发热更新或 target 列表重算后，已记忆的 Web Serial 连接方式仍必须与同一 device ID 的 LAN/Bridge 通道合并显示。DEVD bootstrap 或不可用占位不是可控制 target，不得在无可用 DEVD target 的页面写入“重新接管 devd 租约”或其它硬件控制失败反馈。若已进入 live DEVD 工作区后设备列表刷新失败，界面必须保留该占位作为只读诊断上下文并继续显示 Dashboard；所有写控制保持禁用，占位不得进入设备卡片、连接方式或已知设备列表。
@@ -160,7 +160,7 @@
 - 正式 Web app 的构建必须固定为 live；公开 Demo 由独立构建固定为 mock。URL 参数和 browser storage 不得选择或切换运行时。
 - 公开 Demo 构建必须只加载 deterministic demo scenario，不得启用 devd、Web Serial 或任何真实后端请求；正式构建收到旧 `demo=true` / `uiDemo` 入口时显示停用页，不挂载 live 控制台。
 - 正式构建必须固定使用 live runtime，不得混入 Demo fixture、degraded Demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。`demo=false` 仅作为兼容输入，不得改变运行时边界。
-- Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.N` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
+- Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
 - Product release manifest 必须记录 Web、firmware、host-tools 组件的 `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
 
 ### SHOULD
@@ -214,7 +214,7 @@
 
 ### Release manifest
 
-- Product release tag 是 `vX.Y.Z` 或 `vX.Y.Z-rc.N`。
+- Product release tag 是 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>`。
 - Release assets 包含 Web bundle、firmware bundle、host-tools bundle 和 `flux-purr-release-manifest-<tag>.json`。
 - `changedSincePrevious=false` 的组件不得被推荐为必需升级项。
 
@@ -326,8 +326,8 @@
 - `cargo clippy --manifest-path firmware/Cargo.toml --all-targets -- -D warnings`
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml`
-- `bash .github/scripts/test-manual-release.sh`
-- `bash .github/scripts/test-release-workflows.sh`
+- `bash .github/scripts/test-release-chain.sh`
+- `bash .github/scripts/test-release-completion.sh`
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build`
