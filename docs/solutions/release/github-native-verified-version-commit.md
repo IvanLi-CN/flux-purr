@@ -1,5 +1,5 @@
 ---
-title: GitHub-native verified VERSION preparation commits
+title: GitHub-native verified VERSION preparation commits (superseded)
 module: release-automation
 problem_type: workflow
 component: github-actions
@@ -8,69 +8,38 @@ tags:
   - graphql
   - signed-commits
   - version-preparation
-status: active
+status: superseded
 related_specs:
   - docs/specs/version-source/SPEC.md
+  - docs/specs/manual-version-release-delivery/SPEC.md
 ---
 
-# GitHub-native verified VERSION preparation commits
+# GitHub-native verified VERSION preparation commits (superseded)
+
+> 本 solution 保留为历史背景。当前发布链路不再创建或消费 PR-local VERSION preparation commit；请使用 [Manual version release delivery](../../specs/manual-version-release-delivery/SPEC.md)。
 
 ## Context
 
-Flux Purr prepares a product release by appending one `VERSION`-only commit to
-the existing in-repository pull request. The target branch ruleset requires
-commits to be signed and verified, but release automation must not hold a
-long-lived private signing key.
+Flux Purr historically prepared a product release by appending one `VERSION`-only commit to an in-repository pull request. The target branch ruleset required signed and verified commits, but release automation did not hold a long-lived private signing key.
 
-## Symptoms
+## Historical resolution
 
-An action that creates a local commit and pushes it needs a GPG private key and
-passphrase to satisfy the signed-commit ruleset. If those secrets are absent,
-the preparation job fails after the VERSION staging logic has run. A job can
-still appear successful when it detects an existing preparation and skips the
-signing step, which does not prove that fresh preparation works.
+The former workflow used GitHub GraphQL `createCommitOnBranch` with `GITHUB_TOKEN`, `expectedHeadOid`, and a VERSION-only diff so GitHub could create a verified commit without a local signing key. It verified the branch head, parent/diff/trailer contract, and REST `verification.verified` field before later release checks consumed that preparation.
 
-## Root cause
+## Current replacement
 
-Local Git signing requires the signing key to exist on the runner. The
-`GITHUB_TOKEN` already grants the repository-scoped write capability, but it
-does not provide a local private key for `git commit -S`.
+This mechanism is no longer an active implementation. The current workflow keeps root `VERSION` as the product fact but resolves the release version in the manual release runner workspace after fixing the exact `main` source SHA. Signed commits remain a repository quality gate for normal PR/main development, not a release-preparation mutation.
 
-## Resolution
+Publish reserves an immutable tag before building; same-identity recovery reuses only that tag@SHA identity. No PR label snapshot, VERSION-only preparation commit, or completion workflow is created for a new release.
 
-Use the GitHub GraphQL `createCommitOnBranch` mutation with the existing
-`GITHUB_TOKEN` and `contents: write` permission. Pass the PR branch, the exact
-source SHA as `expectedHeadOid`, the staged `VERSION` contents, and the release
-message/trailers. GitHub creates the child commit and automatically signs it
-when supported. A separate verification step runs for both `created` and
-`existing` preparation states. It verifies the branch head, the VERSION-only
-parent/diff/trailer contract, and the REST commit `verification.verified` field,
-with a bounded retry for verification propagation. A retry after a commit was
-created but its verification has not propagated therefore fails closed instead
-of treating the commit as already complete.
+## Guardrails
 
-This preserves the PR-local commit model, avoids a new App or secret, and keeps
-the ruleset enabled. The local staging commit remains an untrusted payload
-source; only the GitHub-created commit is pushed to the PR branch and consumed
-by later release checks.
-
-## Guardrails / Reuse notes
-
-- Keep the pre-mutation `git ls-remote` check and GraphQL `expectedHeadOid` so a
-  concurrent PR update fails instead of being overwritten.
-- Treat GraphQL errors, a missing returned OID, a changed remote branch head,
-  a malformed preparation commit, or an unverified signature as hard failures.
-- Treat a completed `workflow_run` without a pull request number as a normal
-  non-applicable event and skip before checkout or mutation. When a source is
-  present, retain the open in-repository PR validation before preparation.
-- Do not replace the mutation with the Git Database REST API unless the caller
-  supplies and protects an explicit detached signature; that path does not
-  provide GitHub-native signing by itself.
-- Do not remove the signed-commit ruleset or weaken the VERSION-only and source
-  ancestry checks to avoid credential setup.
+- Do not reintroduce a PR-local VERSION commit, label snapshot, or completion gate.
+- Keep exact source SHA, tag collision, artifact provenance, and same-identity recovery checks fail closed.
+- Do not remove the signed-commit ruleset or weaken PR/main protection to avoid release setup.
 
 ## References
 
-- [GitHub GraphQL `createCommitOnBranch`](https://docs.github.com/en/graphql/reference/commits)
-- [GitHub Actions `GITHUB_TOKEN`](https://docs.github.com/en/actions/concepts/security/github_token)
+- [Manual release specification](../../specs/manual-version-release-delivery/SPEC.md)
 - [Version source specification](../../specs/version-source/SPEC.md)
+- [ADR 0025](../../adr/0025-manual-version-release-delivery.md)

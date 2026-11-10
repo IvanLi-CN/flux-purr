@@ -48,7 +48,11 @@ cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr-devd -
 
 ## Release Work
 
-- Use product tag `vX.Y.Z`; do not recreate `web/v...` or `fw/v...` workflows.
+- Use the manual `Release Product` workflow with an owner-confirmed `release_target` of `patch`, `minor`, `major`, or `rc`; do not provide a final version, tag, or source SHA override.
+- Before dispatch, the Agent must inspect the current `main` exact SHA, trusted stable baseline, and changed paths, then suggest intent and expected version to the owner. Dispatch only after owner confirmation; the workflow independently resolves canonical `VERSION`.
+- Non-document changes normally require a real product Release. Documentation-only changes are restricted to `docs/**`, `README*`, `CHANGELOG*`, Markdown/plain text, and documentation images; mixed changes require release.
+- Use product tag `vX.Y.Z` or `vX.Y.Z-rc.N`; do not recreate `web/v...` or `fw/v...` workflows.
 - Publish Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` on the same GitHub Release.
 - Keep release manifest components explicit with `sha256`, `contentSha256`, `sourceSha`, `protocolVersions`, `changedSincePrevious`, and `updateReason`.
+- Reserve the tag before building. If a release fails after reservation, use `operation=recover` with the original intent only after verifying the same tag points to the exact source SHA; recovery must reuse the same identity and must not calculate a successor.
 - PRs that touch hardware behavior, release policy, CLI/devd contracts, or user operations must update relevant specs, solutions, and project docs.

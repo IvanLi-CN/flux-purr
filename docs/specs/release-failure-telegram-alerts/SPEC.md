@@ -14,7 +14,7 @@ Flux Purr 的 `Release Product` 需要在发布失败时发送可恢复的通知
 
 ### Out of scope
 
-- `Release Product` 的标签、版本、产物和 recovery 行为。
+- `Release Product` 的版本解析、产物构建和 recovery 行为。
 - Oidrune gateway、OIDC audience、Telegram provider 或生产通知服务的配置。
 - 真实 `workflow_dispatch` smoke notification。
 
@@ -24,7 +24,7 @@ Flux Purr 的 `Release Product` 需要在发布失败时发送可恢复的通知
 - **REQ-JB85U-SMOKE:** The wrapper MUST retain a no-input `workflow_dispatch` smoke job with a failure outcome and a caller-generated smoke title.
 - **REQ-JB85U-PIN:** Both notification jobs MUST call `IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b` and MUST omit gateway URL and OIDC audience overrides.
 - **REQ-JB85U-PERMISSION:** Each Oidrune caller job MUST grant `id-token: write` and MUST NOT pass `SHOUTRRR_URL` or another Telegram secret.
-- **REQ-JB85U-SUMMARY:** The caller MUST provide the complete Oidrune `summary`. The failure summary MUST include a failure title, project name, status, target SHA, run URL, and the existing PR, label, version, artifact, and recovery context. The smoke summary MUST include its smoke title, project name, failure status, target SHA, and current run URL.
+- **REQ-JB85U-SUMMARY:** The caller MUST provide the complete Oidrune `summary`. The failure summary MUST include a failure title, project name, status, exact main SHA, run URL, release tag/version when reserved, reservation identity, artifact names, and same-identity recovery target. It MUST NOT read PR labels. The smoke summary MUST include its smoke title, project name, failure status, target SHA, and current run URL.
 
 ## Verification
 
@@ -33,4 +33,4 @@ Flux Purr 的 `Release Product` 需要在发布失败时发送可恢复的通知
 
 ## Related ADRs
 
-- [0005-pr-local-version-preparation](../../adr/0005-pr-local-version-preparation.md)
+- [0025-manual-version-release-delivery](../../adr/0025-manual-version-release-delivery.md)

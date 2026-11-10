@@ -17,7 +17,7 @@ env:
 
 jobs:
   classify:
-    name: Release preparation validation
+    name: Release source validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -29,16 +29,13 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
 
-      - name: Classify prepared VERSION commit
+      - name: Validate release source boundary
         id: classify
         shell: bash
         run: |
           set -euo pipefail
-          if python3 .github/scripts/release_chain.py verify-prepared --commit HEAD >/dev/null 2>&1; then
-            echo "kind=prepared" >> "$GITHUB_OUTPUT"
-          else
-            echo "kind=source" >> "$GITHUB_OUTPUT"
-          fi
+          test -f VERSION
+          echo "kind=source" >> "$GITHUB_OUTPUT"
 
   firmware:
     name: Firmware checks
@@ -52,10 +49,6 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
-
-      - name: Verify prepared release source
-        if: needs.classify.outputs.kind == 'prepared'
-        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
 
       - name: Setup Rust
         if: needs.classify.outputs.kind == 'source'
@@ -185,10 +178,6 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
 
-      - name: Verify prepared release source
-        if: needs.classify.outputs.kind == 'prepared'
-        run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
-
       - name: Setup Bun
         if: needs.classify.outputs.kind == 'source'
         uses: oven-sh/setup-bun@v2
@@ -214,14 +203,11 @@ jobs:
       - name: Release policy script tests
         if: needs.classify.outputs.kind == 'source'
         run: |
-          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_preparation.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
+          python3 -m py_compile .github/scripts/manual_release.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
-          bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-manual-release.sh
           bash .github/scripts/test-release-workflows.sh
-          bash .github/scripts/test-release-preparation.sh
-          bash .github/scripts/test-release-completion.sh
-          bash .github/scripts/test-release-labels.sh
           python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 
       - name: Biome check + typecheck

@@ -19,6 +19,7 @@ VERSION_SPEC.loader.exec_module(PRODUCT_VERSION)
 
 SCHEMA_VERSION = 1
 FIRMWARE_BUNDLE_MEDIA_TYPE = "application/vnd.flux-purr.firmware-bundle+zip"
+RELEASE_INTENTS = {"patch", "minor", "major", "rc"}
 
 
 def media_type_for_asset(path: Path) -> str:
@@ -145,6 +146,14 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         raise ManifestError(
             f"Manifest channel {requested_channel} does not match VERSION-derived channel {expected['channel']}"
         )
+    if args.intent not in RELEASE_INTENTS:
+        raise ManifestError(f"Unsupported release intent: {args.intent}")
+    if args.reservation_id != f"{args.tag}@{args.source_sha}":
+        raise ManifestError("Reservation id must bind the release tag to the source SHA")
+    try:
+        PRODUCT_VERSION.parse_version(args.baseline)
+    except PRODUCT_VERSION.VersionError as exc:
+        raise ManifestError(f"Invalid trusted baseline: {args.baseline}") from exc
     previous = read_previous(args.previous_manifest)
     previous_by_id = previous_components(previous)
     root = Path(args.asset_root)
@@ -169,6 +178,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "tag": args.tag,
         "sourceSha": args.source_sha,
         "channel": expected["channel"],
+        "releaseIntent": args.intent,
+        "trustedBaseline": args.baseline,
+        "reservationId": args.reservation_id,
         "components": components,
     }
 
@@ -179,6 +191,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--channel", choices=("stable", "rc"))
+    parser.add_argument("--intent", choices=sorted(RELEASE_INTENTS), required=True)
+    parser.add_argument("--baseline", required=True)
+    parser.add_argument("--reservation-id", required=True)
     parser.add_argument("--repo-root", default=str(ROOT))
     parser.add_argument("--asset-root", default=".")
     parser.add_argument("--previous-manifest")

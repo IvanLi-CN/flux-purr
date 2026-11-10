@@ -54,6 +54,9 @@ def main() -> int:
     require(declaration.get("schema_version") == 1, "schema_version must be 1", errors)
     required_checks = declaration.get("required_checks")
     require(isinstance(required_checks, list) and required_checks, "required_checks must be a non-empty list", errors)
+    require("expected_preparation_workflows" not in declaration, "legacy preparation workflow declarations must be removed", errors)
+    require(not any("label" in json.dumps(entry).lower() for entry in declaration.get("expected_pr_workflows", [])), "PR workflow declarations must not use release labels", errors)
+    require(not any("completion" in json.dumps(entry).lower() for entry in declaration.get("expected_pr_workflows", [])), "PR workflow declarations must not use release completion", errors)
     require("main" in declaration["policy"]["branch_protection"]["protected_branches"], "main must be protected", errors)
     require(declaration["policy"]["branch_protection"]["require_pull_request"] is True, "main must require pull requests", errors)
     require(declaration["policy"]["branch_protection"]["disallow_direct_pushes"] is True, "direct pushes must be disallowed", errors)
@@ -64,7 +67,6 @@ def main() -> int:
     workflow_jobs: set[str] = set()
     for key in (
         "expected_pr_workflows",
-        "expected_preparation_workflows",
         "expected_main_workflows",
         "expected_release_workflows",
     ):

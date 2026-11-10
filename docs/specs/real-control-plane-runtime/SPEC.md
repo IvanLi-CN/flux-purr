@@ -326,8 +326,8 @@
 - `cargo clippy --manifest-path firmware/Cargo.toml --all-targets -- -D warnings`
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml`
-- `bash .github/scripts/test-release-chain.sh`
-- `bash .github/scripts/test-release-completion.sh`
+- `bash .github/scripts/test-manual-release.sh`
+- `bash .github/scripts/test-release-workflows.sh`
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
 - `bun run --cwd web build`

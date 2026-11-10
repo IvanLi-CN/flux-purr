@@ -6,174 +6,89 @@ bash "${root_dir}/.github/scripts/test-edgeone-deploy.sh"
 python3 -m unittest discover -s "${root_dir}/.github/scripts" -p 'test_setup_xtensa*.py'
 python3 - "${root_dir}" <<'PY'
 from pathlib import Path
+import json
 import sys
 
 root = Path(sys.argv[1])
+release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
 ci_pr = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 ci_main = (root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8")
-prepare = (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
-release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
-completion = (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
-quality = (root / ".github/quality-gates.json").read_text(encoding="utf-8")
-label_gate = (root / ".github/workflows/label-gate.yml").read_text(encoding="utf-8")
-release_chain = (root / ".github/scripts/release_chain.py").read_text(encoding="utf-8")
 notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encoding="utf-8")
+quality = json.loads((root / ".github/quality-gates.json").read_text(encoding="utf-8"))
 edgeone_helper = (root / ".github/scripts/deploy-edgeone.sh").read_text(encoding="utf-8")
 
-assert "Release preparation validation" in ci_pr
-assert "kind=prepared" in ci_pr
-assert "needs: classify" in ci_pr
-assert ci_pr.count("ref: ${{ github.event.pull_request.head.sha || github.sha }}") == 5
-assert "prepared-integration" in ci_main
-assert "git diff --quiet" in ci_main
-assert "  web:\n    name: Web checks\n    needs: classify\n    if: needs.classify.outputs.kind == 'source'\n    runs-on: ubuntu-24.04" in ci_main
-assert "Prepare product version" in prepare
-assert "workflows: [CI PR, Label Gate]" in prepare
-assert "contents: write" in prepare
-assert "github.event.workflow_run.pull_requests[0].number != ''" in prepare
-assert "Create GitHub-signed VERSION commit on the pull request" in prepare
-assert "id: create_version" in prepare
-assert "createCommitOnBranch" in prepare
-assert "expectedHeadOid" in prepare
-assert "branchName: $branch" in prepare
-assert '--arg branch "${HEAD_REF}"' in prepare
-assert "RELEASE_GPG_PRIVATE_KEY" not in prepare
-assert "RELEASE_GPG_PASSPHRASE" not in prepare
-assert "commit --amend --no-edit -S --reset-author" not in prepare
-assert "repos/${GITHUB_REPOSITORY}/contents/VERSION" not in prepare
-assert "git -C \"${RUNNER_TEMP}/release-source\" push origin" not in prepare
-assert "verify-prepared" in prepare
-assert ".commit.verification.verified" in prepare
-assert "Verify prepared VERSION commit and GitHub signature" in prepare
-assert "if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'" in prepare
-assert "PREPARED_SHA: ${{ steps.create_version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}" in prepare
-assert 'echo "prepared_sha=${prepared_sha}" >> "${GITHUB_OUTPUT}"' in prepare
-assert "refs/heads/main" not in prepare
-assert "verification_sha" in prepare
-assert "verify-prepared" in prepare
-assert "verify-merged-prepared" in release
-assert "if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}" in release
-assert "verify-tag" in release
-assert release.index("verify-tag") < release.index("Checkout merged product source")
-assert "--allow-existing" in release
-assert 'python3 .github/scripts/release_chain.py verify-tag \\\n            --version "${PRODUCT_VERSION}" \\\n            --expected-sha "${RELEASE_SHA}" \\\n            --allow-existing' in release
+assert "workflow_dispatch:" in release
+assert "workflow_run:" not in release
+assert "options: [patch, minor, major, rc]" in release
+assert "options: [publish, recover]" in release
+assert "manual_release.py baseline" in release
+assert "manual_release.py classify" in release
+assert "manual_release.py identity" in release
+assert "git rev-parse origin/main" in release
+assert "git tag --list 'v*'" in release
+assert 'if [ "${release_required}" != true ] && [ "${RELEASE_OPERATION}" != recover ]; then' in release
+assert "Recovery requested; continue to verify the existing release identity" in release
+assert "Reserve immutable release tag" in release
 assert "git push origin \"${PRODUCT_TAG}\"" in release
-assert "git fetch --force --tags origin" in prepare
-assert 'git merge-base --is-ancestor "${MAIN_INPUT}" "${main_sha}"' in release
-assert 'if [ "${EVENT_NAME}" = workflow_run ]; then' in release
-assert 'echo "controller_sha=${main_sha}" >> "$GITHUB_OUTPUT"' in release
-assert 'commits/${source_sha_hint}/pulls' in release
-assert 'refs/pull/${pr_number}/head' in release
-assert 'git fetch --force --no-tags origin "${source_sha_hint}"' in release
-assert 'git fetch --force --no-tags origin "refs/pull/${pr_number}/head" || true' in release
-assert 'if [ "${source_sha_unavailable}" = 0 ] && [ -n "${source_sha_hint}" ]' in release
-assert 'git ls-remote --tags origin' in release
-assert 'recovery_tag_ref' in release
-assert 'source_sha_unavailable=0' in release
-assert 'exact existing recovery tag' in release
-assert 'Legacy release ${MAIN_INPUT} is accepted only for exact recovery tag v${recovery_version}.' in release
-assert 'cannot verify merged prepared release ${MAIN_INPUT}' in release
-assert 'if [ "${prepared}" = true ]; then' in release
-assert 'refs/tags/v${recovery_version}^{commit}' in release
-assert 'git show "${MAIN_INPUT}:VERSION" | tr -d' in release
-assert "verify_merged_prepared_release" in release_chain
-assert "verify_prepared_commit" in release_chain
-assert "verify_squashed_prepared_release" in release_chain
-assert '"preparationMode": "squashed"' in release_chain
-assert "def verify_tag" in release_chain
-assert "latest_check_outcomes" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
-assert "latest_check_outcomes" in (root / ".github/scripts/release_completion.py").read_text(encoding="utf-8")
-assert "no_prepared_product_merge" in release_chain
-assert "release/product-main" not in release
-assert "Fast-forward main" not in release
-assert "git push origin \"${RELEASE_SHA}:refs/heads/main\"" not in release
-assert "operation=recover" not in release
-assert "release_snapshot.py" not in release
-assert "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" in release
+assert "Checkout release source and bind VERSION" in release
+assert "printf '%s\\n' \"${PRODUCT_VERSION}\" > VERSION" in release
+assert "gh release create" in release
+assert "Deploy published Web archive to EdgeOne" in release
 assert "Deploy published public demo archive to EdgeOne" in release
-assert "Prepare EdgeOne deployment helper" in release
-assert 'git show "${CONTROLLER_SHA}:.github/scripts/deploy-edgeone.sh" > "${helper_path}"' in release
+assert "release_chain.py" not in release
+assert "release_snapshot.py" not in release
+assert "commit_sha" not in release
+assert "label" not in release.lower()
+assert "refs/heads/main" not in release
+assert 'git push origin "${RELEASE_SHA}:refs/heads/main"' not in release
+assert release.index("Reserve immutable release tag") < release.index("Build and package product assets")
+assert release.index("Build and package product assets") < release.index("Publish and verify release assets")
 assert release.count('bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh"') == 2
-assert "npx --yes edgeone@1.6.18 makers deploy" not in release
+assert "--reservation-id" in release
+assert "releaseIntent" in release
+
+for workflow in (ci_pr, ci_main):
+    assert "release_chain.py" not in workflow
+    assert "prepared" not in workflow
+    assert "label" not in workflow.lower()
+    assert "test-manual-release.sh" in workflow
+
+for old_path in (
+    ".github/workflows/label-gate.yml",
+    ".github/workflows/release-preparation.yml",
+    ".github/workflows/release-completion.yml",
+    ".github/scripts/label-gate.sh",
+    ".github/scripts/release_chain.py",
+    ".github/scripts/release_preparation.py",
+    ".github/scripts/release_completion.py",
+    ".github/scripts/release_snapshot.py",
+):
+    assert not (root / old_path).exists(), old_path
+
+assert quality["required_checks"] == [
+    "Firmware checks",
+    "DEVD checks",
+    "DEVD Windows checks",
+    "Web checks",
+    "Worktree bootstrap",
+]
+assert not any("Label" in item["workflow"] for item in quality["expected_pr_workflows"])
+assert "expected_preparation_workflows" not in quality
+assert all("Release completion" not in item["workflow"] for item in quality["expected_pr_workflows"])
+assert quality["expected_release_workflows"][0]["workflow"] == "Release Product"
+
+assert "labels" not in notify.lower()
+assert "commit_sha=" not in notify
+assert "workflow_run.conclusion == 'failure'" in notify
+assert "operation=recover" in notify
+assert "reservation" in notify
+assert "same-identity" in notify
+
 assert '"edgeone@${cli_version}" makers deploy' in edgeone_helper
-assert 'cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"' in edgeone_helper
 assert 'max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"' in edgeone_helper
 assert "deployment_started" in edgeone_helper
 assert "retryable_preflight_failure" in edgeone_helper
 assert "PIPESTATUS" in edgeone_helper
-assert "tee_status" in edgeone_helper
-assert "automatic retry is disabled" in edgeone_helper
-assert "endpoint or network failure" in edgeone_helper
-assert "check and set region failed" in edgeone_helper
-assert "saw_preflight_context" in edgeone_helper
-assert "normalize_cli_line" in edgeone_helper
-assert "^[1-3]$" in edgeone_helper
-assert "unexpected phase output" not in edgeone_helper
-assert edgeone_helper.index("if (( attempt_output_ok == 0 ))") < edgeone_helper.index("if (( status == 0 ))")
-assert release.index("Setup Bun") < release.index("Deploy published Web archive to EdgeOne")
-assert 'archive="release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-dist "${EDGEONE_PROJECT_NAME}" web-production' in release
-assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-deployed' in release
-assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-deployed --clobber' in release
-assert 'archive="release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"' in release
-assert 'bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production' in release
-assert 'printf \'%s\\n\' "${{ steps.release.outputs.source_sha }}" > .edgeone-demo-deployed' in release
-assert 'gh release upload "${{ steps.release.outputs.tag }}" .edgeone-demo-deployed --clobber' in release
-assert "web-production-bundle" not in ci_main
-assert "web-demo-bundle" not in ci_main
-assert not (root / ".github/workflows/deploy-edgeone.yml").exists()
-assert not (root / ".github/workflows/deploy-edgeone-demo.yml").exists()
-assert "Release completion" in completion
-assert "--labels-json" in completion
-assert "--checks-json" in completion
-assert "checks: read" in completion
-assert "source-checks.json" in completion
-assert "Verify VERSION and release completion" in completion
-for required_workflow in (label_gate, completion):
-    assert "queue: max" in required_workflow
-    assert "cancel-in-progress: true" not in required_workflow
-    assert "gh api \"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}\" --jq '.labels'" in required_workflow
-    assert "uses: actions/checkout@v4" in required_workflow
-    assert "ref: ${{ github.event.pull_request.base.sha || github.sha }}" in required_workflow
-    assert "pull-requests: read" in required_workflow
-    assert "contents: read" in required_workflow
-    assert "contents: write" not in required_workflow
-    assert "pull-requests: write" not in required_workflow
-assert "LABELS_JSON: ${{ runner.temp }}/labels.json" in label_gate
-assert "EVENT_PATH" not in label_gate
-assert 'jq ".pull_request.labels"' not in completion
-assert "Validate PR labels" in quality
-assert "Release completion" in quality
-assert "Validate PR labels" in label_gate
-assert "capture-intent" not in label_gate
-new_notifier = "IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b"
-assert "github-workflows" not in notify
-assert "release-failure-telegram.yml@" not in notify
-assert notify.count(new_notifier) == 2
-assert notify.count("    permissions:\n      id-token: write") == 2
-assert "gateway_url:" not in notify
-assert "oidc_audience:" not in notify
-assert "SHOUTRRR_URL" not in notify
-assert "    secrets:" not in notify
-assert "workflows:\n      - Release Product" in notify
-assert "conclusion == 'failure'" in notify
-assert "types: [completed]" in notify
-assert "branches: [main]" in notify
-assert "outcome: ${{ github.event.workflow_run.conclusion }}" in notify
-assert "outcome: failure" in notify
-assert 'summary: ${{ needs.release_context.outputs.summary }}' in notify
-assert "title=Release Product failure; project=${REPOSITORY}; status=${CONCLUSION}; target_sha=${MERGE_SHA}; run_url=${RUN_URL}" in notify
-for release_context in (
-    "pr_number=${pr_number}",
-    "merge_commit_sha=${MERGE_SHA}",
-    "type_label=${type_label:-unknown}",
-    "channel_label=${channel_label:-unknown}",
-    "components=${components:-none}",
-    "selected_version=${candidate_version}",
-    "artifact_names=${artifact_names}",
-    "backfill=dispatch Release Product with operation=recover and commit_sha=${MERGE_SHA}",
-):
-    assert release_context in notify
-assert "title=Release failure notification smoke; project=${{ github.repository }}; status=failure; target_sha=${{ github.sha }}; run_url=" in notify
+
 print("release workflow fixtures passed")
 PY

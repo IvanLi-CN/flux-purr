@@ -1,6 +1,6 @@
 # Flux Purr 初始化
 
-初始化时期的 label-gate 与 compute-version 发布条款已由 [version-source](../version-source/SPEC.md) 取代；本文件其余内容仍描述仓库初始化基线。
+初始化时期的 label-gate 与 compute-version 发布条款已由 [Manual version release delivery](../manual-version-release-delivery/SPEC.md) 和 [version-source](../version-source/SPEC.md) 取代；本文件其余内容仍描述仓库初始化基线。
 
 ## 背景 / 问题陈述
 
@@ -16,7 +16,7 @@
 - 固件按 ESP32-S3 默认落地 no-std 基线，并预留 C3 切换位。
 - Web 侧落地 React + Vite + Bun + Biome + shadcn/ui + Storybook + Playwright。
 - 建立本地与 CI 一致的质量门禁：`pre-commit`、`commit-msg`、`pre-push`。
-- 落地 label gate + release intent + product tag 发布脚本与工作流。
+- 落地 owner-confirmed release intent + product tag 发布脚本与工作流。
 - 在仓库内安装 UI UX Pro Max，并补齐可执行使用指引。
 
 ### Non-goals
@@ -54,7 +54,7 @@
 - Storybook 可构建，且核心页面/组件具备 stories。
 - shadcn 组件同时可用于 App 与 Storybook。
 - 固件 `fmt`、`clippy`、`build` 命令可执行且结果明确。
-- Release 规则支持 PR label 驱动和 `workflow_dispatch` 手动兜底。
+- Release 规则由 `workflow_dispatch` 接收 `patch`、`minor`、`major` 或 `rc` intent；PR labels 不参与发布。
 
 ### SHOULD
 
@@ -73,12 +73,12 @@
 - 开发者执行 `bash scripts/check-*.sh` 可复用与 CI 相同的检查路径。
 - Web 通过 `bun run --cwd web storybook` 调试组件，通过 `build-storybook` 生成静态产物。
 - 固件通过 `cargo` 命令完成 no-std crate 质量门禁；S3 目标方向在 README 与 CI/release 中保持一致。
-- Release workflow 在 push main 场景下根据关联 PR labels 决定自动 patch、受控 exact 或跳过；数字版本由根目录 `VERSION` 决定，也支持手动触发。
+- Release workflow 在 manual dispatch 时以当前 `main` exact SHA 和 trusted stable baseline 独立解析 canonical version；纯文档 allowlist 可跳过产品发布。
 
 ### Edge cases / errors
 
 - 无效 commit message 必须在 `commit-msg` 阶段失败并阻断提交。
-- 缺失/冲突 PR labels 时，`label-gate.sh` 必须失败。
+- 缺失或非法 `release_target` 时，manual release policy 必须失败。
 - 本地无 `HEAD` 场景不属于迁移后的产品版本合同；构建应报告缺少 source SHA，而不是生成伪造版本。
 - E2E 默认可通过 `SKIP_E2E=1` 跳过，避免无测试样例时阻断主流程。
 
@@ -102,14 +102,14 @@
 - Given hooks 已安装，When 触发 `commit-msg` 且 message 非 conventional，Then 提交被拒绝并输出错误原因。
 - Given Web 依赖已安装，When 执行 `bash scripts/check-web-build.sh` 与 `bash scripts/check-storybook-build.sh`，Then 两者均成功。
 - Given 固件基线已创建，When 执行 `bash scripts/check-firmware-fmt.sh`、`bash scripts/check-firmware-clippy.sh`、`bash scripts/check-firmware-build.sh`，Then 全部成功。
-- Given label 不完整，When 执行 `label-gate.sh`，Then gate 失败；Given label 完整，Then gate 通过。
+- Given `release_target` 不在 `patch|minor|major|rc`，When 执行 manual policy，Then dispatch contract 失败。
 - Given normal-flow 收口，When 输出交付状态，Then 明确 `PR-ready（local）` 且 `未 push / 未建 PR`。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
 - 流程类型已锁定为 `normal`。
 - 技术路线已锁定：Firmware=S3 默认、Web=React+shadcn+Storybook。
-- 发布策略已锁定：PR labels 自动决策 + workflow_dispatch 手动兜底。
+- 发布策略已锁定：owner-confirmed `workflow_dispatch` + trusted baseline Version Policy。
 - UI 工具链已锁定：仓库内安装 UI UX Pro Max。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）

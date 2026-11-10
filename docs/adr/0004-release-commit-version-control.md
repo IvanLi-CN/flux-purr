@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded by [0005-pr-local-version-preparation](0005-pr-local-version-preparation.md).
+Superseded by [ADR 0025](0025-manual-version-release-delivery.md).
 
 Supersedes [0002-release-recovery-and-promotion](0002-release-recovery-and-promotion.md).
 

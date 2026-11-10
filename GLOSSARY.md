@@ -2,6 +2,24 @@
 
 本词汇表约定 Flux Purr 产品评审与演示中的领域用语。
 
+## 发布与版本
+
+**Manual Release（手动发布）**：由 owner 确认 `release_target` 后通过 `Release Product` manual dispatch 启动的产品发布流程；它不允许 caller 直接指定 canonical version，也不能绕过 PR、review、required checks 或 `main` protection。
+
+**Release Intent（发布意图）**：owner 确认的单一目标 `patch`、`minor`、`major` 或 `rc`。它不是最终版本号，workflow 根据 trusted baseline 独立解析 canonical version。
+
+**Trusted Stable Baseline（可信稳定基线）**：当前 release source 可达的最高稳定 final tag；它用于解析下一个 stable 或 RC 版本，不由 PR labels、merge 顺序或 package metadata 推导。
+
+**Release Identity（发布身份）**：绑定 source SHA、baseline、intent、canonical version、tag reservation、artifact digests、GitHub Release、部署结果和 recovery target 的不可歧义记录。
+
+**Tag Reservation（标签预留）**：在构建、创建 Release 或部署前，将 `v<version>` 绑定到 exact source SHA 的不可变占位步骤；collision 必须 fail closed。
+
+**Same-identity Recovery（同身份恢复）**：只复用已经存在且精确指向当前 source SHA 的 release tag，补齐失败的 Release/Deploy/Notify 步骤；不重新计算版本、递增 RC、移动 tag 或创建 successor。
+
+**Documentation-only Change（纯文档变更）**：变更路径全部属于 `docs/**`、`README*`、`CHANGELOG*`、Markdown、纯文本或文档图片资源的提交集合。只要混入其它产品路径，就按产品变更处理。
+
+**Version Suggestion（版本建议）**：Agent 根据当前 baseline 与变更范围向 owner 提出的 intent/预期版本说明；它不写入仓库、不持久化、不替代 owner 确认，也不作为 workflow 的 canonical version 输入。
+
 ## Language
 
 **正式控制台（Live Console）**：用于查看和操作已授权真实 Flux Purr 设备的产品界面，其设备状态与控制结果来自真实设备。

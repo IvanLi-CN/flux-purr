@@ -638,6 +638,9 @@ Every release includes `flux-purr-release-manifest-vX.Y.Z.json` with this shape:
   "tag": "v0.22.1",
   "sourceSha": "cccccccccccccccccccccccccccccccccccccccc",
   "channel": "stable",
+  "releaseIntent": "patch",
+  "trustedBaseline": "0.22.0",
+  "reservationId": "v0.22.1@cccccccccccccccccccccccccccccccccccccccc",
   "components": [
     {
       "id": "firmware",

@@ -36,7 +36,7 @@ The product Web and public-demo bundles are deployed to EdgeOne only by `Release
 - `docs/specs/` - executable specs and acceptance contracts
 - `docs/research/` - upstream research baselines for hardware/firmware derivative work
 - `docs/hardware/` - board-level pin map and power-chain baselines
-- `.github/` - CI, label gate, and release workflows
+- `.github/` - CI, manual release, and failure notification workflows
 - `scripts/` - shared check scripts used by hooks and CI
 
 ## Quick start
@@ -89,13 +89,13 @@ The root [`VERSION`](VERSION) file is the only product-version source. It contai
 
 Development builds derive `nextPatch(VERSION)-dev.<short-sha>`. With `VERSION=0.23.0` and source commit `abcdef0...`, every local consumer reports `0.23.1-dev.abcdef0`; no development command writes `VERSION`.
 
-Every product PR is released separately. After its full PR checks pass, `Prepare product version` appends one VERSION-only preparation commit to that same PR branch. Its trailers bind the verified source SHA, exact product version, and validated label intent. `Release completion` rechecks the current labels, base, preparation diff, and the source commit's full CI before the PR enters `main` through the normal protected merge route; no release workflow writes `main` directly. `Release Product` builds, tags, publishes, and verifies that merged `main` commit. A failed publication leaves the committed `VERSION` locked on `main`; `operation=recover` may only republish that same merged commit and version.
+Non-document changes normally require an actual product Release. Before dispatch, the Agent reads the current `main` exact SHA, trusted stable baseline, and changed paths, then suggests a `release_target` (`patch`, `minor`, `major`, or `rc`) and expected version to the owner. The owner confirms the intent; only then is `Release Product` dispatched. The workflow accepts the intent and `operation=publish|recover`, independently resolves the canonical version, reserves `vX.Y.Z` or `vX.Y.Z-rc.N` against the exact source SHA, and writes that version only in its runner workspace. It never accepts a caller-supplied final version, tag, or source override.
 
-PRs must carry exactly one `type:patch|minor|major|docs|skip` label and exactly one `channel:stable|rc` label. `Validate PR labels` remains required. Once that check and PR CI pass, the preparation workflow copies the validated intent into the VERSION-only commit. `type:patch + channel:stable` writes `nextPatch(VERSION)` automatically. `type:minor`, `type:major`, and `channel:rc` require a controlled exact preparation for the existing PR. Labels never calculate or override a product version.
+Documentation-only changes are limited to `docs/**`, `README*`, `CHANGELOG*`, Markdown/plain text, and documentation image resources. Mixed changes require release. A failed publication can only use `operation=recover` when the immutable release tag already points to the exact source SHA; recovery reuses the same identity and never calculates a successor or increments an RC.
 
-The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits and the `Validate PR labels`, `Release completion`, `Firmware checks`, `DEVD checks`, `DEVD Windows checks`, `Web checks`, and `Worktree bootstrap` checks. Product PRs must use a merge commit so the protected merge preserves the prepared commit as provenance. The existing workflow `GITHUB_TOKEN` writes only the already-open PR branch plus release tags/assets; it has no bypass role. Version preparation uses GitHub's `createCommitOnBranch` mutation, which produces a GitHub-signed and verified commit without a repository signing key, secret, variable, App, or GitHub Environment. Candidate tags are reserved before preparation and checked again before build; the preserved historical `v0.23.0` is audit-only, so the first complete new-chain release is `v0.23.1`.
+The branch protection contract is declared in [.github/quality-gates.json](.github/quality-gates.json). GitHub should protect `main`, require signed commits, PR review policy, and the `Firmware checks`, `DEVD checks`, `DEVD Windows checks`, `Web checks`, and `Worktree bootstrap` checks. PR labels, `Label Gate`, PR-local VERSION preparation, and `Release completion` are retired. Product Release still publishes Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` on one GitHub Release, then deploys the verified archives to EdgeOne.
 
-Each product release attaches Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
+Each product release attaches Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` assets. The manifest records the release intent, trusted baseline, `reservationId`, per-component hashes, `contentSha256`, `sourceSha`, protocol versions, `changedSincePrevious`, and `updateReason`; users should update only components marked changed.
 
 ## Firmware target notes
 

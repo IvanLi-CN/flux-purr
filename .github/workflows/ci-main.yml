@@ -17,7 +17,7 @@ env:
 
 jobs:
   classify:
-    name: Release preparation validation
+    name: Release source validation
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -28,21 +28,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Classify and validate main commit
+      - name: Validate release source boundary
         id: classify
         shell: bash
         run: |
           set -euo pipefail
-          parents="$(git show -s --format=%P "${GITHUB_SHA}")"
-          if [ "$(wc -w <<<"${parents}")" -eq 2 ] && git diff --quiet "${GITHUB_SHA}" "${GITHUB_SHA}^2"; then
-            if python3 .github/scripts/release_chain.py verify-prepared --commit "${GITHUB_SHA}^2"; then
-              echo "kind=prepared-integration" >> "$GITHUB_OUTPUT"
-            else
-              echo "kind=pr-integration" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "kind=source" >> "$GITHUB_OUTPUT"
-          fi
+          test -f VERSION
+          echo "kind=source" >> "$GITHUB_OUTPUT"
 
   firmware:
     name: Firmware checks
@@ -176,14 +168,11 @@ jobs:
 
       - name: Release policy script tests
         run: |
-          python3 -m py_compile .github/scripts/release_chain.py .github/scripts/release_preparation.py .github/scripts/release_completion.py .github/scripts/release_snapshot.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
+          python3 -m py_compile .github/scripts/manual_release.py .github/scripts/product_release_manifest.py .github/scripts/check-quality-gates.py tools/firmware-web-catalog/build_catalog.py
           python3 scripts/test-product-version.py
           bash scripts/test-build-identities.sh
-          bash .github/scripts/test-release-chain.sh
+          bash .github/scripts/test-manual-release.sh
           bash .github/scripts/test-release-workflows.sh
-          bash .github/scripts/test-release-preparation.sh
-          bash .github/scripts/test-release-completion.sh
-          bash .github/scripts/test-release-labels.sh
           python3 -m unittest tools/firmware-web-catalog/test_build_catalog.py
 
       - name: Biome check + typecheck
