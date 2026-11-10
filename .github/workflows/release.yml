@@ -159,46 +159,75 @@ jobs:
           test "$(cat VERSION)" = "${PRODUCT_VERSION}"
 
       - name: Restore immutable release assets for recovery
+        id: recovery_assets
         if: steps.release.outputs.enabled == 'true' && inputs.operation == 'recover'
         env:
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          PRODUCT_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.source_sha }}
+          RELEASE_TARGET: ${{ env.RELEASE_TARGET }}
+          BASELINE_VERSION: ${{ steps.release.outputs.baseline_version }}
+          RESERVATION_ID: ${{ steps.release.outputs.reservation_id }}
         shell: bash
         run: |
           set -euo pipefail
           rm -rf release-assets
           mkdir -p release-assets
-          gh release view "${PRODUCT_TAG}" --json tagName --jq '.tagName' | grep -Fx "${PRODUCT_TAG}"
+          if ! gh release view "${PRODUCT_TAG}" --json tagName --jq '.tagName' | grep -Fx "${PRODUCT_TAG}"; then
+            echo "release_exists=false" >> "${GITHUB_OUTPUT}"
+            echo "status=missing" >> "${GITHUB_OUTPUT}"
+            echo "No Release exists for ${PRODUCT_TAG}; recovery will continue the reserved identity."
+            exit 0
+          fi
+          echo "release_exists=true" >> "${GITHUB_OUTPUT}"
           gh release download "${PRODUCT_TAG}" --dir release-assets
-          test -n "$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
+          manifest="$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
+          test -n "${manifest}" || { echo "existing Release has no durable release manifest" >&2; exit 1; }
+          if python3 .github/scripts/verify_release_assets.py \
+            --asset-root release-assets \
+            --manifest "$(basename "${manifest}")" \
+            --version "${PRODUCT_VERSION}" \
+            --tag "${PRODUCT_TAG}" \
+            --source-sha "${RELEASE_SHA}" \
+            --intent "${RELEASE_TARGET}" \
+            --baseline "${BASELINE_VERSION}" \
+            --reservation-id "${RESERVATION_ID}"; then
+            echo "status=complete" >> "${GITHUB_OUTPUT}"
+            : > "${RUNNER_TEMP}/release-upload-list.txt"
+            exit 0
+          fi
+          mv release-assets "${RUNNER_TEMP}/release-existing-assets"
+          mkdir -p release-assets
+          echo "status=partial" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Rust and Xtensa
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.91.0
 
       - name: Setup Xtensa toolchain
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         uses: ./.github/actions/setup-xtensa
         with:
           buildtargets: esp32s3
 
       - name: Setup Linux serial dependencies
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         uses: ./.github/actions/setup-linux-serial-deps
 
       - name: Setup Bun
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.10"
 
       - name: Install Web dependencies
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         run: bun install --cwd web --frozen-lockfile
 
       - name: Build and package product assets
-        if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         env:
           FLUX_PURR_BUILD_MODE: release
           FLUX_PURR_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
@@ -258,6 +287,35 @@ jobs:
             --component "${host_component}" \
             --output "${manifest}"
           test "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p["version"]+" "+p["sourceSha"]+" "+p["tag"]+" "+p["releaseIntent"]+" "+p["trustedBaseline"]+" "+p["reservationId"])' "${manifest}")" = "${PRODUCT_VERSION} ${FLUX_PURR_SOURCE_SHA} ${PRODUCT_TAG} ${RELEASE_TARGET} ${{ steps.release.outputs.baseline_version }} ${{ steps.release.outputs.reservation_id }}"
+          find release-assets -maxdepth 1 -type f \
+            ! -name 'flux-purr-release-manifest-*.json' \
+            ! -name '.edgeone-*' -print | sort > "${RUNNER_TEMP}/release-upload-list.txt"
+
+      - name: Reconcile partial Release assets
+        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status == 'partial'
+        env:
+          PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          PRODUCT_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.release.outputs.source_sha }}
+          RELEASE_TARGET: ${{ env.RELEASE_TARGET }}
+          BASELINE_VERSION: ${{ steps.release.outputs.baseline_version }}
+          RESERVATION_ID: ${{ steps.release.outputs.reservation_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="$(find "${RUNNER_TEMP}/release-existing-assets" -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -printf '%f\n' -quit)"
+          test -n "${manifest}"
+          python3 .github/scripts/reconcile_release_assets.py \
+            --existing-root "${RUNNER_TEMP}/release-existing-assets" \
+            --built-root release-assets \
+            --manifest "${manifest}" \
+            --version "${PRODUCT_VERSION}" \
+            --tag "${PRODUCT_TAG}" \
+            --source-sha "${RELEASE_SHA}" \
+            --intent "${RELEASE_TARGET}" \
+            --baseline "${BASELINE_VERSION}" \
+            --reservation-id "${RESERVATION_ID}" \
+            --upload-list "${RUNNER_TEMP}/release-upload-list.txt"
 
       - name: Publish and verify release assets
         if: steps.release.outputs.enabled == 'true'
@@ -269,18 +327,11 @@ jobs:
           BASELINE_VERSION: ${{ steps.release.outputs.baseline_version }}
           RESERVATION_ID: ${{ steps.release.outputs.reservation_id }}
           RELEASE_OPERATION: ${{ env.RELEASE_OPERATION }}
+          RECOVERY_RELEASE_EXISTS: ${{ steps.recovery_assets.outputs.release_exists }}
+          RECOVERY_ASSET_STATUS: ${{ steps.recovery_assets.outputs.status }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${RELEASE_OPERATION}" = recover ]; then
-            gh release view "${PRODUCT_TAG}" --json tagName --jq '.tagName' | grep -Fx "${PRODUCT_TAG}"
-          elif gh release view "${PRODUCT_TAG}" >/dev/null 2>&1; then
-            echo "release ${PRODUCT_TAG} already exists; publish cannot mutate an existing identity" >&2
-            exit 1
-          else
-            gh release create "${PRODUCT_TAG}" release-assets/* --verify-tag --title "${PRODUCT_TAG}" --generate-notes
-          fi
-          test "$(git rev-list -n1 "refs/tags/${PRODUCT_TAG}")" = "${RELEASE_SHA}"
           manifest="$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
           test -n "${manifest}"
           python3 .github/scripts/verify_release_assets.py \
@@ -292,6 +343,34 @@ jobs:
             --intent "${RELEASE_TARGET}" \
             --baseline "${BASELINE_VERSION}" \
             --reservation-id "${RESERVATION_ID}"
+          mapfile -t upload_assets < "${RUNNER_TEMP}/release-upload-list.txt"
+          if [ "${RELEASE_OPERATION}" = recover ] && [ "${RECOVERY_ASSET_STATUS}" = complete ]; then
+            gh release view "${PRODUCT_TAG}" --json tagName --jq '.tagName' | grep -Fx "${PRODUCT_TAG}"
+          elif [ "${RELEASE_OPERATION}" = recover ] && [ "${RECOVERY_RELEASE_EXISTS}" = true ]; then
+            gh release view "${PRODUCT_TAG}" --json tagName --jq '.tagName' | grep -Fx "${PRODUCT_TAG}"
+          elif gh release view "${PRODUCT_TAG}" >/dev/null 2>&1; then
+            echo "release ${PRODUCT_TAG} already exists; publish cannot mutate an existing identity" >&2
+            exit 1
+          else
+            gh release create "${PRODUCT_TAG}" "${manifest}" --verify-tag --title "${PRODUCT_TAG}" --generate-notes
+          fi
+          if [ "${#upload_assets[@]}" -gt 0 ]; then
+            gh release upload "${PRODUCT_TAG}" "${upload_assets[@]}"
+          fi
+          test "$(git rev-list -n1 "refs/tags/${PRODUCT_TAG}")" = "${RELEASE_SHA}"
+          gh release view "${PRODUCT_TAG}" --json assets --jq '.assets[].name' > "${RUNNER_TEMP}/remote-release-assets.txt"
+          while IFS= read -r path; do
+            name="$(basename "${path}")"
+            grep -Fx "${name}" "${RUNNER_TEMP}/remote-release-assets.txt"
+          done < <(python3 - "${manifest}" <<'PY'
+          import json
+          import sys
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          for component in payload["components"]:
+              for asset in component["assets"]:
+                  print(asset["path"])
+          PY
+          )
 
       - name: Prepare EdgeOne deployment helper
         if: steps.release.outputs.enabled == 'true'

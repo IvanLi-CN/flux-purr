@@ -95,7 +95,38 @@ with tempfile.TemporaryDirectory() as directory:
     (repo / "VERSION").write_text("0.30.8\n", encoding="utf-8")
     assets = repo / "release-assets"
     assets.mkdir()
-    (assets / "web.tar.gz").write_bytes(b"web")
+    asset_names = {
+        "flux-purr-web-v0.30.8.tar.gz": b"web",
+        "flux-purr-web-demo-v0.30.8.tar.gz": b"demo",
+        "flux-purr-firmware-v0.30.8.fluxpurr-fw": b"firmware",
+        "flux-purr-firmware-v0.30.8.tar.gz": b"firmware-tar",
+        "flux-purr-host-tools-linux-x64-v0.30.8.tar.gz": b"host",
+    }
+    for name, content in asset_names.items():
+        (assets / name).write_bytes(content)
+    components = [
+        {
+            "id": "web",
+            "version": "0.30.8",
+            "channel": "stable",
+            "protocolVersions": [],
+            "assets": ["flux-purr-web-v0.30.8.tar.gz", "flux-purr-web-demo-v0.30.8.tar.gz"],
+        },
+        {
+            "id": "firmware",
+            "version": "0.30.8",
+            "channel": "stable",
+            "protocolVersions": [],
+            "assets": ["flux-purr-firmware-v0.30.8.fluxpurr-fw", "flux-purr-firmware-v0.30.8.tar.gz"],
+        },
+        {
+            "id": "host-tools",
+            "version": "0.30.8",
+            "channel": "stable",
+            "protocolVersions": [],
+            "assets": ["flux-purr-host-tools-linux-x64-v0.30.8.tar.gz"],
+        },
+    ]
     args = argparse.Namespace(
         repo_root=repo,
         version="0.30.8",
@@ -106,7 +137,7 @@ with tempfile.TemporaryDirectory() as directory:
         baseline="0.30.7",
         reservation_id="v0.30.8@" + "0" * 40,
         previous_manifest=None,
-        component=['{"id":"web","version":"0.30.8","channel":"stable","assets":["web.tar.gz"]}'],
+        component=[json.dumps(component) for component in components],
         asset_root=str(assets),
     )
     manifest = module.build_manifest(args)
@@ -132,6 +163,54 @@ with tempfile.TemporaryDirectory() as directory:
             reservation_id="v0.30.8@" + "0" * 40,
         )
     )
+    incomplete_manifest = dict(manifest, components=manifest["components"][:-1])
+    (assets / "incomplete.json").write_text(json.dumps(incomplete_manifest), encoding="utf-8")
+    try:
+        verifier.verify(
+            argparse.Namespace(
+                asset_root=str(assets),
+                manifest="incomplete.json",
+                version="0.30.8",
+                tag="v0.30.8",
+                source_sha="0" * 40,
+                intent="patch",
+                baseline="0.30.7",
+                reservation_id="v0.30.8@" + "0" * 40,
+            )
+        )
+    except verifier.AssetVerificationError:
+        pass
+    else:
+        raise AssertionError("incomplete component set must fail verification")
+    reconcile_spec = importlib.util.spec_from_file_location(
+        "reconcile_release_assets", root / ".github/scripts/reconcile_release_assets.py"
+    )
+    assert reconcile_spec and reconcile_spec.loader
+    reconcile = importlib.util.module_from_spec(reconcile_spec)
+    reconcile_spec.loader.exec_module(reconcile)
+    existing = repo / "existing-release"
+    existing.mkdir()
+    (existing / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    missing_name = "flux-purr-host-tools-linux-x64-v0.30.8.tar.gz"
+    for path in assets.iterdir():
+        if path.name not in {"manifest.json", missing_name}:
+            (existing / path.name).write_bytes(path.read_bytes())
+    upload_list = repo / "upload-list.txt"
+    reconcile.reconcile(
+        argparse.Namespace(
+            existing_root=str(existing),
+            built_root=str(assets),
+            manifest="manifest.json",
+            version="0.30.8",
+            tag="v0.30.8",
+            source_sha="0" * 40,
+            intent="patch",
+            baseline="0.30.7",
+            reservation_id="v0.30.8@" + "0" * 40,
+            upload_list=str(upload_list),
+        )
+    )
+    assert upload_list.read_text(encoding="utf-8").splitlines() == ["release-assets/flux-purr-host-tools-linux-x64-v0.30.8.tar.gz"]
     try:
         bad = argparse.Namespace(**{**vars(args), "tag": "v9.9.9"})
         module.build_manifest(bad)

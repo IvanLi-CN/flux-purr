@@ -14,7 +14,7 @@
 - workflow pin 到 `workflow_dispatch` 的 `github.sha`，并在构建前验证 `origin/main` 没有前进；读取 stable tag baseline，按变更路径执行文档-only skip 或产品 release。
 - publish 在构建前预留带有 intent/baseline/reservation metadata 的 annotated tag；recover 只接受 metadata 与 caller intent 一致、且 tag 与当前 exact source SHA 匹配的 same identity。
 - `rc` 使用下一个 stable baseline 的 `rc.N`，不推进 stable baseline；同 identity recovery 不增加 RC 序号。
-- release manifest 固化 `releaseIntent`、`trustedBaseline`、`reservationId`、canonical version、tag、source SHA 与各 artifact digest；recovery 下载并验证既有 manifest/assets，禁止重建和 clobber。
+- release manifest 固化 `releaseIntent`、`trustedBaseline`、`reservationId`、canonical version、tag、source SHA 与完整 web/firmware/host-tools artifact digest 集合；完整 Release recovery 下载并验证既有 manifest/assets，tag-only recovery 继续同一 identity 构建，部分 Release recovery 只重建 manifest 声明的缺失资产并禁止 clobber。
 - Release、EdgeOne production/demo 和 failure notification 继续分层；部署复用已发布 Web archive。
 - CI PR/CI Main 只执行源代码质量检查，不再识别 prepared commit 或 release labels。
 - `.github/quality-gates.json` 仅声明真实 PR/main workflow jobs；旧 Label Gate、Release preparation 和 Release completion 已从活动路径删除。

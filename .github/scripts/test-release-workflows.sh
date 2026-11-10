@@ -47,6 +47,12 @@ assert "gh release create" in release
 assert "Restore immutable release assets for recovery" in release
 assert "gh release download" in release
 assert "verify_release_assets.py" in release
+assert "reconcile_release_assets.py" in release
+assert "status=missing" in release
+assert "status=partial" in release
+assert "release-upload-list.txt" in release
+assert "gh release create \"${PRODUCT_TAG}\" \"${manifest}\"" in release
+assert "gh release upload \"${PRODUCT_TAG}\" \"${upload_assets[@]}\"" in release
 assert "already exists; publish cannot mutate an existing identity" in release
 assert "--clobber" not in release
 assert "Deploy published Web archive to EdgeOne" in release

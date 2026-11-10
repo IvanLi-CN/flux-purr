@@ -14,6 +14,63 @@ class AssetVerificationError(RuntimeError):
     pass
 
 
+def required_asset_names(version: str) -> dict[str, set[str]]:
+    return {
+        "web": {
+            f"flux-purr-web-v{version}.tar.gz",
+            f"flux-purr-web-demo-v{version}.tar.gz",
+        },
+        "firmware": {
+            f"flux-purr-firmware-v{version}.fluxpurr-fw",
+            f"flux-purr-firmware-v{version}.tar.gz",
+        },
+        "host-tools": {f"flux-purr-host-tools-linux-x64-v{version}.tar.gz"},
+    }
+
+
+def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> list[dict[str, object]]:
+    if payload.get("product") != "flux-purr":
+        raise AssetVerificationError("release manifest has an unexpected product")
+    if payload.get("schemaVersion") != 1:
+        raise AssetVerificationError("release manifest has an unsupported schema version")
+    components = payload.get("components")
+    if not isinstance(components, list):
+        raise AssetVerificationError("release manifest components must be a list")
+    expected_components = required_asset_names(args.version)
+    by_id: dict[str, dict[str, object]] = {}
+    entries: list[dict[str, object]] = []
+    for component in components:
+        if not isinstance(component, dict):
+            raise AssetVerificationError("release component is not an object")
+        component_id = component.get("id")
+        if not isinstance(component_id, str) or component_id in by_id:
+            raise AssetVerificationError("release manifest has duplicate or invalid component ids")
+        if component_id not in expected_components:
+            raise AssetVerificationError(f"release manifest has unexpected component: {component_id}")
+        if component.get("version") != args.version or component.get("sourceSha") != args.source_sha:
+            raise AssetVerificationError(f"release component {component_id} is not bound to this identity")
+        assets = component.get("assets")
+        if not isinstance(assets, list) or not assets:
+            raise AssetVerificationError(f"release component {component_id} has no assets")
+        names: set[str] = set()
+        for asset in assets:
+            if not isinstance(asset, dict):
+                raise AssetVerificationError("release asset entry is not an object")
+            name = asset.get("name")
+            if not isinstance(name, str) or name in names:
+                raise AssetVerificationError(f"release component {component_id} has duplicate asset names")
+            names.add(name)
+            entries.append(asset)
+        if not expected_components[component_id].issubset(names):
+            missing = sorted(expected_components[component_id] - names)
+            raise AssetVerificationError(f"release component {component_id} is missing assets: {missing}")
+        by_id[component_id] = component
+    if set(by_id) != set(expected_components):
+        missing = sorted(set(expected_components) - set(by_id))
+        raise AssetVerificationError(f"release manifest is missing components: {missing}")
+    return entries
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -43,34 +100,27 @@ def verify(args: argparse.Namespace) -> None:
             raise AssetVerificationError(
                 f"manifest {key} {payload.get(key)!r} does not match expected {value!r}"
             )
-    components = payload.get("components")
-    if not isinstance(components, list) or not components:
-        raise AssetVerificationError("release manifest has no components")
+    entries = manifest_entries(payload, args)
     seen: set[Path] = set()
-    for component in components:
-        assets = component.get("assets") if isinstance(component, dict) else None
-        if not isinstance(assets, list) or not assets:
-            raise AssetVerificationError("release component has no assets")
-        for asset in assets:
-            if not isinstance(asset, dict):
-                raise AssetVerificationError("release asset entry is not an object")
-            relative = Path(str(asset.get("path", "")))
-            if relative.is_absolute() or ".." in relative.parts:
-                raise AssetVerificationError(f"release asset path escapes asset root: {relative}")
-            path = (root / relative).resolve()
-            if root not in path.parents:
-                raise AssetVerificationError(f"release asset path escapes asset root: {relative}")
-            if path in seen:
-                raise AssetVerificationError(f"release asset listed more than once: {relative}")
-            seen.add(path)
-            if not path.is_file():
-                raise AssetVerificationError(f"missing release asset: {relative}")
-            expected_size = asset.get("size")
-            if expected_size != path.stat().st_size:
-                raise AssetVerificationError(f"release asset size mismatch: {relative}")
-            expected_sha = asset.get("sha256")
-            if not isinstance(expected_sha, str) or sha256_file(path) != expected_sha:
-                raise AssetVerificationError(f"release asset digest mismatch: {relative}")
+    for asset in entries:
+        relative = Path(str(asset.get("path", "")))
+        name = asset.get("name")
+        if relative.is_absolute() or ".." in relative.parts or relative.name != name:
+            raise AssetVerificationError(f"release asset path is invalid: {relative}")
+        path = (root / relative).resolve()
+        if root not in path.parents:
+            raise AssetVerificationError(f"release asset path escapes asset root: {relative}")
+        if path in seen:
+            raise AssetVerificationError(f"release asset listed more than once: {relative}")
+        seen.add(path)
+        if not path.is_file():
+            raise AssetVerificationError(f"missing release asset: {relative}")
+        expected_size = asset.get("size")
+        if expected_size != path.stat().st_size:
+            raise AssetVerificationError(f"release asset size mismatch: {relative}")
+        expected_sha = asset.get("sha256")
+        if not isinstance(expected_sha, str) or sha256_file(path) != expected_sha:
+            raise AssetVerificationError(f"release asset digest mismatch: {relative}")
 
 
 def main() -> int:
