@@ -229,6 +229,12 @@ with tempfile.TemporaryDirectory() as directory:
     assert reconcile_spec and reconcile_spec.loader
     reconcile = importlib.util.module_from_spec(reconcile_spec)
     reconcile_spec.loader.exec_module(reconcile)
+    prepare_spec = importlib.util.spec_from_file_location(
+        "prepare_release_recovery", root / ".github/scripts/prepare_release_recovery.py"
+    )
+    assert prepare_spec and prepare_spec.loader
+    prepare = importlib.util.module_from_spec(prepare_spec)
+    prepare_spec.loader.exec_module(prepare)
     existing = repo / "existing-release"
     existing.mkdir()
     (existing / manifest_name).write_text(json.dumps(manifest), encoding="utf-8")
@@ -236,6 +242,31 @@ with tempfile.TemporaryDirectory() as directory:
     for path in assets.iterdir():
         if path.name not in {manifest_name, missing_name}:
             (existing / path.name).write_bytes(path.read_bytes())
+    recovery_args = argparse.Namespace(
+        asset_root=str(existing),
+        manifest=manifest_name,
+        version="0.30.8",
+        tag="v0.30.8",
+        source_sha="0" * 40,
+        intent="patch",
+        baseline="0.30.7",
+        reservation_id="v0.30.8@" + "0" * 40,
+    )
+    assert prepare.validate_and_list_missing(recovery_args) == [missing_name]
+    tampered_existing = repo / "existing-release-with-tampered-asset"
+    tampered_existing.mkdir()
+    (tampered_existing / manifest_name).write_text(json.dumps(manifest), encoding="utf-8")
+    for path in assets.iterdir():
+        if path.name not in {manifest_name, missing_name}:
+            (tampered_existing / path.name).write_bytes(path.read_bytes())
+    (tampered_existing / "flux-purr-web-v0.30.8.tar.gz").write_bytes(b"tampered")
+    tampered_args = argparse.Namespace(**{**vars(recovery_args), "asset_root": str(tampered_existing)})
+    try:
+        prepare.validate_and_list_missing(tampered_args)
+    except prepare.VERIFY.AssetVerificationError:
+        pass
+    else:
+        raise AssertionError("tampered existing recovery asset must fail closed")
     upload_list = repo / "upload-list.txt"
     reconcile.reconcile(
         argparse.Namespace(

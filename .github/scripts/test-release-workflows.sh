@@ -36,6 +36,8 @@ assert 'RELEASE_SOURCE_SHA: ${{ github.sha }}' in release
 assert "main advanced after dispatch" in release
 assert 'git ls-tree -r --name-only "${source_sha}"' in release
 assert "git for-each-ref" in release
+assert "git cat-file -t" in release
+assert "matching VERSION or durable reservation metadata are required" in release
 assert "Flux-Purr-Release-Intent:" in release
 assert "--intent-file" in release
 assert "--baseline-file" in release
@@ -55,13 +57,17 @@ assert "gh release download" in release
 assert "verify_release_assets.py" in release
 assert "reconcile_release_assets.py" in release
 assert "manifest_name" in release
-assert 'release-existing-assets/${manifest_name}' in release
+assert '--manifest "${manifest_name}"' in release
 assert 'flux-purr-release-manifest-${PRODUCT_TAG}.json' in release
 assert "--previous-manifest" in release
 assert "status=missing" in release
 assert "status=partial" in release
 assert "release-upload-list.txt" in release
 assert "release-missing-assets.txt" in release
+assert "prepare_release_recovery.py" in release
+assert "release-identity" in release
+assert "actions/upload-artifact@v4" in release
+assert "sha256_file" in (root / ".github/scripts/prepare_release_recovery.py").read_text(encoding="utf-8")
 assert "asset_missing()" in release
 assert "create_release_archive.py" in release
 assert "SOURCE_DATE_EPOCH" in release
@@ -96,6 +102,9 @@ for workflow in (ci_pr, ci_main):
     assert "prepared" not in workflow
     assert "label" not in workflow.lower()
     assert "test-manual-release.sh" in workflow
+    assert "if: always()" in workflow
+    assert "Fail closed when source validation fails" in workflow
+    assert "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7" in workflow
 
 for old_path in (
     ".github/workflows/label-gate.yml",
@@ -128,6 +137,9 @@ assert "operation=recover" in notify
 assert "reservation" in notify
 assert "same-identity" in notify
 assert "canonical_tags" in notify
+assert "gh run download" in notify
+assert "source_sha=" in notify
+assert "release-identity.json" in notify
 assert "continue-on-error: true" in notify
 assert "always()" in notify
 

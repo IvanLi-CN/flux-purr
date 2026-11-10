@@ -25,6 +25,7 @@ Flux Purr 的 `Release Product` 需要在发布失败时发送可恢复的通知
 - **REQ-JB85U-PIN:** Both notification jobs MUST call `IvanLi-CN/oidrune/.github/workflows/notify.yml@e48822f99c6402a753ed86557ea029754cbab20b` and MUST omit gateway URL and OIDC audience overrides.
 - **REQ-JB85U-PERMISSION:** Each Oidrune caller job MUST grant `id-token: write` and MUST NOT pass `SHOUTRRR_URL` or another Telegram secret.
 - **REQ-JB85U-SUMMARY:** The caller MUST provide the complete Oidrune `summary`. The failure summary MUST include a failure title, project name, status, exact main SHA, run URL, release tag/version when reserved, reservation identity, artifact names, and same-identity recovery target. It MUST NOT read PR labels. The smoke summary MUST include its smoke title, project name, failure status, target SHA, and current run URL.
+- **REQ-JB85U-IDENTITY:** The failure context MUST prefer the `release-identity` artifact emitted by `Release Product` before tag reservation. It MUST report the recorded release source SHA separately from the workflow-run main SHA, so a recovery run dispatched after later `main` commits retains the original `recovery_tag` identity.
 
 ## Verification
 

@@ -39,20 +39,65 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source_sha="${MERGE_SHA}"
           release_tag=""
           version="unknown"
-          reservation_id="unreserved@${MERGE_SHA}"
+          release_intent="unknown"
+          reservation_id="unreserved@${source_sha}"
           recovery_target="none: no immutable tag reservation was observed"
-          recovery_hint="do not use recover until a canonical release tag and durable intent are bound to this exact main SHA"
+          recovery_hint="do not use recover until a canonical release tag and durable intent are bound to the release source"
           if git rev-parse --show-toplevel >/dev/null 2>&1; then
             if git fetch --force --tags origin; then
-              canonical_tags="$(git tag --points-at "${MERGE_SHA}" --list 'v*' | python3 -c 'import re,sys; print("\n".join(tag for tag in sys.stdin.read().splitlines() if re.fullmatch(r"v\d+\.\d+\.\d+(?:-rc\.\d+)?", tag)))')"
-              canonical_count="$(printf '%s\n' "${canonical_tags}" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
-              if [ "${canonical_count}" = 1 ]; then
-                release_tag="${canonical_tags}"
-              elif [ "${canonical_count}" -gt 1 ]; then
-                recovery_target="ambiguous: multiple canonical release tags point to ${MERGE_SHA}"
-                recovery_hint="operator review required; do not use recover until the tag identity is unambiguous"
+              identity_dir="${RUNNER_TEMP}/release-identity"
+              rm -rf "${identity_dir}"
+              if gh run download "${RUN_ID}" --repo "${REPOSITORY}" --name release-identity --dir "${identity_dir}" >/dev/null 2>&1; then
+                identity_path="$(find "${identity_dir}" -type f -name release-identity.json -print -quit)"
+                if [ -n "${identity_path}" ]; then
+                  mapfile -t identity_values < <(python3 - "${identity_path}" <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          for key in (
+              "dispatchSha",
+              "sourceSha",
+              "trustedBaselineTag",
+              "trustedBaselineVersion",
+              "version",
+              "tag",
+              "releaseIntent",
+              "operation",
+              "reservationId",
+          ):
+              value = payload.get(key, "")
+              print(value if isinstance(value, str) else "")
+          PY
+                  )
+                  if [ "${#identity_values[@]}" = 9 ] && [ "${identity_values[0]}" = "${MERGE_SHA}" ] \
+                    && [[ "${identity_values[1]}" =~ ^[0-9a-f]{40}$ ]] \
+                    && [[ "${identity_values[5]}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
+                    && [[ "${identity_values[6]}" =~ ^(patch|minor|major|rc)$ ]] \
+                    && [ "${identity_values[8]}" = "${identity_values[5]}@${identity_values[1]}" ]; then
+                    source_sha="${identity_values[1]}"
+                    release_tag="${identity_values[5]}"
+                    version="${identity_values[4]}"
+                    release_intent="${identity_values[6]}"
+                    reservation_id="${identity_values[8]}"
+                  fi
+                fi
+              fi
+              if [ -z "${release_tag}" ]; then
+                source_sha="${MERGE_SHA}"
+                canonical_tags="$(git tag --points-at "${source_sha}" --list 'v*' | python3 -c 'import re,sys; print("\n".join(tag for tag in sys.stdin.read().splitlines() if re.fullmatch(r"v\d+\.\d+\.\d+(?:-rc\.\d+)?", tag)))')"
+                canonical_count="$(printf '%s\n' "${canonical_tags}" | sed '/^$/d' | wc -l | tr -d '[:space:]')"
+                if [ "${canonical_count}" = 1 ]; then
+                  release_tag="${canonical_tags}"
+                  version="${release_tag#v}"
+                  reservation_id="${release_tag}@${source_sha}"
+                elif [ "${canonical_count}" -gt 1 ]; then
+                  recovery_target="ambiguous: multiple canonical release tags point to ${source_sha}"
+                  recovery_hint="operator review required; do not use recover until the tag identity is unambiguous"
+                fi
               fi
             else
               recovery_target="unknown: tag inventory fetch failed"
@@ -60,24 +105,30 @@ jobs:
             fi
           fi
           if [ -n "${release_tag}" ]; then
-            version="${release_tag#v}"
-            reservation_id="${release_tag}@${MERGE_SHA}"
-            tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${release_tag}" | head -n1 || true)"
-            tag_intent="$(printf '%s\n' "${tag_subject}" | sed -n 's/^Flux-Purr-Release-Intent: \([^;]*\);.*$/\1/p')"
-            tag_baseline="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Trusted-Baseline: \([^;]*\);.*$/\1/p')"
-            tag_reservation="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Reservation-ID: \([^;]*\)$/\1/p')"
-            if [ -n "${tag_intent}" ] && [ -n "${tag_baseline}" ] && [ "${tag_reservation}" = "${reservation_id}" ]; then
-              recovery_target="same-identity: ${release_tag}@${MERGE_SHA}"
-              recovery_hint="dispatch Release Product from main with operation=recover, release_target=${tag_intent}, and recovery_tag=${release_tag}"
+            if ! git rev-parse --verify "refs/tags/${release_tag}^{commit}" >/dev/null 2>&1 \
+              || [ "$(git rev-list -n1 "${release_tag}")" != "${source_sha}" ]; then
+              recovery_target="unrecoverable: ${release_tag} does not point to recorded source ${source_sha}"
+              recovery_hint="operator review required; do not use recover until the release tag and source identity agree"
             else
-              recovery_target="unrecoverable: ${release_tag} has no durable release intent metadata"
-              recovery_hint="do not use recover until the release identity metadata is restored or operator review authorizes a new boundary"
+              tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${release_tag}" | head -n1 || true)"
+              tag_intent="$(printf '%s\n' "${tag_subject}" | sed -n 's/^Flux-Purr-Release-Intent: \([^;]*\);.*$/\1/p')"
+              tag_baseline="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Trusted-Baseline: \([^;]*\);.*$/\1/p')"
+              tag_reservation="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Reservation-ID: \([^;]*\)$/\1/p')"
+              if [ -n "${tag_intent}" ] && [ -n "${tag_baseline}" ] && [ "${tag_reservation}" = "${release_tag}@${source_sha}" ]; then
+                release_intent="${tag_intent}"
+                reservation_id="${release_tag}@${source_sha}"
+                recovery_target="same-identity: ${release_tag}@${source_sha}"
+                recovery_hint="dispatch Release Product from main with operation=recover, release_target=${tag_intent}, and recovery_tag=${release_tag}"
+              else
+                recovery_target="unrecoverable: ${release_tag} has no durable release intent metadata"
+                recovery_hint="do not use recover until the release identity metadata is restored or operator review authorizes a new boundary"
+              fi
             fi
           elif git rev-parse --show-toplevel >/dev/null 2>&1; then
             version="$(git show "${MERGE_SHA}:VERSION" 2>/dev/null || printf '%s' unknown)"
           fi
           artifact_names="$(gh api "repos/${REPOSITORY}/actions/runs/${RUN_ID}/artifacts" --jq '[.artifacts[].name] | join(",")' 2>/dev/null || printf '%s' unknown)"
-          details="merge_sha=${MERGE_SHA}; version=${version}; release_tag=${release_tag:-unknown}; reservation_id=${reservation_id}; artifact_names=${artifact_names}; recovery_target=${recovery_target}; recovery_hint=${recovery_hint}"
+          details="merge_sha=${MERGE_SHA}; source_sha=${source_sha}; version=${version}; release_tag=${release_tag:-unknown}; release_intent=${release_intent}; reservation_id=${reservation_id}; artifact_names=${artifact_names}; recovery_target=${recovery_target}; recovery_hint=${recovery_hint}"
           summary="title=Release Product failure; project=${REPOSITORY}; status=${CONCLUSION}; target_sha=${MERGE_SHA}; run_url=${RUN_URL}; ${details}"
           {
             echo 'summary<<EOF'

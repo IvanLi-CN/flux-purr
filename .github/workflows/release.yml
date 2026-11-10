@@ -90,11 +90,33 @@ jobs:
           metadata_re='^Flux-Purr-Release-Intent: (patch|minor|major|rc); Flux-Purr-Trusted-Baseline: ([0-9]+\.[0-9]+\.[0-9]+); Flux-Purr-Reservation-ID: (v[^[:space:]]+@[0-9a-f]{40})$'
           while IFS=$'\t' read -r tag _ tag_subject; do
             [ -n "${tag}" ] || continue
-            printf '%s %s\n' "${tag}" "$(git rev-list -n1 "${tag}")" >> "${tag_file}"
+            if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+              continue
+            fi
+            tag_version="${tag#v}"
+            tag_sha="$(git rev-list -n1 "${tag}")"
+            tag_intent=""
+            tag_baseline=""
+            tag_reservation=""
+            tag_metadata_match=false
             if [[ "${tag_subject}" =~ ${metadata_re} ]]; then
-              printf '%s %s\n' "${tag}" "${BASH_REMATCH[1]}" >> "${intent_file}"
-              printf '%s %s\n' "${tag}" "${BASH_REMATCH[2]}" >> "${baseline_file}"
-              printf '%s %s\n' "${tag}" "${BASH_REMATCH[3]}" >> "${reservation_file}"
+              tag_intent="${BASH_REMATCH[1]}"
+              tag_baseline="${BASH_REMATCH[2]}"
+              tag_reservation="${BASH_REMATCH[3]}"
+              if [ "${tag_reservation}" = "${tag}@${tag_sha}" ]; then
+                tag_metadata_match=true
+              fi
+            fi
+            if [ "$(git cat-file -t "refs/tags/${tag}")" != tag ] \
+              || { [ "$(git show "${tag_sha}:VERSION" 2>/dev/null | tr -d '\n')" != "${tag_version}" ] && [ "${tag_metadata_match}" != true ]; }; then
+              echo "Ignoring untrusted release tag ${tag}: annotated tag and matching VERSION or durable reservation metadata are required." >&2
+              continue
+            fi
+            printf '%s %s\n' "${tag}" "${tag_sha}" >> "${tag_file}"
+            if [ "${tag_metadata_match}" = true ]; then
+              printf '%s %s\n' "${tag}" "${tag_intent}" >> "${intent_file}"
+              printf '%s %s\n' "${tag}" "${tag_baseline}" >> "${baseline_file}"
+              printf '%s %s\n' "${tag}" "${tag_reservation}" >> "${reservation_file}"
             fi
           done < <(git for-each-ref --format='%(refname:short)%09%(objectname)%09%(contents:subject)' 'refs/tags/v*')
 
@@ -148,6 +170,51 @@ jobs:
             echo "reservation_id=${reservation_id}"
             echo "reservation_status=${reservation_status}"
           } >> "${GITHUB_OUTPUT}"
+
+      - name: Record resolved release identity
+        if: steps.release.outputs.enabled == 'true'
+        env:
+          IDENTITY_PATH: ${{ runner.temp }}/release-identity.json
+          DISPATCH_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          BASELINE_TAG: ${{ steps.release.outputs.baseline_tag }}
+          BASELINE_VERSION: ${{ steps.release.outputs.baseline_version }}
+          PRODUCT_VERSION: ${{ steps.release.outputs.version }}
+          PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_TARGET: ${{ env.RELEASE_TARGET }}
+          RELEASE_OPERATION: ${{ env.RELEASE_OPERATION }}
+          RESERVATION_ID: ${{ steps.release.outputs.reservation_id }}
+        run: |
+          set -euo pipefail
+          python3 - "${IDENTITY_PATH}" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          payload = {
+              "dispatchSha": os.environ["DISPATCH_SHA"],
+              "sourceSha": os.environ["SOURCE_SHA"],
+              "trustedBaselineTag": os.environ["BASELINE_TAG"],
+              "trustedBaselineVersion": os.environ["BASELINE_VERSION"],
+              "version": os.environ["PRODUCT_VERSION"],
+              "tag": os.environ["PRODUCT_TAG"],
+              "releaseIntent": os.environ["RELEASE_TARGET"],
+              "operation": os.environ["RELEASE_OPERATION"],
+              "reservationId": os.environ["RESERVATION_ID"],
+          }
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+          test -s "${IDENTITY_PATH}"
+
+      - name: Upload resolved release identity
+        if: steps.release.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-identity
+          path: ${{ runner.temp }}/release-identity.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Reserve immutable release tag
         if: steps.release.outputs.enabled == 'true' && inputs.operation == 'publish'
@@ -223,19 +290,15 @@ jobs:
           fi
           mv release-assets "${RUNNER_TEMP}/release-existing-assets"
           mkdir -p release-assets
-          python3 - "${RUNNER_TEMP}/release-existing-assets/${manifest_name}" "${RUNNER_TEMP}/release-existing-assets" > "${RUNNER_TEMP}/release-missing-assets.txt" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          manifest = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-          root = pathlib.Path(sys.argv[2])
-          for component in manifest["components"]:
-              for asset in component["assets"]:
-                  path = pathlib.Path(asset["path"])
-                  if not (root / path).is_file():
-                      print(path)
-          PY
+          python3 .github/scripts/prepare_release_recovery.py \
+            --asset-root "${RUNNER_TEMP}/release-existing-assets" \
+            --manifest "${manifest_name}" \
+            --version "${PRODUCT_VERSION}" \
+            --tag "${PRODUCT_TAG}" \
+            --source-sha "${RELEASE_SHA}" \
+            --intent "${RELEASE_TARGET}" \
+            --baseline "${BASELINE_VERSION}" \
+            --reservation-id "${RESERVATION_ID}" > "${RUNNER_TEMP}/release-missing-assets.txt"
           echo "status=partial" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Rust and Xtensa
