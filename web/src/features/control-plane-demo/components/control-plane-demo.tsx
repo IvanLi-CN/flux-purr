@@ -798,6 +798,7 @@ export function ControlPlaneDemo({
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
+  const explicitSelectedDeviceIdRef = useRef<string | null>(null)
   const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
   const activeView = navigation
     ? navigation.state.kind === 'add-device'
@@ -1072,7 +1073,29 @@ export function ControlPlaneDemo({
     healthyRouteFallback
       ? healthyRouteFallback
       : preferredRouteDeviceConnection
+  const explicitRouteConnectionKind = routeDeviceChoice
+    ? requestedConnectionByIdentity[routeDeviceChoice.identityId]?.kind
+    : undefined
+  const webSerialMayOverrideRoute =
+    explicitRouteConnectionKind === undefined || explicitRouteConnectionKind === 'web-serial'
   const preferredSelectedDeviceId = useMemo(() => {
+    if (
+      explicitSelectedDeviceIdRef.current &&
+      deviceOptions.some((device) => device.id === explicitSelectedDeviceIdRef.current)
+    ) {
+      return explicitSelectedDeviceIdRef.current
+    }
+    if (
+      webSerial.state === 'connected' &&
+      webSerial.deviceId &&
+      deviceOptions.some((device) => device.id === webSerial.deviceId) &&
+      webSerialMayOverrideRoute &&
+      (!routeDeviceConnection ||
+        !isHealthyRouteConnection(routeDeviceConnection) ||
+        routeDeviceConnection.kind === 'web-serial')
+    ) {
+      return webSerial.deviceId
+    }
     if (navigation?.state.kind === 'device' && routeDeviceConnection) {
       return routeDeviceConnection.target.id
     }
@@ -1100,6 +1123,9 @@ export function ControlPlaneDemo({
     routeDeviceConnection,
     scenario.selectedDeviceId,
     selectedDeviceId,
+    webSerialMayOverrideRoute,
+    webSerial.deviceId,
+    webSerial.state,
   ])
 
   useEffect(() => {
@@ -1329,7 +1355,16 @@ export function ControlPlaneDemo({
     const connectedTarget = activeScenario.devices.find(
       (device) => device.id === webSerial.deviceId
     )
-    if (navigation?.state.kind === 'add-device' && connectedTarget) {
+    if (
+      connectedTarget &&
+      navigation &&
+      (navigation.state.kind === 'add-device' ||
+        (deviceIdentityId(connectedTarget) !== navigation.state.deviceId &&
+          webSerialMayOverrideRoute &&
+          (!routeDeviceConnection ||
+            !isHealthyRouteConnection(routeDeviceConnection) ||
+            routeDeviceConnection.kind === 'web-serial')))
+    ) {
       void navigation.navigate({
         kind: 'device',
         deviceId: deviceIdentityId(connectedTarget),
@@ -1361,7 +1396,7 @@ export function ControlPlaneDemo({
 
     const currentSelection = deviceOptions.find((device) => device.id === preferredSelectedDeviceId)
     const shouldAdoptWebSerialTarget =
-      selectedAddDeviceKind === 'web-serial' ||
+      (selectedAddDeviceKind === 'web-serial' && webSerialMayOverrideRoute) ||
       !currentSelection ||
       isNoLiveTargetDevice(currentSelection) ||
       isPendingDeviceChoice(currentSelection)
@@ -1374,6 +1409,8 @@ export function ControlPlaneDemo({
     preferredSelectedDeviceId,
     activeScenario.devices,
     navigation,
+    routeDeviceConnection,
+    webSerialMayOverrideRoute,
     persistKnownWebSerialDevices,
     selectedAddDeviceKind,
     webSerial.deviceId,
@@ -3465,6 +3502,9 @@ export function ControlPlaneDemo({
             }))
             setRouteFallbackKind(undefined)
           }
+          setSelectedDeviceId(nextDevice.id)
+          explicitSelectedDeviceIdRef.current = nextDevice.id
+          setSelectedAddDeviceKind(defaultAddDeviceKind)
           const currentState = navigation.state
           return navigation.navigate(
             currentState.kind === 'device'
@@ -3533,6 +3573,7 @@ export function ControlPlaneDemo({
             )
           )
         }
+        explicitSelectedDeviceIdRef.current = deviceId
         setSelectedDeviceId(deviceId)
 
         if (!nextDevice) {
