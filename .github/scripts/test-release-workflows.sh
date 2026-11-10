@@ -19,6 +19,7 @@ edgeone_helper = (root / ".github/scripts/deploy-edgeone.sh").read_text(encoding
 
 assert "workflow_dispatch:" in release
 assert "workflow_run:" not in release
+assert "group: release-product-main" in release
 assert "options: [patch, minor, major, rc]" in release
 assert "options: [publish, recover]" in release
 assert "manual_release.py baseline" in release

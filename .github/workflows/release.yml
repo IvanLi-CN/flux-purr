@@ -16,7 +16,7 @@ on:
         default: publish
 
 concurrency:
-  group: release-product-${{ github.sha }}-${{ inputs.release_target }}-${{ inputs.operation }}
+  group: release-product-main
   cancel-in-progress: false
 
 permissions:
