@@ -78,8 +78,8 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 
 - 非纯文档变更默认必须形成实际产品 Release；只有 `docs/**`、`README*`、`CHANGELOG*`、Markdown、纯文本和文档图片资源组成的变更可以跳过产品发布，混合提交按产品变更处理。
 - Agent 在 manual dispatch 前必须读取当前 `main` exact SHA、trusted stable baseline 和变更范围，向 owner 建议 `patch`、`minor`、`major` 或 `rc` intent 及预期版本。建议不持久化，也不替代 owner 确认；owner 确认 intent 后才调用 dispatch。
-- `Release Product` 只接受 `release_target` 与 `operation=publish|recover`，不接受 caller 的最终版本、tag 或 `commit_sha` 覆盖。workflow 独立解析 canonical version，并在 runner workspace 绑定 root `VERSION`。
-- 新发布使用同一 `source_sha`、trusted baseline、canonical version、tag reservation、artifact digest、GitHub Release 和部署 identity。失败后只允许同 identity recovery；不得重新计算 successor、递增 RC 或移动 tag。
+- `Release Product` 只允许从受保护 `main` 调度；publish 接受 `release_target` 与 `operation=publish`，recover 额外接受已有 immutable `recovery_tag` 作为 identity locator，不接受 caller 的最终版本、新 tag 或 `commit_sha` 覆盖。workflow 独立解析 canonical version，并在 runner workspace 绑定 root `VERSION`。
+- 新发布使用同一 `source_sha`、trusted baseline、canonical version、tag reservation、artifact digest、GitHub Release 和部署 identity。失败后只允许使用 `recovery_tag` 做同 identity recovery；不得重新计算 successor、递增 RC 或移动 tag。
 - 不使用 PR labels、`Label Gate`、PR-local VERSION preparation 或旧 completion workflow 作为 release gate。具体契约见 `docs/specs/manual-version-release-delivery/SPEC.md`。
 
 ## 文档与交付要求

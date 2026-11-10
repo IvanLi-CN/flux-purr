@@ -160,7 +160,7 @@
 - 正式 Web app 的构建必须固定为 live；公开 Demo 由独立构建固定为 mock。URL 参数和 browser storage 不得选择或切换运行时。
 - 公开 Demo 构建必须只加载 deterministic demo scenario，不得启用 devd、Web Serial 或任何真实后端请求；正式构建收到旧 `demo=true` / `uiDemo` 入口时显示停用页，不挂载 live 控制台。
 - 正式构建必须固定使用 live runtime，不得混入 Demo fixture、degraded Demo 数据或 daemon mock devices；真实后端返回的 mock devices 也不得显示为 live target。`demo=false` 仅作为兼容输入，不得改变运行时边界。
-- Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
+- Product release workflow 必须产出单一 `vX.Y.Z` 或 `vX.Y.Z-rc.N` tag，不得继续创建新的 `web/v...` 或 `fw/v...` tag。
 - Product release manifest 必须记录 Web、firmware、host-tools 组件的 `sha256`、`contentSha256`、`sourceSha`、`protocolVersions`、`changedSincePrevious` 与 `updateReason`。
 
 ### SHOULD
@@ -214,7 +214,7 @@
 
 ### Release manifest
 
-- Product release tag 是 `vX.Y.Z` 或 `vX.Y.Z-rc.<sha7>`。
+- Product release tag 是 `vX.Y.Z` 或 `vX.Y.Z-rc.N`。
 - Release assets 包含 Web bundle、firmware bundle、host-tools bundle 和 `flux-purr-release-manifest-<tag>.json`。
 - `changedSincePrevious=false` 的组件不得被推荐为必需升级项。
 

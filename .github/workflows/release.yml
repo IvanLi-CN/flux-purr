@@ -14,6 +14,10 @@ on:
         type: choice
         options: [publish, recover]
         default: publish
+      recovery_tag:
+        description: "Existing immutable release tag to recover; required only for recover"
+        required: false
+        type: string
 
 concurrency:
   group: release-product-main
@@ -25,12 +29,14 @@ permissions:
 jobs:
   release:
     name: Release Product
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TARGET: ${{ inputs.release_target }}
       RELEASE_OPERATION: ${{ inputs.operation }}
+      RELEASE_RECOVERY_TAG: ${{ inputs.recovery_tag }}
       RELEASE_SOURCE_SHA: ${{ github.sha }}
     steps:
       - name: Checkout exact main release source
@@ -54,12 +60,24 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --force origin main --tags
-          source_sha="${RELEASE_SOURCE_SHA}"
-          test "${source_sha}" = "$(git rev-parse HEAD)"
+          dispatch_sha="${RELEASE_SOURCE_SHA}"
+          test "${dispatch_sha}" = "$(git rev-parse HEAD)"
           current_main_sha="$(git rev-parse origin/main)"
-          if [ "${current_main_sha}" != "${source_sha}" ]; then
-            echo "main advanced after dispatch: expected ${source_sha}, observed ${current_main_sha}" >&2
-            exit 1
+          source_sha="${dispatch_sha}"
+          if [ "${RELEASE_OPERATION}" = publish ]; then
+            if [ "${current_main_sha}" != "${dispatch_sha}" ]; then
+              echo "main advanced after dispatch: expected ${dispatch_sha}, observed ${current_main_sha}" >&2
+              exit 1
+            fi
+            test -z "${RELEASE_RECOVERY_TAG}"
+          else
+            recovery_tag="${RELEASE_RECOVERY_TAG}"
+            if [[ ! "${recovery_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+              echo "recover requires a canonical recovery_tag such as vX.Y.Z or vX.Y.Z-rc.N" >&2
+              exit 1
+            fi
+            git rev-parse --verify "refs/tags/${recovery_tag}^{commit}" >/dev/null
+            source_sha="$(git rev-list -n1 "${recovery_tag}")"
           fi
           tag_file="${RUNNER_TEMP}/release-tags.txt"
           intent_file="${RUNNER_TEMP}/release-tag-intents.txt"
@@ -89,8 +107,7 @@ jobs:
           if [ -n "${baseline_tag}" ]; then
             git diff --name-only "${baseline_tag}..${source_sha}" > "${RUNNER_TEMP}/release-paths.txt"
           else
-            root_commit="$(git rev-list --max-parents=0 "${source_sha}" | tail -n1)"
-            git diff --name-only "${root_commit}..${source_sha}" > "${RUNNER_TEMP}/release-paths.txt"
+            git ls-tree -r --name-only "${source_sha}" > "${RUNNER_TEMP}/release-paths.txt"
           fi
           classification="$(python3 .github/scripts/manual_release.py classify --paths-file "${RUNNER_TEMP}/release-paths.txt")"
           release_required="$(printf '%s' "${classification}" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["release_required"]).lower())')"
@@ -124,6 +141,7 @@ jobs:
             echo "enabled=true"
             echo "release_sha=${source_sha}"
             echo "source_sha=${source_sha}"
+            echo "baseline_tag=${baseline_tag}"
             echo "baseline_version=${identity_baseline}"
             echo "version=${version}"
             echo "tag=${tag}"
@@ -181,9 +199,15 @@ jobs:
           fi
           echo "release_exists=true" >> "${GITHUB_OUTPUT}"
           gh release download "${PRODUCT_TAG}" --dir release-assets
-          manifest="$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
-          test -n "${manifest}" || { echo "existing Release has no durable release manifest" >&2; exit 1; }
-          manifest_name="$(basename "${manifest}")"
+          manifest_name="flux-purr-release-manifest-${PRODUCT_TAG}.json"
+          manifest="release-assets/${manifest_name}"
+          if [ ! -f "${manifest}" ]; then
+            mv release-assets "${RUNNER_TEMP}/release-existing-assets"
+            mkdir -p release-assets
+            echo "status=missing_manifest" >> "${GITHUB_OUTPUT}"
+            echo "Existing Release has no canonical manifest; recovery will rebuild and reconcile every manifest-declared asset." >&2
+            exit 0
+          fi
           if python3 .github/scripts/verify_release_assets.py \
             --asset-root release-assets \
             --manifest "${manifest_name}" \
@@ -247,6 +271,7 @@ jobs:
           FLUX_PURR_SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
           PRODUCT_VERSION: ${{ steps.release.outputs.version }}
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_OPERATION: ${{ env.RELEASE_OPERATION }}
         shell: bash
         run: |
           set -euo pipefail
@@ -259,7 +284,7 @@ jobs:
               "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" \
               "flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" > "${missing_assets}"
           fi
-          if [ -d "${RUNNER_TEMP}/release-existing-assets" ]; then
+          if [ "${{ steps.recovery_assets.outputs.status }}" = partial ] && [ -d "${RUNNER_TEMP}/release-existing-assets" ]; then
             cp -a "${RUNNER_TEMP}/release-existing-assets/." release-assets/
           fi
           asset_missing() { grep -Fxq "$1" "${missing_assets}"; }
@@ -348,6 +373,20 @@ jobs:
           firmware_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"firmware","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.usb.v2"],"assets":["flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".fluxpurr-fw","flux-purr-firmware-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           host_component="$(CHANNEL="${channel}" python3 -c 'import json,os; print(json.dumps({"id":"host-tools","version":os.environ["PRODUCT_VERSION"],"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.devd-local-cbor.v1","flux-purr.devd-http.v1"],"assets":["flux-purr-host-tools-linux-x64-v"+os.environ["PRODUCT_VERSION"]+".tar.gz"]}))')"
           manifest="release-assets/flux-purr-release-manifest-${PRODUCT_TAG}.json"
+          previous_manifest_args=()
+          baseline_tag="${{ steps.release.outputs.baseline_tag }}"
+          if [ -n "${baseline_tag}" ] && [ "${RELEASE_OPERATION}" = publish ] && gh release view "${baseline_tag}" >/dev/null 2>&1; then
+            previous_dir="${RUNNER_TEMP}/previous-release"
+            rm -rf "${previous_dir}"
+            mkdir -p "${previous_dir}"
+            previous_name="flux-purr-release-manifest-${baseline_tag}.json"
+            if gh release download "${baseline_tag}" --pattern "${previous_name}" --dir "${previous_dir}"; then
+              previous_manifest="${previous_dir}/${previous_name}"
+              if [ -f "${previous_manifest}" ]; then
+                previous_manifest_args+=(--previous-manifest "${previous_manifest}")
+              fi
+            fi
+          fi
           python3 .github/scripts/product_release_manifest.py \
             --repo-root "$GITHUB_WORKSPACE" \
             --version "${PRODUCT_VERSION}" \
@@ -361,6 +400,7 @@ jobs:
             --component "${web_component}" \
             --component "${firmware_component}" \
             --component "${host_component}" \
+            "${previous_manifest_args[@]}" \
             --output "${manifest}"
           test "$(python3 -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p["version"]+" "+p["sourceSha"]+" "+p["tag"]+" "+p["releaseIntent"]+" "+p["trustedBaseline"]+" "+p["reservationId"])' "${manifest}")" = "${PRODUCT_VERSION} ${FLUX_PURR_SOURCE_SHA} ${PRODUCT_TAG} ${RELEASE_TARGET} ${{ steps.release.outputs.baseline_version }} ${{ steps.release.outputs.reservation_id }}"
           find release-assets -maxdepth 1 -type f \
@@ -368,7 +408,7 @@ jobs:
             ! -name '.edgeone-*' -print | sort > "${RUNNER_TEMP}/release-upload-list.txt"
 
       - name: Reconcile partial Release assets
-        if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status == 'partial'
+        if: steps.release.outputs.enabled == 'true' && (steps.recovery_assets.outputs.status == 'partial' || steps.recovery_assets.outputs.status == 'missing_manifest')
         env:
           PRODUCT_TAG: ${{ steps.release.outputs.tag }}
           PRODUCT_VERSION: ${{ steps.release.outputs.version }}
@@ -379,8 +419,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest="$(find "${RUNNER_TEMP}/release-existing-assets" -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -printf '%f\n' -quit)"
-          test -n "${manifest}"
+          manifest="flux-purr-release-manifest-${PRODUCT_TAG}.json"
+          reconcile_flags=()
+          if [ "${{ steps.recovery_assets.outputs.status }}" = missing_manifest ]; then
+            reconcile_flags+=(--allow-missing-manifest)
+          fi
           python3 .github/scripts/reconcile_release_assets.py \
             --existing-root "${RUNNER_TEMP}/release-existing-assets" \
             --built-root release-assets \
@@ -391,6 +434,7 @@ jobs:
             --intent "${RELEASE_TARGET}" \
             --baseline "${BASELINE_VERSION}" \
             --reservation-id "${RESERVATION_ID}" \
+            "${reconcile_flags[@]}" \
             --upload-list "${RUNNER_TEMP}/release-upload-list.txt"
 
       - name: Publish and verify release assets
@@ -410,6 +454,8 @@ jobs:
           set -euo pipefail
           manifest="$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
           test -n "${manifest}"
+          manifest_name="flux-purr-release-manifest-${PRODUCT_TAG}.json"
+          test "$(basename "${manifest}")" = "${manifest_name}"
           python3 .github/scripts/verify_release_assets.py \
             --asset-root release-assets \
             --manifest "$(basename "${manifest}")" \
@@ -433,8 +479,12 @@ jobs:
           if [ "${#upload_assets[@]}" -gt 0 ]; then
             gh release upload "${PRODUCT_TAG}" "${upload_assets[@]}"
           fi
+          if [ "${RELEASE_OPERATION}" = recover ] && [ "${RECOVERY_RELEASE_EXISTS}" = true ]; then
+            gh release edit "${PRODUCT_TAG}" --draft=false --verify-tag
+          fi
           test "$(git rev-list -n1 "refs/tags/${PRODUCT_TAG}")" = "${RELEASE_SHA}"
           gh release view "${PRODUCT_TAG}" --json assets --jq '.assets[].name' > "${RUNNER_TEMP}/remote-release-assets.txt"
+          grep -Fx "${manifest_name}" "${RUNNER_TEMP}/remote-release-assets.txt"
           while IFS= read -r path; do
             name="$(basename "${path}")"
             grep -Fx "${name}" "${RUNNER_TEMP}/remote-release-assets.txt"
@@ -499,7 +549,9 @@ jobs:
           gh release upload "${PRODUCT_TAG}" "${started_marker_path}"
           rm -rf web-dist
           mkdir web-dist
-          tar -xzf "${archive}" -C web-dist
+          python3 .github/scripts/safe_extract_release_archive.py \
+            --archive "${archive}" \
+            --destination web-dist
           bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-dist "${EDGEONE_PROJECT_NAME}" web-production
           printf '%s\n' "${RELEASE_SHA}" > .edgeone-deployed
           gh release upload "${PRODUCT_TAG}" .edgeone-deployed
@@ -543,7 +595,9 @@ jobs:
           test -f "${archive}"
           rm -rf web-demo-dist
           mkdir web-demo-dist
-          tar -xzf "${archive}" -C web-demo-dist
+          python3 .github/scripts/safe_extract_release_archive.py \
+            --archive "${archive}" \
+            --destination web-demo-dist
           bash "${RUNNER_TEMP}/flux-purr-deploy-edgeone.sh" web-demo-dist "${EDGEONE_DEMO_PROJECT_NAME}" web-demo-production
           printf '%s\n' "${RELEASE_SHA}" > .edgeone-demo-deployed
           gh release upload "${PRODUCT_TAG}" .edgeone-demo-deployed

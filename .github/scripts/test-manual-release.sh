@@ -90,6 +90,7 @@ python3 - "${root_dir}" <<'PY'
 import argparse
 import importlib.util
 import json
+import tarfile
 import tempfile
 from pathlib import Path
 import sys
@@ -153,7 +154,18 @@ with tempfile.TemporaryDirectory() as directory:
     assert manifest["releaseIntent"] == "patch"
     assert manifest["trustedBaseline"] == "0.30.7"
     assert manifest["reservationId"] == "v0.30.8@" + "0" * 40
-    (assets / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    previous_path = repo / "previous-manifest.json"
+    previous_path.write_text(json.dumps(manifest), encoding="utf-8")
+    repeat_args = argparse.Namespace(**{
+        **vars(args),
+        "source_sha": "1" * 40,
+        "reservation_id": "v0.30.8@" + "1" * 40,
+        "previous_manifest": str(previous_path),
+    })
+    repeat_manifest = module.build_manifest(repeat_args)
+    assert all(not component["changedSincePrevious"] for component in repeat_manifest["components"])
+    manifest_name = "flux-purr-release-manifest-v0.30.8.json"
+    (assets / manifest_name).write_text(json.dumps(manifest), encoding="utf-8")
     verifier_spec = importlib.util.spec_from_file_location(
         "verify_release_assets", root / ".github/scripts/verify_release_assets.py"
     )
@@ -163,7 +175,7 @@ with tempfile.TemporaryDirectory() as directory:
     verifier.verify(
         argparse.Namespace(
             asset_root=str(assets),
-            manifest="manifest.json",
+            manifest=manifest_name,
             version="0.30.8",
             tag="v0.30.8",
             source_sha="0" * 40,
@@ -173,12 +185,12 @@ with tempfile.TemporaryDirectory() as directory:
         )
     )
     incomplete_manifest = dict(manifest, components=manifest["components"][:-1])
-    (assets / "incomplete.json").write_text(json.dumps(incomplete_manifest), encoding="utf-8")
+    (assets / manifest_name).write_text(json.dumps(incomplete_manifest), encoding="utf-8")
     try:
         verifier.verify(
             argparse.Namespace(
                 asset_root=str(assets),
-                manifest="incomplete.json",
+                manifest=manifest_name,
                 version="0.30.8",
                 tag="v0.30.8",
                 source_sha="0" * 40,
@@ -193,12 +205,12 @@ with tempfile.TemporaryDirectory() as directory:
         raise AssertionError("incomplete component set must fail verification")
     tampered_manifest = json.loads(json.dumps(manifest))
     tampered_manifest["components"][0]["assets"][0]["channel"] = "rc"
-    (assets / "tampered.json").write_text(json.dumps(tampered_manifest), encoding="utf-8")
+    (assets / manifest_name).write_text(json.dumps(tampered_manifest), encoding="utf-8")
     try:
         verifier.verify(
             argparse.Namespace(
                 asset_root=str(assets),
-                manifest="tampered.json",
+                manifest=manifest_name,
                 version="0.30.8",
                 tag="v0.30.8",
                 source_sha="0" * 40,
@@ -219,17 +231,17 @@ with tempfile.TemporaryDirectory() as directory:
     reconcile_spec.loader.exec_module(reconcile)
     existing = repo / "existing-release"
     existing.mkdir()
-    (existing / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (existing / manifest_name).write_text(json.dumps(manifest), encoding="utf-8")
     missing_name = "flux-purr-host-tools-linux-x64-v0.30.8.tar.gz"
     for path in assets.iterdir():
-        if path.name not in {"manifest.json", missing_name}:
+        if path.name not in {manifest_name, missing_name}:
             (existing / path.name).write_bytes(path.read_bytes())
     upload_list = repo / "upload-list.txt"
     reconcile.reconcile(
         argparse.Namespace(
             existing_root=str(existing),
             built_root=str(assets),
-            manifest="manifest.json",
+            manifest=manifest_name,
             version="0.30.8",
             tag="v0.30.8",
             source_sha="0" * 40,
@@ -240,6 +252,36 @@ with tempfile.TemporaryDirectory() as directory:
         )
     )
     assert upload_list.read_text(encoding="utf-8").splitlines() == ["release-assets/flux-purr-host-tools-linux-x64-v0.30.8.tar.gz"]
+    missing_manifest_existing = repo / "existing-release-without-manifest"
+    missing_manifest_existing.mkdir()
+    missing_manifest_built = repo / "rebuilt-release-without-manifest"
+    missing_manifest_built.mkdir()
+    for path in assets.iterdir():
+        if path.name not in {manifest_name, missing_name}:
+            (missing_manifest_existing / path.name).write_bytes(path.read_bytes())
+        if path.name != manifest_name:
+            (missing_manifest_built / path.name).write_bytes(path.read_bytes())
+    (missing_manifest_built / manifest_name).write_text(json.dumps(manifest), encoding="utf-8")
+    missing_manifest_upload = repo / "missing-manifest-upload-list.txt"
+    reconcile.reconcile(
+        argparse.Namespace(
+            existing_root=str(missing_manifest_existing),
+            built_root=str(missing_manifest_built),
+            manifest=manifest_name,
+            version="0.30.8",
+            tag="v0.30.8",
+            source_sha="0" * 40,
+            intent="patch",
+            baseline="0.30.7",
+            reservation_id="v0.30.8@" + "0" * 40,
+            upload_list=str(missing_manifest_upload),
+            allow_missing_manifest=True,
+        )
+    )
+    assert missing_manifest_upload.read_text(encoding="utf-8").splitlines() == [
+        "release-assets/flux-purr-host-tools-linux-x64-v0.30.8.tar.gz",
+        "release-assets/" + manifest_name,
+    ]
     try:
         bad = argparse.Namespace(**{**vars(args), "tag": "v9.9.9"})
         module.build_manifest(bad)
@@ -269,11 +311,45 @@ with tempfile.TemporaryDirectory() as archive_directory:
         (directory / "nested").mkdir(parents=True)
         (directory / "nested" / "file.txt").write_text("same\n", encoding="utf-8")
         (directory / "root.txt").write_text("same\n", encoding="utf-8")
+    (first / "root.txt").chmod(0o600)
+    (second / "root.txt").chmod(0o644)
     first_archive = archive_root / "first.tar.gz"
     second_archive = archive_root / "second.tar.gz"
     archive.create_archive(first, first_archive, [])
     archive.create_archive(second, second_archive, [])
     assert first_archive.read_bytes() == second_archive.read_bytes()
+    unsafe_root = archive_root / "unsafe"
+    unsafe_root.mkdir()
+    (unsafe_root / "payload.txt").write_text("payload\n", encoding="utf-8")
+    unsafe_archive = archive_root / "unsafe.tar.gz"
+    with tarfile.open(unsafe_archive, "w:gz") as tar:
+        traversal = tarfile.TarInfo("../escape.txt")
+        traversal.size = 0
+        tar.addfile(traversal)
+    safe_spec = importlib.util.spec_from_file_location(
+        "safe_extract_release_archive", root / ".github/scripts/safe_extract_release_archive.py"
+    )
+    assert safe_spec and safe_spec.loader
+    safe_extract = importlib.util.module_from_spec(safe_spec)
+    safe_spec.loader.exec_module(safe_extract)
+    try:
+        safe_extract.extract_archive(unsafe_archive, archive_root / "unsafe-output")
+    except safe_extract.ArchiveSafetyError:
+        pass
+    else:
+        raise AssertionError("archive traversal must be rejected")
+    symlink_archive = archive_root / "symlink.tar.gz"
+    with tarfile.open(symlink_archive, "w:gz") as tar:
+        link = tarfile.TarInfo("link")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "payload.txt"
+        tar.addfile(link)
+    try:
+        safe_extract.extract_archive(symlink_archive, archive_root / "symlink-output")
+    except safe_extract.ArchiveSafetyError:
+        pass
+    else:
+        raise AssertionError("archive symlink must be rejected")
 PY
 
 echo "manual release policy tests passed"

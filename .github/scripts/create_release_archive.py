@@ -16,8 +16,12 @@ def iter_paths(root: Path, requested: list[str]) -> list[tuple[Path, str]]:
     result: list[tuple[Path, str]] = []
 
     def visit(path: Path, relative: Path) -> None:
+        if path.is_symlink():
+            raise ValueError(f"archive does not allow symlinks: {relative}")
+        if not path.is_file() and not path.is_dir():
+            raise ValueError(f"archive only supports regular files and directories: {relative}")
         result.append((path, relative.as_posix()))
-        if path.is_dir() and not path.is_symlink():
+        if path.is_dir():
             for child in sorted(path.iterdir(), key=lambda item: item.name):
                 visit(child, relative / child.name)
 
@@ -52,6 +56,7 @@ def create_archive(source_root: Path, output: Path, requested: list[str]) -> Non
                         info.uname = ""
                         info.gname = ""
                         info.mtime = 0
+                        info.mode = 0o755 if info.isdir() or (info.mode & 0o111) else 0o644
                         info.pax_headers = {}
                         if info.isreg():
                             with path.open("rb") as source:

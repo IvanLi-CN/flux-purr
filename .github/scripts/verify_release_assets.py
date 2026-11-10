@@ -19,6 +19,23 @@ def canonical_sha256(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def component_content_payload(component: dict[str, object], assets: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "id": component["id"],
+        "channel": component.get("channel", "stable"),
+        "protocolVersions": component.get("protocolVersions", []),
+        "assets": [
+            {
+                "size": asset["size"],
+                "sha256": asset["sha256"],
+                "mediaType": asset["mediaType"],
+                "channel": asset["channel"],
+            }
+            for asset in assets
+        ],
+    }
+
+
 def required_asset_names(version: str) -> dict[str, set[str]]:
     return {
         "web": {
@@ -55,7 +72,11 @@ def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> li
             raise AssetVerificationError("release manifest has duplicate or invalid component ids")
         if component_id not in expected_components:
             raise AssetVerificationError(f"release manifest has unexpected component: {component_id}")
-        if component.get("version") != args.version or component.get("sourceSha") != args.source_sha:
+        if (
+            component.get("version") != args.version
+            or component.get("sourceSha") != args.source_sha
+            or component.get("channel") != expected_channel
+        ):
             raise AssetVerificationError(f"release component {component_id} is not bound to this identity")
         protocol_versions = component.get("protocolVersions")
         if not isinstance(protocol_versions, list) or not all(isinstance(value, str) for value in protocol_versions):
@@ -80,13 +101,7 @@ def manifest_entries(payload: dict[str, object], args: argparse.Namespace) -> li
         if not expected_components[component_id].issubset(names):
             missing = sorted(expected_components[component_id] - names)
             raise AssetVerificationError(f"release component {component_id} is missing assets: {missing}")
-        content_payload = {
-            "id": component_id,
-            "version": args.version,
-            "sourceSha": args.source_sha,
-            "protocolVersions": protocol_versions,
-            "assets": assets,
-        }
+        content_payload = component_content_payload(component, assets)
         if content_sha != canonical_sha256(content_payload):
             raise AssetVerificationError(f"release component {component_id} content digest is invalid")
         changed = component.get("changedSincePrevious")
@@ -115,6 +130,11 @@ def verify(args: argparse.Namespace) -> None:
     manifest_path = (root / args.manifest).resolve()
     if root not in manifest_path.parents:
         raise AssetVerificationError("manifest must be inside the asset root")
+    expected_manifest_name = f"flux-purr-release-manifest-{args.tag}.json"
+    if manifest_path.name != expected_manifest_name:
+        raise AssetVerificationError(
+            f"manifest filename {manifest_path.name!r} does not match {expected_manifest_name!r}"
+        )
     if not manifest_path.is_file():
         raise AssetVerificationError(f"missing release manifest: {manifest_path}")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))

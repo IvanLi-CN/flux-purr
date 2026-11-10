@@ -17,11 +17,11 @@
 | 输入 | 来源 | 规则 |
 | --- | --- | --- |
 | `release_target` | owner-confirmed manual dispatch input | 只接受 `patch`、`minor`、`major`、`rc` |
-| source SHA | `workflow_dispatch` event 的 `github.sha` | workflow pin 到该 SHA，并在构建前确认 `origin/main` 尚未前进；漂移时 fail closed |
+| source SHA | publish 使用 `workflow_dispatch` event 的 `github.sha`；recover 使用 owner 指定的既有 `recovery_tag` target | workflow 只允许从 `main` 调度；publish 在构建前确认 `origin/main` 尚未前进，recover 复用既有 tag@SHA identity |
 | trusted baseline | source SHA 可达的最高稳定 `vX.Y.Z` tag | 只接受稳定 final tag；没有历史 tag 时才使用 root `VERSION` 作为 bootstrap fallback |
 | tag inventory | fetched immutable tags 与 annotated intent metadata | 用于 collision、RC 序号和 recovery identity 验证 |
 
-caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy 结果。`SemVer change governance` 只在另有兼容性评估需求时作为可选输入，永远不决定 release eligibility、target 或 RC 序号。
+caller 不得提供 `version`、新 tag、commit SHA 或其它字段覆盖 policy 结果；recover 的 `recovery_tag` 只用于定位已经存在的 immutable identity，不能创建或改写版本。`SemVer change governance` 只在另有兼容性评估需求时作为可选输入，永远不决定 release eligibility、target 或 RC 序号。
 
 ### Resolution
 
@@ -35,7 +35,7 @@ caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy �
 
 有效 identity 至少绑定：`source_sha`、trusted baseline、owner intent、canonical version、reservation id、tag、artifact digests、GitHub Release、部署结果和 recovery target。reservation id 的当前实现为 `<tag>@<source_sha>`。
 
-`publish` 必须先检查 tag collision，然后创建并验证指向 exact source SHA 的 annotated tag；tag annotation 必须持久化 owner intent、trusted baseline 和 reservation id，再构建资产。`recover` 不接受历史 `commit_sha` 入口，只能复用已经指向当前 exact source SHA 且 intent metadata 与 caller 一致的唯一 release tag；stable intent 不能恢复 RC tag，RC intent 不能恢复 stable tag。没有 Release 时，recovery 可以在同一 tag@SHA identity 下继续构建并创建 Release；已有 Release 时必须下载并验证既有 manifest 与 artifact digests，完整资产直接复用，带有 durable manifest 的部分资产只允许重建并上传缺失项，绝不覆盖已存在的资产。tag、Release 或部署已经部分成功时，重试只能继续这个 identity。
+`publish` 必须先检查 tag collision，然后创建并验证指向 exact source SHA 的 annotated tag；tag annotation 必须持久化 owner intent、trusted baseline 和 reservation id，再构建资产。`recover` 只能从 `main` 调度并携带已经存在的 `recovery_tag`，复用其 exact tag@SHA 与 intent metadata；stable intent 不能恢复 RC tag，RC intent 不能恢复 stable tag。没有 Release 时，recovery 可以在同一 tag@SHA identity 下继续构建并创建 Release；已有 Release 时必须下载并验证 canonical manifest 与 artifact digests，缺失 manifest 的 Release 先以新构建的 canonical manifest 比对现有 assets，带有 durable manifest 的部分资产只允许重建并上传缺失项，绝不覆盖已存在的资产。tag、Release 或部署已经部分成功时，重试只能继续这个 identity。
 
 ### Build and delivery
 
@@ -53,7 +53,7 @@ caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy �
 ## 验收标准
 
 - 静态 contract tests 能证明新发布路径不读取 PR labels、`Label Gate`、`release_snapshot` 或 PR-local VERSION preparation。
-- workflow dispatch 只接受四种 intent，并拒绝 caller version override；版本 policy 覆盖 baseline、单调性、collision、RC 序号和 idempotent recovery。
+- workflow dispatch 只接受四种 intent，publish/recover 只允许从 `main` 调度，recover 仅接受既有 `recovery_tag` identity，并拒绝 caller version/source override；版本 policy 覆盖 baseline、单调性、collision、RC 序号和 idempotent recovery。
 - 文档 allowlist、非纯文档和混合提交判定有自动化测试。
 - 所有产品版本 consumer 使用同一 canonical VERSION resolver。
 - quality-gates、CI PR、CI Main、Release Product 和 failure notification 的声明不再包含旧 label/preparation/completion 路径。

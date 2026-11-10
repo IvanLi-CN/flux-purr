@@ -16,12 +16,17 @@ ci_main = (root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8")
 notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encoding="utf-8")
 quality = json.loads((root / ".github/quality-gates.json").read_text(encoding="utf-8"))
 edgeone_helper = (root / ".github/scripts/deploy-edgeone.sh").read_text(encoding="utf-8")
+safe_extract = root / ".github/scripts/safe_extract_release_archive.py"
 
 assert "workflow_dispatch:" in release
 assert "workflow_run:" not in release
 assert "group: release-product-main" in release
 assert "options: [patch, minor, major, rc]" in release
 assert "options: [publish, recover]" in release
+assert "recovery_tag:" in release
+assert "if: github.ref == 'refs/heads/main'" in release
+assert "RELEASE_RECOVERY_TAG" in release
+assert "recover requires a canonical recovery_tag" in release
 assert "manual_release.py baseline" in release
 assert "manual_release.py classify" in release
 assert "manual_release.py identity" in release
@@ -29,6 +34,7 @@ assert "git rev-parse origin/main" in release
 assert 'ref: ${{ github.sha }}' in release
 assert 'RELEASE_SOURCE_SHA: ${{ github.sha }}' in release
 assert "main advanced after dispatch" in release
+assert 'git ls-tree -r --name-only "${source_sha}"' in release
 assert "git for-each-ref" in release
 assert "Flux-Purr-Release-Intent:" in release
 assert "--intent-file" in release
@@ -50,6 +56,8 @@ assert "verify_release_assets.py" in release
 assert "reconcile_release_assets.py" in release
 assert "manifest_name" in release
 assert 'release-existing-assets/${manifest_name}' in release
+assert 'flux-purr-release-manifest-${PRODUCT_TAG}.json' in release
+assert "--previous-manifest" in release
 assert "status=missing" in release
 assert "status=partial" in release
 assert "release-upload-list.txt" in release
@@ -59,6 +67,9 @@ assert "create_release_archive.py" in release
 assert "SOURCE_DATE_EPOCH" in release
 assert "source_commit_epoch" in release
 assert "tar -czf" not in release
+assert "safe_extract_release_archive.py" in release
+assert "tar -xzf" not in release
+assert safe_extract.is_file()
 assert "gh release create \"${PRODUCT_TAG}\" \"${manifest}\"" in release
 assert "gh release upload \"${PRODUCT_TAG}\" \"${upload_assets[@]}\"" in release
 assert "already exists; publish cannot mutate an existing identity" in release
@@ -73,7 +84,6 @@ assert "release_chain.py" not in release
 assert "release_snapshot.py" not in release
 assert "commit_sha" not in release
 assert "label" not in release.lower()
-assert "refs/heads/main" not in release
 assert 'git push origin "${RELEASE_SHA}:refs/heads/main"' not in release
 assert release.index("Reserve immutable release tag") < release.index("Build and package product assets")
 assert release.index("Build and package product assets") < release.index("Publish and verify release assets")

@@ -20,8 +20,13 @@ def reconcile(args: argparse.Namespace) -> None:
     existing_root = Path(args.existing_root).resolve()
     built_root = Path(args.built_root).resolve()
     manifest_path = existing_root / args.manifest
-    if not manifest_path.is_file():
-        raise VERIFY.AssetVerificationError("partial Release has no durable manifest")
+    manifest_from_existing = manifest_path.is_file()
+    if not manifest_from_existing:
+        if not args.allow_missing_manifest:
+            raise VERIFY.AssetVerificationError("partial Release has no durable manifest")
+        manifest_path = built_root / args.manifest
+        if not manifest_path.is_file():
+            raise VERIFY.AssetVerificationError("rebuilt Release has no canonical manifest")
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     expected = {
         "version": args.version,
@@ -60,7 +65,10 @@ def reconcile(args: argparse.Namespace) -> None:
                 raise VERIFY.AssetVerificationError(f"rebuilt missing asset does not match manifest: {relative}")
             missing.append(str(Path("release-assets") / relative))
     built_manifest = built_root / args.manifest
-    shutil.copy2(manifest_path, built_manifest)
+    if manifest_from_existing:
+        shutil.copy2(manifest_path, built_manifest)
+    else:
+        missing.append(str(Path("release-assets") / args.manifest))
     for marker in (".edgeone-deploying", ".edgeone-deployed", ".edgeone-demo-deploying", ".edgeone-demo-deployed"):
         source = existing_root / marker
         if source.is_file():
@@ -92,6 +100,7 @@ def main() -> int:
     parser.add_argument("--baseline", required=True)
     parser.add_argument("--reservation-id", required=True)
     parser.add_argument("--upload-list", required=True)
+    parser.add_argument("--allow-missing-manifest", action="store_true")
     args = parser.parse_args()
     try:
         reconcile(args)

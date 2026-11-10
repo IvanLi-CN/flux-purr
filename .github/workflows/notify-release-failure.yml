@@ -68,7 +68,7 @@ jobs:
             tag_reservation="$(printf '%s\n' "${tag_subject}" | sed -n 's/.*Flux-Purr-Reservation-ID: \([^;]*\)$/\1/p')"
             if [ -n "${tag_intent}" ] && [ -n "${tag_baseline}" ] && [ "${tag_reservation}" = "${reservation_id}" ]; then
               recovery_target="same-identity: ${release_tag}@${MERGE_SHA}"
-              recovery_hint="dispatch Release Product with operation=recover and release_target=${tag_intent}"
+              recovery_hint="dispatch Release Product from main with operation=recover, release_target=${tag_intent}, and recovery_tag=${release_tag}"
             else
               recovery_target="unrecoverable: ${release_tag} has no durable release intent metadata"
               recovery_hint="do not use recover until the release identity metadata is restored or operator review authorizes a new boundary"

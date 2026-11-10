@@ -50,6 +50,24 @@ def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def component_content_payload(component: dict[str, Any], assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hash component content, excluding release identity and versioned filenames."""
+    return {
+        "id": component["id"],
+        "channel": component.get("channel", "stable"),
+        "protocolVersions": component.get("protocolVersions", []),
+        "assets": [
+            {
+                "size": asset["size"],
+                "sha256": asset["sha256"],
+                "mediaType": asset["mediaType"],
+                "channel": asset["channel"],
+            }
+            for asset in assets
+        ],
+    }
+
+
 def read_previous(path: str | None) -> dict[str, Any] | None:
     if not path:
         return None
@@ -112,14 +130,7 @@ def build_component(
                 "channel": component.get("channel", "stable"),
             }
         )
-    content_payload = {
-        "id": component["id"],
-        "version": component["version"],
-        "sourceSha": source_sha,
-        "protocolVersions": component.get("protocolVersions", []),
-        "assets": assets,
-    }
-    content_sha256 = canonical_sha256(content_payload)
+    content_sha256 = canonical_sha256(component_content_payload(component, assets))
     previous_component = previous_by_id.get(component["id"])
     previous_sha = previous_component.get("contentSha256") if isinstance(previous_component, dict) else None
     changed = previous_sha != content_sha256
@@ -127,6 +138,7 @@ def build_component(
         "id": component["id"],
         "version": component["version"],
         "sourceSha": source_sha,
+        "channel": component.get("channel", "stable"),
         "protocolVersions": component.get("protocolVersions", []),
         "assets": assets,
         "contentSha256": content_sha256,
