@@ -9683,7 +9683,11 @@
 }
 
 .industrial-status-strip--firmware {
-  grid-template-columns: minmax(0, 1fr) minmax(11.4rem, auto);
+  grid-template-columns: minmax(14rem, 1.1fr) minmax(12rem, 0.9fr) minmax(11.4rem, auto);
+}
+
+.industrial-firmware-target-picker {
+  min-width: 0;
 }
 
 .industrial-firmware-context {
@@ -9790,6 +9794,11 @@
 }
 
 @media (max-width: 759px) {
+  .industrial-firmware-target-picker {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
   .industrial-status-strip--firmware .industrial-firmware-context,
   .industrial-workspace-switch {
     flex: 1 1 100%;
