@@ -93,7 +93,15 @@ def md5_bytes(value: bytes) -> str:
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    source_date_epoch = os.getenv("SOURCE_DATE_EPOCH")
+    if source_date_epoch is not None:
+        try:
+            current = datetime.fromtimestamp(int(source_date_epoch), UTC)
+        except (ValueError, OSError) as error:
+            raise CatalogError("SOURCE_DATE_EPOCH must be a Unix timestamp") from error
+    else:
+        current = datetime.now(UTC)
+    return current.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def sanitize_component(value: str, label: str) -> str:

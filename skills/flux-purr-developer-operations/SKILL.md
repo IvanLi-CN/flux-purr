@@ -48,7 +48,13 @@ cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr-devd -
 
 ## Release Work
 
-- Use product tag `vX.Y.Z`; do not recreate `web/v...` or `fw/v...` workflows.
+- Use the manual `Release Product` workflow from protected `main` with an owner-confirmed `release_target` of `patch`, `minor`, `major`, or `rc`; do not provide a final version, new tag, or source SHA override. For recovery, provide only the existing immutable `recovery_tag` identity locator.
+- Before dispatch, the Agent must inspect the current `main` exact SHA, trusted stable baseline, and changed paths, then suggest intent and expected version to the owner. Dispatch only after owner confirmation; the workflow independently resolves canonical `VERSION`.
+- Non-document changes normally require a real product Release. Documentation-only changes are restricted to `docs/**`, `README*`, `CHANGELOG*`, Markdown/plain text, and documentation images; mixed changes require release.
+- Use product tag `vX.Y.Z` or `vX.Y.Z-rc.N`; do not recreate `web/v...` or `fw/v...` workflows.
 - Publish Web, firmware, host-tools, and `flux-purr-release-manifest-vX.Y.Z.json` on the same GitHub Release.
 - Keep release manifest components explicit with `sha256`, `contentSha256`, `sourceSha`, `protocolVersions`, `changedSincePrevious`, and `updateReason`.
+- Reserve the tag before building. If a release fails after reservation, use `operation=recover` from protected `main` with the original intent and existing `recovery_tag` only after verifying the tag points to the reserved source SHA; recovery must reuse the same identity and must not calculate a successor.
+- The workflow records a `release-identity` artifact before tag reservation. Failure notifications use its recorded release source SHA, so a recovery run dispatched after later `main` commits must not infer identity from `workflow_run.head_sha`. Durable-manifest recovery validates every existing asset's path, size, and SHA before listing missing files; tampered or symlinked assets fail closed.
+- Required CI jobs must fail explicitly when source validation fails, and PR/Main workflows run pinned `actionlint`; a skipped required job is not an acceptable quality-gate result.
 - PRs that touch hardware behavior, release policy, CLI/devd contracts, or user operations must update relevant specs, solutions, and project docs.

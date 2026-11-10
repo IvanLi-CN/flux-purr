@@ -4,7 +4,7 @@
 
 Flux Purr 当前只在 README 中提供手动 `bun install` / `bun install --cwd web` / `bun run hooks:install` 路径。linked worktree 创建后不会自动补齐 `commitlint`、`lefthook`、web toolchain 或 Cargo fetch 预热，导致新 worktree 进入开发状态依赖维护者记忆。
 
-仓库已经具备 `quality-gates`、PR label release 和多 surface CI，但“新 worktree 能否恢复到可开发状态”尚未被声明为正式 contract，也没有 smoke gate 防漂移。
+仓库已经具备 `quality-gates`、Manual version release delivery 和多 surface CI，但“新 worktree 能否恢复到可开发状态”尚未被声明为正式 contract，也没有 smoke gate 防漂移。
 
 ## 目标 / 非目标
 

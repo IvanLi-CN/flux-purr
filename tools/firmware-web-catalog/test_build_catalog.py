@@ -168,6 +168,16 @@ class BuildFirmwareCatalogTest(unittest.TestCase):
         self.assertEqual(request.call_count, 3)
         self.assertIn("page=3", request.call_args_list[-1].args[0])
 
+    def test_source_date_epoch_makes_generated_at_reproducible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "local.fluxpurr-fw"
+            write_bundle(bundle, version="1.2.3-local.1", channel="local", source_sha="a" * 40)
+            with patch.dict(catalog.os.environ, {"SOURCE_DATE_EPOCH": "1760000000"}):
+                rendered = catalog.stage_catalog(self.args(root, local_bundle=[bundle]))
+
+            self.assertEqual(rendered["generatedAt"], "2025-10-09T08:53:20Z")
+
 
 if __name__ == "__main__":
     unittest.main()

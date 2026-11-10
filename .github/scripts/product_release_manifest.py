@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ VERSION_SPEC.loader.exec_module(PRODUCT_VERSION)
 
 SCHEMA_VERSION = 1
 FIRMWARE_BUNDLE_MEDIA_TYPE = "application/vnd.flux-purr.firmware-bundle+zip"
+RELEASE_INTENTS = {"patch", "minor", "major", "rc"}
 
 
 def media_type_for_asset(path: Path) -> str:
@@ -46,6 +48,24 @@ def sha256_file(path: Path) -> str:
 def canonical_sha256(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def component_content_payload(component: dict[str, Any], assets: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hash component content, excluding release identity and versioned filenames."""
+    return {
+        "id": component["id"],
+        "channel": component.get("channel", "stable"),
+        "protocolVersions": component.get("protocolVersions", []),
+        "assets": [
+            {
+                "size": asset["size"],
+                "sha256": asset["sha256"],
+                "mediaType": asset["mediaType"],
+                "channel": asset["channel"],
+            }
+            for asset in assets
+        ],
+    }
 
 
 def read_previous(path: str | None) -> dict[str, Any] | None:
@@ -110,14 +130,7 @@ def build_component(
                 "channel": component.get("channel", "stable"),
             }
         )
-    content_payload = {
-        "id": component["id"],
-        "version": component["version"],
-        "sourceSha": source_sha,
-        "protocolVersions": component.get("protocolVersions", []),
-        "assets": assets,
-    }
-    content_sha256 = canonical_sha256(content_payload)
+    content_sha256 = canonical_sha256(component_content_payload(component, assets))
     previous_component = previous_by_id.get(component["id"])
     previous_sha = previous_component.get("contentSha256") if isinstance(previous_component, dict) else None
     changed = previous_sha != content_sha256
@@ -125,6 +138,7 @@ def build_component(
         "id": component["id"],
         "version": component["version"],
         "sourceSha": source_sha,
+        "channel": component.get("channel", "stable"),
         "protocolVersions": component.get("protocolVersions", []),
         "assets": assets,
         "contentSha256": content_sha256,
@@ -145,6 +159,24 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         raise ManifestError(
             f"Manifest channel {requested_channel} does not match VERSION-derived channel {expected['channel']}"
         )
+    if args.intent not in RELEASE_INTENTS:
+        raise ManifestError(f"Unsupported release intent: {args.intent}")
+    if not re.fullmatch(r"[0-9a-f]{40}", args.source_sha):
+        raise ManifestError("Source SHA must be a full lowercase hexadecimal commit SHA")
+    if args.tag != f"v{args.version}":
+        raise ManifestError("Manifest tag must be v + the canonical manifest version")
+    if args.intent == "rc" and "-rc." not in args.version:
+        raise ManifestError("rc release intent requires an RC canonical version")
+    if args.intent != "rc" and "-rc." in args.version:
+        raise ManifestError("stable release intent cannot use an RC canonical version")
+    if args.reservation_id != f"{args.tag}@{args.source_sha}":
+        raise ManifestError("Reservation id must bind the release tag to the source SHA")
+    try:
+        baseline = PRODUCT_VERSION.parse_version(args.baseline)
+    except PRODUCT_VERSION.VersionError as exc:
+        raise ManifestError(f"Invalid trusted baseline: {args.baseline}") from exc
+    if baseline["rc"] is not None:
+        raise ManifestError("Trusted baseline must be a stable final version")
     previous = read_previous(args.previous_manifest)
     previous_by_id = previous_components(previous)
     root = Path(args.asset_root)
@@ -169,6 +201,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "tag": args.tag,
         "sourceSha": args.source_sha,
         "channel": expected["channel"],
+        "releaseIntent": args.intent,
+        "trustedBaseline": args.baseline,
+        "reservationId": args.reservation_id,
         "components": components,
     }
 
@@ -179,6 +214,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--channel", choices=("stable", "rc"))
+    parser.add_argument("--intent", choices=sorted(RELEASE_INTENTS), required=True)
+    parser.add_argument("--baseline", required=True)
+    parser.add_argument("--reservation-id", required=True)
     parser.add_argument("--repo-root", default=str(ROOT))
     parser.add_argument("--asset-root", default=".")
     parser.add_argument("--previous-manifest")

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0025](0025-manual-version-release-delivery.md) for release selection and transport. The root `VERSION` source decision remains valid.
 
 Flux Purr declares its exact product SemVer only in the root `VERSION` file. A product tag, package manifest, PR label, release snapshot, and workflow input may record or request work, but none may establish the version consumed by a build, runtime, manifest, or release asset. For a normal release, `nextPatch(VERSION)` is the release version; development leaves `VERSION` untouched and displays `nextPatch(VERSION)-dev.<short-sha>`. The protected-merge transport for that value is defined by [ADR 0005](0005-pr-local-version-preparation.md).
 

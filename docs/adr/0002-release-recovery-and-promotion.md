@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded by [0004-release-commit-version-control](0004-release-commit-version-control.md)
+Superseded by [ADR 0025](0025-manual-version-release-delivery.md) through the historical 0004/0005 chain.
 
 ## Context
 

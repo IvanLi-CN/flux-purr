@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0025](0025-manual-version-release-delivery.md).
 
 Supersedes [0004-release-commit-version-control](0004-release-commit-version-control.md).
 

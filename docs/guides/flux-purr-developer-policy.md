@@ -74,6 +74,16 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 - Web live development 在需要 leased `devd` 端口时，必须显式设置 `VITE_FLUX_PURR_DEVD_URL` 与 `VITE_FLUX_PURR_ENABLE_DEVD=1`。
 - 固件发布目录由 `tools/firmware-web-catalog/build_catalog.py` 在服务器侧构建；Browser 只能读取同源 `/firmware/releases-manifest.json`、`/firmware/firmware-integrity-catalog.json` 和清单声明的精确 bundle 路径。开发构建的本地 ELF 只能通过开发者 `flash` 使用，不得由 Vite 或任何 Web 目录包装成 `.fluxpurr-fw`。Vite 开发默认通过服务器端 GitHub proxy 提供已发布版本；`FLUX_PURR_DEV_FIRMWARE_RELEASES=0` 仅禁用远端刷新，不禁用已打包 release。遇到 GitHub API 限流时，设置仅供该本地 Vite 进程读取的 `GITHUB_TOKEN`；绝不以 `VITE_*` 变量或浏览器请求暴露它。
 
+## Manual release policy
+
+- 非纯文档变更默认必须形成实际产品 Release；只有 `docs/**`、`README*`、`CHANGELOG*`、Markdown、纯文本和文档图片资源组成的变更可以跳过产品发布，混合提交按产品变更处理。
+- Agent 在 manual dispatch 前必须读取当前 `main` exact SHA、trusted stable baseline 和变更范围，向 owner 建议 `patch`、`minor`、`major` 或 `rc` intent 及预期版本。建议不持久化，也不替代 owner 确认；owner 确认 intent 后才调用 dispatch。
+- `Release Product` 只允许从受保护 `main` 调度；publish 接受 `release_target` 与 `operation=publish`，recover 额外接受已有 immutable `recovery_tag` 作为 identity locator，不接受 caller 的最终版本、新 tag 或 `commit_sha` 覆盖。workflow 独立解析 canonical version，并在 runner workspace 绑定 root `VERSION`。
+- 新发布使用同一 `source_sha`、trusted baseline、canonical version、tag reservation、artifact digest、GitHub Release 和部署 identity。失败后只允许使用 `recovery_tag` 做同 identity recovery；不得重新计算 successor、递增 RC 或移动 tag。
+- workflow 在预留 tag 前保存 `release-identity` artifact；失败通知从其中读取真实 release source SHA，不能把 recover 的 `workflow_run.head_sha` 当作原始 source。带 durable manifest 的 recovery 先验证已有资产的路径、size 和 SHA，篡改或 symlink 直接失败。
+- CI required jobs 在 source validation 失败时必须显式失败；PR/Main workflow 运行固定版本 `actionlint`，不得以 skipped job 充当通过。
+- 不使用 PR labels、`Label Gate`、PR-local VERSION preparation 或旧 completion workflow 作为 release gate。具体契约见 `docs/specs/manual-version-release-delivery/SPEC.md`。
+
 ## 文档与交付要求
 
 - 任何改变硬件行为、用户可见行为、API 契约、安全边界或 release policy 的实现，都必须同步相关 `docs/specs/**`、`docs/solutions/**` 与项目文档。
