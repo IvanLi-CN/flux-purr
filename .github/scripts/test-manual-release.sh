@@ -59,6 +59,15 @@ set -e
 test "${status}" -ne 0
 grep -F "already has release tag" "${tmp_dir}/source-tag.out"
 
+: > "${tmp_dir}/empty-tags.txt"
+set +e
+python3 "${root_dir}/.github/scripts/manual_release.py" baseline \
+  --tags-file "${tmp_dir}/empty-tags.txt" --fallback-version 0.30.8-rc.1 > "${tmp_dir}/rc-baseline.out" 2>&1
+status=$?
+set -e
+test "${status}" -ne 0
+grep -F "trusted baseline must be stable" "${tmp_dir}/rc-baseline.out"
+
 python3 "${root_dir}/.github/scripts/manual_release.py" identity \
   --intent rc --baseline 0.30.7 --source-sha 0000000000000000000000000000000000000002 \
   --tags-file "${tmp_dir}/tags.txt" --intent-file "${tmp_dir}/tag-intents.txt" \
@@ -245,6 +254,26 @@ with tempfile.TemporaryDirectory() as directory:
         pass
     else:
         raise AssertionError("RC trusted baseline must fail")
+
+archive_spec = importlib.util.spec_from_file_location(
+    "create_release_archive", root / ".github/scripts/create_release_archive.py"
+)
+assert archive_spec and archive_spec.loader
+archive = importlib.util.module_from_spec(archive_spec)
+archive_spec.loader.exec_module(archive)
+with tempfile.TemporaryDirectory() as archive_directory:
+    archive_root = Path(archive_directory)
+    first = archive_root / "first"
+    second = archive_root / "second"
+    for directory in (first, second):
+        (directory / "nested").mkdir(parents=True)
+        (directory / "nested" / "file.txt").write_text("same\n", encoding="utf-8")
+        (directory / "root.txt").write_text("same\n", encoding="utf-8")
+    first_archive = archive_root / "first.tar.gz"
+    second_archive = archive_root / "second.tar.gz"
+    archive.create_archive(first, first_archive, [])
+    archive.create_archive(second, second_archive, [])
+    assert first_archive.read_bytes() == second_archive.read_bytes()
 PY
 
 echo "manual release policy tests passed"

@@ -183,9 +183,10 @@ jobs:
           gh release download "${PRODUCT_TAG}" --dir release-assets
           manifest="$(find release-assets -maxdepth 1 -type f -name 'flux-purr-release-manifest-*.json' -print -quit)"
           test -n "${manifest}" || { echo "existing Release has no durable release manifest" >&2; exit 1; }
+          manifest_name="$(basename "${manifest}")"
           if python3 .github/scripts/verify_release_assets.py \
             --asset-root release-assets \
-            --manifest "$(basename "${manifest}")" \
+            --manifest "${manifest_name}" \
             --version "${PRODUCT_VERSION}" \
             --tag "${PRODUCT_TAG}" \
             --source-sha "${RELEASE_SHA}" \
@@ -198,7 +199,7 @@ jobs:
           fi
           mv release-assets "${RUNNER_TEMP}/release-existing-assets"
           mkdir -p release-assets
-          python3 - "${RUNNER_TEMP}/release-existing-assets/${manifest}" "${RUNNER_TEMP}/release-existing-assets" > "${RUNNER_TEMP}/release-missing-assets.txt" <<'PY'
+          python3 - "${RUNNER_TEMP}/release-existing-assets/${manifest_name}" "${RUNNER_TEMP}/release-existing-assets" > "${RUNNER_TEMP}/release-missing-assets.txt" <<'PY'
           import json
           import pathlib
           import sys
@@ -284,6 +285,15 @@ jobs:
             cargo build --manifest-path tools/flux-purr-devd/Cargo.toml --release --locked --bins
           fi
           mkdir -p release-assets
+          source_commit_epoch="$(git show -s --format=%ct "${FLUX_PURR_SOURCE_SHA}")"
+          export SOURCE_DATE_EPOCH="${source_commit_epoch}"
+          catalog_published_at="$(python3 - "${source_commit_epoch}" <<'PY'
+          import datetime
+          import sys
+
+          print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.UTC).isoformat().replace("+00:00", "Z"))
+          PY
+          )"
           bundle="release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"
           if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"; then
             target/release/flux-purr-build-firmware-bundle \
@@ -296,7 +306,10 @@ jobs:
               --output "${bundle}"
           fi
           if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz"; then
-            tar -czf "release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz" -C release-assets "$(basename "${bundle}")"
+            python3 .github/scripts/create_release_archive.py \
+              --source-root release-assets \
+              --path "$(basename "${bundle}")" \
+              --output "release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.tar.gz"
           fi
           if [ "${need_web}" = true ] || [ "${need_host}" = true ]; then
             test -f "${bundle}"
@@ -305,16 +318,20 @@ jobs:
               --output-root web/public/firmware \
               --current-bundle "${bundle}" \
               --current-tag "${PRODUCT_TAG}" \
-              --current-published-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              --current-published-at "${catalog_published_at}"
           fi
           if [ "${need_web}" = true ]; then
             bun run --cwd web build
             bun run --cwd web build:demo
             if asset_missing "flux-purr-web-v${PRODUCT_VERSION}.tar.gz"; then
-              tar -czf "release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz" -C web/dist .
+              python3 .github/scripts/create_release_archive.py \
+                --source-root web/dist \
+                --output "release-assets/flux-purr-web-v${PRODUCT_VERSION}.tar.gz"
             fi
             if asset_missing "flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"; then
-              tar -czf "release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz" -C web/dist-demo .
+              python3 .github/scripts/create_release_archive.py \
+                --source-root web/dist-demo \
+                --output "release-assets/flux-purr-web-demo-v${PRODUCT_VERSION}.tar.gz"
             fi
           fi
           if [ "${need_host}" = true ]; then
@@ -322,7 +339,9 @@ jobs:
             cp target/release/flux-purr target/release/flux-purr-devd host-tools/bin/
             cp build-info.json VERSION host-tools/
             cp web/public/firmware/firmware-integrity-catalog.json host-tools/bin/
-            tar -czf "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz" -C host-tools .
+            python3 .github/scripts/create_release_archive.py \
+              --source-root host-tools \
+              --output "release-assets/flux-purr-host-tools-linux-x64-v${PRODUCT_VERSION}.tar.gz"
           fi
           cp build-info.json VERSION release-assets/
           web_component="$(CHANNEL="${channel}" python3 -c 'import json,os; version=os.environ["PRODUCT_VERSION"]; print(json.dumps({"id":"web","version":version,"channel":os.environ["CHANNEL"],"protocolVersions":["flux-purr.http.v1","flux-purr.web-serial.v1"],"assets":["flux-purr-web-v"+version+".tar.gz","flux-purr-web-demo-v"+version+".tar.gz"]}))')"

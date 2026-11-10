@@ -39,7 +39,7 @@ caller 不得提供 `version`、tag、commit SHA 或其它字段覆盖 policy �
 
 ### Build and delivery
 
-每种 artifact 只构建一次。firmware、devd、CLI、Web、bundle、manifest 和 Release 从同一个 runner `VERSION` 与 source SHA 生成；same-identity recovery 对完整 Release 只复用并验证既有资产，对带 durable manifest 的部分 Release 只重建缺失资产并要求 digest 与 manifest 完全一致，禁止覆盖已存在的资产；EdgeOne production/demo 复用已发布的 Web archive，不重新构建。部署开始前先写入不可变 `deployment-started` receipt，只有内容等于当前 source SHA 的 `deployed` marker 才能跳过部署；若只存在 started receipt，恢复必须 fail closed 并要求 operator review，避免 provider 已成功但 receipt 未上传时重复部署。Release、Deploy、Notify 分层，通知成功不等于 Release 或 Deploy 成功。
+每种 artifact 只构建一次。firmware、devd、CLI、Web、bundle、manifest 和 Release 从同一个 runner `VERSION` 与 source SHA 生成；catalog 时间戳和压缩归档元数据也由 immutable source identity 决定，以保证同一 identity 的恢复 bytes 可重现。same-identity recovery 对完整 Release 只复用并验证既有资产，对带 durable manifest 的部分 Release 只重建缺失资产并要求 digest 与 manifest 完全一致，禁止覆盖已存在的资产；EdgeOne production/demo 复用已发布的 Web archive，不重新构建。部署开始前先写入不可变 `deployment-started` receipt，只有内容等于当前 source SHA 的 `deployed` marker 才能跳过部署；若只存在 started receipt，恢复必须 fail closed 并要求 operator review，避免 provider 已成功但 receipt 未上传时重复部署。Release、Deploy、Notify 分层，通知成功不等于 Release 或 Deploy 成功。
 
 纯文档变更由 workflow 输出 skip，不能创建产品 Release；产品变更或文档与产品混合变更必须走完整 Release。workflow 失败时通知包含 version、merge/source SHA、reservation identity、tag（若已保留）和 same-identity recovery target。
 

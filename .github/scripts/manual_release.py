@@ -119,6 +119,12 @@ def stable_base(value: str) -> str:
     return f"{parsed['major']}.{parsed['minor']}.{parsed['patch']}"
 
 
+def validate_stable_baseline(value: str) -> None:
+    parsed = VERSION.parse_version(value)
+    if parsed["rc"] is not None:
+        raise ManualReleaseError(f"trusted baseline must be stable: {value}")
+
+
 def next_stable(value: str, intent: str) -> str:
     parsed = VERSION.parse_version(stable_base(value))
     major, minor, patch = int(parsed["major"]), int(parsed["minor"]), int(parsed["patch"])
@@ -165,6 +171,7 @@ def is_ancestor(ancestor: str, descendant: str) -> bool:
 def resolve_version(intent: str, baseline: str, tags: dict[str, str]) -> str:
     if intent not in INTENTS:
         raise ManualReleaseError(f"unsupported release intent: {intent}")
+    validate_stable_baseline(baseline)
     base = next_stable(baseline, intent if intent != "rc" else "patch")
     if intent != "rc":
         return base
@@ -219,6 +226,7 @@ def identity(
 ) -> dict[str, str]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise ManualReleaseError("source SHA must be a full lowercase hexadecimal commit SHA")
+    validate_stable_baseline(baseline)
     if operation == "recover":
         existing = matching_tag(tags, source_sha)
         if existing is None:
@@ -305,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "baseline":
             tags = parse_tags(args.tags_file)
+            validate_stable_baseline(args.fallback_version)
             result = latest_stable(tags, args.source_sha)
             print(json.dumps({"tag": result[0], "version": result[0][1:], "sha": result[1]} if result else {"tag": "", "version": args.fallback_version, "sha": ""}, sort_keys=True))
         elif args.command == "resolve":

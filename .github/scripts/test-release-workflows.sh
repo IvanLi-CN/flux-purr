@@ -48,11 +48,17 @@ assert "Restore immutable release assets for recovery" in release
 assert "gh release download" in release
 assert "verify_release_assets.py" in release
 assert "reconcile_release_assets.py" in release
+assert "manifest_name" in release
+assert 'release-existing-assets/${manifest_name}' in release
 assert "status=missing" in release
 assert "status=partial" in release
 assert "release-upload-list.txt" in release
 assert "release-missing-assets.txt" in release
 assert "asset_missing()" in release
+assert "create_release_archive.py" in release
+assert "SOURCE_DATE_EPOCH" in release
+assert "source_commit_epoch" in release
+assert "tar -czf" not in release
 assert "gh release create \"${PRODUCT_TAG}\" \"${manifest}\"" in release
 assert "gh release upload \"${PRODUCT_TAG}\" \"${upload_assets[@]}\"" in release
 assert "already exists; publish cannot mutate an existing identity" in release
