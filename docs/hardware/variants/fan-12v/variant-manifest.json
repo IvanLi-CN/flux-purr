@@ -1,7 +1,7 @@
 {
   "variant": "fan-12v",
   "status": "frozen",
-  "base_archived_netlist": "docs/hardware/netlists/main-controller-board.enet",
+  "base_archived_netlist": "hardware/pcb/main-controller-board.enet",
   "silkscreen_required_text": "12V FAN ONLY",
   "shared_contract": {
     "gpio": {

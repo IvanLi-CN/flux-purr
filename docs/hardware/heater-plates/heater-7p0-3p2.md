@@ -81,13 +81,13 @@ Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying s
 The checked manufacturing package is stored at:
 
 ```text
-docs/hardware/gerbers/heater-plate-7p0cm-3p2ohm/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip
+hardware/pcb/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip
 ```
 
 The `support top board` and `insulation board` used with this heater stack are archived separately from the heater plate package:
 
 ```text
-docs/hardware/gerbers/heater-stack-support-7p0cm/
+hardware/pcb/
 ```
 
 Package SHA-256:

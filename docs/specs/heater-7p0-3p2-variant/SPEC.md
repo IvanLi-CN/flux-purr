@@ -27,7 +27,7 @@
 
 - `docs/hardware/heater-plate-design.md`
 - `docs/hardware/heater-plates/heater-7p0-3p2.md`
-- `docs/hardware/gerbers/heater-plate-7p0cm-3p2ohm/**`
+- `hardware/pcb/**`
 - `docs/specs/heater-7p0-3p2-variant/SPEC.md`
 - `docs/specs/README.md`
 
@@ -43,7 +43,7 @@
 
 - `heater-7p0-3p2` 必须记录为 `70 mm x 70 mm`、`R20 = 3.2 ohm` 变体。
 - 接受冷态电阻范围必须沿用 `3.2 ohm` 方案：`3.1 ohm <= R20 <= 3.3 ohm`。
-- Gerber 包必须保存到 `docs/hardware/gerbers/heater-plate-7p0cm-3p2ohm/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`。
+- Gerber 包必须保存到 `hardware/pcb/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`。
 - 文档必须记录 Gerber 包 SHA-256：`c1c3742df95d7034359f85b2adfa2905967c44bfac6cd6a3168c0da025c3d026`。
 - heater family 支持矩阵必须包含 `heater-7p0-3p2`。
 - 文档必须说明 `heater-5p6-3p2` 与 `heater-7p0-3p2` 共用 firmware-facing `3.2 ohm` load class；固件不得根据物理面积推断加热板版本。
@@ -96,8 +96,8 @@
 
 ### Testing
 
-- `unzip -t docs/hardware/gerbers/heater-plate-7p0cm-3p2ohm/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`
-- `shasum -a 256 docs/hardware/gerbers/heater-plate-7p0cm-3p2ohm/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`
+- `unzip -t hardware/pcb/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`
+- `shasum -a 256 hardware/pcb/flux-purr-heater-plate-7p0cm-3p2ohm-gerbers.zip`
 - `rg -n "heater-7p0-3p2|heater-plate-7p0cm-3p2ohm|c1c3742d" docs`
 - `rg -n 'TO''DO|TB''D|待''补充' docs/hardware/heater-plate-design.md docs/hardware/heater-plates/heater-7p0-3p2.md docs/specs/heater-7p0-3p2-variant/SPEC.md`
 

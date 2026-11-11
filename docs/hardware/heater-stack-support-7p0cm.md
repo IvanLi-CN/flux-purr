@@ -39,14 +39,14 @@ Do not merge these support boards into the heater-plate identity:
 The archived manufacturing packages are stored at:
 
 ```text
-docs/hardware/gerbers/heater-stack-support-7p0cm/flux-purr-heater-stack-support-top-board-7p0cm-gerbers.zip
-docs/hardware/gerbers/heater-stack-support-7p0cm/flux-purr-heater-stack-insulation-board-7p0cm-gerbers.zip
+hardware/pcb/heater-stack-support-top-board-7p0cm-gerbers.zip
+hardware/pcb/heater-stack-insulation-board-7p0cm-gerbers.zip
 ```
 
 Source file mapping:
 
-- `Gerber_顶板.zip` -> `flux-purr-heater-stack-support-top-board-7p0cm-gerbers.zip`
-- `Gerber_隔热板.zip` -> `flux-purr-heater-stack-insulation-board-7p0cm-gerbers.zip`
+- `Gerber_顶板.zip` -> `heater-stack-support-top-board-7p0cm-gerbers.zip`
+- `Gerber_隔热板.zip` -> `heater-stack-insulation-board-7p0cm-gerbers.zip`
 
 SHA-256:
 

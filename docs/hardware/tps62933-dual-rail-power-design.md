@@ -136,7 +136,7 @@ This matches the board intent of treating anything below about `4.5 V` as underv
 - `EN` must have its own weak pulldown so the fan rail stays off during reset and while the MCU pin is high-impedance
 - the implemented board inserts a `2.2 kOhm` series resistor between the MCU-side `FAN_EN_RAW` net and the actual `FAN_EN` node at the TPS pin
 - one channel of the shared `PESD3V3S2UT` is placed on `FAN_EN_RAW`; the second channel is used by `RTD_ADC`
-- the archived base netlist at `docs/hardware/netlists/main-controller-board.enet` is the `fan-5v` baseline
+- the archived base netlist at `hardware/pcb/main-controller-board.enet` is the `fan-5v` baseline
 - all PCB-variant overlays are frozen under `docs/hardware/variants/`
 
 ### 7.2 Shared control network

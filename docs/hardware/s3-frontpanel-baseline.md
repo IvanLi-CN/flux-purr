@@ -12,10 +12,10 @@ This document freezes the hardware integration baseline for the ESP32-S3FH4R2 re
   - `fan-12v`: nominal `3.45 V ~ 12.14 V` with the E24 feedback network
 - Display: same 1.12-inch panel class used in `iso-usb-hub`
 - Front-panel keys: direct-to-MCU, no I2C GPIO expander
-- Archived controller-board netlist: `docs/hardware/netlists/main-controller-board.enet` (`fan-5v` baseline)
-- FUSB302B controller-board netlist: `docs/hardware/netlists/main-controller-board-fusb302b-rev-5-2.enet` (revision `5.2`)
+- Archived controller-board netlist: `hardware/pcb/main-controller-board.enet` (`fan-5v` baseline)
+- FUSB302B controller-board netlist: `hardware/pcb/main-controller-board-fusb302b-rev-5-2.enet` (revision `5.2`)
 - Variant overlay reference: `docs/hardware/fan-pcb-variants.md`
-- Archived front-panel-board netlist: `docs/hardware/netlists/front-panel-board.enet`
+- Archived front-panel-board netlist: `hardware/pcb/front-panel-board.enet`
 
 ## 2) Direct MCU GPIO allocation (25 active)
 

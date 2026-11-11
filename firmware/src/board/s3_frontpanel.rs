@@ -101,7 +101,7 @@ mod tests {
         assert_eq!(PIN_PD_INTERRUPT, 7);
         assert_eq!(PIN_LCD_DC, 10);
         assert_eq!(PIN_LCD_BLK, 13);
-        // Keep in sync with docs/hardware/netlists/main-controller-board.enet:
+        // Keep in sync with hardware/pcb/main-controller-board.enet:
         // GPIO17=BTN_LEFT, GPIO18=BTN_DOWN.
         assert_eq!(PIN_KEY_LEFT, 17);
         assert_eq!(PIN_KEY_DOWN, 18);

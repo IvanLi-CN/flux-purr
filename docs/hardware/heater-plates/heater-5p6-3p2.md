@@ -67,7 +67,7 @@ Fixed-voltage current and power estimates for `R20 = 3.2 ohm`, before applying s
 The checked manufacturing package is stored at:
 
 ```text
-docs/hardware/gerbers/heater-plate-5p6cm-3p2ohm/flux-purr-heater-plate-5p6cm-3p2ohm-gerbers.zip
+hardware/pcb/flux-purr-heater-plate-5p6cm-3p2ohm-gerbers.zip
 ```
 
 Package SHA-256:
