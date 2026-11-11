@@ -98,7 +98,7 @@ Status retains `currentMa`, `ppsCapability*`, and `manualPps*` compatibility fie
 
 ### REQ-FUSB-HARDWARE
 
-`docs/hardware/netlists/main-controller-board.enet` remains the archived CH224Q baseline. `docs/hardware/netlists/main-controller-board-fusb302b-rev-5-2.enet` is the imported FUSB302B source netlist.
+`hardware/pcb/main-controller-board.enet` remains the archived CH224Q baseline. `hardware/pcb/main-controller-board-fusb302b-rev-5-2.enet` is the imported FUSB302B source netlist.
 
 C20 is directly `VBUS`-to-`GND`, marked `Add into BOM=yes`, and is explicitly recorded as `100uF ±20% 50V` with `Voltage Rating: 50V` and `DeviceName: C1210_100UF_50V_20%`. The imported source markings are preserved without substitution. A physical component marking is authoritative, followed by traceable assembly BOM/AOI or rework evidence for the actual board. C42 and C43 remain separately specified `100uF`, `35V` VBUS bulk capacitors.
 

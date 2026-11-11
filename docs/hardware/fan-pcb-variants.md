@@ -26,7 +26,7 @@ The control topology also remains shared:
 
 ## 2) Archived source and overlays
 
-- Archived base netlist: `docs/hardware/netlists/main-controller-board.enet`
+- Archived base netlist: `hardware/pcb/main-controller-board.enet`
 - The archived base netlist is treated as the `fan-5v` baseline.
 - Variant overlays live under:
   - `docs/hardware/variants/fan-5v/`

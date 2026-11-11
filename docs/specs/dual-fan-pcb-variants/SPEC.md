@@ -78,7 +78,7 @@
 ### Core flows
 
 - `fan-5v` 与 `fan-12v` 共享 `GPIO35/36/34` 硬件所有权与状态字段语义。
-- archived base netlist 继续保留在 `docs/hardware/netlists/main-controller-board.enet`，并视为 `fan-5v` 基线。
+- archived base netlist 继续保留在 `hardware/pcb/main-controller-board.enet`，并视为 `fan-5v` 基线。
 - `fan-12v` 通过单独 manifest / BOM 覆盖说明：`R19/R20/R18` 分别替换为 `13 kΩ / 150 kΩ / 47 kΩ`，`R15` 保持 `10 kΩ`，`FAN_VCC` 输出电容升级到 `>=25 V / 1206+`。
 - firmware core 只处理 `fan_enabled` + `fan_pwm_permille` 这组 normalized control contract，不维护 shared 5V / 12V 电压 profile。
 - `fan_pwm_permille` 的含义保持为“归一化设定值 / actuator effort”，而不是“所有板型都等价的固定毫伏数”。
