@@ -9869,24 +9869,16 @@ function UpdateView({
   onActivity: (entry: FirmwareActivityInput) => void
 }) {
   return (
-    <div className="industrial-view-panel industrial-view-panel--firmware-workbench">
-      <ScrollArea
-        className="firmware-workspace__scroll"
-        ariaLabel="固件工作区内容"
-        scrollableNodeProps={{
-          'data-firmware-workspace-scroll': 'true',
-        }}
-      >
-        <FirmwareWorkbench
-          browserAvailable={browserAvailable}
-          nativeTargets={nativeTargets}
-          devdBaseUrl={devdBaseUrl}
-          officialArtifacts={officialArtifacts}
-          artifactBlocked={artifactBlocked}
-          executionMode={mockOnly ? 'mock' : 'live'}
-          onActivity={onActivity}
-        />
-      </ScrollArea>
+    <div className="industrial-view-panel">
+      <FirmwareWorkbench
+        browserAvailable={browserAvailable}
+        nativeTargets={nativeTargets}
+        devdBaseUrl={devdBaseUrl}
+        officialArtifacts={officialArtifacts}
+        artifactBlocked={artifactBlocked}
+        executionMode={mockOnly ? 'mock' : 'live'}
+        onActivity={onActivity}
+      />
     </div>
   )
 }

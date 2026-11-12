@@ -23,54 +23,6 @@ test.describe('firmware workspace ui demo', () => {
     await runMockFirmwareTransaction(page, '/devices/fp-lab-01/update')
     expect(crossOriginRequests).toEqual([])
   })
-
-  test('keeps the firmware workspace inside its responsive containers', async ({ page }) => {
-    for (const viewport of [
-      { width: 1440, height: 900 },
-      { width: 1024, height: 768 },
-      { width: 759, height: 844 },
-      { width: 390, height: 844 },
-    ]) {
-      await page.setViewportSize(viewport)
-      await page.goto('/devices/fp-lab-01/update?uiDemo=firmware-workspace')
-      await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
-
-      const layout = await page.evaluate(() => {
-        const main = document.querySelector('.industrial-console__main')?.getBoundingClientRect()
-        const log = document.querySelector('.firmware-transaction-log')?.getBoundingClientRect()
-        const scroll = document.querySelector<HTMLElement>(
-          '[data-firmware-workspace-scroll="true"]'
-        )
-        const summary = document.querySelector('.firmware-transaction-log__summary')
-        return {
-          documentScrollWidth: document.documentElement.scrollWidth,
-          viewportWidth: window.innerWidth,
-          documentScrollHeight: document.documentElement.scrollHeight,
-          viewportHeight: window.innerHeight,
-          mainBottom: main?.bottom ?? 0,
-          logTop: log?.top ?? 0,
-          logHeight: log?.height ?? 0,
-          scrollClientHeight: scroll?.clientHeight ?? 0,
-          scrollHeight: scroll?.scrollHeight ?? 0,
-          summaryVisible: summary ? getComputedStyle(summary).display !== 'none' : false,
-        }
-      })
-
-      expect(layout.documentScrollWidth).toBeLessThanOrEqual(layout.viewportWidth)
-      expect(layout.documentScrollHeight).toBeLessThanOrEqual(layout.viewportHeight)
-
-      if (viewport.width < 1180) {
-        expect(layout.logTop).toBeGreaterThanOrEqual(layout.mainBottom - 1)
-      }
-
-      if (viewport.width <= 759) {
-        expect(layout.logHeight).toBeLessThanOrEqual(100)
-        expect(layout.summaryVisible).toBe(true)
-      } else {
-        expect(layout.scrollHeight).toBeGreaterThanOrEqual(layout.scrollClientHeight)
-      }
-    }
-  })
 })
 
 async function installDemoGuards(page: DemoPage, baseURL: string | undefined) {

@@ -1788,7 +1788,6 @@ export function FirmwareTransactionLog({ entries }: { entries: FirmwareActivityE
   const scrollableNodeRef = useRef<HTMLDivElement | null>(null)
   const [followTail, setFollowTail] = useState(true)
   const latestEntryId = entries.at(-1)?.id
-  const latestEntry = entries.at(-1)
 
   const scrollToTail = useCallback((behavior: ScrollBehavior = 'auto') => {
     const scrollableNode = scrollableNodeRef.current
@@ -1835,15 +1834,6 @@ export function FirmwareTransactionLog({ entries }: { entries: FirmwareActivityE
           <output aria-label="日志条目数">{entries.length} 条</output>
         </span>
       </header>
-      {latestEntry ? (
-        <div className="firmware-transaction-log__summary" aria-live="polite">
-          <time>{latestEntry.time}</time>
-          <span>
-            <strong>{latestEntry.event}</strong>
-            <small>{latestEntry.detail}</small>
-          </span>
-        </div>
-      ) : null}
       <ScrollArea
         className="firmware-transaction-log__scroll"
         scrollbarMinSize={48}
