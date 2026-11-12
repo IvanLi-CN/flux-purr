@@ -9312,21 +9312,17 @@
 .industrial-console__main:has(.firmware-workbench) {
   display: grid;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .industrial-console__main:has(.firmware-workbench) > .industrial-view-panel {
-  height: 100%;
   min-height: 0;
 }
 
 .industrial-console__main:has(.firmware-workbench) .firmware-workbench {
-  height: 100%;
-  min-height: 0;
-  grid-template-rows: auto auto auto auto minmax(12rem, 1fr) auto;
-  align-content: stretch;
-}
-
-.industrial-console__main:has(.firmware-workbench) .firmware-workbench__status {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
   min-height: 0;
 }
 
@@ -9489,11 +9485,16 @@
   align-items: center;
   gap: 0.45rem;
   min-width: 0;
+  min-height: 3.15rem;
   padding: 0.45rem;
   border-radius: 9px;
   background: transparent;
   font-weight: 750;
   cursor: pointer;
+}
+
+.firmware-workbench__controls fieldset label span {
+  line-height: 1.15;
 }
 
 .firmware-workbench__controls fieldset label:has(input:checked) {
@@ -9971,6 +9972,7 @@
   gap: 0.8rem;
   min-width: 0;
   padding: 1rem;
+  min-height: 11.5rem;
   border-radius: 14px;
   background: var(--industrial-charcoal);
   color: #f6f8fa;
@@ -10233,11 +10235,6 @@
 }
 
 @media (max-width: 680px) {
-  .industrial-console__main:has(.firmware-workbench) .firmware-workbench {
-    height: auto;
-    grid-template-rows: none;
-  }
-
   .firmware-workbench__tasks,
   .firmware-workbench__controls {
     grid-template-columns: minmax(0, 1fr);
@@ -10272,6 +10269,7 @@
 
   .firmware-workbench__status {
     padding: 0.85rem;
+    min-height: 9rem;
   }
 
   .firmware-workbench__status-heading {

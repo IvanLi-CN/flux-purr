@@ -1290,13 +1290,7 @@ export function FirmwareWorkbench({
       <div className="firmware-workbench__controls">
         <div className="firmware-workbench__controls-heading">
           <strong>连接与固件</strong>
-          <span>
-            {transport === 'devd'
-              ? devdHealthLabel(devdHealth)
-              : mockExecution
-                ? '演示模拟 Browser USB ROM'
-                : '浏览器直接连接 ROM'}
-          </span>
+          <span>{transport === 'devd' ? devdHealthLabel(devdHealth) : '浏览器直接连接 ROM'}</span>
         </div>
         <fieldset>
           <legend>连接引擎</legend>
@@ -1327,9 +1321,7 @@ export function FirmwareWorkbench({
             <Usb size={16} aria-hidden="true" />
             <span>
               浏览器 USB
-              <small>
-                {mockExecution ? '演示模拟' : browserAvailable ? 'Chrome / Edge' : '不可用'}
-              </small>
+              <small>{browserAvailable ? 'Chrome / Edge' : '不可用'}</small>
             </span>
           </label>
         </fieldset>
@@ -1442,7 +1434,7 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock',
-                            label: '浏览器 USB · Demo Fixture A · 模拟在线设备',
+                            label: 'Bench Fixture A · 在线',
                             index: -1,
                           },
                         ]
@@ -1455,7 +1447,7 @@ export function FirmwareWorkbench({
                         .join(':')
                       return {
                         id: `browser-${usbId}-${String(port)}`,
-                        label: `浏览器 USB · ${usbId || '已授权端口'} · 在线`,
+                        label: `${usbId || '已授权设备'} · 在线`,
                         index,
                       }
                     }),
