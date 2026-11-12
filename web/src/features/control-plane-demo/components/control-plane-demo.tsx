@@ -4777,7 +4777,12 @@ export function ControlPlaneDemo({
             </div>
 
             {isFirmwareWorkspace ? (
-              <FirmwareWorkspaceContext onWorkspaceChange={handleWorkspaceChange} />
+              <FirmwareWorkspaceContext
+                devices={deviceOptions}
+                device={visibleDevice}
+                onDeviceChange={handleDeviceChange}
+                onWorkspaceChange={handleWorkspaceChange}
+              />
             ) : (
               <DeviceToolbar
                 devices={deviceOptions}
@@ -5805,8 +5810,14 @@ export function DeviceToolbar({
 }
 
 function FirmwareWorkspaceContext({
+  devices,
+  device,
+  onDeviceChange,
   onWorkspaceChange,
 }: {
+  devices: DeviceTarget[]
+  device: DeviceTarget
+  onDeviceChange: (deviceId: string) => void
   onWorkspaceChange: (workspace: ConsoleWorkspace) => void
 }) {
   return (
@@ -5814,6 +5825,9 @@ function FirmwareWorkspaceContext({
       className="industrial-status-strip industrial-status-strip--firmware"
       aria-label="固件工作区"
     >
+      <div className="industrial-target-picker">
+        <DeviceTargetPicker devices={devices} device={device} onDeviceChange={onDeviceChange} />
+      </div>
       <div className="industrial-firmware-context">
         <Upload size={18} aria-hidden="true" />
         <span>
