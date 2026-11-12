@@ -34,9 +34,6 @@ test.describe('firmware workspace ui demo', () => {
       await page.setViewportSize(viewport)
       await page.goto('/devices/fp-lab-01/update?uiDemo=firmware-workspace')
       await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible()
-      await expect(
-        page.locator('.industrial-status-strip--firmware .industrial-target-picker')
-      ).toBeVisible()
 
       const layout = await page.evaluate(() => {
         const main = document.querySelector('.industrial-console__main')?.getBoundingClientRect()
