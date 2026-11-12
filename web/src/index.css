@@ -9309,6 +9309,27 @@
   color: var(--industrial-text);
 }
 
+.industrial-console__main:has(.firmware-workbench) {
+  display: grid;
+  min-height: 0;
+}
+
+.industrial-console__main:has(.firmware-workbench) > .industrial-view-panel {
+  height: 100%;
+  min-height: 0;
+}
+
+.industrial-console__main:has(.firmware-workbench) .firmware-workbench {
+  height: 100%;
+  min-height: 0;
+  grid-template-rows: auto auto auto auto minmax(12rem, 1fr) auto;
+  align-content: stretch;
+}
+
+.industrial-console__main:has(.firmware-workbench) .firmware-workbench__status {
+  min-height: 0;
+}
+
 .firmware-workbench button,
 .firmware-workbench select {
   letter-spacing: 0;
@@ -10212,6 +10233,11 @@
 }
 
 @media (max-width: 680px) {
+  .industrial-console__main:has(.firmware-workbench) .firmware-workbench {
+    height: auto;
+    grid-template-rows: none;
+  }
+
   .firmware-workbench__tasks,
   .firmware-workbench__controls {
     grid-template-columns: minmax(0, 1fr);
