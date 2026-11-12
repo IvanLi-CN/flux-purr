@@ -29,9 +29,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -124,6 +122,7 @@ export interface FirmwareNativeTarget {
   updateEligible: boolean
   currentTemperatureC?: number
   heaterEnabled?: boolean
+  online?: boolean
 }
 
 function sortArtifactsByPublishedAt(
@@ -1423,39 +1422,51 @@ export function FirmwareWorkbench({
               <SelectValue placeholder="选择连接设备" />
             </SelectTrigger>
             <SelectContent position="popper">
-              <SelectGroup>
-                <SelectLabel>本机 devd · 实时设备</SelectLabel>
-                {nativeTargets.map((target) => (
-                  <SelectItem key={target.id} value={`devd:${target.id}`}>
-                    {target.label} · {target.detail} · 在线
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-              <SelectGroup>
-                <SelectLabel>浏览器 USB · 已记忆设备</SelectLabel>
-                {mockExecution ? (
-                  <SelectItem value="browser:mock">
-                    浏览器 USB · Demo Fixture A · 模拟在线设备
-                  </SelectItem>
-                ) : null}
-                {rememberedBrowserPorts.map((port, index) => {
-                  const info = port.getInfo?.()
-                  const usbId = [info?.usbVendorId, info?.usbProductId]
-                    .filter((part) => part !== undefined)
-                    .map((part) => `0x${part?.toString(16).padStart(4, '0')}`)
-                    .join(':')
-                  return (
-                    <SelectItem key={`browser-${usbId}-${String(port)}`} value={`browser:${index}`}>
-                      浏览器 USB · {usbId || '已授权端口'} · 已记忆
+              {transport === 'devd'
+                ? [...nativeTargets]
+                    .sort(
+                      (left, right) => Number(right.online ?? true) - Number(left.online ?? true)
+                    )
+                    .map((target) => (
+                      <SelectItem
+                        key={target.id}
+                        value={`devd:${target.id}`}
+                        disabled={target.online === false}
+                      >
+                        {target.label} · {target.detail} ·{' '}
+                        {target.online === false ? '离线' : '在线'}
+                      </SelectItem>
+                    ))
+                : [
+                    ...(mockExecution
+                      ? [
+                          {
+                            id: 'mock',
+                            label: '浏览器 USB · Demo Fixture A · 模拟在线设备',
+                            index: -1,
+                          },
+                        ]
+                      : []),
+                    ...rememberedBrowserPorts.map((port, index) => {
+                      const info = port.getInfo?.()
+                      const usbId = [info?.usbVendorId, info?.usbProductId]
+                        .filter((part) => part !== undefined)
+                        .map((part) => `0x${part?.toString(16).padStart(4, '0')}`)
+                        .join(':')
+                      return {
+                        id: `browser-${usbId}-${String(port)}`,
+                        label: `浏览器 USB · ${usbId || '已授权端口'} · 在线`,
+                        index,
+                      }
+                    }),
+                  ].map((device) => (
+                    <SelectItem
+                      key={device.id}
+                      value={device.id === 'mock' ? 'browser:mock' : `browser:${device.index}`}
+                    >
+                      {device.label}
                     </SelectItem>
-                  )
-                })}
-                {!mockExecution && rememberedBrowserPorts.length === 0 ? (
-                  <SelectItem value="browser:none" disabled>
-                    没有已记忆的浏览器 USB 设备
-                  </SelectItem>
-                ) : null}
-              </SelectGroup>
+                  ))}
             </SelectContent>
           </Select>
         </section>

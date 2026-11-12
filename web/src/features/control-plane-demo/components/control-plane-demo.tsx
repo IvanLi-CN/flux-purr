@@ -1748,6 +1748,7 @@ export function ControlPlaneDemo({
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
           heaterEnabled: visibleDevice.heaterEnabled,
+          online: true,
         },
       ]
     }
@@ -1776,6 +1777,7 @@ export function ControlPlaneDemo({
           device.capabilities.includes('install_status'),
         currentTemperatureC: device.currentTempC,
         heaterEnabled: device.heaterEnabled,
+        online: device.severity !== 'offline',
       }))
   }, [liveDevd.firmwareDevices, mockOnly, visibleDevice])
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
