@@ -1739,6 +1739,18 @@ export function ControlPlaneDemo({
   ])
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
   const firmwareNativeTargets = useMemo<FirmwareNativeTarget[]>(() => {
+    if (mockOnly) {
+      return [
+        {
+          id: 'demo-devd-fp-lab-01',
+          label: visibleDevice.alias,
+          detail: '演示 devd · 模拟在线目标',
+          updateEligible: true,
+          currentTemperatureC: visibleDevice.currentTempC,
+          heaterEnabled: visibleDevice.heaterEnabled,
+        },
+      ]
+    }
     const discoveredTargets = liveDevd.firmwareDevices
     const routedTarget =
       visibleDevice.transport === 'devd' && visibleDevice.connectionCandidate === true
@@ -1765,7 +1777,7 @@ export function ControlPlaneDemo({
         currentTemperatureC: device.currentTempC,
         heaterEnabled: device.heaterEnabled,
       }))
-  }, [liveDevd.firmwareDevices, visibleDevice])
+  }, [liveDevd.firmwareDevices, mockOnly, visibleDevice])
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
   const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
   const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined

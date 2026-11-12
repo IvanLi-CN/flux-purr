@@ -277,7 +277,11 @@ export function FirmwareWorkbench({
               : '没有可用的发布版本'
 
   useEffect(() => {
-    if (mockExecution || !devdBaseUrl) {
+    if (mockExecution) {
+      setDevdHealth('available')
+      return
+    }
+    if (!devdBaseUrl) {
       setDevdHealth('unavailable')
       return
     }
@@ -299,6 +303,12 @@ export function FirmwareWorkbench({
 
     return () => controller.abort()
   }, [devdBaseUrl, mockExecution])
+
+  useEffect(() => {
+    if (transport === 'devd' && nativeTargetId === null && nativeTargets.length > 0) {
+      setNativeTargetId(nativeTargets[0].id)
+    }
+  }, [nativeTargetId, nativeTargets, transport])
 
   useEffect(() => {
     browserPreauthorizedPortsRef.current = undefined
@@ -1324,49 +1334,6 @@ export function FirmwareWorkbench({
             </span>
           </label>
         </fieldset>
-
-        {transport === 'devd' ? (
-          <section
-            className="firmware-workbench__native-target"
-            aria-labelledby="native-target-label"
-          >
-            <span id="native-target-label">本机固件目标</span>
-            <Select
-              value={nativeTargetId ?? undefined}
-              disabled={!devdAvailable || busy || nativeTargets.length === 0}
-              onValueChange={(targetId) => {
-                resetAuthorization()
-                setNativeTargetId(targetId)
-                onActivity?.({
-                  event: '本机目标已选择',
-                  detail: '该授权目标将仅用于当前固件事务。',
-                  tone: 'info',
-                })
-              }}
-            >
-              <SelectTrigger
-                className="firmware-workbench__native-target-trigger"
-                aria-label="本机固件目标"
-              >
-                <SelectValue
-                  placeholder={
-                    nativeTargets.length === 0 ? '没有已授权的本机目标' : '选择已授权的本机目标'
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                <SelectGroup>
-                  <SelectLabel>已授权目标</SelectLabel>
-                  {nativeTargets.map((target) => (
-                    <SelectItem key={target.id} value={target.id}>
-                      {target.label} · {target.detail}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </section>
-        ) : null}
 
         {transport === 'browser' && !mockExecution ? (
           <section
