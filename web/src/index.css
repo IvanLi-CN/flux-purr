@@ -10151,6 +10151,17 @@
   min-height: 3rem;
 }
 
+.firmware-workbench__device-trigger {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 10px;
+  background: var(--industrial-panel);
+  color: var(--industrial-text);
+  box-shadow:
+    inset 2px 2px 5px var(--industrial-shadow),
+    inset -2px -2px 5px var(--industrial-light);
+}
+
 .firmware-workbench__erase-notice {
   display: flex;
   align-items: center;
@@ -10225,6 +10236,12 @@
 
   .firmware-workbench__actions {
     grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.15fr) 3rem;
+  }
+
+  .firmware-workbench__device-target {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 100%;
+    gap: 0.35rem;
   }
 
   .firmware-workbench__status {

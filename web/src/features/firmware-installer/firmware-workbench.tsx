@@ -1419,7 +1419,7 @@ export function FirmwareWorkbench({
               }
             }}
           >
-            <SelectTrigger aria-label="设备">
+            <SelectTrigger className="firmware-workbench__device-trigger" aria-label="设备">
               <SelectValue placeholder="选择连接设备" />
             </SelectTrigger>
             <SelectContent position="popper">
