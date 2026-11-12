@@ -184,6 +184,7 @@ export function FirmwareWorkbench({
   const browserPreflightTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
   const browserPortSelectionTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
   const [browserSelectedPort, setBrowserSelectedPort] = useState<BrowserSerialPort | null>(null)
+  const [rememberedBrowserPorts, setRememberedBrowserPorts] = useState<BrowserSerialPort[]>([])
   const [browserMessage, setBrowserMessage] = useState<string | null>(null)
   const [executionOutcome, setExecutionOutcome] = useState<FirmwareOutcome>('idle')
   const [executionProgressValue, setExecutionProgressValue] = useState(0)
@@ -318,6 +319,24 @@ export function FirmwareWorkbench({
       cancelled = true
     }
   }, [browserSerial, mockExecution])
+
+  const refreshRememberedBrowserPorts = useCallback(async () => {
+    if (mockExecution || !browserSerial?.getPorts) {
+      setRememberedBrowserPorts([])
+      return
+    }
+    try {
+      const ports = (await browserSerial.getPorts()).filter(isFluxPurrUsbSerialPort)
+      setRememberedBrowserPorts(ports)
+      browserPreauthorizedPortsRef.current = ports
+    } catch {
+      setRememberedBrowserPorts([])
+    }
+  }, [browserSerial, mockExecution])
+
+  const browserDeviceIndex = browserSelectedPort
+    ? Math.max(0, rememberedBrowserPorts.indexOf(browserSelectedPort))
+    : -1
 
   useEffect(() => {
     if (officialArtifacts) {
@@ -1397,6 +1416,70 @@ export function FirmwareWorkbench({
       </div>
 
       <div className="firmware-workbench__advanced-options">
+        <section
+          className="firmware-workbench__device-target"
+          aria-labelledby="device-target-label"
+        >
+          <span id="device-target-label">设备</span>
+          <Select
+            value={
+              transport === 'devd'
+                ? `devd:${nativeTargetId ?? ''}`
+                : `browser:${browserDeviceIndex >= 0 ? browserDeviceIndex : 'none'}`
+            }
+            disabled={busy}
+            onOpenChange={(open) => {
+              if (open) void refreshRememberedBrowserPorts()
+            }}
+            onValueChange={(value) => {
+              resetAuthorization()
+              if (value.startsWith('devd:')) {
+                setTransport('devd')
+                setNativeTargetId(value.slice('devd:'.length))
+                return
+              }
+              const port = rememberedBrowserPorts[Number(value.slice('browser:'.length))]
+              if (port) {
+                setTransport('browser')
+                setBrowserSelectedPort(port)
+              }
+            }}
+          >
+            <SelectTrigger aria-label="设备">
+              <SelectValue placeholder="选择连接设备" />
+            </SelectTrigger>
+            <SelectContent position="popper">
+              <SelectGroup>
+                <SelectLabel>本机 devd · 实时设备</SelectLabel>
+                {nativeTargets.map((target) => (
+                  <SelectItem key={target.id} value={`devd:${target.id}`}>
+                    {target.label} · {target.detail} · 在线
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+              <SelectGroup>
+                <SelectLabel>浏览器 USB · 已记忆设备</SelectLabel>
+                {rememberedBrowserPorts.map((port, index) => {
+                  const info = port.getInfo?.()
+                  const usbId = [info?.usbVendorId, info?.usbProductId]
+                    .filter((part) => part !== undefined)
+                    .map((part) => `0x${part?.toString(16).padStart(4, '0')}`)
+                    .join(':')
+                  return (
+                    <SelectItem key={`browser-${usbId}-${String(port)}`} value={`browser:${index}`}>
+                      浏览器 USB · {usbId || '已授权端口'} · 已记忆
+                    </SelectItem>
+                  )
+                })}
+                {rememberedBrowserPorts.length === 0 ? (
+                  <SelectItem value="browser:none" disabled>
+                    没有已记忆的浏览器 USB 设备
+                  </SelectItem>
+                ) : null}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </section>
         {operation === 'update' ? (
           <label className="firmware-workbench__downgrade">
             <input

@@ -10130,12 +10130,25 @@
 }
 
 .firmware-workbench__channel,
+.firmware-workbench__device-target,
 .firmware-workbench__downgrade {
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
   color: var(--industrial-text-muted);
   font-size: 0.75rem;
+}
+
+.firmware-workbench__device-target {
+  display: grid;
+  grid-template-columns: auto minmax(14rem, 1fr);
+  align-items: center;
+  gap: 0.6rem;
+  min-width: min(100%, 24rem);
+}
+
+.firmware-workbench__device-target [data-slot="select-trigger"] {
+  min-height: 3rem;
 }
 
 .firmware-workbench__erase-notice {
