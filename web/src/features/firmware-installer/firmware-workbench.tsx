@@ -1392,7 +1392,9 @@ export function FirmwareWorkbench({
             value={
               transport === 'devd'
                 ? `devd:${nativeTargetId ?? ''}`
-                : `browser:${browserDeviceIndex >= 0 ? browserDeviceIndex : 'none'}`
+                : mockExecution
+                  ? 'browser:mock'
+                  : `browser:${browserDeviceIndex >= 0 ? browserDeviceIndex : 'none'}`
             }
             disabled={busy}
             onOpenChange={(open) => {
@@ -1403,6 +1405,11 @@ export function FirmwareWorkbench({
               if (value.startsWith('devd:')) {
                 setTransport('devd')
                 setNativeTargetId(value.slice('devd:'.length))
+                return
+              }
+              if (value === 'browser:mock') {
+                setTransport('browser')
+                setBrowserSelectedPort(null)
                 return
               }
               const port = rememberedBrowserPorts[Number(value.slice('browser:'.length))]
@@ -1426,6 +1433,11 @@ export function FirmwareWorkbench({
               </SelectGroup>
               <SelectGroup>
                 <SelectLabel>浏览器 USB · 已记忆设备</SelectLabel>
+                {mockExecution ? (
+                  <SelectItem value="browser:mock">
+                    浏览器 USB · Demo Fixture A · 模拟在线设备
+                  </SelectItem>
+                ) : null}
                 {rememberedBrowserPorts.map((port, index) => {
                   const info = port.getInfo?.()
                   const usbId = [info?.usbVendorId, info?.usbProductId]
@@ -1438,7 +1450,7 @@ export function FirmwareWorkbench({
                     </SelectItem>
                   )
                 })}
-                {rememberedBrowserPorts.length === 0 ? (
+                {!mockExecution && rememberedBrowserPorts.length === 0 ? (
                   <SelectItem value="browser:none" disabled>
                     没有已记忆的浏览器 USB 设备
                   </SelectItem>
