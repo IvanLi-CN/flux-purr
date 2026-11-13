@@ -1008,7 +1008,7 @@ export function ControlPlaneDemo({
           id: 'firmware-activity-idle',
           time: '待命',
           event: '等待任务',
-          detail: '选择任务、连接引擎与固件来源后运行完整预检。',
+          detail: '选择任务、连接方式与固件来源后运行完整预检。',
           tone: 'info',
         },
       ]
@@ -1739,6 +1739,37 @@ export function ControlPlaneDemo({
   ])
   const visibleDeviceIsLive = isLiveRuntimeDevice(visibleDevice)
   const firmwareNativeTargets = useMemo<FirmwareNativeTarget[]>(() => {
+    if (mockOnly) {
+      return [
+        {
+          id: 'demo-devd-fp-lab-01',
+          label: 'Research Bench',
+          detail: '/dev/cu.usbmodem14101',
+          updateEligible: true,
+          currentTemperatureC: visibleDevice.currentTempC,
+          heaterEnabled: visibleDevice.heaterEnabled,
+          online: true,
+        },
+        {
+          id: 'demo-devd-fp-lab-02',
+          label: 'Production Bench',
+          detail: '/dev/cu.usbmodem14102',
+          updateEligible: true,
+          currentTemperatureC: 26.1,
+          heaterEnabled: false,
+          online: true,
+        },
+        {
+          id: 'demo-devd-fp-lab-03',
+          label: 'Service Bench',
+          detail: '/dev/cu.usbmodem14103',
+          updateEligible: false,
+          currentTemperatureC: 24.8,
+          heaterEnabled: false,
+          online: false,
+        },
+      ]
+    }
     const discoveredTargets = liveDevd.firmwareDevices
     const routedTarget =
       visibleDevice.transport === 'devd' && visibleDevice.connectionCandidate === true
@@ -1761,11 +1792,12 @@ export function ControlPlaneDemo({
         updateEligible:
           device.firmware !== 'unknown' &&
           device.severity !== 'offline' &&
-          device.capabilities.includes('install_status'),
+          (device.capabilities.includes('install_status') || device.capabilities.includes('flash')),
         currentTemperatureC: device.currentTempC,
         heaterEnabled: device.heaterEnabled,
+        online: device.severity !== 'offline',
       }))
-  }, [liveDevd.firmwareDevices, visibleDevice])
+  }, [liveDevd.firmwareDevices, mockOnly, visibleDevice])
   const lanDeviceId = isDirectLanDevice(visibleDevice) ? visibleDevice.id : undefined
   const lanDeviceBaseUrl = isDirectLanDevice(visibleDevice) ? visibleDevice.baseUrl : undefined
   const lanLease = lanDeviceId ? lanLeasesByDevice[lanDeviceId] : undefined

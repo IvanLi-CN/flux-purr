@@ -77,7 +77,7 @@ async function runMockFirmwareTransaction(page: DemoPage, url: string) {
   await expect(page.getByRole('heading', { name: '热控工作台' })).toBeVisible({
     timeout: 30_000,
   })
-  await expect(page.getByText('演示模拟 Browser USB ROM')).toBeVisible()
+  await expect(page.getByText('浏览器直接连接 ROM')).toBeVisible()
 
   const beforeInteraction = await demoTelemetry(page)
   expect(beforeInteraction).toEqual({ fetch: 0, getPorts: 0, requestPort: 0, eventSource: 0 })

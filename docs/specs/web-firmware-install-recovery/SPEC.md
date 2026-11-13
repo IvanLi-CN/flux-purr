@@ -69,7 +69,7 @@ The installation engines MUST implement the following shared artifact, target an
 - Browser 写后运行时验证不得调用 `requestPort()`、系统串口扫描或从未知候选自动换口。原 `SerialPort` 对象因 USB CDC 重枚举失效时，允许只读调用 `navigator.serial.getPorts()` 重新解析：仅当同一 origin 的已授权集合中恰有一个端口与当前事务原端口的 `getInfo()` 精确匹配 `0x303A:0x1001` 时，才可使用该新对象；没有匹配或存在多个匹配都必须失败，绝不猜测目标。断开、重枚举等待、打开、JSONL 请求、读取和关闭都必须受同一个有限总时限约束；端口暂时不可用时可以在这个唯一目标上重试。身份请求在总时限内必须有界且可见地重试，启动日志或 `runtime_ready` 标记仅作诊断、不得成为协议前提；超时必须结算为 `write_complete_unverified`，不得无限停留在进度中。
 - 真实写入继续受 exact-port、lease、串口独占和 `FLUX_PURR_DEVD_ALLOW_REAL_FLASH=1` 门禁约束。
 - Browser 只能读取当前 Web origin 的 `firmware/releases-manifest.json` 与其中声明的精确 `firmware/releases/**.fluxpurr-fw` 路径；不得访问 GitHub API、GitHub download URL、任意目录路径或任意代理 URL。
-- `demo=true`、`uiDemo=firmware-workspace` 和发布 public demo 都是 mock-only UI 入口；其中 `uiDemo=firmware-workspace` 仅用于开发期视觉证据，不能作为发布产品路由。固件目录、发布包、本地包、USB 端口、ROM/security 响应和事务结果必须来自确定性的内存样本。所有这些 Demo 入口不得调用 devd HTTP/EventSource、业务 `fetch()`、`navigator.serial.getPorts()`、`navigator.serial.requestPort()`、串口打开/复位/esptool 或系统文件选择器；也不得产生跨源网络请求（包括远程字体）。预检与写入交互只推进模拟状态机。发布 public demo 必须剥离 `uiDemo` 参数，不得暴露开发证据入口。
+- 开发 Demo 与发布 public demo 都是 mock-only UI 入口，通过构建模式提供，不使用 `demo=true` 或其他 Demo 查询参数；开发期视觉证据不得作为发布产品路由。固件目录、发布包、本地包、USB 端口、ROM/security 响应和事务结果必须来自确定性的内存样本。所有这些 Demo 入口不得调用 devd HTTP/EventSource、业务 `fetch()`、`navigator.serial.getPorts()`、`navigator.serial.requestPort()`、串口打开/复位/esptool 或系统文件选择器；也不得产生跨源网络请求（包括远程字体）。预检与写入交互只推进模拟状态机。
 
 ### SHOULD
 
@@ -143,7 +143,7 @@ The installation engines MUST implement the following shared artifact, target an
 - Given preflight 已通过，When 用户开始写入，Then execution 使用独立步骤并从 0% 开始；Given execution 尚未得到 `verified`，Then execution 百分比不得为 100%。
 - Given Browser 写入后 USB CDC 正在重新枚举或原端口短暂占用，When 运行时验证，Then 只对原授权对象或同一 origin 已授权集合中唯一精确匹配的 `0x303A:0x1001` 对象有界重试，并记录当前重连/请求/读取阶段；Given 匹配存在歧义或总时限耗尽，Then 清理读写锁、关闭端口并返回 `write_complete_unverified`。
 - Given Browser 打开发布版本选择器，When 读取目录并选择版本，Then 只请求同源 `releases-manifest.json` 和清单中的精确 bundle 路径；Given Vite 开发模式中 GitHub 暂时不可用，Then 仍列出已打包和本地产物。
-- Given 任一 Demo 入口（`demo=true`、`uiDemo=firmware-workspace` 或发布 public demo），When 选择发布版本或演示本地包、运行预检并开始更新，Then UI 显示确定性的模拟阶段与事务结果，且没有业务网络请求、devd 请求、跨源资源请求、浏览器串口调用或系统文件选择器。
+- Given 任一构建模式提供的 Demo 入口（不带 Demo 查询参数），When 选择发布版本或演示本地包、运行预检并开始更新，Then UI 显示确定性的模拟阶段与事务结果，且没有业务网络请求、devd 请求、跨源资源请求、浏览器串口调用或系统文件选择器。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -168,7 +168,19 @@ The installation engines MUST implement the following shared artifact, target an
 
 ## Visual Evidence
 
-桌面 Demo 使用确定性 mock 数据和内存状态机；`demo=true` 是可交互的模拟产品入口，`uiDemo=firmware-workspace` 是开发期视觉证据路径，发布 public demo 不提供后者。所有入口都不依赖且不调用 devd、业务网络、跨源资源、浏览器串口、系统文件选择器或硬件设备。
+### 标准界面尺寸与布局约束
+
+固件维护工作区以 `1440×900 CSS px` 作为标准桌面设计起点；`1024×768 CSS px`、`759×844 CSS px` 和 `390×844 CSS px` 分别作为平板、窄屏和移动端验收视口。桌面宽度达到双栏阈值时，左侧固件主面板与右侧事务日志面板必须共享同一工作区高度并对齐上、下边缘；左栏内部内容使用剩余高度均匀分配，不能依赖随机底部空白或页面级滚动。低于双栏阈值时，日志按既有页面规则堆叠到主内容下方；移动端使用紧凑日志摘要。
+
+### 标准尺寸验收清单
+
+- [ ] `1440×900`：左右面板上、下边缘对齐；左栏内部区块间距统一；无页面横向溢出、无随机底部空白。
+- [ ] `1024×768`：按仓库响应式断点堆叠或受控滚动；左栏内容不被裁切。
+- [ ] `759×844`：主内容与日志摘要按窄屏规则排列；无横向溢出。
+- [ ] `390×844`：单列布局、设备选择器、允许降级和操作按钮保持可用触控尺寸。
+- [ ] 四个视口均从无查询参数的 Mock Demo 入口验收，Demo 不连接 devd、Web Serial 或真实硬件。
+
+桌面 Demo 使用确定性 mock 数据和内存状态机；它由 Demo 构建模式提供，URL 保持无查询参数。所有入口都不依赖且不调用 devd、业务网络、跨源资源、浏览器串口、系统文件选择器或硬件设备。
 
 非 Demo 入口支持 `?workspace=firmware` 直达固件维护工作区；本地构建包由同源目录提供，页面不会请求或操作浏览器串口直到用户明确运行预检。
 

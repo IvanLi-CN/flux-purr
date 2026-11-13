@@ -29,9 +29,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   Select,
   SelectContent,
-  SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -124,6 +122,7 @@ export interface FirmwareNativeTarget {
   updateEligible: boolean
   currentTemperatureC?: number
   heaterEnabled?: boolean
+  online?: boolean
 }
 
 function sortArtifactsByPublishedAt(
@@ -153,6 +152,7 @@ export function FirmwareWorkbench({
   // Default to the non-destructive path; recovery remains an explicit choice because it erases MCU flash.
   const [operation, setOperation] = useState<FirmwareOperation>('update')
   const [transport, setTransport] = useState<FirmwareTransport>('browser')
+  const [mockBrowserDeviceId, setMockBrowserDeviceId] = useState('mock-a')
   const [nativeTargetId, setNativeTargetId] = useState<string | null>(null)
   const [channel, setChannel] = useState<FirmwareChannel>('stable')
   const [includeRc, setIncludeRc] = useState(false)
@@ -182,8 +182,8 @@ export function FirmwareWorkbench({
   const [browserProgress, setBrowserProgress] = useState(0)
   const [browserPreflightStageIndex, setBrowserPreflightStageIndex] = useState(0)
   const browserPreflightTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
-  const browserPortSelectionTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
   const [browserSelectedPort, setBrowserSelectedPort] = useState<BrowserSerialPort | null>(null)
+  const [rememberedBrowserPorts, setRememberedBrowserPorts] = useState<BrowserSerialPort[]>([])
   const [browserMessage, setBrowserMessage] = useState<string | null>(null)
   const [executionOutcome, setExecutionOutcome] = useState<FirmwareOutcome>('idle')
   const [executionProgressValue, setExecutionProgressValue] = useState(0)
@@ -229,9 +229,14 @@ export function FirmwareWorkbench({
   const executionStageList = useMemo(() => executionStages(operation), [operation])
   const effectiveMessage = showingExecution
     ? (executionMessage ?? '预检凭据已确认；等待开始固件写入。')
-    : (browserMessage ?? '选择连接引擎和固件来源后运行完整预检。')
+    : (browserMessage ?? '选择连接方式和固件来源后运行完整预检。')
   const transportAvailable =
-    transport === 'devd' ? devdAvailable && nativeTarget !== null : browserAvailable
+    transport === 'devd'
+      ? devdAvailable &&
+        nativeTarget !== null &&
+        nativeTarget.online !== false &&
+        nativeTarget.updateEligible
+      : browserAvailable
   const canRun =
     operation !== null &&
     transportAvailable &&
@@ -250,6 +255,21 @@ export function FirmwareWorkbench({
       (transport === 'devd'
         ? approvalToken !== null && devdArtifactId !== null
         : browserLoader !== null && localBundle !== null))
+  const resetAuthorization = useCallback(() => {
+    if (!mockExecution) void disconnectBrowserLoader(browserLoader)
+    setBrowserLoader(null)
+    setApprovalToken(null)
+    setDevdArtifactId(null)
+    setBrowserOutcome(null)
+    setBrowserMessage(null)
+    setBrowserProgress(0)
+    setBrowserPreflightStageIndex(0)
+    setExecutionOutcome('idle')
+    setExecutionProgressValue(0)
+    setExecutionStageIndex(0)
+    setExecutionMessage(null)
+    browserRuntimePhaseRef.current = null
+  }, [browserLoader, mockExecution])
   const artifactEntryTitle =
     channel === 'local'
       ? mockExecution
@@ -276,7 +296,11 @@ export function FirmwareWorkbench({
               : '没有可用的发布版本'
 
   useEffect(() => {
-    if (mockExecution || !devdBaseUrl) {
+    if (mockExecution) {
+      setDevdHealth('available')
+      return
+    }
+    if (!devdBaseUrl) {
       setDevdHealth('unavailable')
       return
     }
@@ -300,6 +324,15 @@ export function FirmwareWorkbench({
   }, [devdBaseUrl, mockExecution])
 
   useEffect(() => {
+    if (transport !== 'devd') return
+    const selected = nativeTargets.find((target) => target.id === nativeTargetId)
+    if (selected?.online !== false && selected?.updateEligible) return
+    const next = nativeTargets.find((target) => target.online !== false && target.updateEligible)
+    setNativeTargetId(next?.id ?? null)
+    resetAuthorization()
+  }, [nativeTargetId, nativeTargets, resetAuthorization, transport])
+
+  useEffect(() => {
     browserPreauthorizedPortsRef.current = undefined
     if (mockExecution || !browserSerial?.getPorts) return
 
@@ -318,6 +351,37 @@ export function FirmwareWorkbench({
       cancelled = true
     }
   }, [browserSerial, mockExecution])
+
+  const refreshRememberedBrowserPorts = useCallback(async () => {
+    if (mockExecution || !browserSerial?.getPorts) {
+      setRememberedBrowserPorts([])
+      return
+    }
+    try {
+      const ports = (await browserSerial.getPorts()).filter(isFluxPurrUsbSerialPort)
+      const previousInfo = browserSelectedPort?.getInfo?.()
+      const matchingPorts = browserSelectedPort
+        ? ports.filter(
+            (port) =>
+              port === browserSelectedPort ||
+              (previousInfo?.usbVendorId !== undefined &&
+                previousInfo.usbProductId !== undefined &&
+                port.getInfo?.()?.usbVendorId === previousInfo.usbVendorId &&
+                port.getInfo?.()?.usbProductId === previousInfo.usbProductId)
+          )
+        : []
+      setRememberedBrowserPorts(ports)
+      browserPreauthorizedPortsRef.current = ports
+      setBrowserSelectedPort(matchingPorts.length === 1 ? matchingPorts[0] : null)
+    } catch {
+      setRememberedBrowserPorts([])
+      setBrowserSelectedPort(null)
+    }
+  }, [browserSelectedPort, browserSerial, mockExecution])
+
+  const browserDeviceIndex = browserSelectedPort
+    ? Math.max(0, rememberedBrowserPorts.indexOf(browserSelectedPort))
+    : -1
 
   useEffect(() => {
     if (officialArtifacts) {
@@ -392,15 +456,31 @@ export function FirmwareWorkbench({
     })
   }
 
-  const appendBrowserPortSelectionTrace = (entry: BrowserPreflightTraceEvent) => {
-    browserPortSelectionTraceRef.current = [...browserPortSelectionTraceRef.current, entry].slice(
-      -8
-    )
-    onActivity?.({
-      event: entry.event,
-      detail: entry.detail,
-      tone: entry.tone,
+  const chooseBrowserUsbPort = () => {
+    if (mockExecution || !browserSerial || busy) return
+    resetAuthorization()
+    browserPreauthorizedPortsRef.current = []
+    const selection = beginBrowserUsbPreflight({
+      serial: browserSerial,
+      forcePortSelection: true,
+      selectionReason: 'change_port',
+      onTrace: appendBrowserPreflightTrace,
     })
+    void selection.then(
+      (port) => {
+        browserPreauthorizedPortsRef.current = [port]
+        setBrowserSelectedPort(port)
+        setRememberedBrowserPorts((current) =>
+          current.includes(port) ? current : [...current, port]
+        )
+        onActivity?.({
+          event: '浏览器 USB 端口已固定',
+          detail: '后续预检仅使用刚刚在浏览器选择器中确认的设备。',
+          tone: 'success',
+        })
+      },
+      () => undefined
+    )
   }
 
   const showPreflightStage = (
@@ -1035,22 +1115,6 @@ export function FirmwareWorkbench({
     }
   }
 
-  const resetAuthorization = () => {
-    if (!mockExecution) void disconnectBrowserLoader(browserLoader)
-    setBrowserLoader(null)
-    setApprovalToken(null)
-    setDevdArtifactId(null)
-    setBrowserOutcome(null)
-    setBrowserMessage(null)
-    setBrowserProgress(0)
-    setBrowserPreflightStageIndex(0)
-    setExecutionOutcome('idle')
-    setExecutionProgressValue(0)
-    setExecutionStageIndex(0)
-    setExecutionMessage(null)
-    browserRuntimePhaseRef.current = null
-  }
-
   const chooseOperation = (next: FirmwareOperation) => {
     resetAuthorization()
     setOperation(next)
@@ -1067,37 +1131,10 @@ export function FirmwareWorkbench({
     transportWasSelected.current = true
     setTransport(next)
     onActivity?.({
-      event: '连接引擎已切换',
+      event: '连接方式已切换',
       detail: `${transportLabel(next)} 将执行已选任务的完整预检。`,
       tone: 'info',
     })
-  }
-
-  const chooseBrowserUsbPort = () => {
-    if (mockExecution || !browserSerial || busy) return
-
-    // `requestPort()` must remain in this synchronous click path. Resetting the
-    // old transaction only changes local state and never selects a new device.
-    resetAuthorization()
-    browserPortSelectionTraceRef.current = []
-    const selection = beginBrowserUsbPreflight({
-      serial: browserSerial,
-      forcePortSelection: true,
-      selectionReason: 'change_port',
-      onTrace: appendBrowserPortSelectionTrace,
-    })
-    void selection.then(
-      (port) => {
-        browserPreauthorizedPortsRef.current = [port]
-        setBrowserSelectedPort(port)
-        onActivity?.({
-          event: '浏览器 USB 端口已固定',
-          detail: '后续预检仅使用刚刚在浏览器选择器中确认的设备。',
-          tone: 'success',
-        })
-      },
-      () => undefined
-    )
   }
 
   const chooseOfficialArtifact = (artifactId: string) => {
@@ -1203,10 +1240,7 @@ export function FirmwareWorkbench({
         message: executionMessage,
       },
       bundleSha256: localBundle?.bundleSha256 ?? null,
-      browserPreflightTrace: [
-        ...browserPortSelectionTraceRef.current,
-        ...browserPreflightTraceRef.current,
-      ],
+      browserPreflightTrace: [...browserPreflightTraceRef.current],
       generatedAt: new Date().toISOString(),
     }
     const url = URL.createObjectURL(
@@ -1262,16 +1296,10 @@ export function FirmwareWorkbench({
       <div className="firmware-workbench__controls">
         <div className="firmware-workbench__controls-heading">
           <strong>连接与固件</strong>
-          <span>
-            {transport === 'devd'
-              ? devdHealthLabel(devdHealth)
-              : mockExecution
-                ? '演示模拟 Browser USB ROM'
-                : '浏览器直接连接 ROM'}
-          </span>
+          <span>{transport === 'devd' ? devdHealthLabel(devdHealth) : '浏览器直接连接 ROM'}</span>
         </div>
         <fieldset>
-          <legend>连接引擎</legend>
+          <legend>连接方式</legend>
           <label>
             <input
               type="radio"
@@ -1299,82 +1327,10 @@ export function FirmwareWorkbench({
             <Usb size={16} aria-hidden="true" />
             <span>
               浏览器 USB
-              <small>
-                {mockExecution ? '演示模拟' : browserAvailable ? 'Chrome / Edge' : '不可用'}
-              </small>
+              <small>{browserAvailable ? 'Chrome / Edge' : '不可用'}</small>
             </span>
           </label>
         </fieldset>
-
-        {transport === 'devd' ? (
-          <section
-            className="firmware-workbench__native-target"
-            aria-labelledby="native-target-label"
-          >
-            <span id="native-target-label">本机固件目标</span>
-            <Select
-              value={nativeTargetId ?? undefined}
-              disabled={!devdAvailable || busy || nativeTargets.length === 0}
-              onValueChange={(targetId) => {
-                resetAuthorization()
-                setNativeTargetId(targetId)
-                onActivity?.({
-                  event: '本机目标已选择',
-                  detail: '该授权目标将仅用于当前固件事务。',
-                  tone: 'info',
-                })
-              }}
-            >
-              <SelectTrigger
-                className="firmware-workbench__native-target-trigger"
-                aria-label="本机固件目标"
-              >
-                <SelectValue
-                  placeholder={
-                    nativeTargets.length === 0 ? '没有已授权的本机目标' : '选择已授权的本机目标'
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent position="popper">
-                <SelectGroup>
-                  <SelectLabel>已授权目标</SelectLabel>
-                  {nativeTargets.map((target) => (
-                    <SelectItem key={target.id} value={target.id}>
-                      {target.label} · {target.detail}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </section>
-        ) : null}
-
-        {transport === 'browser' && !mockExecution ? (
-          <section
-            className="firmware-workbench__browser-target"
-            aria-labelledby="browser-target-label"
-          >
-            <span id="browser-target-label">浏览器 USB 目标</span>
-            <Button
-              type="button"
-              variant="outline"
-              className="firmware-workbench__browser-target-trigger h-10 justify-start px-3"
-              disabled={!browserAvailable || busy}
-              onClick={chooseBrowserUsbPort}
-            >
-              <Usb data-icon="inline-start" aria-hidden="true" />
-              <span className="grid min-w-0 flex-1 gap-0.5 text-left">
-                <strong>选择 / 更换浏览器 USB 端口</strong>
-                <small>
-                  {browserSelectedPort
-                    ? '已固定为本次在浏览器选择器中确认的设备'
-                    : '打开 Chrome 选择器，仅显示 ESP32-S3 USB JTAG/serial 设备'}
-                </small>
-              </span>
-              <ChevronRight data-icon="inline-end" aria-hidden="true" />
-            </Button>
-          </section>
-        ) : null}
 
         <section className="firmware-workbench__artifact" aria-labelledby="firmware-artifact-label">
           <span id="firmware-artifact-label">固件包</span>
@@ -1397,6 +1353,133 @@ export function FirmwareWorkbench({
       </div>
 
       <div className="firmware-workbench__advanced-options">
+        <section
+          className="firmware-workbench__device-target"
+          aria-labelledby="device-target-label"
+        >
+          <span id="device-target-label">设备</span>
+          <Select
+            value={
+              transport === 'devd'
+                ? `devd:${nativeTargetId ?? ''}`
+                : mockExecution
+                  ? `browser:${mockBrowserDeviceId}`
+                  : `browser:${browserDeviceIndex >= 0 ? browserDeviceIndex : 'none'}`
+            }
+            disabled={busy}
+            onOpenChange={(open) => {
+              if (open) void refreshRememberedBrowserPorts()
+            }}
+            onValueChange={(value) => {
+              resetAuthorization()
+              if (value === 'browser:choose') {
+                chooseBrowserUsbPort()
+                return
+              }
+              if (value.startsWith('devd:')) {
+                setTransport('devd')
+                setNativeTargetId(value.slice('devd:'.length))
+                return
+              }
+              if (value.startsWith('browser:mock-')) {
+                setTransport('browser')
+                setMockBrowserDeviceId(value.slice('browser:'.length))
+                setBrowserSelectedPort(null)
+                return
+              }
+              const port = rememberedBrowserPorts[Number(value.slice('browser:'.length))]
+              if (port) {
+                setTransport('browser')
+                setBrowserSelectedPort(port)
+              }
+            }}
+          >
+            <SelectTrigger
+              className="firmware-workbench__device-trigger"
+              aria-label={transport === 'devd' ? '本机固件目标' : '浏览器 USB 设备'}
+            >
+              <SelectValue placeholder="选择连接设备" />
+            </SelectTrigger>
+            <SelectContent position="popper">
+              {transport === 'browser' ? (
+                <SelectItem value="browser:choose" disabled={mockExecution || !browserSerial}>
+                  选择 / 更换浏览器 USB 端口
+                </SelectItem>
+              ) : null}
+              {transport === 'devd'
+                ? [...nativeTargets]
+                    .sort(
+                      (left, right) => Number(right.online ?? true) - Number(left.online ?? true)
+                    )
+                    .map((target) => (
+                      <SelectItem
+                        key={target.id}
+                        value={`devd:${target.id}`}
+                        disabled={target.online === false || !target.updateEligible}
+                      >
+                        {[target.label, target.detail, target.online === false ? '离线' : '在线']
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </SelectItem>
+                    ))
+                : [
+                    ...(mockExecution
+                      ? [
+                          {
+                            id: 'mock-a',
+                            label: 'Research Bench',
+                            detail: 'VID 0x303A · PID 0x1001',
+                            index: -1,
+                            online: true,
+                          },
+                          {
+                            id: 'mock-b',
+                            label: 'Production Bench',
+                            detail: 'VID 0x303A · PID 0x1001',
+                            index: -2,
+                            online: true,
+                          },
+                          {
+                            id: 'mock-c',
+                            label: 'Service Bench',
+                            detail: 'VID 0x303A · PID 0x1001',
+                            index: -3,
+                            online: false,
+                          },
+                        ].sort((left, right) => Number(right.online) - Number(left.online))
+                      : []),
+                    ...rememberedBrowserPorts.map((port, index) => {
+                      const info = port.getInfo?.()
+                      const usbId = [info?.usbVendorId, info?.usbProductId]
+                        .filter((part) => part !== undefined)
+                        .map((part) => `0x${part?.toString(16).padStart(4, '0')}`)
+                        .join(':')
+                      return {
+                        id: `browser-${usbId}-${index}`,
+                        label: usbId || '已授权设备',
+                        detail: '已授权 Web Serial 端口',
+                        index,
+                        online: true,
+                      }
+                    }),
+                  ].map((device) => (
+                    <SelectItem
+                      key={device.id}
+                      value={
+                        device.id.startsWith('mock-')
+                          ? `browser:${device.id}`
+                          : `browser:${device.index}`
+                      }
+                      disabled={device.online === false}
+                    >
+                      {[device.label, device.detail, device.online ? '在线' : '离线']
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </SelectItem>
+                  ))}
+            </SelectContent>
+          </Select>
+        </section>
         {operation === 'update' ? (
           <label className="firmware-workbench__downgrade">
             <input
@@ -1408,7 +1491,7 @@ export function FirmwareWorkbench({
                 setAllowDowngrade(event.currentTarget.checked)
               }}
             />
-            <span>允许安装较旧版本</span>
+            <span>允许降级</span>
           </label>
         ) : null}
       </div>
@@ -1614,19 +1697,15 @@ export function FirmwareWorkbench({
         </DialogContent>
       </Dialog>
 
-      {transport === 'browser' ? (
-        <aside className="firmware-workbench__boot-guide" aria-label="Browser USB ROM 引导">
-          <Usb size={17} aria-hidden="true" />
-          <span>
-            <strong>{mockExecution ? 'ROM 引导（模拟）' : 'ROM 引导'}</strong>
-            <small>
-              {mockExecution
-                ? '演示使用内存中的 USB、ROM 与安全响应样本，不会请求或操作浏览器串口。'
-                : '预检请求浏览器 USB 后，若未进入 ROM，请按住 BOOT、点按 RESET，再松开 BOOT。'}
-            </small>
-          </span>
-        </aside>
-      ) : null}
+      <aside className="firmware-workbench__boot-guide" aria-label="ROM 引导">
+        <Usb size={17} aria-hidden="true" />
+        <span>
+          <strong>ROM 引导</strong>
+          <small>
+            预检按当前连接方式准备 ROM 与安全检查；演示模式使用内存样本，不操作真实设备。
+          </small>
+        </span>
+      </aside>
 
       {operation === 'install_recovery' ? (
         <p className="firmware-workbench__erase-notice">

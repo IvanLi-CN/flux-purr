@@ -49,8 +49,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
   devices: [
     {
       id: 'fp-lab-01',
-      alias: 'Bench Fixture A',
-      location: 'Simulated thermal bench',
+      alias: 'Research Bench',
+      location: 'Thermal lab',
       transport: 'mock',
       severity: 'nominal',
       baseUrl: 'mock:bench-alpha',
@@ -110,8 +110,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
     },
     {
       id: 'fp-kit-02',
-      alias: 'Field Kit',
-      location: 'Bring-up cart',
+      alias: 'Production Bench',
+      location: 'Production line',
       transport: 'serial',
       severity: 'warning',
       baseUrl: 'serial://usbmodem14101',
@@ -169,8 +169,8 @@ export const controlPlaneScenario: ControlPlaneScenario = {
     },
     {
       id: 'fp-demo-03',
-      alias: 'Offline Mock Device',
-      location: 'Design review',
+      alias: 'Service Bench',
+      location: 'Service bay',
       transport: 'mock',
       severity: 'offline',
       baseUrl: 'mock:offline-device',
@@ -354,7 +354,7 @@ export const controlPlaneScenario: ControlPlaneScenario = {
     {
       time: '20:14:21',
       source: 'probe',
-      message: 'Identity frame matched the Bench Fixture A capability map.',
+      message: 'Identity frame matched the Research Bench capability map.',
       tone: 'success',
     },
     {

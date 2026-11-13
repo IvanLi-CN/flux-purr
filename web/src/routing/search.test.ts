@@ -11,12 +11,11 @@ describe('app search validation', () => {
         demoNetwork: 'timeout',
         demoArtifact: 'blocked',
       })
-    ).toEqual({ demo: false, uiDemo: true })
+    ).toEqual({ uiDemo: true })
   })
 
   it('preserves any formal uiDemo query as a disabled legacy entry', () => {
     expect(validateAppSearch({ uiDemo: 'firmware-workspace' })).toEqual({
-      demo: false,
       uiDemo: true,
     })
   })

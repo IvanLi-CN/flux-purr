@@ -81,14 +81,40 @@ describe('FirmwareWorkbench task and target scope', () => {
 
     expect(markup).toContain('更新现有设备')
     expect(markup).toContain('安装或恢复')
-    expect(markup).toContain('选择连接引擎和固件来源后运行完整预检。')
+    expect(markup).toContain('选择连接方式和固件来源后运行完整预检。')
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).not.toContain('本机固件目标')
     expect(markup).not.toContain('基准治具 A · /dev/cu.usbmodem101 · 租约就绪')
     expect(markup).toContain('固件包')
     expect(markup).toContain('选择固件包')
-    expect(markup).toContain('Browser USB ROM 引导')
-    expect(markup).toContain('选择 / 更换浏览器 USB 端口')
+    expect(markup).toContain('ROM 引导')
+  })
+
+  it('renders one device selector in the mock demo', () => {
+    const markup = renderToStaticMarkup(
+      createElement(FirmwareWorkbench, {
+        browserAvailable: true,
+        executionMode: 'mock',
+        officialArtifacts: [
+          {
+            id: 'stable-1.4.2',
+            version: 'v1.4.2',
+            channel: 'stable',
+            source: 'release',
+            releaseTag: 'v1.4.2',
+            sourceSha: 'a'.repeat(40),
+            buildId: 'a'.repeat(16),
+            assetPath: '/firmware/releases/v1.4.2-demo/flux-purr-v1.4.2.fluxpurr-fw',
+            bundleSha256: `sha256:${'a'.repeat(64)}`,
+            target: 'ESP32-S3FH4R2',
+            publishedAt: '2026-07-20T08:00:00Z',
+          },
+        ],
+        nativeTargets: [],
+      })
+    )
+
+    expect(markup.match(/aria-label="浏览器 USB 设备"/g)?.length).toBe(1)
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {
