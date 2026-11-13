@@ -1368,22 +1368,22 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: '已授权 USB 设备 1',
-                            detail: 'ESP32-S3 JTAG/serial · VID 0x303A · PID 0x1001',
+                            label: '研发台',
+                            detail: 'VID 0x303A · PID 0x1001',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: '已授权 USB 设备 2',
-                            detail: 'ESP32-S3 JTAG/serial · VID 0x303A · PID 0x1001',
+                            label: '生产台',
+                            detail: 'VID 0x303A · PID 0x1001',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: '已授权 USB 设备 3',
-                            detail: 'ESP32-S3 JTAG/serial · VID 0x303A · PID 0x1001',
+                            label: '维修台',
+                            detail: 'VID 0x303A · PID 0x1001',
                             index: -3,
                             online: false,
                           },
