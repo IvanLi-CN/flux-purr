@@ -255,6 +255,21 @@ export function FirmwareWorkbench({
       (transport === 'devd'
         ? approvalToken !== null && devdArtifactId !== null
         : browserLoader !== null && localBundle !== null))
+  const resetAuthorization = useCallback(() => {
+    if (!mockExecution) void disconnectBrowserLoader(browserLoader)
+    setBrowserLoader(null)
+    setApprovalToken(null)
+    setDevdArtifactId(null)
+    setBrowserOutcome(null)
+    setBrowserMessage(null)
+    setBrowserProgress(0)
+    setBrowserPreflightStageIndex(0)
+    setExecutionOutcome('idle')
+    setExecutionProgressValue(0)
+    setExecutionStageIndex(0)
+    setExecutionMessage(null)
+    browserRuntimePhaseRef.current = null
+  }, [browserLoader, mockExecution])
   const artifactEntryTitle =
     channel === 'local'
       ? mockExecution
@@ -314,10 +329,8 @@ export function FirmwareWorkbench({
     if (selected?.online !== false && selected?.updateEligible) return
     const next = nativeTargets.find((target) => target.online !== false && target.updateEligible)
     setNativeTargetId(next?.id ?? null)
-    if (selected && selected.online === false) {
-      resetAuthorization()
-    }
-  }, [nativeTargetId, nativeTargets, transport])
+    resetAuthorization()
+  }, [nativeTargetId, nativeTargets, resetAuthorization, transport])
 
   useEffect(() => {
     browserPreauthorizedPortsRef.current = undefined
@@ -346,18 +359,25 @@ export function FirmwareWorkbench({
     }
     try {
       const ports = (await browserSerial.getPorts()).filter(isFluxPurrUsbSerialPort)
-      const previousIndex = browserSelectedPort
-        ? rememberedBrowserPorts.indexOf(browserSelectedPort)
-        : -1
+      const previousInfo = browserSelectedPort?.getInfo?.()
+      const matchingPorts = browserSelectedPort
+        ? ports.filter(
+            (port) =>
+              port === browserSelectedPort ||
+              (previousInfo?.usbVendorId !== undefined &&
+                previousInfo.usbProductId !== undefined &&
+                port.getInfo?.()?.usbVendorId === previousInfo.usbVendorId &&
+                port.getInfo?.()?.usbProductId === previousInfo.usbProductId)
+          )
+        : []
       setRememberedBrowserPorts(ports)
       browserPreauthorizedPortsRef.current = ports
-      setBrowserSelectedPort(
-        previousIndex >= 0 ? (ports[previousIndex] ?? null) : null
-      )
+      setBrowserSelectedPort(matchingPorts.length === 1 ? matchingPorts[0] : null)
     } catch {
       setRememberedBrowserPorts([])
+      setBrowserSelectedPort(null)
     }
-  }, [browserSelectedPort, browserSerial, mockExecution, rememberedBrowserPorts])
+  }, [browserSelectedPort, browserSerial, mockExecution])
 
   const browserDeviceIndex = browserSelectedPort
     ? Math.max(0, rememberedBrowserPorts.indexOf(browserSelectedPort))
@@ -1093,22 +1113,6 @@ export function FirmwareWorkbench({
         tone: 'error',
       })
     }
-  }
-
-  const resetAuthorization = () => {
-    if (!mockExecution) void disconnectBrowserLoader(browserLoader)
-    setBrowserLoader(null)
-    setApprovalToken(null)
-    setDevdArtifactId(null)
-    setBrowserOutcome(null)
-    setBrowserMessage(null)
-    setBrowserProgress(0)
-    setBrowserPreflightStageIndex(0)
-    setExecutionOutcome('idle')
-    setExecutionProgressValue(0)
-    setExecutionStageIndex(0)
-    setExecutionMessage(null)
-    browserRuntimePhaseRef.current = null
   }
 
   const chooseOperation = (next: FirmwareOperation) => {
