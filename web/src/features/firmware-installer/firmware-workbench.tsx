@@ -1331,9 +1331,7 @@ export function FirmwareWorkbench({
           className="firmware-workbench__browser-target"
           aria-labelledby="connection-target-label"
         >
-          <span id="connection-target-label">
-            {transport === 'browser' ? '浏览器 USB 目标' : '本机 devd 目标'}
-          </span>
+          <span id="connection-target-label">连接目标</span>
           <Button
             type="button"
             variant="outline"
@@ -1343,22 +1341,8 @@ export function FirmwareWorkbench({
           >
             <Usb data-icon="inline-start" aria-hidden="true" />
             <span className="grid min-w-0 flex-1 gap-0.5 text-left">
-              <strong>
-                {transport !== 'browser'
-                  ? '设备由下方列表选择'
-                  : mockExecution
-                    ? '演示设备由下方列表选择'
-                    : '选择 / 更换浏览器 USB 端口'}
-              </strong>
-              <small>
-                {transport !== 'browser'
-                  ? '本机 devd 设备与端口信息显示在下方设备列表'
-                  : mockExecution
-                    ? '演示模式不调用浏览器串口；打开下方设备列表切换模拟设备'
-                    : browserSelectedPort
-                      ? '已固定为本次在浏览器选择器中确认的设备'
-                      : '打开 Chrome 选择器，仅显示 ESP32-S3 USB JTAG/serial 设备'}
-              </small>
+              <strong>选择 / 更换设备目标</strong>
+              <small>连接引擎对应的设备与端口由下方设备列表管理</small>
             </span>
             <ChevronRight data-icon="inline-end" aria-hidden="true" />
           </Button>

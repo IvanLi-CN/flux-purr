@@ -88,7 +88,7 @@ describe('FirmwareWorkbench task and target scope', () => {
     expect(markup).toContain('固件包')
     expect(markup).toContain('选择固件包')
     expect(markup).toContain('Browser USB ROM 引导')
-    expect(markup).toContain('选择 / 更换浏览器 USB 端口')
+    expect(markup).toContain('选择 / 更换设备目标')
   })
 
   it('keeps the browser target region stable in the mock demo', () => {
@@ -115,8 +115,8 @@ describe('FirmwareWorkbench task and target scope', () => {
       })
     )
 
-    expect(markup).toContain('演示设备由下方列表选择')
-    expect(markup).toContain('演示模式不调用浏览器串口')
+    expect(markup).toContain('连接目标')
+    expect(markup).toContain('选择 / 更换设备目标')
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {
