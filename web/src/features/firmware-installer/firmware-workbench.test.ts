@@ -114,7 +114,7 @@ describe('FirmwareWorkbench task and target scope', () => {
       })
     )
 
-    expect(markup.match(/aria-label="设备"/g)?.length).toBe(1)
+    expect(markup.match(/aria-label="浏览器 USB 设备"/g)?.length).toBe(1)
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {

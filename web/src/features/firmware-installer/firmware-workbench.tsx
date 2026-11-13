@@ -1343,7 +1343,10 @@ export function FirmwareWorkbench({
               }
             }}
           >
-            <SelectTrigger className="firmware-workbench__device-trigger" aria-label="设备">
+            <SelectTrigger
+              className="firmware-workbench__device-trigger"
+              aria-label={transport === 'devd' ? '本机固件目标' : '浏览器 USB 设备'}
+            >
               <SelectValue placeholder="选择连接设备" />
             </SelectTrigger>
             <SelectContent position="popper">
