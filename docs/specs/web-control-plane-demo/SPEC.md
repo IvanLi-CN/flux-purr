@@ -181,7 +181,7 @@
 - Given 1440px desktop viewport，When 查看 demo，Then Dashboard 与全局日志同屏显示，且页面本身不依赖大段滚动。
 - Given 浏览器 Web Serial 连续产生运行时事件，When 查看全局日志，Then 较早事件位于较新事件上方，最新事件位于列表底部。
 - Given 日志内容在固定缓冲区内持续更新，When 开启“跟随尾部”，Then switch 为 checked 且视口持续保持在最新事件；关闭后滚动位置不被新事件抢回。
-- Given 在顶部状态栏选择 `Assembly Bay`，When 查看当前界面，Then 页面显示该 target 的 serial transport、warning severity 与 firmware 摘要。
+- Given 在顶部状态栏选择 `生产热控台`，When 查看当前界面，Then 页面显示该 target 的 serial transport、warning severity 与 firmware 摘要。
 - Given 在 Dashboard 调整目标温度，When 点击 `+`，Then live target、mock runtime 与日志同步变化，不需要提交按钮。
 - Given 点击 `Settings`，When 查看当前界面，Then 可以看到 preset slots、preset temperature editor、preset enable switch 与 fan policy control。
 - Given 修改 preset 温度，When debounce 时间结束，Then preset 自动保存并显示 autosaved 状态。
@@ -268,7 +268,7 @@
 - 证据来源：独立 Vite mock-only Demo 构建，deterministic fixtures。
 - 绑定说明：当前 PR 图来自 Chrome 中的正常控制台，固定为 `fp-lab-01` normal 场景；未知 identity 恢复态只作为历史辅助证据。
 - 布局检查：1440×1000 保持 1280px 固定工作区，Inspector 默认以可收起 bubble 启动，打开后使用占满视口宽度、受控高度的四栏底部 dock；页面根层不得出现整体纵向滚动，只有栏内允许纵向滚动；1180–1279px 使用三栏底部 dock；左右侧栏仅在 1700px+ 且保留 1280px 工作区与 24px gutter 时可选，视口更窄时不得挤压产品口；底部布局仅在视口高度足够时可选，否则回退悬浮。375×812 无横向溢出或越界元素，Inspector bubble 与恢复操作触摸高度不小于 48px。
-- Public Demo target fixtures display human-readable device names: `North Lab`, `Assembly Bay`, and `Service Cart`.
+- Public Demo target fixtures display human-readable device names: `研发热控台`, `生产热控台`, and `维修热控台`.
 
 ### Current Public Demo Console with Inspector (1746×1136)
 

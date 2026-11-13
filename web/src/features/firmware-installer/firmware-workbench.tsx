@@ -1368,21 +1368,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'North Lab',
+                            label: '研发热控台',
                             detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'Assembly Bay',
+                            label: '生产热控台',
                             detail: 'Bring-up cart',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'Service Cart',
+                            label: '维修热控台',
                             detail: 'Design review',
                             index: -3,
                             online: false,

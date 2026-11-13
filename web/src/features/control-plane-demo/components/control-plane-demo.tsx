@@ -1743,7 +1743,7 @@ export function ControlPlaneDemo({
       return [
         {
           id: 'demo-devd-fp-lab-01',
-          label: 'North Lab',
+          label: '研发热控台',
           detail: 'Simulated thermal bench',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
@@ -1752,7 +1752,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-02',
-          label: 'Assembly Bay',
+          label: '生产热控台',
           detail: 'Bring-up cart',
           updateEligible: true,
           currentTemperatureC: 26.1,
@@ -1761,7 +1761,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-03',
-          label: 'Service Cart',
+          label: '维修热控台',
           detail: 'Design review',
           updateEligible: false,
           currentTemperatureC: 24.8,
