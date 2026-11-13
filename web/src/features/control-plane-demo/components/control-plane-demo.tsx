@@ -1792,7 +1792,7 @@ export function ControlPlaneDemo({
         updateEligible:
           device.firmware !== 'unknown' &&
           device.severity !== 'offline' &&
-          device.capabilities.includes('install_status'),
+          (device.capabilities.includes('install_status') || device.capabilities.includes('flash')),
         currentTemperatureC: device.currentTempC,
         heaterEnabled: device.heaterEnabled,
         online: device.severity !== 'offline',
