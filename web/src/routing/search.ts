@@ -30,7 +30,6 @@ export function validateAppSearch(search: Record<string, unknown>): AppSearch {
   const legacyDemoRequest =
     !demoBuild && (normalizeBoolean(search.demo) || search.uiDemo !== undefined)
   return {
-    ...(demoBuild ? {} : { demo: false }),
     ...(!demoBuild && (normalizeBoolean(search.uiDemo) || legacyDemoRequest)
       ? { uiDemo: true as const }
       : {}),
