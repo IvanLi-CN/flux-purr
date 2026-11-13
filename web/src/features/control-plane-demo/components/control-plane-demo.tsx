@@ -1743,7 +1743,7 @@ export function ControlPlaneDemo({
       return [
         {
           id: 'demo-devd-fp-lab-01',
-          label: 'Bench Fixture A',
+          label: 'FP-LAB-01',
           detail: '/dev/cu.usbmodem14101',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
@@ -1752,7 +1752,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-02',
-          label: 'Bench Fixture B',
+          label: 'FP-LAB-02',
           detail: '/dev/cu.usbmodem14102',
           updateEligible: true,
           currentTemperatureC: 26.1,
@@ -1761,7 +1761,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-03',
-          label: 'Bench Fixture C',
+          label: 'FP-LAB-03',
           detail: '/dev/cu.usbmodem14103',
           updateEligible: false,
           currentTemperatureC: 24.8,

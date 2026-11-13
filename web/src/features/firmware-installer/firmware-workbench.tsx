@@ -1368,21 +1368,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'Bench Fixture A',
+                            label: 'FP-LAB-01',
                             detail: '/dev/cu.usbmodem14101',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'Bench Fixture B',
+                            label: 'FP-LAB-02',
                             detail: '/dev/cu.usbmodem14102',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'Bench Fixture C',
+                            label: 'FP-LAB-03',
                             detail: '/dev/cu.usbmodem14103',
                             index: -3,
                             online: false,
