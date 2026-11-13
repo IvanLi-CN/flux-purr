@@ -1327,7 +1327,7 @@ export function FirmwareWorkbench({
           </label>
         </fieldset>
 
-        {transport === 'browser' && !mockExecution ? (
+        {transport === 'browser' ? (
           <section
             className="firmware-workbench__browser-target"
             aria-labelledby="browser-target-label"
@@ -1337,16 +1337,20 @@ export function FirmwareWorkbench({
               type="button"
               variant="outline"
               className="firmware-workbench__browser-target-trigger h-10 justify-start px-3"
-              disabled={!browserAvailable || busy}
-              onClick={chooseBrowserUsbPort}
+              disabled={mockExecution || !browserAvailable || busy}
+              onClick={mockExecution ? undefined : chooseBrowserUsbPort}
             >
               <Usb data-icon="inline-start" aria-hidden="true" />
               <span className="grid min-w-0 flex-1 gap-0.5 text-left">
-                <strong>选择 / 更换浏览器 USB 端口</strong>
+                <strong>
+                  {mockExecution ? '演示设备由下方列表选择' : '选择 / 更换浏览器 USB 端口'}
+                </strong>
                 <small>
-                  {browserSelectedPort
-                    ? '已固定为本次在浏览器选择器中确认的设备'
-                    : '打开 Chrome 选择器，仅显示 ESP32-S3 USB JTAG/serial 设备'}
+                  {mockExecution
+                    ? '演示模式不调用浏览器串口；打开下方设备列表切换模拟设备'
+                    : browserSelectedPort
+                      ? '已固定为本次在浏览器选择器中确认的设备'
+                      : '打开 Chrome 选择器，仅显示 ESP32-S3 USB JTAG/serial 设备'}
                 </small>
               </span>
               <ChevronRight data-icon="inline-end" aria-hidden="true" />
