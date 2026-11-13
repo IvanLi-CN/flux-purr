@@ -232,7 +232,10 @@ export function FirmwareWorkbench({
     : (browserMessage ?? '选择连接方式和固件来源后运行完整预检。')
   const transportAvailable =
     transport === 'devd'
-      ? devdAvailable && nativeTarget !== null && nativeTarget.online !== false
+      ? devdAvailable &&
+        nativeTarget !== null &&
+        nativeTarget.online !== false &&
+        nativeTarget.updateEligible
       : browserAvailable
   const canRun =
     operation !== null &&
@@ -308,8 +311,8 @@ export function FirmwareWorkbench({
   useEffect(() => {
     if (transport !== 'devd') return
     const selected = nativeTargets.find((target) => target.id === nativeTargetId)
-    if (selected?.online !== false) return
-    const next = nativeTargets.find((target) => target.online !== false)
+    if (selected?.online !== false && selected?.updateEligible) return
+    const next = nativeTargets.find((target) => target.online !== false && target.updateEligible)
     setNativeTargetId(next?.id ?? null)
     if (selected && selected.online === false) {
       resetAuthorization()
@@ -349,7 +352,7 @@ export function FirmwareWorkbench({
       setRememberedBrowserPorts(ports)
       browserPreauthorizedPortsRef.current = ports
       setBrowserSelectedPort(
-        previousIndex >= 0 ? (ports[previousIndex] ?? null) : (browserSelectedPort ?? null)
+        previousIndex >= 0 ? (ports[previousIndex] ?? null) : null
       )
     } catch {
       setRememberedBrowserPorts([])
@@ -1408,7 +1411,7 @@ export function FirmwareWorkbench({
                       <SelectItem
                         key={target.id}
                         value={`devd:${target.id}`}
-                        disabled={target.online === false}
+                        disabled={target.online === false || !target.updateEligible}
                       >
                         {[target.label, target.detail, target.online === false ? '离线' : '在线']
                           .filter(Boolean)
@@ -1448,7 +1451,7 @@ export function FirmwareWorkbench({
                         .map((part) => `0x${part?.toString(16).padStart(4, '0')}`)
                         .join(':')
                       return {
-                        id: `browser-${usbId}-${String(port)}`,
+                        id: `browser-${usbId}-${index}`,
                         label: usbId || '已授权设备',
                         detail: '已授权 Web Serial 端口',
                         index,

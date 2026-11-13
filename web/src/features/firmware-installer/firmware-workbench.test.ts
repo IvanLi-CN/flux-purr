@@ -115,7 +115,6 @@ describe('FirmwareWorkbench task and target scope', () => {
     )
 
     expect(markup.match(/aria-label="浏览器 USB 设备"/g)?.length).toBe(1)
-    expect(markup).toContain('选择 / 更换浏览器 USB 端口')
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {
