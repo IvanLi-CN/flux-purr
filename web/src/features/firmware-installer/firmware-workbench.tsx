@@ -1494,7 +1494,7 @@ export function FirmwareWorkbench({
                 setAllowDowngrade(event.currentTarget.checked)
               }}
             />
-            <span>允许安装较旧版本</span>
+            <span>允许降级</span>
           </label>
         ) : null}
       </div>
