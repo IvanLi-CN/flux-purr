@@ -1368,22 +1368,22 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'FP-LAB-01',
-                            detail: '/dev/cu.usbmodem14101',
+                            label: 'Bench Fixture A',
+                            detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'FP-LAB-02',
-                            detail: '/dev/cu.usbmodem14102',
+                            label: 'Field Kit',
+                            detail: 'Bring-up cart',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'FP-LAB-03',
-                            detail: '/dev/cu.usbmodem14103',
+                            label: 'Offline Mock Device',
+                            detail: 'Design review',
                             index: -3,
                             online: false,
                           },
