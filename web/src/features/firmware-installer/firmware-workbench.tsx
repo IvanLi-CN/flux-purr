@@ -1368,21 +1368,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'Flux Purr 热控台 01',
+                            label: 'flux-purr-001122334455',
                             detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'Flux Purr 热控台 02',
+                            label: 'flux-purr-a0f262f20d6c',
                             detail: 'Bring-up cart',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'Flux Purr 热控台 03',
+                            label: 'flux-purr-s3-001',
                             detail: 'Design review',
                             index: -3,
                             online: false,

@@ -1743,7 +1743,7 @@ export function ControlPlaneDemo({
       return [
         {
           id: 'demo-devd-fp-lab-01',
-          label: 'Flux Purr 热控台 01',
+          label: 'flux-purr-001122334455',
           detail: 'Simulated thermal bench',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
@@ -1752,7 +1752,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-02',
-          label: 'Flux Purr 热控台 02',
+          label: 'flux-purr-a0f262f20d6c',
           detail: 'Bring-up cart',
           updateEligible: true,
           currentTemperatureC: 26.1,
@@ -1761,7 +1761,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-03',
-          label: 'Flux Purr 热控台 03',
+          label: 'flux-purr-s3-001',
           detail: 'Design review',
           updateEligible: false,
           currentTemperatureC: 24.8,
