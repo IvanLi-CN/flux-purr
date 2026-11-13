@@ -81,13 +81,13 @@ describe('FirmwareWorkbench task and target scope', () => {
 
     expect(markup).toContain('更新现有设备')
     expect(markup).toContain('安装或恢复')
-    expect(markup).toContain('选择连接引擎和固件来源后运行完整预检。')
+    expect(markup).toContain('选择连接方式和固件来源后运行完整预检。')
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).not.toContain('本机固件目标')
     expect(markup).not.toContain('基准治具 A · /dev/cu.usbmodem101 · 租约就绪')
     expect(markup).toContain('固件包')
     expect(markup).toContain('选择固件包')
-    expect(markup).toContain('Browser USB ROM 引导')
+    expect(markup).toContain('ROM 引导')
     expect(markup).toContain('选择 / 更换设备目标')
   })
 

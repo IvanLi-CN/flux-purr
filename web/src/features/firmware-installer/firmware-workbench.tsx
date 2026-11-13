@@ -230,7 +230,7 @@ export function FirmwareWorkbench({
   const executionStageList = useMemo(() => executionStages(operation), [operation])
   const effectiveMessage = showingExecution
     ? (executionMessage ?? '预检凭据已确认；等待开始固件写入。')
-    : (browserMessage ?? '选择连接引擎和固件来源后运行完整预检。')
+    : (browserMessage ?? '选择连接方式和固件来源后运行完整预检。')
   const transportAvailable =
     transport === 'devd' ? devdAvailable && nativeTarget !== null : browserAvailable
   const canRun =
@@ -1096,7 +1096,7 @@ export function FirmwareWorkbench({
     transportWasSelected.current = true
     setTransport(next)
     onActivity?.({
-      event: '连接引擎已切换',
+      event: '连接方式已切换',
       detail: `${transportLabel(next)} 将执行已选任务的完整预检。`,
       tone: 'info',
     })
@@ -1294,7 +1294,7 @@ export function FirmwareWorkbench({
           <span>{transport === 'devd' ? devdHealthLabel(devdHealth) : '浏览器直接连接 ROM'}</span>
         </div>
         <fieldset>
-          <legend>连接引擎</legend>
+          <legend>连接方式</legend>
           <label>
             <input
               type="radio"
@@ -1342,7 +1342,7 @@ export function FirmwareWorkbench({
             <Usb data-icon="inline-start" aria-hidden="true" />
             <span className="grid min-w-0 flex-1 gap-0.5 text-left">
               <strong>选择 / 更换设备目标</strong>
-              <small>连接引擎对应的设备与端口由下方设备列表管理</small>
+              <small>连接方式对应的设备与端口由下方设备列表管理</small>
             </span>
             <ChevronRight data-icon="inline-end" aria-hidden="true" />
           </Button>
@@ -1694,19 +1694,15 @@ export function FirmwareWorkbench({
         </DialogContent>
       </Dialog>
 
-      {transport === 'browser' ? (
-        <aside className="firmware-workbench__boot-guide" aria-label="Browser USB ROM 引导">
-          <Usb size={17} aria-hidden="true" />
-          <span>
-            <strong>{mockExecution ? 'ROM 引导（模拟）' : 'ROM 引导'}</strong>
-            <small>
-              {mockExecution
-                ? '演示使用内存中的 USB、ROM 与安全响应样本，不会请求或操作浏览器串口。'
-                : '预检请求浏览器 USB 后，若未进入 ROM，请按住 BOOT、点按 RESET，再松开 BOOT。'}
-            </small>
-          </span>
-        </aside>
-      ) : null}
+      <aside className="firmware-workbench__boot-guide" aria-label="ROM 引导">
+        <Usb size={17} aria-hidden="true" />
+        <span>
+          <strong>ROM 引导</strong>
+          <small>
+            预检按当前连接方式准备 ROM 与安全检查；演示模式使用内存样本，不操作真实设备。
+          </small>
+        </span>
+      </aside>
 
       {operation === 'install_recovery' ? (
         <p className="firmware-workbench__erase-notice">

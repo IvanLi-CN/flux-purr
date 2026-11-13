@@ -1008,7 +1008,7 @@ export function ControlPlaneDemo({
           id: 'firmware-activity-idle',
           time: '待命',
           event: '等待任务',
-          detail: '选择任务、连接引擎与固件来源后运行完整预检。',
+          detail: '选择任务、连接方式与固件来源后运行完整预检。',
           tone: 'info',
         },
       ]

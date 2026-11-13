@@ -152,7 +152,7 @@ export const firmwareDemoActivity: FirmwareActivityEntry[] = [
   {
     id: 'firmware-demo-4',
     time: '20:19:15',
-    event: '传输引擎',
+    event: '传输方式',
     detail: '模拟 Browser USB ROM 为当前演示路径；本机 devd 未启用。',
     tone: 'warning',
   },
