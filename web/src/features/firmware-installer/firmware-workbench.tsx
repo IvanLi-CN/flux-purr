@@ -182,7 +182,6 @@ export function FirmwareWorkbench({
   const [browserProgress, setBrowserProgress] = useState(0)
   const [browserPreflightStageIndex, setBrowserPreflightStageIndex] = useState(0)
   const browserPreflightTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
-  const browserPortSelectionTraceRef = useRef<BrowserPreflightTraceEvent[]>([])
   const [browserSelectedPort, setBrowserSelectedPort] = useState<BrowserSerialPort | null>(null)
   const [rememberedBrowserPorts, setRememberedBrowserPorts] = useState<BrowserSerialPort[]>([])
   const [browserMessage, setBrowserMessage] = useState<string | null>(null)
@@ -414,17 +413,6 @@ export function FirmwareWorkbench({
 
   const appendBrowserPreflightTrace = (entry: BrowserPreflightTraceEvent) => {
     browserPreflightTraceRef.current = [...browserPreflightTraceRef.current, entry].slice(-32)
-    onActivity?.({
-      event: entry.event,
-      detail: entry.detail,
-      tone: entry.tone,
-    })
-  }
-
-  const appendBrowserPortSelectionTrace = (entry: BrowserPreflightTraceEvent) => {
-    browserPortSelectionTraceRef.current = [...browserPortSelectionTraceRef.current, entry].slice(
-      -8
-    )
     onActivity?.({
       event: entry.event,
       detail: entry.detail,
@@ -1102,33 +1090,6 @@ export function FirmwareWorkbench({
     })
   }
 
-  const chooseBrowserUsbPort = () => {
-    if (mockExecution || !browserSerial || busy) return
-
-    // `requestPort()` must remain in this synchronous click path. Resetting the
-    // old transaction only changes local state and never selects a new device.
-    resetAuthorization()
-    browserPortSelectionTraceRef.current = []
-    const selection = beginBrowserUsbPreflight({
-      serial: browserSerial,
-      forcePortSelection: true,
-      selectionReason: 'change_port',
-      onTrace: appendBrowserPortSelectionTrace,
-    })
-    void selection.then(
-      (port) => {
-        browserPreauthorizedPortsRef.current = [port]
-        setBrowserSelectedPort(port)
-        onActivity?.({
-          event: '浏览器 USB 端口已固定',
-          detail: '后续预检仅使用刚刚在浏览器选择器中确认的设备。',
-          tone: 'success',
-        })
-      },
-      () => undefined
-    )
-  }
-
   const chooseOfficialArtifact = (artifactId: string) => {
     const artifact = catalogArtifacts.find((candidate) => candidate.id === artifactId)
     if (!artifact) return
@@ -1232,10 +1193,7 @@ export function FirmwareWorkbench({
         message: executionMessage,
       },
       bundleSha256: localBundle?.bundleSha256 ?? null,
-      browserPreflightTrace: [
-        ...browserPortSelectionTraceRef.current,
-        ...browserPreflightTraceRef.current,
-      ],
+      browserPreflightTrace: [...browserPreflightTraceRef.current],
       generatedAt: new Date().toISOString(),
     }
     const url = URL.createObjectURL(
@@ -1326,27 +1284,6 @@ export function FirmwareWorkbench({
             </span>
           </label>
         </fieldset>
-
-        <section
-          className="firmware-workbench__browser-target"
-          aria-labelledby="connection-target-label"
-        >
-          <span id="connection-target-label">连接目标</span>
-          <Button
-            type="button"
-            variant="outline"
-            className="firmware-workbench__browser-target-trigger h-10 justify-start px-3"
-            disabled={transport !== 'browser' || mockExecution || !browserAvailable || busy}
-            onClick={transport === 'browser' && !mockExecution ? chooseBrowserUsbPort : undefined}
-          >
-            <Usb data-icon="inline-start" aria-hidden="true" />
-            <span className="grid min-w-0 flex-1 gap-0.5 text-left">
-              <strong>选择 / 更换设备目标</strong>
-              <small>连接方式对应的设备与端口由下方设备列表管理</small>
-            </span>
-            <ChevronRight data-icon="inline-end" aria-hidden="true" />
-          </Button>
-        </section>
 
         <section className="firmware-workbench__artifact" aria-labelledby="firmware-artifact-label">
           <span id="firmware-artifact-label">固件包</span>

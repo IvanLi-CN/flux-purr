@@ -9478,8 +9478,7 @@
 
 .firmware-workbench__controls legend,
 .firmware-workbench__artifact > span,
-.firmware-workbench__native-target > span,
-.firmware-workbench__browser-target > span {
+.firmware-workbench__native-target > span {
   color: var(--industrial-muted-text);
   font-family: "JetBrains Mono", monospace;
   font-size: 0.62rem;
@@ -9518,15 +9517,10 @@
   accent-color: var(--industrial-accent);
 }
 
-.firmware-workbench__native-target,
-.firmware-workbench__browser-target {
+.firmware-workbench__native-target {
   display: grid;
   gap: 0.5rem;
   min-width: 0;
-}
-
-.firmware-workbench__browser-target {
-  grid-column: 1 / -1;
 }
 
 .firmware-workbench__native-target {
@@ -9544,22 +9538,6 @@
   box-shadow:
     inset 2px 2px 5px var(--industrial-shadow),
     inset -2px -2px 5px var(--industrial-light);
-}
-
-.firmware-workbench__browser-target-trigger {
-  min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  border-radius: 10px;
-  background: var(--industrial-panel);
-  color: var(--industrial-text);
-  box-shadow:
-    inset 2px 2px 5px var(--industrial-shadow),
-    inset -2px -2px 5px var(--industrial-light);
-}
-
-.firmware-workbench__browser-target-trigger:hover:not(:disabled) {
-  background: color-mix(in oklch, var(--industrial-panel) 62%, var(--industrial-bg) 38%);
-  color: var(--industrial-text);
 }
 
 .firmware-workbench__artifact {

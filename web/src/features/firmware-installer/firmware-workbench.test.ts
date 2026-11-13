@@ -88,10 +88,9 @@ describe('FirmwareWorkbench task and target scope', () => {
     expect(markup).toContain('固件包')
     expect(markup).toContain('选择固件包')
     expect(markup).toContain('ROM 引导')
-    expect(markup).toContain('选择 / 更换设备目标')
   })
 
-  it('keeps the browser target region stable in the mock demo', () => {
+  it('renders one device selector in the mock demo', () => {
     const markup = renderToStaticMarkup(
       createElement(FirmwareWorkbench, {
         browserAvailable: true,
@@ -115,8 +114,7 @@ describe('FirmwareWorkbench task and target scope', () => {
       })
     )
 
-    expect(markup).toContain('连接目标')
-    expect(markup).toContain('选择 / 更换设备目标')
+    expect(markup.match(/aria-label="设备"/g)?.length).toBe(1)
   })
 
   it('explains an empty published catalog instead of rendering a blank firmware entry', () => {
