@@ -231,7 +231,9 @@ export function FirmwareWorkbench({
     ? (executionMessage ?? '预检凭据已确认；等待开始固件写入。')
     : (browserMessage ?? '选择连接方式和固件来源后运行完整预检。')
   const transportAvailable =
-    transport === 'devd' ? devdAvailable && nativeTarget !== null : browserAvailable
+    transport === 'devd'
+      ? devdAvailable && nativeTarget !== null && nativeTarget.online !== false
+      : browserAvailable
   const canRun =
     operation !== null &&
     transportAvailable &&
@@ -304,8 +306,13 @@ export function FirmwareWorkbench({
   }, [devdBaseUrl, mockExecution])
 
   useEffect(() => {
-    if (transport === 'devd' && nativeTargetId === null && nativeTargets.length > 0) {
-      setNativeTargetId(nativeTargets[0].id)
+    if (transport !== 'devd') return
+    const selected = nativeTargets.find((target) => target.id === nativeTargetId)
+    if (selected?.online !== false) return
+    const next = nativeTargets.find((target) => target.online !== false)
+    setNativeTargetId(next?.id ?? null)
+    if (selected && selected.online === false) {
+      resetAuthorization()
     }
   }, [nativeTargetId, nativeTargets, transport])
 
@@ -336,12 +343,18 @@ export function FirmwareWorkbench({
     }
     try {
       const ports = (await browserSerial.getPorts()).filter(isFluxPurrUsbSerialPort)
+      const previousIndex = browserSelectedPort
+        ? rememberedBrowserPorts.indexOf(browserSelectedPort)
+        : -1
       setRememberedBrowserPorts(ports)
       browserPreauthorizedPortsRef.current = ports
+      setBrowserSelectedPort(
+        previousIndex >= 0 ? (ports[previousIndex] ?? null) : (browserSelectedPort ?? null)
+      )
     } catch {
       setRememberedBrowserPorts([])
     }
-  }, [browserSerial, mockExecution])
+  }, [browserSelectedPort, browserSerial, mockExecution, rememberedBrowserPorts])
 
   const browserDeviceIndex = browserSelectedPort
     ? Math.max(0, rememberedBrowserPorts.indexOf(browserSelectedPort))
@@ -418,6 +431,33 @@ export function FirmwareWorkbench({
       detail: entry.detail,
       tone: entry.tone,
     })
+  }
+
+  const chooseBrowserUsbPort = () => {
+    if (mockExecution || !browserSerial || busy) return
+    resetAuthorization()
+    browserPreauthorizedPortsRef.current = []
+    const selection = beginBrowserUsbPreflight({
+      serial: browserSerial,
+      forcePortSelection: true,
+      selectionReason: 'change_port',
+      onTrace: appendBrowserPreflightTrace,
+    })
+    void selection.then(
+      (port) => {
+        browserPreauthorizedPortsRef.current = [port]
+        setBrowserSelectedPort(port)
+        setRememberedBrowserPorts((current) =>
+          current.includes(port) ? current : [...current, port]
+        )
+        onActivity?.({
+          event: '浏览器 USB 端口已固定',
+          detail: '后续预检仅使用刚刚在浏览器选择器中确认的设备。',
+          tone: 'success',
+        })
+      },
+      () => undefined
+    )
   }
 
   const showPreflightStage = (
@@ -1325,6 +1365,10 @@ export function FirmwareWorkbench({
             }}
             onValueChange={(value) => {
               resetAuthorization()
+              if (value === 'browser:choose') {
+                chooseBrowserUsbPort()
+                return
+              }
               if (value.startsWith('devd:')) {
                 setTransport('devd')
                 setNativeTargetId(value.slice('devd:'.length))
@@ -1350,6 +1394,11 @@ export function FirmwareWorkbench({
               <SelectValue placeholder="选择连接设备" />
             </SelectTrigger>
             <SelectContent position="popper">
+              {transport === 'browser' ? (
+                <SelectItem value="browser:choose" disabled={mockExecution || !browserSerial}>
+                  选择 / 更换浏览器 USB 端口
+                </SelectItem>
+              ) : null}
               {transport === 'devd'
                 ? [...nativeTargets]
                     .sort(
