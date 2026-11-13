@@ -9311,12 +9311,15 @@
 
 .industrial-console__main:has(.firmware-workbench) {
   display: grid;
+  align-self: start;
+  height: max-content;
   min-height: 0;
   overflow-y: auto;
 }
 
 .industrial-console__main:has(.firmware-workbench) > .industrial-view-panel {
-  height: 100%;
+  height: auto;
+  align-self: start;
   min-height: 0;
   overflow-y: auto;
 }
