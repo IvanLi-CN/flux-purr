@@ -9780,7 +9780,7 @@
   align-items: flex-start;
   gap: 0.5rem;
   min-width: 0;
-  margin: -0.15rem 0 0;
+  margin: 0;
   padding: 0.66rem 0.75rem;
   border-radius: 10px;
   background: color-mix(in oklch, var(--industrial-muted) 70%, transparent);
