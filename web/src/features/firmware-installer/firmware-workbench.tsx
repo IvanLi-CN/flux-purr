@@ -1368,21 +1368,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'Bench Fixture A',
+                            label: 'Flux Purr 热控台 01',
                             detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'Field Kit',
+                            label: 'Flux Purr 热控台 02',
                             detail: 'Bring-up cart',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'Offline Mock Device',
+                            label: 'Flux Purr 热控台 03',
                             detail: 'Design review',
                             index: -3,
                             online: false,

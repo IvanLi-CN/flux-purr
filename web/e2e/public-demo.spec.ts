@@ -142,7 +142,7 @@ test.describe('public demo build', () => {
       'Configure · Calibrate · Inspect'
     )
     await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
-    await expect(page.getByText(/#1 · Bench Fixture A/)).toBeVisible()
+    await expect(page.getByText(/#1 · Flux Purr 热控台 01/)).toBeVisible()
 
     await selectInspectorOption(page, 'Persona', 'observer')
     await expect(page.getByRole('button', { name: 'Simulate thermal warning' })).toBeDisabled()
@@ -548,9 +548,9 @@ test.describe('public demo build', () => {
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
     await page.getByRole('combobox', { name: 'Current target' }).click()
-    await expect(page.getByRole('option', { name: /Bench Fixture A/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /Field Kit/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /Offline Mock Device/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Flux Purr 热控台 01/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Flux Purr 热控台 02/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Flux Purr 热控台 03/ })).toBeVisible()
     await page.keyboard.press('Escape')
   })
 
@@ -711,7 +711,7 @@ test.describe('public demo build', () => {
     }
 
     await page.goto('/devices/fp-demo-03/overview?demo=true&demoScene=offline')
-    await expect(page.getByText('Offline Mock Device', { exact: true })).toBeVisible()
+    await expect(page.getByText('Flux Purr 热控台 03', { exact: true })).toBeVisible()
     await expect(page.getByText('-54 dBm')).toHaveCount(0)
 
     await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')
