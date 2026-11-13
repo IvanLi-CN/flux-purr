@@ -1368,19 +1368,22 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'Bench Fixture A · 在线',
+                            label: 'Bench Fixture A',
+                            detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'Bench Fixture B · 在线',
+                            label: 'Bench Fixture B',
+                            detail: 'Simulated thermal bench 2',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'Bench Fixture C · 离线',
+                            label: 'Bench Fixture C',
+                            detail: 'Simulated thermal bench 3',
                             index: -3,
                             online: false,
                           },
@@ -1394,7 +1397,8 @@ export function FirmwareWorkbench({
                         .join(':')
                       return {
                         id: `browser-${usbId}-${String(port)}`,
-                        label: `${usbId || '已授权设备'} · 在线`,
+                        label: usbId || '已授权设备',
+                        detail: '已授权 Web Serial 端口',
                         index,
                         online: true,
                       }
@@ -1409,7 +1413,9 @@ export function FirmwareWorkbench({
                       }
                       disabled={device.online === false}
                     >
-                      {device.label}
+                      {[device.label, device.detail, device.online ? '在线' : '离线']
+                        .filter(Boolean)
+                        .join(' · ')}
                     </SelectItem>
                   ))}
             </SelectContent>
