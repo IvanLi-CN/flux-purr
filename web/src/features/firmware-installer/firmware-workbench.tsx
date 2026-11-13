@@ -1368,21 +1368,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: 'flux-purr-001122334455',
+                            label: 'North Lab',
                             detail: 'Simulated thermal bench',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: 'flux-purr-a0f262f20d6c',
+                            label: 'Assembly Bay',
                             detail: 'Bring-up cart',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: 'flux-purr-s3-001',
+                            label: 'Service Cart',
                             detail: 'Design review',
                             index: -3,
                             online: false,
