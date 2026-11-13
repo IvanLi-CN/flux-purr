@@ -1358,8 +1358,9 @@ export function FirmwareWorkbench({
                         value={`devd:${target.id}`}
                         disabled={target.online === false}
                       >
-                        {target.label} · {target.detail} ·{' '}
-                        {target.online === false ? '离线' : '在线'}
+                        {[target.label, target.detail, target.online === false ? '离线' : '在线']
+                          .filter(Boolean)
+                          .join(' · ')}
                       </SelectItem>
                     ))
                 : [

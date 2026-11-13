@@ -1744,7 +1744,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-01',
           label: 'Bench Fixture A',
-          detail: 'USB-C 端口 A',
+          detail: '',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
           heaterEnabled: visibleDevice.heaterEnabled,
@@ -1753,7 +1753,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-02',
           label: 'Bench Fixture B',
-          detail: 'USB-C 端口 B',
+          detail: '',
           updateEligible: true,
           currentTemperatureC: 26.1,
           heaterEnabled: false,
@@ -1762,7 +1762,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-03',
           label: 'Bench Fixture C',
-          detail: 'USB-C 端口 C',
+          detail: '',
           updateEligible: false,
           currentTemperatureC: 24.8,
           heaterEnabled: false,
