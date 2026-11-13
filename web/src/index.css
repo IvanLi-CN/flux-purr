@@ -9432,7 +9432,8 @@
   display: grid;
   grid-template-columns: minmax(15rem, 1.2fr) minmax(11rem, 0.8fr);
   gap: 0.8rem;
-  padding: 1.05rem;
+  row-gap: 0.8rem;
+  padding: 1rem;
   border-radius: 16px;
   background: var(--industrial-bg);
   box-shadow:
@@ -9464,7 +9465,7 @@
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.4rem;
+  gap: 0.5rem;
   min-width: 0;
   padding: 0.38rem;
   border: 0;
@@ -9517,7 +9518,7 @@
 .firmware-workbench__native-target,
 .firmware-workbench__browser-target {
   display: grid;
-  gap: 0.35rem;
+  gap: 0.5rem;
   min-width: 0;
 }
 
@@ -9561,7 +9562,7 @@
 .firmware-workbench__artifact {
   display: grid;
   grid-column: 1 / -1;
-  gap: 0.35rem;
+  gap: 0.4rem;
   min-width: 0;
 }
 
@@ -9988,7 +9989,7 @@
 
 @media (min-width: 681px) {
   .industrial-console__main:has(.firmware-workbench) .firmware-workbench {
-    gap: 0.7rem;
+    gap: 0.55rem;
   }
 
   .industrial-console__main:has(.firmware-workbench) .firmware-workbench__tasks > button {
@@ -9997,12 +9998,13 @@
   }
 
   .industrial-console__main:has(.firmware-workbench) .firmware-workbench__controls {
-    gap: 0.6rem;
-    padding: 0.7rem;
+    gap: 0.7rem;
+    row-gap: 0.8rem;
+    padding: 0.85rem;
   }
 
   .industrial-console__main:has(.firmware-workbench) .firmware-workbench__status {
-    min-height: 8.5rem;
+    min-height: 7.5rem;
   }
 }
 
