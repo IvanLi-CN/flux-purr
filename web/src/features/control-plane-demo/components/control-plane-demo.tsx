@@ -1744,7 +1744,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-01',
           label: 'Bench Fixture A',
-          detail: 'Simulated thermal bench',
+          detail: '热控工位 01',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
           heaterEnabled: visibleDevice.heaterEnabled,
@@ -1753,7 +1753,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-02',
           label: 'Bench Fixture B',
-          detail: 'Simulated thermal bench 2',
+          detail: '热控工位 02',
           updateEligible: true,
           currentTemperatureC: 26.1,
           heaterEnabled: false,
@@ -1762,7 +1762,7 @@ export function ControlPlaneDemo({
         {
           id: 'demo-devd-fp-lab-03',
           label: 'Bench Fixture C',
-          detail: 'Simulated thermal bench 3',
+          detail: '热控工位 03',
           updateEligible: false,
           currentTemperatureC: 24.8,
           heaterEnabled: false,
