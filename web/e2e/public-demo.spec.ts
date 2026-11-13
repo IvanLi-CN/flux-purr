@@ -142,7 +142,7 @@ test.describe('public demo build', () => {
       'Configure · Calibrate · Inspect'
     )
     await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
-    await expect(page.getByText(/#1 · 研发热控台/)).toBeVisible()
+    await expect(page.getByText(/#1 · 研发台/)).toBeVisible()
 
     await selectInspectorOption(page, 'Persona', 'observer')
     await expect(page.getByRole('button', { name: 'Simulate thermal warning' })).toBeDisabled()
@@ -548,9 +548,9 @@ test.describe('public demo build', () => {
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
     await page.getByRole('combobox', { name: 'Current target' }).click()
-    await expect(page.getByRole('option', { name: /研发热控台/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /生产热控台/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /维修热控台/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /研发台/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /生产台/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /维修台/ })).toBeVisible()
     await page.keyboard.press('Escape')
   })
 
@@ -711,7 +711,7 @@ test.describe('public demo build', () => {
     }
 
     await page.goto('/devices/fp-demo-03/overview?demo=true&demoScene=offline')
-    await expect(page.getByText('维修热控台', { exact: true })).toBeVisible()
+    await expect(page.getByText('维修台', { exact: true })).toBeVisible()
     await expect(page.getByText('-54 dBm')).toHaveCount(0)
 
     await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')
