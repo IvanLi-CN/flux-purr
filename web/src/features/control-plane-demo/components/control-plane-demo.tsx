@@ -1743,7 +1743,7 @@ export function ControlPlaneDemo({
       return [
         {
           id: 'demo-devd-fp-lab-01',
-          label: '研发台',
+          label: 'Research Bench',
           detail: '/dev/cu.usbmodem14101',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
@@ -1752,7 +1752,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-02',
-          label: '生产台',
+          label: 'Production Bench',
           detail: '/dev/cu.usbmodem14102',
           updateEligible: true,
           currentTemperatureC: 26.1,
@@ -1761,7 +1761,7 @@ export function ControlPlaneDemo({
         },
         {
           id: 'demo-devd-fp-lab-03',
-          label: '维修台',
+          label: 'Service Bench',
           detail: '/dev/cu.usbmodem14103',
           updateEligible: false,
           currentTemperatureC: 24.8,

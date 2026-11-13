@@ -142,7 +142,7 @@ test.describe('public demo build', () => {
       'Configure · Calibrate · Inspect'
     )
     await page.getByRole('button', { name: 'Simulate thermal warning' }).click()
-    await expect(page.getByText(/#1 · 研发台/)).toBeVisible()
+    await expect(page.getByText(/#1 · Research Bench/)).toBeVisible()
 
     await selectInspectorOption(page, 'Persona', 'observer')
     await expect(page.getByRole('button', { name: 'Simulate thermal warning' })).toBeDisabled()
@@ -543,14 +543,14 @@ test.describe('public demo build', () => {
     await expect(inspector).toHaveAttribute('data-placement', 'left')
   })
 
-  test('uses English names for every demo target fixture', async ({ page }) => {
+  test('uses concise names for every demo target fixture', async ({ page }) => {
     await page.goto('/')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
     await page.getByRole('combobox', { name: 'Current target' }).click()
-    await expect(page.getByRole('option', { name: /研发台/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /生产台/ })).toBeVisible()
-    await expect(page.getByRole('option', { name: /维修台/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Research Bench/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Production Bench/ })).toBeVisible()
+    await expect(page.getByRole('option', { name: /Service Bench/ })).toBeVisible()
     await page.keyboard.press('Escape')
   })
 
@@ -711,7 +711,7 @@ test.describe('public demo build', () => {
     }
 
     await page.goto('/devices/fp-demo-03/overview?demo=true&demoScene=offline')
-    await expect(page.getByText('维修台', { exact: true })).toBeVisible()
+    await expect(page.getByText('Service Bench', { exact: true })).toBeVisible()
     await expect(page.getByText('-54 dBm')).toHaveCount(0)
 
     await page.goto('/devices/fp-lab-01/update?demo=true&demoScene=blocked-artifact')

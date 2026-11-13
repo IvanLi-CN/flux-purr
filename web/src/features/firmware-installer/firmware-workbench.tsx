@@ -1371,21 +1371,21 @@ export function FirmwareWorkbench({
                       ? [
                           {
                             id: 'mock-a',
-                            label: '研发台',
+                            label: 'Research Bench',
                             detail: 'VID 0x303A · PID 0x1001',
                             index: -1,
                             online: true,
                           },
                           {
                             id: 'mock-b',
-                            label: '生产台',
+                            label: 'Production Bench',
                             detail: 'VID 0x303A · PID 0x1001',
                             index: -2,
                             online: true,
                           },
                           {
                             id: 'mock-c',
-                            label: '维修台',
+                            label: 'Service Bench',
                             detail: 'VID 0x303A · PID 0x1001',
                             index: -3,
                             online: false,
