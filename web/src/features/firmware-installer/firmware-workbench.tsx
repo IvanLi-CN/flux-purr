@@ -152,6 +152,7 @@ export function FirmwareWorkbench({
   // Default to the non-destructive path; recovery remains an explicit choice because it erases MCU flash.
   const [operation, setOperation] = useState<FirmwareOperation>('update')
   const [transport, setTransport] = useState<FirmwareTransport>('browser')
+  const [mockBrowserDeviceId, setMockBrowserDeviceId] = useState('mock-a')
   const [nativeTargetId, setNativeTargetId] = useState<string | null>(null)
   const [channel, setChannel] = useState<FirmwareChannel>('stable')
   const [includeRc, setIncludeRc] = useState(false)
@@ -1384,7 +1385,7 @@ export function FirmwareWorkbench({
               transport === 'devd'
                 ? `devd:${nativeTargetId ?? ''}`
                 : mockExecution
-                  ? 'browser:mock'
+                  ? `browser:${mockBrowserDeviceId}`
                   : `browser:${browserDeviceIndex >= 0 ? browserDeviceIndex : 'none'}`
             }
             disabled={busy}
@@ -1398,8 +1399,9 @@ export function FirmwareWorkbench({
                 setNativeTargetId(value.slice('devd:'.length))
                 return
               }
-              if (value === 'browser:mock') {
+              if (value.startsWith('browser:mock-')) {
                 setTransport('browser')
+                setMockBrowserDeviceId(value.slice('browser:'.length))
                 setBrowserSelectedPort(null)
                 return
               }
@@ -1433,11 +1435,24 @@ export function FirmwareWorkbench({
                     ...(mockExecution
                       ? [
                           {
-                            id: 'mock',
+                            id: 'mock-a',
                             label: 'Bench Fixture A · 在线',
                             index: -1,
+                            online: true,
                           },
-                        ]
+                          {
+                            id: 'mock-b',
+                            label: 'Bench Fixture B · 在线',
+                            index: -2,
+                            online: true,
+                          },
+                          {
+                            id: 'mock-c',
+                            label: 'Bench Fixture C · 离线',
+                            index: -3,
+                            online: false,
+                          },
+                        ].sort((left, right) => Number(right.online) - Number(left.online))
                       : []),
                     ...rememberedBrowserPorts.map((port, index) => {
                       const info = port.getInfo?.()
@@ -1449,12 +1464,18 @@ export function FirmwareWorkbench({
                         id: `browser-${usbId}-${String(port)}`,
                         label: `${usbId || '已授权设备'} · 在线`,
                         index,
+                        online: true,
                       }
                     }),
                   ].map((device) => (
                     <SelectItem
                       key={device.id}
-                      value={device.id === 'mock' ? 'browser:mock' : `browser:${device.index}`}
+                      value={
+                        device.id.startsWith('mock-')
+                          ? `browser:${device.id}`
+                          : `browser:${device.index}`
+                      }
+                      disabled={device.online === false}
                     >
                       {device.label}
                     </SelectItem>

@@ -1743,12 +1743,30 @@ export function ControlPlaneDemo({
       return [
         {
           id: 'demo-devd-fp-lab-01',
-          label: visibleDevice.alias,
-          detail: '演示 devd · 模拟在线目标',
+          label: 'Bench Fixture A',
+          detail: '演示 devd · USB-C 端口 A',
           updateEligible: true,
           currentTemperatureC: visibleDevice.currentTempC,
           heaterEnabled: visibleDevice.heaterEnabled,
           online: true,
+        },
+        {
+          id: 'demo-devd-fp-lab-02',
+          label: 'Bench Fixture B',
+          detail: '演示 devd · USB-C 端口 B',
+          updateEligible: true,
+          currentTemperatureC: 26.1,
+          heaterEnabled: false,
+          online: true,
+        },
+        {
+          id: 'demo-devd-fp-lab-03',
+          label: 'Bench Fixture C',
+          detail: '演示 devd · USB-C 端口 C',
+          updateEligible: false,
+          currentTemperatureC: 24.8,
+          heaterEnabled: false,
+          online: false,
         },
       ]
     }
