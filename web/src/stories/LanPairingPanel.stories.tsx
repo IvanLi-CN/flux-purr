@@ -308,7 +308,7 @@ export const PrivateNetworkBlocked: Story = {
   args: {
     connectDevice: async () => {
       throw new ControlPlaneClientError(
-        '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。',
+        'LAN 设备暂时无响应。请检查设备地址、网络连接或浏览器私网访问权限。',
         'lan_transport_unavailable',
         false
       )
@@ -318,7 +318,7 @@ export const PrivateNetworkBlocked: Story = {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: '连接设备' }))
     await expect(
-      canvas.getByText('无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。')
+      canvas.getByText('LAN 设备暂时无响应。请检查设备地址、网络连接或浏览器私网访问权限。')
     ).toBeVisible()
     expect(canvas.queryByLabelText('四位配对码')).toBeNull()
   },
