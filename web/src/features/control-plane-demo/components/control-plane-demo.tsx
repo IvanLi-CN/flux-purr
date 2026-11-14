@@ -1100,8 +1100,14 @@ export function ControlPlaneDemo({
   })
   useEffect(() => {
     if (activeView === 'add-device' && previousActiveViewRef.current !== 'add-device') {
-      setSelectedAddDeviceKind(defaultAddDeviceKind)
-      setAddDeviceStage('choose')
+      setSelectedAddDeviceKind(
+        allowDemoControls && webSerialOptions?.demoPresetActive
+          ? 'web-serial'
+          : defaultAddDeviceKind
+      )
+      setAddDeviceStage(
+        allowDemoControls && webSerialOptions?.demoPresetActive ? 'configure' : 'choose'
+      )
       setFeedback({
         title: 'WiFi / LAN',
         detail: '输入设备地址并获取 LAN 租约，随后进入在线设备控制。',
@@ -1109,7 +1115,7 @@ export function ControlPlaneDemo({
       })
     }
     previousActiveViewRef.current = activeView
-  }, [activeView])
+  }, [activeView, allowDemoControls, webSerialOptions?.demoPresetActive])
   const activeScenario = liveScenario
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
