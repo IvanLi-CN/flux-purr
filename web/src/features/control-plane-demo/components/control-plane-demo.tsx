@@ -133,6 +133,7 @@ import {
   type LanDeviceSession,
   type LanLease,
   type LanProbe,
+  type LanPublicInfo,
   type LanSubnetScanOptions,
   lanProbeToDeviceTarget,
   listSavedLanDeviceSessions,
@@ -308,6 +309,17 @@ function createDemoLanScan(
       options.onProgress?.({ done: step, total })
     }
     return devices
+  }
+}
+
+async function createDemoLanConnection(address: string): Promise<LanPublicInfo> {
+  const hostname = new URL(address).hostname
+  return {
+    api: 'v1',
+    deviceId: `demo-lan-${hostname.replaceAll('.', '-')}`,
+    hostname,
+    firmwareVersion: 'fw/v0.4.0-demo',
+    pairing: { mode: 'unavailable', active: true, attemptsRemaining: 0 },
   }
 }
 
@@ -847,6 +859,8 @@ export function ControlPlaneDemo({
     if (!allowDemoControls || lanPairing?.scanDevices) return lanPairing
     return {
       ...lanPairing,
+      connectDevice: createDemoLanConnection,
+      resumeSession: async () => null,
       scanDevices: createDemoLanScan(demoLanScanResults),
     }
   }, [allowDemoControls, demoLanScanResults, lanPairing])
