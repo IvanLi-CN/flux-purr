@@ -5117,7 +5117,10 @@ function RouteDeviceRecovery({
   identityId: string
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   transport?: DeviceConnectionKind
   retry: () => void
   onDeviceSelect: (deviceId: string) => void
@@ -6241,7 +6244,10 @@ function ViewPanel({
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
   mockOnly: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported' | 'wifiOperationInterruption'>
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'wifiOperationInterruption' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -6580,7 +6586,10 @@ function AddDeviceView({
   devdBaseUrl,
 }: {
   allowDemoControls: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   onAddDevice: (kind: AddDeviceKind) => void
   selectedAddDeviceKind: AddDeviceKind
   addDeviceStage: 'choose' | 'configure'
@@ -6631,6 +6640,9 @@ function AddDeviceView({
           {selectedAddDeviceKind === 'wifi' ? (
             <LanPairingPanel {...lanPairing} onPaired={onLanPaired} />
           ) : null}
+          {selectedAddDeviceKind === 'web-serial' ? (
+            <WebSerialPairingPanel webSerial={webSerial} />
+          ) : null}
           {selectedAddDeviceKind === 'bridge' ? (
             <BridgeTargetPanel
               devices={knownDevices}
@@ -6642,6 +6654,99 @@ function AddDeviceView({
         </>
       )}
     </div>
+  )
+}
+
+function WebSerialPairingPanel({
+  webSerial,
+}: {
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
+}) {
+  const isConnecting = webSerial.state === 'connecting'
+  const isConnected = webSerial.state === 'connected'
+  const hasError = webSerial.state === 'error'
+  const isUnsupported = webSerial.state === 'unsupported' || !webSerial.supported
+
+  const content = isUnsupported
+    ? {
+        icon: <Usb aria-hidden="true" />,
+        eyebrow: '浏览器能力不可用',
+        title: '无法使用 Web Serial',
+        detail: '请使用支持 Web Serial 的 Chrome、Chromium 或 Edge，并在安全上下文中打开此页面。',
+        action: '检查浏览器环境',
+      }
+    : isConnecting
+      ? {
+          icon: <LoaderCircle className="animate-spin" aria-hidden="true" />,
+          eyebrow: '等待浏览器选择',
+          title: '正在连接 Web Serial',
+          detail: '请在浏览器对话框中选择设备端口。选择完成后会自动读取设备身份。',
+          action: '重新打开选择窗口',
+        }
+      : isConnected
+        ? {
+            icon: <CheckCircle2 aria-hidden="true" />,
+            eyebrow: '连接已建立',
+            title: 'Web Serial 设备已连接',
+            detail: webSerial.deviceIdentityId
+              ? `设备 ID · ${webSerial.deviceIdentityId}`
+              : '设备端口已就绪，可以进入设备控制。',
+            action: '更换设备',
+          }
+        : {
+            icon: hasError ? <AlertTriangle aria-hidden="true" /> : <Usb aria-hidden="true" />,
+            eyebrow: hasError ? '连接未完成' : '需要浏览器授权',
+            title: hasError ? '没有完成 Web Serial 连接' : '选择一个浏览器设备',
+            detail: hasError
+              ? webSerial.error || '设备选择被取消或端口无法打开。请确认设备已连接，再重新选择。'
+              : '点击下方按钮打开浏览器设备选择窗口。系统只会读取你明确选择的串口设备。',
+            action: hasError ? '重新选择设备' : '选择 Web Serial 设备',
+          }
+
+  const handleConnect = () => {
+    if (isUnsupported || isConnecting) return
+    void webSerial.connect({ forcePortSelection: true, replaceExisting: isConnected })
+  }
+
+  return (
+    <section className="industrial-web-serial-pairing-panel" aria-label="Web Serial 连接">
+      <div className="industrial-web-serial-pairing-panel__hero">
+        <span
+          className={`industrial-web-serial-pairing-panel__icon is-${hasError ? 'error' : isConnected ? 'success' : 'idle'}`}
+        >
+          {content.icon}
+        </span>
+        <div>
+          <p className="industrial-label">{content.eyebrow}</p>
+          <h2>{content.title}</h2>
+          <p>{content.detail}</p>
+        </div>
+      </div>
+      <div className="industrial-web-serial-pairing-panel__steps">
+        <div className={isConnecting || isConnected ? 'is-active' : undefined}>
+          <span>01</span>
+          <strong>选择设备</strong>
+          <small>浏览器会打开端口选择窗口</small>
+        </div>
+        <div className={isConnected ? 'is-active' : undefined}>
+          <span>02</span>
+          <strong>读取身份</strong>
+          <small>验证设备并加载控制能力</small>
+        </div>
+        <div className={isConnected ? 'is-active' : undefined}>
+          <span>03</span>
+          <strong>进入控制</strong>
+          <small>连接成功后切换到设备工作区</small>
+        </div>
+      </div>
+      <Button type="button" onClick={handleConnect} disabled={isUnsupported || isConnecting}>
+        {isConnecting ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
+        {content.action}
+      </Button>
+    </section>
   )
 }
 

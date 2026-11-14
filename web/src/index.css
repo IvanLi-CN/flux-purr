@@ -4012,6 +4012,11 @@
     height: 100%;
   }
 
+  .industrial-add-device-flow:has(.industrial-web-serial-pairing-panel) {
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100%;
+  }
+
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel) .industrial-lan-pairing-panel {
     display: flex;
     min-height: 0;
@@ -4050,6 +4055,102 @@
     .industrial-lan-pairing-panel__scan-results {
     min-height: 0;
     overflow: visible;
+  }
+
+  .industrial-web-serial-pairing-panel {
+    display: grid;
+    align-content: center;
+    gap: 1.25rem;
+    min-height: 0;
+    height: 100%;
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 68%, var(--industrial-light) 32%);
+    border-radius: 14px;
+    background: color-mix(in oklch, var(--industrial-panel) 78%, var(--industrial-bg) 22%);
+    padding: clamp(1.25rem, 3vw, 2.5rem);
+  }
+
+  .industrial-web-serial-pairing-panel__hero {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+    max-width: 44rem;
+  }
+
+  .industrial-web-serial-pairing-panel__icon {
+    display: grid;
+    place-items: center;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 12px;
+    background: color-mix(in oklch, var(--industrial-accent) 14%, var(--industrial-panel) 86%);
+    color: var(--industrial-accent);
+  }
+
+  .industrial-web-serial-pairing-panel__icon.is-error {
+    color: var(--industrial-danger);
+    background: color-mix(in oklch, var(--industrial-danger) 12%, var(--industrial-panel) 88%);
+  }
+
+  .industrial-web-serial-pairing-panel__icon.is-success {
+    color: #17794c;
+    background: color-mix(in oklch, #17794c 12%, var(--industrial-panel) 88%);
+  }
+
+  .industrial-web-serial-pairing-panel__hero h2 {
+    margin: 0.18rem 0 0.45rem;
+    color: var(--industrial-text);
+    font-size: clamp(1.25rem, 2vw, 1.8rem);
+  }
+
+  .industrial-web-serial-pairing-panel__hero p:last-child {
+    max-width: 40rem;
+    margin: 0;
+    color: var(--industrial-muted-text);
+    line-height: 1.55;
+  }
+
+  .industrial-web-serial-pairing-panel__steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 0.65rem;
+    max-width: 48rem;
+  }
+
+  .industrial-web-serial-pairing-panel__steps > div {
+    display: grid;
+    gap: 0.22rem;
+    border: 1px solid rgba(95, 128, 148, 0.22);
+    border-radius: 10px;
+    background: rgba(250, 253, 253, 0.3);
+    padding: 0.75rem;
+  }
+
+  .industrial-web-serial-pairing-panel__steps > div.is-active {
+    border-color: rgba(22, 131, 74, 0.4);
+    background: rgba(22, 131, 74, 0.08);
+  }
+
+  .industrial-web-serial-pairing-panel__steps span {
+    color: var(--industrial-muted-text);
+    font:
+      800 0.66rem "JetBrains Mono",
+      monospace;
+  }
+
+  .industrial-web-serial-pairing-panel__steps strong {
+    color: var(--industrial-text);
+    font-size: 0.8rem;
+  }
+
+  .industrial-web-serial-pairing-panel__steps small {
+    color: var(--industrial-muted-text);
+    font-size: 0.7rem;
+    line-height: 1.4;
+  }
+
+  .industrial-web-serial-pairing-panel > button {
+    justify-self: start;
   }
 
   .industrial-recent-device-list {
