@@ -399,11 +399,6 @@ export function LanPairingPanel({
                 已扫描 {scanProgress.done} / {scanProgress.total || '...'}
               </output>
             ) : null}
-            {scanState === 'ready' && scanResults.length === 0 ? (
-              <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
-                未发现设备
-              </output>
-            ) : null}
             {scanError ? (
               <output
                 className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
