@@ -167,6 +167,12 @@ The palette describes workshop materials and operational signals rather than bra
 
 The application fills the dynamic viewport and centers a bounded instrument chassis. Inside it, identity and view controls lead into a workspace that pairs the active task with a persistent event surface on wide screens. At narrower widths, grids collapse, control groups stack, and the event surface compresses without abandoning the physical metaphor.
 
+### Standard desktop canvas
+
+The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
+
+The adaptive layout is a separate responsive mode. It uses the available dynamic viewport, collapses columns, stacks controls, and assigns scrolling to the active work area. Mobile dimensions and flow are evaluated for reachability and legibility, not for pixel parity with the standard desktop canvas.
+
 Spacing is compact and repetitive: the small and medium rhythm separates controls, while larger gaps separate functional modules. Repeated controls use stable tracks, minimum heights, and bounded panels so state changes do not shift the surrounding layout. Interactive targets remain at least 48px on mobile.
 
 **The One Bench Rule.** Keep one active device and its immediate workflow in view; do not turn the console into a fleet dashboard or a field of unrelated cards.
