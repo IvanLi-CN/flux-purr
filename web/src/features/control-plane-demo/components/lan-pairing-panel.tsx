@@ -294,7 +294,6 @@ export function LanPairingPanel({
     }
     setSelectedScanBaseUrl(device.baseUrl)
     setPublicInfo(device.info)
-    setMessage(`已选择 ${device.info.hostname}，点击连接以打开设备控制。`)
   }
 
   const refreshPairing = async () => {
