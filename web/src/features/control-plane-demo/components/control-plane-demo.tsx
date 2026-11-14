@@ -4901,7 +4901,11 @@ export function ControlPlaneDemo({
           <div
             className={
               isDeviceAddFlowActive
-                ? 'industrial-console__workspace industrial-console__workspace--add-device'
+                ? `industrial-console__workspace ${
+                    addDeviceStage === 'configure'
+                      ? 'industrial-console__workspace--add-device'
+                      : 'industrial-console__workspace--selection'
+                  }`
                 : isFirmwareWorkspace
                   ? 'industrial-console__workspace industrial-console__workspace--firmware'
                   : 'industrial-console__workspace'
@@ -5003,9 +5007,9 @@ export function ControlPlaneDemo({
 
             {isFirmwareWorkspace ? (
               <FirmwareTransactionLog entries={firmwareActivity} />
-            ) : (
+            ) : isDeviceAddFlowActive && addDeviceStage === 'configure' ? (
               <GlobalLogPanel events={visibleEvents} />
-            )}
+            ) : null}
           </div>
         </section>
       </div>
