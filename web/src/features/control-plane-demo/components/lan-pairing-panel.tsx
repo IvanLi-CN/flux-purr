@@ -211,11 +211,15 @@ export function LanPairingPanel({
         if (error instanceof ControlPlaneClientError && error.code === 'unauthorized') {
           setPairingMessage(lanPairingFailureMessage(error))
         } else {
-          throw error
+          setState('error')
+          setMessage(`已找到已保存的配对凭据，但验证设备失败：${lanPairingFailureMessage(error)}`)
+          return
         }
       }
       if (info.pairing.mode === 'required') {
-        setMessage(`已连接 ${info.hostname}。输入四位配对码后才可启用控制。`)
+        setMessage(
+          `未找到 ${info.hostname} 的已保存配对凭据。首次在此浏览器中连接需要输入四位配对码；之后将自动复用。`
+        )
         setPairingDialogOpen(true)
         return
       }
