@@ -556,22 +556,32 @@ export async function resumeLanDeviceSession(
   health: Pick<LanPublicInfo, 'deviceId'>,
   probe: (session: LanDeviceSession) => Promise<LanProbe> = (session) => probeLanDevice(session)
 ): Promise<ResumedLanDeviceSession | null> {
-  const session = loadLanDeviceSession(baseUrl)
+  const normalizedBaseUrl = normalizeLanBaseUrl(baseUrl)
+  const session =
+    loadLanDeviceSession(normalizedBaseUrl) ??
+    listSavedLanDeviceSessions().find((candidate) => candidate.deviceId === health.deviceId)
   if (!session) return null
 
   if (session.deviceId && session.deviceId !== health.deviceId) {
-    forgetLanDeviceSession(baseUrl)
+    forgetLanDeviceSession(normalizedBaseUrl)
     return null
   }
 
+  // DHCP and mDNS can change the address between visits. The device identity
+  // is stable, so move the saved bearer to the address that just answered the
+  // anonymous health probe before resuming the authenticated session.
+  const currentSession =
+    session.baseUrl === normalizedBaseUrl ? session : { ...session, baseUrl: normalizedBaseUrl }
+  if (currentSession !== session) storeLanDeviceSession(currentSession)
+
   try {
-    const snapshot = await probe(session)
+    const snapshot = await probe(currentSession)
     if (snapshot.identity.deviceId !== health.deviceId) {
       forgetLanDeviceSession(baseUrl)
       return null
     }
     return {
-      session: rememberLanDeviceIdentity(session, snapshot),
+      session: rememberLanDeviceIdentity(currentSession, snapshot),
       probe: snapshot,
     }
   } catch (error) {

@@ -272,6 +272,56 @@ describe('LAN browser client', () => {
     }
   })
 
+  it('reuses a saved bearer when the same device receives a new LAN address', async () => {
+    const records = new Map<string, string>()
+    const storage = {
+      get length() {
+        return records.size
+      },
+      clear: () => records.clear(),
+      getItem: (key: string) => records.get(key) ?? null,
+      key: (index: number) => Array.from(records.keys())[index] ?? null,
+      removeItem: (key: string) => records.delete(key),
+      setItem: (key: string, value: string) => records.set(key, value),
+    } as Storage
+    vi.stubGlobal('window', { localStorage: storage })
+    try {
+      storeLanDeviceSession({
+        baseUrl: 'http://192.168.1.10',
+        token: 'a'.repeat(64),
+        deviceId: '001122334455',
+        hostname: 'flux-purr-001122334455',
+      })
+      const probe = {
+        identity: {
+          deviceId: '001122334455',
+          hostname: 'flux-purr-001122334455',
+          firmwareVersion: '1.0.0',
+          buildId: 'build-1',
+          capabilities: [],
+        },
+      } as unknown as Awaited<ReturnType<typeof probeLanDevice>>
+
+      const resumed = await resumeLanDeviceSession(
+        'http://192.168.1.11',
+        { deviceId: '001122334455' },
+        async (session) => {
+          expect(session.baseUrl).toBe('http://192.168.1.11')
+          expect(session.token).toBe('a'.repeat(64))
+          return probe
+        }
+      )
+
+      expect(resumed?.session.baseUrl).toBe('http://192.168.1.11')
+      expect(loadLanDeviceSession('http://192.168.1.11')).toMatchObject({
+        deviceId: '001122334455',
+        token: 'a'.repeat(64),
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('accepts Chromium but explicitly excludes Safari direct-LAN mode', () => {
     expect(isChromiumPrivateNetworkSupported('Mozilla/5.0 Chrome/140.0.0.0 Safari/537.36')).toBe(
       true
