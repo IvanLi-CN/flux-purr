@@ -572,7 +572,7 @@ test.describe('control plane direct LAN', () => {
 async function openLanPairing(page: Page) {
   await page.getByRole('button', { name: '目标设备' }).click()
   await page.getByRole('button', { name: '添加设备' }).click()
-  const wifi = page.getByRole('button', { name: 'WiFi', exact: true })
+  const wifi = page.getByRole('button', { name: /WiFi/ })
   await wifi.click()
   await expect(wifi).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByLabel('WiFi LAN pairing')).toBeVisible()
