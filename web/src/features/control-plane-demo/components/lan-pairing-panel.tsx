@@ -1,9 +1,10 @@
 import { LoaderCircle, MonitorSmartphone, ScanSearch, Wifi, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   claimLanPairing,
+  clearRecentLanScanCidrs,
   type DiscoveredLanDevice,
   getLanPairingMetadata,
   getLanPublicInfo,
@@ -12,9 +13,11 @@ import {
   type LanPublicInfo,
   loadLanAddress,
   loadLanScanCidr,
+  loadRecentLanScanCidrs,
   normalizeLanBaseUrl,
   probeLanDevice,
   rememberLanDeviceIdentity,
+  rememberLanScanCidr,
   resumeLanDeviceSession,
   scanLanSubnet,
   storeLanAddress,
@@ -98,7 +101,20 @@ export function LanPairingPanel({
   const [selectedScanBaseUrl, setSelectedScanBaseUrl] = useState<string | null>(null)
   const [scanState, setScanState] = useState<'idle' | 'scanning' | 'ready' | 'error'>('idle')
   const [scanError, setScanError] = useState('')
+  const [recentCidrs, setRecentCidrs] = useState(loadRecentLanScanCidrs)
+  const [recentCidrsWidth, setRecentCidrsWidth] = useState(0)
   const scanControllerRef = useRef<AbortController | null>(null)
+  const recentCidrsRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const element = recentCidrsRef.current
+    if (!element) return
+    const updateWidth = () => setRecentCidrsWidth(element.clientWidth)
+    updateWidth()
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(
     () => () => {
@@ -116,6 +132,8 @@ export function LanPairingPanel({
     setScanResults([])
     setSelectedScanBaseUrl(null)
     setScanProgress({ done: 0, total: 0 })
+    rememberLanScanCidr(scanCidr)
+    setRecentCidrs(loadRecentLanScanCidrs())
     try {
       const devices = await scanDevices(scanCidr, {
         signal: controller.signal,
@@ -134,6 +152,12 @@ export function LanPairingPanel({
       }
     }
   }
+
+  const recentCidrCount = Math.max(
+    0,
+    Math.min(recentCidrs.length, Math.floor((recentCidrsWidth - 5.5 * 16) / (8 * 16)))
+  )
+  const visibleRecentCidrs = recentCidrs.slice(0, recentCidrCount)
 
   const cancelScan = () => {
     scanControllerRef.current?.abort()
@@ -343,6 +367,31 @@ export function LanPairingPanel({
                 </Button>
               )}
             </form>
+
+            <div ref={recentCidrsRef} className="industrial-lan-pairing-panel__recent-cidrs">
+              {visibleRecentCidrs.map((cidr) => (
+                <button
+                  key={cidr}
+                  type="button"
+                  className="industrial-chip"
+                  onClick={() => setScanCidr(cidr)}
+                >
+                  {cidr}
+                </button>
+              ))}
+              {recentCidrs.length > 0 ? (
+                <button
+                  type="button"
+                  className="industrial-chip industrial-chip--clear"
+                  onClick={() => {
+                    clearRecentLanScanCidrs()
+                    setRecentCidrs([])
+                  }}
+                >
+                  清理记录
+                </button>
+              ) : null}
+            </div>
 
             {scanState === 'scanning' ? (
               <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">

@@ -4387,6 +4387,37 @@
     align-items: end;
   }
 
+  .industrial-lan-pairing-panel__recent-cidrs {
+    display: flex;
+    min-width: 0;
+    gap: 0.4rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .industrial-chip {
+    flex: 0 0 auto;
+    min-height: 1.8rem;
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 54%, var(--industrial-light) 46%);
+    border-radius: 999px;
+    background: var(--industrial-bg);
+    padding: 0.3rem 0.62rem;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.68rem;
+    font-weight: 800;
+  }
+
+  .industrial-chip:hover,
+  .industrial-chip:focus-visible {
+    border-color: var(--industrial-accent);
+    color: var(--industrial-accent);
+  }
+
+  .industrial-chip--clear {
+    color: var(--industrial-danger);
+  }
+
   .industrial-lan-pairing-panel__scan-status {
     display: flex;
     align-items: center;

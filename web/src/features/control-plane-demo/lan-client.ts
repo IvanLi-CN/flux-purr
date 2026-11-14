@@ -5,6 +5,7 @@ import type { DeviceTarget } from './types'
 const LAN_STORAGE_PREFIX = 'flux-purr:lan-device:'
 const LAN_ADDRESS_STORAGE_KEY = 'flux-purr:lan-address'
 const LAN_SCAN_CIDR_STORAGE_KEY = 'flux-purr:lan-scan-cidr'
+const LAN_SCAN_CIDRS_STORAGE_KEY = 'flux-purr:lan-scan-cidrs'
 const LAN_LEASE_TTL_MS = 30_000
 
 export type LanPairingMode = 'required' | 'optional' | 'unavailable'
@@ -528,6 +529,33 @@ export function storeLanScanCidr(cidr: string) {
 
 export function loadLanScanCidr(fallback: string) {
   return getStorage()?.getItem(LAN_SCAN_CIDR_STORAGE_KEY)?.trim() || fallback
+}
+
+export function loadRecentLanScanCidrs() {
+  const raw = getStorage()?.getItem(LAN_SCAN_CIDRS_STORAGE_KEY)
+  if (!raw) return []
+  try {
+    const value = JSON.parse(raw)
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function rememberLanScanCidr(cidr: string) {
+  const normalized = cidr.trim()
+  if (!normalized) return
+  const next = [
+    normalized,
+    ...loadRecentLanScanCidrs().filter((item) => item !== normalized),
+  ].slice(0, 12)
+  getStorage()?.setItem(LAN_SCAN_CIDRS_STORAGE_KEY, JSON.stringify(next))
+}
+
+export function clearRecentLanScanCidrs() {
+  getStorage()?.removeItem(LAN_SCAN_CIDRS_STORAGE_KEY)
 }
 
 export function loadLanDeviceSession(baseUrl: string): LanDeviceSession | null {
