@@ -520,6 +520,31 @@ describe('LAN browser client', () => {
     expect(session.controlRevision).toBe(16)
   })
 
+  it('allows read-only thermal tuning status without a mutation lease', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ phase: 'idle', trialPurpose: 'scout' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const session = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 7,
+    }
+
+    await authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher)
+
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://192.168.1.10/api/v1/thermal-tuning',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ Authorization: `Bearer ${session.token}` }),
+      })
+    )
+    expect(fetcher.mock.calls[0]?.[1]?.headers).not.toHaveProperty('X-Flux-Purr-Lease')
+  })
+
   it('persists a successful LAN write revision for the next reloaded write', async () => {
     const records = new Map<string, string>()
     vi.stubGlobal('window', {
