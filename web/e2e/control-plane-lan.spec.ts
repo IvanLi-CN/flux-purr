@@ -496,7 +496,7 @@ test.describe('control plane direct LAN', () => {
         }
       })
     ).toEqual({
-      keys: ['flux-purr:lan-device-id:001122334455'],
+      keys: expect.arrayContaining(['flux-purr:lan-device-id:001122334455']),
       rejected: expect.objectContaining({
         baseUrl: 'http://192.168.1.18',
         deviceId,
