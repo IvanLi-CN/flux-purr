@@ -3957,9 +3957,9 @@
     display: grid;
     gap: 0.85rem;
     margin-top: 1rem;
-    border: 1px solid color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-muted) 62%);
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 68%, var(--industrial-light) 32%);
     border-radius: 10px;
-    background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-accent) 12%);
+    background: var(--industrial-panel);
     padding: 1rem;
   }
 
@@ -4199,8 +4199,8 @@
     height: 2rem;
     place-items: center;
     border-radius: 8px;
-    background: #0f7890;
-    color: #f4ffff;
+    background: var(--industrial-accent);
+    color: #ffffff;
   }
 
   .industrial-lan-pairing-panel__heading strong,
@@ -4537,12 +4537,16 @@
   }
 
   .industrial-known-device-card {
-    border: 1px solid rgba(255, 255, 255, 0.54);
-    border-radius: 16px;
-    background: var(--industrial-bg);
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 72%, var(--industrial-light) 28%);
+    border-radius: 12px;
+    background: var(--industrial-panel);
     box-shadow:
-      6px 6px 12px var(--industrial-shadow),
-      -6px -6px 12px var(--industrial-light);
+      inset 2px 2px 5px color-mix(in oklch, var(--industrial-shadow) 40%, transparent),
+      inset -2px -2px 5px color-mix(in oklch, var(--industrial-light) 75%, transparent);
+    transition:
+      border-color 160ms ease,
+      box-shadow 160ms ease,
+      color 160ms ease;
   }
 
   .industrial-known-device-card {
@@ -4557,7 +4561,6 @@
   }
 
   .industrial-known-device-card:hover {
-    transform: translateY(-1px);
     color: var(--industrial-accent);
   }
 
@@ -4692,9 +4695,11 @@
 
   .industrial-add-device-option.is-selected {
     color: var(--industrial-accent);
+    border-color: var(--industrial-accent);
     box-shadow:
-      inset 5px 5px 10px var(--industrial-shadow),
-      inset -5px -5px 10px var(--industrial-light);
+      inset 4px 4px 8px color-mix(in oklch, var(--industrial-shadow) 52%, transparent),
+      inset -4px -4px 8px color-mix(in oklch, var(--industrial-light) 82%, transparent),
+      0 0 0 1px color-mix(in oklch, var(--industrial-accent) 35%, transparent);
   }
 
   .industrial-add-device-option:focus-visible {

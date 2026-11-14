@@ -6488,7 +6488,7 @@ function AddDeviceView({
 }) {
   return (
     <div className="industrial-view-panel industrial-view-panel--calibration">
-      <PanelHeader kicker="Add device" title="Choose connection" />
+      <PanelHeader kicker="连接设备" title="选择连接方式" />
       <AddDeviceChoices
         allowDemoControls={allowDemoControls}
         webSerial={webSerial}
