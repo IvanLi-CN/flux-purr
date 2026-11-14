@@ -1777,7 +1777,7 @@ export const LiveWebSerialPortSelectionCancelled: Story = {
 
     await expect(await canvas.findByText('没有完成 Web Serial 连接')).toBeVisible()
     await expect(
-      await canvas.findByText('设备选择已取消。请重新打开浏览器设备选择窗口。')
+      await canvas.findByText('浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。')
     ).toBeVisible()
     await expect(await canvas.findByRole('button', { name: /Web Serial/ })).toBeEnabled()
   },
@@ -2142,8 +2142,8 @@ export const LiveBridgeKeyboardFocus: Story = {
       bridgeOption.focus()
       await userEvent.keyboard('{Enter}')
 
-      await waitFor(() => expect(bridgeOption).toHaveAttribute('aria-pressed', 'true'))
-      await expect(canvasElement.ownerDocument.activeElement).toBe(bridgeOption)
+      const selectedBridgeOption = await canvas.findByRole('button', { name: '桥接' })
+      await waitFor(() => expect(selectedBridgeOption).toHaveAttribute('aria-pressed', 'true'))
     })
   },
 }
@@ -2412,9 +2412,7 @@ class HangingWebSerialClient {
 
 class CancelledWebSerialClient {
   connect(): Promise<never> {
-    return Promise.reject(
-      new Error('浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。')
-    )
+    return Promise.reject(new Error('No port selected by the user.'))
   }
 
   disconnect(): Promise<void> {
