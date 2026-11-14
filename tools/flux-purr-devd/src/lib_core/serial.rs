@@ -240,6 +240,28 @@ pub(crate) async fn serial_lan_pairing_code(
     validate_lan_pairing_code(code)
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct LanAuthPayload {
+    pub token: String,
+}
+
+pub(crate) async fn serial_lan_auth(
+    state: &AppState,
+    target: &DeviceRecord,
+) -> Result<String, HttpError> {
+    let payload =
+        serial_request_payload::<LanAuthPayload>(state, target, "get_lan_auth", "lan_auth").await?;
+    if !crate::lan::is_token(&payload.token) {
+        return Err(HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_lan_auth",
+            "USB returned an invalid LAN authentication token.",
+            false,
+        ));
+    }
+    Ok(payload.token)
+}
+
 pub(crate) async fn serial_open_lan_pairing_window(
     state: &AppState,
     target: &DeviceRecord,

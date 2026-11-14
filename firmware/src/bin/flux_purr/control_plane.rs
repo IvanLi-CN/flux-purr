@@ -4100,12 +4100,14 @@ pub(crate) fn usb_early_request_response(
             true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
-        UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
-            request_id,
-            "startup_busy",
-            "LAN pairing code is not available until runtime initialization completes.",
-            true,
-        ),
+        UsbRequestOp::GetLanPairingCode | UsbRequestOp::GetLanAuth => {
+            usb_error_response_with_retryable(
+                request_id,
+                "startup_busy",
+                "LAN pairing code is not available until runtime initialization completes.",
+                true,
+            )
+        }
         UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
             usb_error_response_with_retryable(
                 request_id,
@@ -4451,12 +4453,14 @@ pub(crate) fn usb_recovery_request_response(
             true,
         ),
         UsbRequestOp::SetLogLevel => usb_response(request_id, UsbResponsePayload::Ack),
-        UsbRequestOp::GetLanPairingCode => usb_error_response_with_retryable(
-            request_id,
-            "hardware_bringup_failed",
-            "LAN pairing code is unavailable because hardware bring-up did not complete.",
-            true,
-        ),
+        UsbRequestOp::GetLanPairingCode | UsbRequestOp::GetLanAuth => {
+            usb_error_response_with_retryable(
+                request_id,
+                "hardware_bringup_failed",
+                "LAN pairing code is unavailable because hardware bring-up did not complete.",
+                true,
+            )
+        }
         UsbRequestOp::OpenLanPairingWindow | UsbRequestOp::CloseLanPairingWindow => {
             usb_error_response_with_retryable(
                 request_id,

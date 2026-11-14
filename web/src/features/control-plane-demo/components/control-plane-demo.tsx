@@ -6903,6 +6903,12 @@ function BridgeTargetPanel({
 
       const probe = await client.probeDevdDevice(devdBaseUrl, device.id, lease.leaseId)
       const connected = bridgeProbeToDeviceTarget(device, probe)
+      // USB ownership is sufficient to establish the local devd LAN session.
+      // Keep the USB connection authoritative even when mDNS is temporarily
+      // unavailable; the authenticated bridge is an opportunistic convenience.
+      await client
+        .establishDevdLanAuth(devdBaseUrl, device.id, lease.leaseId)
+        .catch(() => undefined)
       setConnectionState({ status: 'connected', device: connected })
     } catch (error) {
       setConnectionState({

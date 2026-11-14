@@ -361,6 +361,21 @@ impl NetHttpState {
         }
     }
 
+    /// Establishes a host-authenticated LAN session through USB. This is only
+    /// called by the USB control plane after devd has acquired its device lease.
+    pub fn ensure_token_from_usb(
+        &mut self,
+        entropy: [u8; crate::lan::LAN_TOKEN_BYTES],
+    ) -> LanToken {
+        if let Some(token) = self.token {
+            return token;
+        }
+        let token = LanToken::new(entropy);
+        self.token = Some(token);
+        self.token_dirty = true;
+        token
+    }
+
     /// Only the USB/devd control path may call this method.
     pub fn clear_token_from_usb(&mut self) {
         self.token = None;

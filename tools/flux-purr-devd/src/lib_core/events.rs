@@ -221,7 +221,10 @@ pub(crate) fn redact_lan_pairing_code(value: &mut Value) {
 }
 
 pub(crate) fn is_sensitive_field_key(key: &str) -> bool {
-    key.eq_ignore_ascii_case("password") || key.eq_ignore_ascii_case("psk")
+    key.eq_ignore_ascii_case("password")
+        || key.eq_ignore_ascii_case("psk")
+        || key.eq_ignore_ascii_case("token")
+        || key.eq_ignore_ascii_case("bearer")
 }
 
 pub(crate) fn flash_dry_run_approval(

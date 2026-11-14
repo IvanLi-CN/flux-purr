@@ -328,6 +328,18 @@ pub async fn clear_token_from_usb() {
         .clear_token_from_usb();
 }
 
+/// Returns the persistent LAN bearer to the already-authorized USB/devd host.
+/// The token never enters the browser-facing HTTP API.
+pub async fn ensure_token_from_usb() -> [u8; crate::lan::LAN_TOKEN_BYTES] {
+    CONTROL_STATE
+        .lock()
+        .await
+        .as_mut()
+        .expect("LAN control state initialized")
+        .ensure_token_from_usb(random_entropy())
+        .bytes()
+}
+
 pub async fn take_persisted_token_change() -> Option<Option<[u8; crate::lan::LAN_TOKEN_BYTES]>> {
     CONTROL_STATE
         .lock()

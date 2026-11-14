@@ -103,6 +103,11 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     leaseId: string
   ): Promise<DevdDeviceRecord>
+  establishDevdLanAuth(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<DevdDeviceRecord>
   disconnectDevdDevice(
     devdBaseUrl: string,
     deviceId: string,
@@ -266,6 +271,13 @@ export function createControlPlaneHttpClient(
         {
           method: 'POST',
         }
+      )
+    },
+    establishDevdLanAuth(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/lan-auth/establish?lease_id=${encodeURIComponent(leaseId)}`,
+        { method: 'POST' }
       )
     },
     disconnectDevdDevice(devdBaseUrl, deviceId, leaseId) {

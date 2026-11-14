@@ -277,6 +277,7 @@ pub(crate) async fn process_request_frame(
         UsbRequestOp::ResetPersistence => process_reset_persistence(context, request_id),
         UsbRequestOp::GetNetwork
         | UsbRequestOp::GetLanPairingCode
+        | UsbRequestOp::GetLanAuth
         | UsbRequestOp::OpenLanPairingWindow
         | UsbRequestOp::CloseLanPairingWindow
         | UsbRequestOp::ClearLanPairingToken => {
@@ -526,6 +527,7 @@ pub(crate) async fn process_network_request(
     match op {
         UsbRequestOp::GetNetwork => process_get_network(context, request_id).await,
         UsbRequestOp::GetLanPairingCode => process_get_lan_pairing_code(request_id),
+        UsbRequestOp::GetLanAuth => process_get_lan_auth(request_id).await,
         UsbRequestOp::OpenLanPairingWindow => process_open_lan_pairing(context, request_id).await,
         UsbRequestOp::CloseLanPairingWindow => process_close_lan_pairing(context, request_id).await,
         UsbRequestOp::ClearLanPairingToken => {
@@ -574,6 +576,31 @@ pub(crate) fn process_get_lan_pairing_code(
             "LAN pairing is disabled in this firmware build.",
         ),
     )
+}
+
+#[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
+pub(crate) async fn process_get_lan_auth(
+    request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
+) -> (bool, UsbFrame) {
+    #[cfg(feature = "net_http")]
+    {
+        let token = flux_purr_firmware::net::ensure_token_from_usb().await;
+        let mut encoded = heapless::String::<64>::new();
+        for byte in token {
+            let _ = core::fmt::Write::write_fmt(&mut encoded, format_args!("{byte:02x}"));
+        }
+        (
+            false,
+            usb_response(
+                request_id,
+                UsbResponsePayload::LanAuth(flux_purr_firmware::control_plane::LanAuth {
+                    token: encoded,
+                }),
+            ),
+        )
+    }
+    #[cfg(not(feature = "net_http"))]
+    lan_unavailable_response(request_id)
 }
 
 #[cfg(all(target_arch = "xtensa", feature = "web_serial"))]
@@ -1947,6 +1974,13 @@ pub(crate) fn lan_frame_response(
             }
             UsbResponsePayload::ThermalStatus(value) => lan_json_response(value),
             UsbResponsePayload::LanPairingCode(value) => lan_json_response(value),
+            UsbResponsePayload::LanAuth(_) => (
+                404,
+                lan_error_json(
+                    "unsupported_operation",
+                    "LAN authentication is available only through USB/devd.",
+                ),
+            ),
             UsbResponsePayload::Wifi(value) => lan_json_response(value),
             UsbResponsePayload::Calibration(value) => lan_json_response(value),
             UsbResponsePayload::CalibrationJob(value) => lan_json_response(value),

@@ -92,6 +92,13 @@
 - The public Demo build MUST keep these behaviors mockable without opening LAN, Web Serial, or `devd` connections.
 - covers: `VER-LTR-018`, `VER-LTR-019`
 
+### REQ-LTR-011 USB-assisted LAN authentication
+
+- An authorized USB/devd lease MAY establish LAN authentication without user-entered pairing code.
+- Firmware MUST expose this operation only on the USB control channel and MUST persist or reuse the device bearer internally.
+- devd MUST bind the resulting credential to the verified USB `deviceId`, derive the `flux-purr-<deviceId>.local` locator from the verified identity, validate LAN identity/status before registering the bridge, and never serialize the bearer to Web callers or logs.
+- Web callers MUST receive only the authenticated devd bridge record and its verified mDNS locator.
+
 ## Verification
 
 ### VER-LTR-001 Locator reconciliation fixture
