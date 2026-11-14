@@ -706,7 +706,7 @@ export async function probeLanDevice(
   } catch (error) {
     if (
       !(error instanceof ControlPlaneClientError) ||
-      error.code !== 'lan_private_network_unavailable'
+      error.code !== 'lan_transport_unavailable'
     ) {
       throw error
     }
@@ -871,8 +871,8 @@ async function lanRequest<T = Record<string, unknown>>(
   } catch (error) {
     if (error instanceof TypeError) {
       throw new ControlPlaneClientError(
-        '浏览器无法访问私网设备。',
-        'lan_private_network_unavailable',
+        '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。',
+        'lan_transport_unavailable',
         false
       )
     }

@@ -1872,7 +1872,10 @@ export function ControlPlaneDemo({
             device.id === deviceId
               ? {
                   ...device,
-                  leaseState: 'conflict',
+                  leaseState:
+                    error instanceof ControlPlaneClientError && error.code === 'lease_conflict'
+                      ? 'conflict'
+                      : 'expired',
                   transportIssue: error instanceof Error ? error.message : '无法获取 LAN lease。',
                 }
               : device

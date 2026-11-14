@@ -308,8 +308,8 @@ export const PrivateNetworkBlocked: Story = {
   args: {
     connectDevice: async () => {
       throw new ControlPlaneClientError(
-        '浏览器无法访问私网设备。',
-        'lan_private_network_unavailable',
+        '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。',
+        'lan_transport_unavailable',
         false
       )
     },
@@ -319,7 +319,7 @@ export const PrivateNetworkBlocked: Story = {
     await userEvent.click(canvas.getByRole('button', { name: '连接设备' }))
     await expect(
       canvas.getByText(
-        '浏览器阻止了对私网设备的访问。请确认使用 Chrome、Chromium 或 Edge，并允许私网访问。'
+        '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。'
       )
     ).toBeVisible()
     expect(canvas.queryByLabelText('四位配对码')).toBeNull()

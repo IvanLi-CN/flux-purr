@@ -545,6 +545,20 @@ describe('LAN browser client', () => {
     expect(fetcher.mock.calls[0]?.[1]?.headers).not.toHaveProperty('X-Flux-Purr-Lease')
   })
 
+  it('reports a LAN transport failure without claiming a lease conflict', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockRejectedValue(new TypeError('Failed to fetch'))
+    const session = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 7,
+    }
+
+    await expect(authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher)).rejects.toMatchObject({
+      code: 'lan_transport_unavailable',
+      message: '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。',
+    })
+  })
+
   it('persists a successful LAN write revision for the next reloaded write', async () => {
     const records = new Map<string, string>()
     vi.stubGlobal('window', {
