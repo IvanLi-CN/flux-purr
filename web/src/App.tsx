@@ -126,6 +126,7 @@ function App() {
       routeState?.kind === 'device' ? routeState.deviceId : activeScenario.selectedDeviceId
     const base = `/devices/${encodeURIComponent(deviceId)}`
     return [
+      { value: '/devices/new', label: 'Devices · Add connection' },
       { value: `${base}/overview`, label: 'Overview' },
       { value: `${base}/settings/presets`, label: 'Settings · Presets' },
       { value: `${base}/settings/fan`, label: 'Settings · Fan' },
