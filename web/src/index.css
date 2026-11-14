@@ -4466,7 +4466,7 @@
 
   .industrial-lan-pairing-panel__scan-results-panel {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     min-height: 13rem;
     align-content: start;
     gap: 0.65rem;
@@ -4523,6 +4523,8 @@
 
   .industrial-lan-pairing-panel__scan-results {
     display: grid;
+    align-content: start;
+    grid-auto-rows: max-content;
     min-height: 0;
     gap: 0.45rem;
     margin: 0;

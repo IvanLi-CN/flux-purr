@@ -409,20 +409,6 @@ export function LanPairingPanel({
               ) : null}
             </div>
 
-            {scanState === 'scanning' ? (
-              <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
-                <LoaderCircle className="animate-spin" aria-hidden="true" />
-                已扫描 {scanProgress.done} / {scanProgress.total || '...'}
-              </output>
-            ) : null}
-            {scanError ? (
-              <output
-                className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
-                aria-live="polite"
-              >
-                {scanError}
-              </output>
-            ) : null}
             <section
               className="industrial-lan-pairing-panel__scan-results-panel"
               aria-label="扫描结果"
@@ -431,6 +417,20 @@ export function LanPairingPanel({
                 <span>扫描结果</span>
                 <small>{scanResults.length} 台</small>
               </header>
+              {scanState === 'scanning' ? (
+                <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
+                  <LoaderCircle className="animate-spin" aria-hidden="true" />
+                  已扫描 {scanProgress.done} / {scanProgress.total || '...'}
+                </output>
+              ) : null}
+              {scanError ? (
+                <output
+                  className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
+                  aria-live="polite"
+                >
+                  {scanError}
+                </output>
+              ) : null}
               {scanResults.length > 0 ? (
                 <ul className="industrial-lan-pairing-panel__scan-results" aria-label="发现的设备">
                   {scanResults.map((device) => (

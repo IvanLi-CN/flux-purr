@@ -1,6 +1,7 @@
 import type { AppVariant } from '@/app-mode'
 import {
   type DemoArtifactState,
+  type DemoLanScanResultsPreset,
   type DemoLeaseState,
   type DemoNetworkState,
   type DemoPersonaId,
@@ -21,6 +22,7 @@ export interface AppSearch {
   demoWifiCapability?: 'default' | 'read-only' | 'unavailable'
   demoLogs?: 'normal' | 'empty'
   demoTelemetry?: 'available' | 'unavailable'
+  demoLanScanResults?: DemoLanScanResultsPreset
 }
 
 export function validateAppSearch(search: Record<string, unknown>): AppSearch {
