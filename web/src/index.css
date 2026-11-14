@@ -4037,6 +4037,15 @@
     padding: 0;
   }
 
+  .industrial-add-device-flow:has(.industrial-web-serial-pairing-panel)
+    .industrial-web-serial-pairing-panel {
+    margin-top: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+  }
+
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
     .industrial-lan-pairing-panel__scan {
     display: flex;
