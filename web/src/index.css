@@ -4431,6 +4431,62 @@
     color: #a13b3b;
   }
 
+  .industrial-lan-pairing-panel__scan-results-panel {
+    display: grid;
+    min-height: 13rem;
+    align-content: start;
+    gap: 0.65rem;
+    border: 1px solid rgba(72, 125, 154, 0.2);
+    border-radius: 10px;
+    background: color-mix(in oklch, var(--industrial-panel) 78%, var(--industrial-bg) 22%);
+    padding: 0.75rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-results-panel > header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--industrial-text);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .industrial-lan-pairing-panel__scan-results-panel > header small {
+    color: var(--industrial-muted-text);
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+
+  .industrial-lan-pairing-panel__scan-empty {
+    display: grid;
+    min-height: 10rem;
+    place-content: center;
+    justify-items: center;
+    gap: 0.38rem;
+    color: var(--industrial-muted-text);
+    text-align: center;
+  }
+
+  .industrial-lan-pairing-panel__scan-empty svg {
+    margin-bottom: 0.18rem;
+    color: var(--industrial-accent);
+    opacity: 0.72;
+  }
+
+  .industrial-lan-pairing-panel__scan-empty strong {
+    color: var(--industrial-text);
+    font-size: 0.82rem;
+  }
+
+  .industrial-lan-pairing-panel__scan-empty span {
+    max-width: 28rem;
+    font-size: 0.74rem;
+    line-height: 1.45;
+  }
+
   .industrial-lan-pairing-panel__scan-results {
     display: grid;
     gap: 0.45rem;

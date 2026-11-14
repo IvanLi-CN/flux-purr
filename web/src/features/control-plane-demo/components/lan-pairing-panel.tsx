@@ -407,31 +407,46 @@ export function LanPairingPanel({
                 {scanError}
               </output>
             ) : null}
-            {scanResults.length > 0 ? (
-              <ul className="industrial-lan-pairing-panel__scan-results" aria-label="发现的设备">
-                {scanResults.map((device) => (
-                  <li
-                    key={`${device.info.deviceId}:${device.baseUrl}`}
-                    className={selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined}
-                  >
-                    <span>
-                      <strong>{device.info.hostname}</strong>
-                      <small>{device.baseUrl}</small>
-                    </span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => connectScanDevice(device)}
-                      disabled={state === 'connecting' || state === 'claiming'}
-                      aria-pressed={selectedScanBaseUrl === device.baseUrl}
-                      aria-label={`连接 ${device.info.hostname}`}
+            <section
+              className="industrial-lan-pairing-panel__scan-results-panel"
+              aria-label="扫描结果"
+            >
+              <header>
+                <span>扫描结果</span>
+                <small>{scanResults.length} 台</small>
+              </header>
+              {scanResults.length > 0 ? (
+                <ul className="industrial-lan-pairing-panel__scan-results" aria-label="发现的设备">
+                  {scanResults.map((device) => (
+                    <li
+                      key={`${device.info.deviceId}:${device.baseUrl}`}
+                      className={selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined}
                     >
-                      连接
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+                      <span>
+                        <strong>{device.info.hostname}</strong>
+                        <small>{device.baseUrl}</small>
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => connectScanDevice(device)}
+                        disabled={state === 'connecting' || state === 'claiming'}
+                        aria-pressed={selectedScanBaseUrl === device.baseUrl}
+                        aria-label={`连接 ${device.info.hostname}`}
+                      >
+                        连接
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="industrial-lan-pairing-panel__scan-empty">
+                  <MonitorSmartphone aria-hidden="true" />
+                  <strong>暂无搜索结果</strong>
+                  <span>输入网段并开始扫描，发现的设备会显示在这里。</span>
+                </div>
+              )}
+            </section>
           </section>
 
           {publicInfo ? (
