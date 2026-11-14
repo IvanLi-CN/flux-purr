@@ -4043,7 +4043,7 @@
     .industrial-lan-pairing-panel__scan-results-scroll {
     height: 100%;
     min-height: 0;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
