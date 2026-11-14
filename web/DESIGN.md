@@ -167,6 +167,12 @@ The palette describes workshop materials and operational signals rather than bra
 
 The application fills the dynamic viewport and centers a bounded instrument chassis. Inside it, identity and view controls lead into a workspace that pairs the active task with a persistent event surface on wide screens. At narrower widths, grids collapse, control groups stack, and the event surface compresses without abandoning the physical metaphor.
 
+### Standard desktop canvas
+
+The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
+
+The adaptive layout is a separate responsive mode. It uses the available dynamic viewport, collapses columns, stacks controls, and assigns scrolling to the active work area. Mobile dimensions and flow are evaluated for reachability and legibility, not for pixel parity with the standard desktop canvas.
+
 Spacing is compact and repetitive: the small and medium rhythm separates controls, while larger gaps separate functional modules. Repeated controls use stable tracks, minimum heights, and bounded panels so state changes do not shift the surrounding layout. Interactive targets remain at least 48px on mobile.
 
 **The One Bench Rule.** Keep one active device and its immediate workflow in view; do not turn the console into a fleet dashboard or a field of unrelated cards.
@@ -229,6 +235,12 @@ Panels may use subtle corner fasteners to imply mounting, but mechanical details
 - **Default:** Any application-owned internal region that can overflow, including a list, log, table, dialog pane, or inspector, uses `ScrollArea` from `@/components/ui/scroll-area`. It wraps the established `simplebar-react` track and thumb so scrolling remains visually consistent with the instrument panel.
 - **Behavior:** Tracks auto-hide until hover, keyboard focus, or scrolling; content retains browser scrolling semantics and uses a visible focus path through its interactive children. Long content scrolls inside a bounded region rather than forcing an unexpected page-level scroll.
 - **Exceptions:** Do not wrap the page or `body`. Browser- or system-owned controls, such as textareas, native selects, file choosers, and third-party popups, retain their platform scrolling. A region that is intentionally clipped or always fits does not need a scroll container.
+
+### Lists
+
+- **Structure:** Application-owned lists keep a visible heading, count or status, and stable row geometry so the panel remains scannable while content changes.
+- **Overflow:** Long lists use a bounded `ScrollArea`; scrolling stays inside the list panel and does not move the surrounding workspace.
+- **Empty state:** Empty lists preserve the same panel geometry and show a calm placeholder with the next useful action. Empty, loading, error, and populated states must be designed together.
 
 ### Navigation
 

@@ -1556,17 +1556,21 @@ export const LiveLanAddDeviceSelection: Story = {
     const canvas = within(canvasElement)
     const documentRoot = within(canvasElement.ownerDocument.body)
 
-    await step('WiFi is selected by default and shows its LAN address entry', async () => {
+    await step('WiFi opens its LAN address entry', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
       await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
-      await expect(await canvas.findByRole('button', { name: /WiFi/ })).toHaveAttribute(
-        'aria-pressed',
-        'true'
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
       )
-      await expect(await canvas.findByLabelText('WiFi LAN pairing')).toBeVisible()
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
+      await expect(await canvas.findByRole('region', { name: 'WiFi LAN pairing' })).toBeVisible()
       await expect(await canvas.findByLabelText('设备地址')).toBeVisible()
+      const wifiTab = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-grid--compact button'
+      )
+      expect(wifiTab).toHaveAttribute('aria-pressed', 'true')
     })
   },
 }
@@ -1624,12 +1628,21 @@ export const LiveQuickAddDevice: Story = {
   name: 'Live / Quick Add Device',
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await step('quick add WiFi switches into the LAN connection form', async () => {
-      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
+      if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+        await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+        await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+      }
+      await canvas.findByRole('heading', { name: '选择连接方式' })
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
+      )
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
-      await expect(await canvas.findByLabelText('WiFi LAN pairing')).toBeVisible()
+      await expect(await canvas.findByRole('region', { name: 'WiFi LAN pairing' })).toBeVisible()
       await expect(await canvas.findByLabelText('设备地址')).toBeVisible()
       await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
     })
@@ -1646,11 +1659,20 @@ export const LiveQuickAddBridgeDevice: Story = {
   },
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await step('quick add Bridge requires route and target selection before binding', async () => {
-      await userEvent.click(await canvas.findByRole('button', { name: /桥接/ }))
+      if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+        await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+        await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+      }
+      await canvas.findByRole('heading', { name: '选择连接方式' })
+      const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(3)'
+      )
+      if (!bridgeOption) throw new Error('Bridge add-device option is missing')
+      await userEvent.click(bridgeOption)
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
       await expect(await canvas.findByRole('region', { name: 'DEVD 桥接目标' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: 'USB' })).toHaveAttribute(
         'aria-pressed',
@@ -1707,15 +1729,25 @@ export const LiveWebSerialConnectionTimeout: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
-    await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
+    await canvas.findByRole('heading', { name: '选择连接方式' })
+    const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
+      '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
+    )
+    if (!webSerialOption) throw new Error('Web Serial add-device option is missing')
+    await userEvent.click(webSerialOption)
 
-    await expect(await canvas.findByText(/正在等待浏览器选择串口/)).toBeVisible()
+    await expect(await canvas.findByText('正在连接 Web Serial')).toBeVisible()
     await expect(
       await canvas.findByText('Web Serial 连接超时，请重新选择设备。', {}, { timeout: 4_000 })
     ).toBeVisible()
-    await expect(await canvas.findByText('Web Serial unavailable')).toBeVisible()
+    await expect(await canvas.findByText('没有完成 Web Serial 连接')).toBeVisible()
   },
 }
 
@@ -1729,11 +1761,21 @@ export const LiveWebSerialPortSelectionCancelled: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
-    await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
+    await canvas.findByRole('heading', { name: '选择连接方式' })
+    const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
+      '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
+    )
+    if (!webSerialOption) throw new Error('Web Serial add-device option is missing')
+    await userEvent.click(webSerialOption)
 
-    await expect(await canvas.findByText('Web Serial unavailable')).toBeVisible()
+    await expect(await canvas.findByText('没有完成 Web Serial 连接')).toBeVisible()
     await expect(
       await canvas.findByText('浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。')
     ).toBeVisible()
@@ -2086,16 +2128,22 @@ export const LiveBridgeKeyboardFocus: Story = {
   },
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
-
+    const documentRoot = within(canvasElement.ownerDocument.body)
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
+    await canvas.findByRole('heading', { name: '选择连接方式' })
     await step('keyboard activation preserves the visible focus indicator', async () => {
-      const bridgeOption = await canvas.findByRole('button', {
-        name: /桥接/,
-      })
+      const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(3)'
+      )
+      if (!bridgeOption) throw new Error('Bridge add-device option is missing')
       bridgeOption.focus()
       await userEvent.keyboard('{Enter}')
 
-      await expect(bridgeOption).toHaveAttribute('aria-pressed', 'true')
-      await expect(canvasElement.ownerDocument.activeElement).toBe(bridgeOption)
+      const selectedBridgeOption = await canvas.findByRole('button', { name: '桥接' })
+      await waitFor(() => expect(selectedBridgeOption).toHaveAttribute('aria-pressed', 'true'))
     })
   },
 }
@@ -2364,9 +2412,7 @@ class HangingWebSerialClient {
 
 class CancelledWebSerialClient {
   connect(): Promise<never> {
-    return Promise.reject(
-      new Error('浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。')
-    )
+    return Promise.reject(new Error('No port selected by the user.'))
   }
 
   disconnect(): Promise<void> {
@@ -2818,6 +2864,11 @@ export const LiveLanScanSelection: Story = {
     const canvas = within(canvasElement)
 
     await step('connecting a scan result starts the same direct LAN flow', async () => {
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
+      )
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await expect(await canvas.findByText(lanIdentity.hostname)).toBeVisible()
       await userEvent.click(
@@ -2832,7 +2883,7 @@ export const LiveLanScanSelection: Story = {
           name: `连接 ${lanIdentity.hostname}`,
         })
       ).toHaveAttribute('aria-pressed', 'true')
-      const results = canvas.getByRole('list', { name: '发现的设备' })
+      const results = canvas.getByRole('region', { name: '发现的设备' })
       expect(getComputedStyle(results).gap).not.toBe('0px')
       await expect(canvas.getByRole('button', { name: '目标设备' })).not.toHaveTextContent(
         lanIdentity.hostname
@@ -2852,6 +2903,11 @@ export const LiveLanScanSelectionThenConnect: Story = {
     const canvas = within(canvasElement)
 
     await step('selecting a candidate and completing connection selects the hostname', async () => {
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
+      )
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await userEvent.click(
         await canvas.findByRole('button', {
@@ -2881,6 +2937,11 @@ export const LiveLanPairingRegistersDeviceName: Story = {
     const canvas = within(canvasElement)
 
     await step('successful pairing and lease select the hostname target', async () => {
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
+      )
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
       await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
       const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
       await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2908,12 +2969,19 @@ export const LiveLanLeaseFailureDoesNotBindTarget: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+      '.industrial-add-device-flow > .industrial-add-device-grid button'
+    )
+    if (!wifiOption) throw new Error('WiFi add-device option is missing')
+    await userEvent.click(wifiOption)
     await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
     const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
     await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
     await userEvent.click(await dialog.findByRole('button', { name: '配对设备' }))
 
-    await expect(await canvas.findByText('LAN 租约获取失败')).toBeVisible()
+    await expect(
+      await canvas.findByText('设备已配对，但控制租约获取失败。请检查其他客户端后重试。')
+    ).toBeVisible()
     await expect(canvas.getByRole('button', { name: '目标设备' })).not.toHaveTextContent(
       lanIdentity.hostname
     )
@@ -2933,6 +3001,11 @@ export const LiveLanHeartbeatExpiryRequiresExplicitReselection: Story = {
     const canvas = within(canvasElement)
 
     await step('heartbeat expiry leaves direct LAN controls read-only', async () => {
+      const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+        '.industrial-add-device-flow > .industrial-add-device-grid button'
+      )
+      if (!wifiOption) throw new Error('WiFi add-device option is missing')
+      await userEvent.click(wifiOption)
       await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
       const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
       await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2977,6 +3050,11 @@ export const LiveLanStaleWriteRefreshesWithoutReplay: Story = {
     await step(
       'a stale direct-LAN write refreshes device state without replaying the request',
       async () => {
+        const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
+          '.industrial-add-device-flow > .industrial-add-device-grid button'
+        )
+        if (!wifiOption) throw new Error('WiFi add-device option is missing')
+        await userEvent.click(wifiOption)
         await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
         const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
         await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')

@@ -1,9 +1,11 @@
 import { LoaderCircle, MonitorSmartphone, ScanSearch, Wifi, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   claimLanPairing,
+  clearRecentLanScanCidrs,
   type DiscoveredLanDevice,
   getLanPairingMetadata,
   getLanPublicInfo,
@@ -12,9 +14,11 @@ import {
   type LanPublicInfo,
   loadLanAddress,
   loadLanScanCidr,
+  loadRecentLanScanCidrs,
   normalizeLanBaseUrl,
   probeLanDevice,
   rememberLanDeviceIdentity,
+  rememberLanScanCidr,
   resumeLanDeviceSession,
   scanLanSubnet,
   storeLanAddress,
@@ -34,6 +38,7 @@ export interface LanPairingPanelProps {
     session: LanDeviceSession,
     probe: Awaited<ReturnType<typeof probeLanDevice>>
   ) => void | Promise<void>
+  onMockConnected?: (info: LanPublicInfo) => void | Promise<void>
   initialAddress?: string
   supported?: boolean
   connectDevice?: (address: string) => Promise<LanPublicInfo>
@@ -72,6 +77,7 @@ export function lanPairingFailureMessage(error: unknown) {
 
 export function LanPairingPanel({
   onPaired,
+  onMockConnected,
   initialAddress = '',
   supported = isChromiumPrivateNetworkSupported(),
   connectDevice = getLanPublicInfo,
@@ -98,7 +104,20 @@ export function LanPairingPanel({
   const [selectedScanBaseUrl, setSelectedScanBaseUrl] = useState<string | null>(null)
   const [scanState, setScanState] = useState<'idle' | 'scanning' | 'ready' | 'error'>('idle')
   const [scanError, setScanError] = useState('')
+  const [recentCidrs, setRecentCidrs] = useState(loadRecentLanScanCidrs)
+  const [recentCidrsWidth, setRecentCidrsWidth] = useState(0)
   const scanControllerRef = useRef<AbortController | null>(null)
+  const recentCidrsRef = useRef<HTMLDivElement>(null)
+
+  useLayoutEffect(() => {
+    const element = recentCidrsRef.current
+    if (!element) return
+    const updateWidth = () => setRecentCidrsWidth(element.clientWidth)
+    updateWidth()
+    const observer = new ResizeObserver(updateWidth)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(
     () => () => {
@@ -115,13 +134,26 @@ export function LanPairingPanel({
     setScanError('')
     setScanResults([])
     setSelectedScanBaseUrl(null)
+    setPublicInfo(null)
+    setConnectedBaseUrl(null)
+    setConnectedAddress(null)
+    setPairingDialogOpen(false)
     setScanProgress({ done: 0, total: 0 })
     try {
       const devices = await scanDevices(scanCidr, {
         signal: controller.signal,
         onProgress: setScanProgress,
+        onDevice: (device) => {
+          setScanResults((current) =>
+            current.some((item) => item.info.deviceId === device.info.deviceId)
+              ? current
+              : [...current, device]
+          )
+        },
       })
       if (controller.signal.aborted) return
+      rememberLanScanCidr(scanCidr)
+      setRecentCidrs(loadRecentLanScanCidrs())
       setScanResults(devices)
       setScanState('ready')
     } catch (error) {
@@ -135,10 +167,21 @@ export function LanPairingPanel({
     }
   }
 
+  const recentCidrCount = Math.max(
+    0,
+    Math.min(recentCidrs.length, Math.floor((recentCidrsWidth - 5.5 * 16) / (8 * 16)))
+  )
+  const visibleRecentCidrs = recentCidrs.slice(0, recentCidrCount)
+
   const cancelScan = () => {
     scanControllerRef.current?.abort()
     scanControllerRef.current = null
     setScanState('idle')
+    setSelectedScanBaseUrl(null)
+    setPublicInfo(null)
+    setConnectedBaseUrl(null)
+    setConnectedAddress(null)
+    setPairingDialogOpen(false)
   }
 
   const claim = async (baseUrl: string, pairingCode?: string) => {
@@ -225,6 +268,7 @@ export function LanPairingPanel({
         return
       }
       setMessage(`已连接 ${info.hostname}。此设备仅提供基础低频信息读取。`)
+      await onMockConnected?.(info)
     } catch (error) {
       setState('error')
       setMessage(lanPairingFailureMessage(error))
@@ -236,6 +280,20 @@ export function LanPairingPanel({
     storeLanAddress(device.baseUrl)
     setSelectedScanBaseUrl(device.baseUrl)
     void connect(device.baseUrl)
+  }
+
+  const selectScanDevice = (device: DiscoveredLanDevice) => {
+    if (selectedScanBaseUrl === device.baseUrl) {
+      setSelectedScanBaseUrl(null)
+      setPublicInfo(null)
+      setConnectedBaseUrl(null)
+      setConnectedAddress(null)
+      setPairingDialogOpen(false)
+      setMessage('')
+      return
+    }
+    setSelectedScanBaseUrl(device.baseUrl)
+    setPublicInfo(device.info)
   }
 
   const refreshPairing = async () => {
@@ -344,50 +402,98 @@ export function LanPairingPanel({
               )}
             </form>
 
-            {scanState === 'scanning' ? (
-              <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
-                <LoaderCircle className="animate-spin" aria-hidden="true" />
-                已扫描 {scanProgress.done} / {scanProgress.total || '...'}
-              </output>
-            ) : null}
-            {scanState === 'ready' && scanResults.length === 0 ? (
-              <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
-                未发现设备
-              </output>
-            ) : null}
-            {scanError ? (
-              <output
-                className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
-                aria-live="polite"
-              >
-                {scanError}
-              </output>
-            ) : null}
-            {scanResults.length > 0 ? (
-              <ul className="industrial-lan-pairing-panel__scan-results" aria-label="发现的设备">
-                {scanResults.map((device) => (
-                  <li
-                    key={`${device.info.deviceId}:${device.baseUrl}`}
-                    className={selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined}
-                  >
-                    <span>
-                      <strong>{device.info.hostname}</strong>
-                      <small>{device.baseUrl}</small>
-                    </span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => connectScanDevice(device)}
-                      disabled={state === 'connecting' || state === 'claiming'}
-                      aria-pressed={selectedScanBaseUrl === device.baseUrl}
-                      aria-label={`连接 ${device.info.hostname}`}
-                    >
-                      连接
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
+            <div ref={recentCidrsRef} className="industrial-lan-pairing-panel__recent-cidrs">
+              {visibleRecentCidrs.map((cidr) => (
+                <button
+                  key={cidr}
+                  type="button"
+                  className="industrial-chip"
+                  onClick={() => setScanCidr(cidr)}
+                >
+                  {cidr}
+                </button>
+              ))}
+              {recentCidrs.length > 0 ? (
+                <button
+                  type="button"
+                  className="industrial-chip industrial-chip--clear"
+                  onClick={() => {
+                    clearRecentLanScanCidrs()
+                    setRecentCidrs([])
+                  }}
+                >
+                  清理记录
+                </button>
+              ) : null}
+            </div>
+
+            <section
+              className="industrial-lan-pairing-panel__scan-results-panel"
+              aria-label="扫描结果"
+            >
+              <header>
+                <span>扫描结果</span>
+                <small aria-live="polite">
+                  {scanState === 'scanning'
+                    ? `已扫描 ${scanProgress.done} / ${scanProgress.total || '...'}`
+                    : `${scanResults.length} 台`}
+                </small>
+              </header>
+              {scanError ? (
+                <output
+                  className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
+                  aria-live="polite"
+                >
+                  {scanError}
+                </output>
+              ) : null}
+              {scanResults.length > 0 ? (
+                <ScrollArea
+                  className="industrial-lan-pairing-panel__scan-results-scroll"
+                  autoHide={false}
+                  ariaLabel="发现的设备"
+                >
+                  <ul className="industrial-lan-pairing-panel__scan-results">
+                    {scanResults.map((device) => (
+                      <li
+                        key={`${device.info.deviceId}:${device.baseUrl}`}
+                        className={
+                          selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined
+                        }
+                      >
+                        <button
+                          type="button"
+                          className="industrial-lan-pairing-panel__scan-select"
+                          onClick={() => selectScanDevice(device)}
+                        >
+                          <strong>{device.info.hostname}</strong>
+                          <small>{device.baseUrl}</small>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            connectScanDevice(device)
+                          }}
+                          disabled={state === 'connecting' || state === 'claiming'}
+                          aria-pressed={selectedScanBaseUrl === device.baseUrl}
+                          aria-label={`连接 ${device.info.hostname}`}
+                        >
+                          连接
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
+              ) : (
+                <div className="industrial-lan-pairing-panel__scan-empty">
+                  <MonitorSmartphone aria-hidden="true" />
+                  <strong>暂无搜索结果</strong>
+                  <span>输入网段并开始扫描，发现的设备会显示在这里。</span>
+                </div>
+              )}
+            </section>
           </section>
 
           {publicInfo ? (
@@ -420,7 +526,7 @@ export function LanPairingPanel({
         </>
       )}
 
-      {message ? (
+      {message && !(selectedScanBaseUrl && state === 'idle') ? (
         <output
           className={`industrial-lan-pairing-panel__message industrial-lan-pairing-panel__message--${state}`}
           aria-live="polite"

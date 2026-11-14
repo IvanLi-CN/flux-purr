@@ -421,7 +421,9 @@ test.describe('control plane direct LAN', () => {
 
     await pairRequiredLanDevice(page)
 
-    await expect(page.getByText('LAN 租约获取失败')).toBeVisible()
+    await expect(
+      page.getByText('设备已配对，但控制租约获取失败。请检查其他客户端后重试。')
+    ).toBeVisible()
     await expect(targetSelector).toContainText('DEVD')
     await expect(targetSelector).not.toContainText('flux-purr-001122334455')
     expect(runtimeRequests()).toHaveLength(0)
@@ -572,7 +574,9 @@ test.describe('control plane direct LAN', () => {
 async function openLanPairing(page: Page) {
   await page.getByRole('button', { name: '目标设备' }).click()
   await page.getByRole('button', { name: '添加设备' }).click()
-  await expect(page.getByRole('button', { name: /WiFi/ })).toHaveAttribute('aria-pressed', 'true')
+  const wifi = page.getByRole('button', { name: /WiFi/ })
+  await wifi.click()
+  await expect(wifi).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByLabel('WiFi LAN pairing')).toBeVisible()
 }
 

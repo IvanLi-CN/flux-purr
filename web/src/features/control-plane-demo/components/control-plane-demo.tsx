@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertTriangle,
+  ArrowLeft,
   Cable,
   CheckCircle2,
   ChevronDown,
@@ -107,6 +108,7 @@ import type {
   ThermalTuningStatus,
   VinCalibrationSample,
 } from '../contracts'
+import type { DemoLanScanResultsPreset } from '../demo-inspector-state'
 import {
   type DeviceChoice,
   type DeviceConnectionKind,
@@ -124,12 +126,15 @@ import {
 import {
   authorizedLanRequest,
   createLanLease,
+  type DiscoveredLanDevice,
   directLanStaleReadPath,
   getLanPublicInfo,
   isDirectLanDevice,
   type LanDeviceSession,
   type LanLease,
   type LanProbe,
+  type LanPublicInfo,
+  type LanSubnetScanOptions,
   lanProbeToDeviceTarget,
   listSavedLanDeviceSessions,
   loadLanDeviceSession,
@@ -258,6 +263,7 @@ interface ControlPlaneDemoProps {
   firmwareArtifacts?: OfficialFirmwareArtifact[]
   initialFirmwareActivity?: FirmwareActivityEntry[]
   lanPairing?: LanPairingOverrides
+  demoLanScanResults?: DemoLanScanResultsPreset
   lanRuntime?: LanRuntimeDependencies
 }
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
@@ -266,6 +272,56 @@ type LogFilter = 'all' | EventLogEntry['tone']
 
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
 const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
+
+function createDemoLanScan(
+  resultPreset: DemoLanScanResultsPreset
+): NonNullable<LanPairingOverrides['scanDevices']> {
+  return async (cidr, options: LanSubnetScanOptions = {}): Promise<DiscoveredLanDevice[]> => {
+    const prefix = Number(cidr.trim().split('/')[1])
+    const safePrefix = Number.isFinite(prefix) ? Math.min(24, Math.max(8, prefix)) : 24
+    const durationMs = 10_000 + (24 - safePrefix) * 1_250
+    const total = Math.min(256, Math.max(1, 2 ** Math.max(0, 32 - safePrefix) - 2))
+    const resultCount = resultPreset === 'long' ? 24 : resultPreset === 'typical' ? 6 : 0
+    const baseHost = cidr.trim().split('/')[0].split('.').slice(0, 3).join('.')
+    const devices: DiscoveredLanDevice[] = []
+    let emitted = 0
+
+    for (let step = 1; step <= total; step += 1) {
+      if (options.signal?.aborted) return devices
+      await new Promise<void>((resolve) => setTimeout(resolve, durationMs / total))
+      const nextCount = Math.min(resultCount, Math.floor((step / total) * resultCount))
+      while (emitted < nextCount) {
+        const host = `${baseHost}.${10 + emitted}`
+        const device: DiscoveredLanDevice = {
+          baseUrl: `http://${host}`,
+          info: {
+            api: 'v1',
+            deviceId: `demo-lan-${emitted + 1}`,
+            hostname: `demo-lan-${String(emitted + 1).padStart(2, '0')}`,
+            firmwareVersion: 'fw/v0.4.0-demo',
+            pairing: { mode: 'optional', active: true, attemptsRemaining: 3 },
+          },
+        }
+        devices.push(device)
+        options.onDevice?.(device)
+        emitted += 1
+      }
+      options.onProgress?.({ done: step, total })
+    }
+    return devices
+  }
+}
+
+async function createDemoLanConnection(address: string): Promise<LanPublicInfo> {
+  const hostname = new URL(address).hostname
+  return {
+    api: 'v1',
+    deviceId: `demo-lan-${hostname.replaceAll('.', '-')}`,
+    hostname,
+    firmwareVersion: 'fw/v0.4.0-demo',
+    pairing: { mode: 'unavailable', active: true, attemptsRemaining: 0 },
+  }
+}
 
 export function shouldEnableAutomaticLiveDevdDiscovery({
   devdEnabled,
@@ -472,7 +528,7 @@ const addDeviceOptions: Array<{
   {
     kind: 'wifi',
     label: 'WiFi',
-    detail: '预留后续站点地址，但不把硬件标记为在线。',
+    detail: '输入设备地址并获取 LAN 租约，随后进入在线设备控制。',
   },
   {
     kind: 'web-serial',
@@ -795,10 +851,12 @@ export function ControlPlaneDemo({
   firmwareArtifacts,
   initialFirmwareActivity,
   lanPairing,
+  demoLanScanResults = 'none',
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const explicitSelectedDeviceIdRef = useRef<string | null>(null)
+  const previousActiveViewRef = useRef<string | null>(null)
   const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
   const activeView = navigation
     ? navigation.state.kind === 'add-device'
@@ -846,8 +904,23 @@ export function ControlPlaneDemo({
             })
       )
   )
-  const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
-    useState<AddDeviceKind>(defaultAddDeviceKind)
+  const [selectedAddDeviceKind, setSelectedAddDeviceKind] = useState<AddDeviceKind>(
+    webSerialOptions?.demoPresetActive ? 'web-serial' : defaultAddDeviceKind
+  )
+  const [addDeviceStage, setAddDeviceStage] = useState<'choose' | 'configure'>(
+    webSerialOptions?.demoPresetActive ? 'configure' : 'choose'
+  )
+
+  useEffect(() => {
+    if (!allowDemoControls || webSerialOptions?.demoPresetActive === undefined) return
+    if (webSerialOptions.demoPresetActive) {
+      setSelectedAddDeviceKind('web-serial')
+      setAddDeviceStage('configure')
+    } else {
+      setSelectedAddDeviceKind(defaultAddDeviceKind)
+      setAddDeviceStage('choose')
+    }
+  }, [allowDemoControls, webSerialOptions?.demoPresetActive])
   const routedRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const devdLeaseAllowedForRoute =
@@ -1025,6 +1098,24 @@ export function ControlPlaneDemo({
       : '连接浏览器 Web Serial 端口后即可加载真实硬件状态。',
     tone: 'info',
   })
+  useEffect(() => {
+    if (activeView === 'add-device' && previousActiveViewRef.current !== 'add-device') {
+      setSelectedAddDeviceKind(
+        allowDemoControls && webSerialOptions?.demoPresetActive
+          ? 'web-serial'
+          : defaultAddDeviceKind
+      )
+      setAddDeviceStage(
+        allowDemoControls && webSerialOptions?.demoPresetActive ? 'configure' : 'choose'
+      )
+      setFeedback({
+        title: 'WiFi / LAN',
+        detail: '输入设备地址并获取 LAN 租约，随后进入在线设备控制。',
+        tone: 'info',
+      })
+    }
+    previousActiveViewRef.current = activeView
+  }, [activeView, allowDemoControls, webSerialOptions?.demoPresetActive])
   const activeScenario = liveScenario
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
@@ -2085,6 +2176,34 @@ export function ControlPlaneDemo({
     [navigation, visibleCalibrationWorkspaceTab, visibleDevice]
   )
 
+  const resolvedLanPairing = useMemo(() => {
+    if (!allowDemoControls || lanPairing?.scanDevices) return lanPairing
+    return {
+      ...lanPairing,
+      connectDevice: createDemoLanConnection,
+      onMockConnected: async () => {
+        if (navigation) {
+          await navigation.navigate({
+            kind: 'device',
+            deviceId: scenario.selectedDeviceId,
+            view: 'dashboard',
+          })
+        } else {
+          await setConsoleView('dashboard')
+        }
+      },
+      resumeSession: async () => null,
+      scanDevices: createDemoLanScan(demoLanScanResults),
+    }
+  }, [
+    allowDemoControls,
+    demoLanScanResults,
+    lanPairing,
+    navigation,
+    scenario.selectedDeviceId,
+    setConsoleView,
+  ])
+
   const setWorkspaceTab = useCallback(
     (
       nextTab: CalibrationWorkspaceTab,
@@ -3007,12 +3126,24 @@ export function ControlPlaneDemo({
         })
         setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
+        const identityId = deviceIdentityId(leasedTarget)
+        setRequestedConnectionByIdentity((current) => ({
+          ...current,
+          [identityId]: { kind: 'wifi', targetId: leasedTarget.id },
+        }))
+        setRouteFallbackKind(undefined)
         setSelectedDeviceId(target.id)
+        explicitSelectedDeviceIdRef.current = target.id
         setSelectedAddDeviceKind(defaultAddDeviceKind)
+        setFeedback({
+          title: `${target.alias} connected over WiFi / LAN`,
+          detail: 'LAN lease acquired. The device dashboard will use the WiFi connection.',
+          tone: 'info',
+        })
         if (navigation) {
           await navigation.navigate({
             kind: 'device',
-            deviceId: deviceIdentityId(leasedTarget),
+            deviceId: identityId,
             view: 'dashboard',
           })
         } else {
@@ -3668,6 +3799,7 @@ export function ControlPlaneDemo({
     kind: AddDeviceKind,
     { showPendingDashboard = true }: { showPendingDashboard?: boolean } = {}
   ) => {
+    setAddDeviceStage('configure')
     setSelectedAddDeviceKind(kind)
     if (kind === 'wifi') {
       setFeedback({
@@ -4874,7 +5006,11 @@ export function ControlPlaneDemo({
           <div
             className={
               isDeviceAddFlowActive
-                ? 'industrial-console__workspace industrial-console__workspace--selection'
+                ? `industrial-console__workspace ${
+                    addDeviceStage === 'configure'
+                      ? 'industrial-console__workspace--add-device'
+                      : 'industrial-console__workspace--selection'
+                  }`
                 : isFirmwareWorkspace
                   ? 'industrial-console__workspace industrial-console__workspace--firmware'
                   : 'industrial-console__workspace'
@@ -4965,17 +5101,20 @@ export function ControlPlaneDemo({
                 onQuickAddDevice={handleQuickAddDevice}
                 onAddDevice={handleAddDeviceChoice}
                 selectedAddDeviceKind={selectedAddDeviceKind}
+                addDeviceStage={addDeviceStage}
+                onAddDeviceStageChange={setAddDeviceStage}
+                recentDevices={knownDevices}
                 onLanPaired={handleLanPaired}
-                lanPairing={lanPairing}
+                lanPairing={resolvedLanPairing}
                 onFirmwareActivity={appendFirmwareActivity}
               />
             </section>
 
             {isFirmwareWorkspace ? (
               <FirmwareTransactionLog entries={firmwareActivity} />
-            ) : isDeviceAddFlowActive ? null : (
+            ) : !isDeviceAddFlowActive || addDeviceStage === 'configure' ? (
               <GlobalLogPanel events={visibleEvents} />
-            )}
+            ) : null}
           </div>
         </section>
       </div>
@@ -4998,7 +5137,10 @@ function RouteDeviceRecovery({
   identityId: string
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   transport?: DeviceConnectionKind
   retry: () => void
   onDeviceSelect: (deviceId: string) => void
@@ -6091,6 +6233,9 @@ function ViewPanel({
   onQuickAddDevice,
   onAddDevice,
   selectedAddDeviceKind,
+  addDeviceStage,
+  onAddDeviceStageChange,
+  recentDevices,
   onLanPaired,
   lanPairing,
   onFirmwareActivity,
@@ -6119,7 +6264,10 @@ function ViewPanel({
   knownDevices: DeviceTarget[]
   allowDemoControls: boolean
   mockOnly: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported' | 'wifiOperationInterruption'>
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'wifiOperationInterruption' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -6165,6 +6313,9 @@ function ViewPanel({
   onQuickAddDevice: (kind: AddDeviceKind) => void
   onAddDevice: (kind: AddDeviceKind) => void
   selectedAddDeviceKind: AddDeviceKind
+  addDeviceStage: 'choose' | 'configure'
+  onAddDeviceStageChange: (stage: 'choose' | 'configure') => void
+  recentDevices: DeviceTarget[]
   onLanPaired: (session: LanDeviceSession, probe: LanProbe) => void | Promise<void>
   lanPairing?: LanPairingOverrides
   onFirmwareActivity: (entry: FirmwareActivityInput) => void
@@ -6243,9 +6394,11 @@ function ViewPanel({
       <AddDeviceView
         allowDemoControls={allowDemoControls}
         webSerial={webSerial}
-        feedback={feedback}
         onAddDevice={onAddDevice}
         selectedAddDeviceKind={selectedAddDeviceKind}
+        addDeviceStage={addDeviceStage}
+        onAddDeviceStageChange={onAddDeviceStageChange}
+        recentDevices={recentDevices}
         onLanPaired={onLanPaired}
         lanPairing={lanPairing}
         knownDevices={knownDevices}
@@ -6440,9 +6593,11 @@ function RouteRecoveryNotice({
 function AddDeviceView({
   allowDemoControls,
   webSerial,
-  feedback,
   onAddDevice,
   selectedAddDeviceKind,
+  addDeviceStage,
+  onAddDeviceStageChange,
+  recentDevices,
   onLanPaired,
   lanPairing,
   knownDevices,
@@ -6451,10 +6606,15 @@ function AddDeviceView({
   devdBaseUrl,
 }: {
   allowDemoControls: boolean
-  webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
-  feedback: ActionFeedback
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
   onAddDevice: (kind: AddDeviceKind) => void
   selectedAddDeviceKind: AddDeviceKind
+  addDeviceStage: 'choose' | 'configure'
+  onAddDeviceStageChange: (stage: 'choose' | 'configure') => void
+  recentDevices: DeviceTarget[]
   onLanPaired: (session: LanDeviceSession, probe: LanProbe) => void | Promise<void>
   lanPairing?: LanPairingOverrides
   knownDevices: DeviceTarget[]
@@ -6463,27 +6623,182 @@ function AddDeviceView({
   devdBaseUrl: string | null
 }) {
   return (
-    <div className="industrial-view-panel industrial-view-panel--calibration">
-      <PanelHeader kicker="Add device" title="Choose connection" />
-      <AddDeviceChoices
-        allowDemoControls={allowDemoControls}
-        webSerial={webSerial}
-        onAddDevice={onAddDevice}
-        selectedKind={selectedAddDeviceKind}
-      />
-      {!allowDemoControls && selectedAddDeviceKind === 'wifi' ? (
-        <LanPairingPanel {...lanPairing} onPaired={onLanPaired} />
-      ) : null}
-      {!allowDemoControls && selectedAddDeviceKind === 'bridge' ? (
-        <BridgeTargetPanel
-          devices={knownDevices}
-          onConnect={onBridgeTargetSelect}
-          client={controlClient}
-          devdBaseUrl={devdBaseUrl}
-        />
-      ) : null}
-      {selectedAddDeviceKind === 'bridge' ? null : <ActionFeedbackPanel feedback={feedback} />}
+    <div className="industrial-view-panel industrial-view-panel--calibration industrial-add-device-flow">
+      {addDeviceStage === 'choose' ? (
+        <>
+          <PanelHeader kicker="连接设备" title="选择连接方式" />
+          <AddDeviceChoices
+            allowDemoControls={allowDemoControls}
+            webSerial={webSerial}
+            onAddDevice={onAddDevice}
+            selectedKind={undefined}
+          />
+          <RecentDeviceList devices={recentDevices} />
+        </>
+      ) : (
+        <>
+          <div className="industrial-add-device-flow__toolbar">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="industrial-add-device-flow__back"
+              aria-label="返回连接方式"
+              title="返回连接方式"
+              onClick={() => onAddDeviceStageChange('choose')}
+            >
+              <ArrowLeft aria-hidden="true" />
+            </Button>
+            <AddDeviceChoices
+              allowDemoControls={allowDemoControls}
+              webSerial={webSerial}
+              onAddDevice={onAddDevice}
+              selectedKind={selectedAddDeviceKind}
+              compact
+            />
+          </div>
+          {selectedAddDeviceKind === 'wifi' ? (
+            <LanPairingPanel {...lanPairing} onPaired={onLanPaired} />
+          ) : null}
+          {selectedAddDeviceKind === 'web-serial' ? (
+            <WebSerialPairingPanel webSerial={webSerial} />
+          ) : null}
+          {selectedAddDeviceKind === 'bridge' ? (
+            <BridgeTargetPanel
+              devices={knownDevices}
+              onConnect={onBridgeTargetSelect}
+              client={controlClient}
+              devdBaseUrl={devdBaseUrl}
+            />
+          ) : null}
+        </>
+      )}
     </div>
+  )
+}
+
+function WebSerialPairingPanel({
+  webSerial,
+}: {
+  webSerial: Pick<
+    LiveWebSerialControls,
+    'state' | 'supported' | 'error' | 'deviceIdentityId' | 'connect'
+  >
+}) {
+  const isConnecting = webSerial.state === 'connecting'
+  const isConnected = webSerial.state === 'connected'
+  const hasError = webSerial.state === 'error'
+  const isUnsupported = webSerial.state === 'unsupported' || !webSerial.supported
+
+  const content = isUnsupported
+    ? {
+        icon: <Usb aria-hidden="true" />,
+        eyebrow: '浏览器能力不可用',
+        title: '无法使用 Web Serial',
+        detail: '请使用支持 Web Serial 的 Chrome、Chromium 或 Edge，并在安全上下文中打开此页面。',
+        action: '检查浏览器环境',
+      }
+    : isConnecting
+      ? {
+          icon: <LoaderCircle className="animate-spin" aria-hidden="true" />,
+          eyebrow: '等待浏览器选择',
+          title: '正在连接 Web Serial',
+          detail: '请在浏览器对话框中选择设备端口。选择完成后会自动读取设备身份。',
+          action: '重新打开选择窗口',
+        }
+      : isConnected
+        ? {
+            icon: <CheckCircle2 aria-hidden="true" />,
+            eyebrow: '连接已建立',
+            title: 'Web Serial 设备已连接',
+            detail: webSerial.deviceIdentityId
+              ? `设备 ID · ${webSerial.deviceIdentityId}`
+              : '设备端口已就绪，可以进入设备控制。',
+            action: '更换设备',
+          }
+        : {
+            icon: hasError ? <AlertTriangle aria-hidden="true" /> : <Usb aria-hidden="true" />,
+            eyebrow: hasError ? '连接未完成' : '需要浏览器授权',
+            title: hasError ? '没有完成 Web Serial 连接' : '选择一个浏览器设备',
+            detail: hasError
+              ? webSerial.error || '设备选择被取消或端口无法打开。请确认设备已连接，再重新选择。'
+              : '点击下方按钮打开浏览器设备选择窗口。系统只会读取你明确选择的串口设备。',
+            action: hasError ? '重新选择设备' : '选择 Web Serial 设备',
+          }
+
+  const handleConnect = () => {
+    if (isUnsupported || isConnecting) return
+    void webSerial.connect({ forcePortSelection: true, replaceExisting: isConnected })
+  }
+
+  return (
+    <section className="industrial-web-serial-pairing-panel" aria-label="Web Serial 连接">
+      <div className="industrial-web-serial-pairing-panel__hero">
+        <span
+          className={`industrial-web-serial-pairing-panel__icon is-${hasError ? 'error' : isConnected ? 'success' : 'idle'}`}
+        >
+          {content.icon}
+        </span>
+        <div>
+          <p className="industrial-label">{content.eyebrow}</p>
+          <h2>{content.title}</h2>
+          <p>{content.detail}</p>
+        </div>
+      </div>
+      <div className="industrial-web-serial-pairing-panel__steps">
+        <div className={isConnecting || isConnected ? 'is-active' : undefined}>
+          <span>01</span>
+          <strong>选择设备</strong>
+          <small>浏览器会打开端口选择窗口</small>
+        </div>
+        <div className={isConnected ? 'is-active' : undefined}>
+          <span>02</span>
+          <strong>读取身份</strong>
+          <small>验证设备并加载控制能力</small>
+        </div>
+        <div className={isConnected ? 'is-active' : undefined}>
+          <span>03</span>
+          <strong>进入控制</strong>
+          <small>连接成功后切换到设备工作区</small>
+        </div>
+      </div>
+      <Button type="button" onClick={handleConnect} disabled={isUnsupported || isConnecting}>
+        {isConnecting ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
+        {content.action}
+      </Button>
+    </section>
+  )
+}
+
+function RecentDeviceList({ devices }: { devices: DeviceTarget[] }) {
+  return (
+    <section className="industrial-recent-device-list" aria-label="最近连接的设备">
+      <div className="industrial-recent-device-list__header">
+        <div>
+          <p className="industrial-label">最近连接</p>
+          <h3>设备记录</h3>
+        </div>
+        <span>{devices.length} 台</span>
+      </div>
+      <ScrollArea className="industrial-recent-device-list__body" autoHide>
+        {devices.length ? (
+          devices.map((device) => (
+            <article className="industrial-recent-device" key={device.id}>
+              <div>
+                <strong>{device.alias}</strong>
+                <small>{device.location}</small>
+              </div>
+              <span>{transportLabels[device.transport]}</span>
+            </article>
+          ))
+        ) : (
+          <div className="industrial-recent-device-list__empty">
+            <strong>还没有连接记录</strong>
+            <span>选择上方连接方式开始添加设备。</span>
+          </div>
+        )}
+      </ScrollArea>
+    </section>
   )
 }
 
@@ -6854,17 +7169,21 @@ function AddDeviceChoices({
   webSerial,
   onAddDevice,
   selectedKind,
+  compact,
 }: {
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
   onAddDevice: (kind: AddDeviceKind) => void
   selectedKind?: AddDeviceKind
+  compact?: boolean
 }) {
   const webSerialDisabled =
     !allowDemoControls && (webSerial.state === 'unsupported' || webSerial.state === 'connecting')
 
   return (
-    <div className="industrial-add-device-grid">
+    <div
+      className={`industrial-add-device-grid${compact ? ' industrial-add-device-grid--compact' : ''}`}
+    >
       {addDeviceOptions.map((item) => {
         const disabled = item.kind === 'web-serial' && webSerialDisabled
         const isSelected = item.kind === selectedKind
@@ -6890,7 +7209,7 @@ function AddDeviceChoices({
             }}
           >
             <span>{label}</span>
-            <small>{item.detail}</small>
+            {compact ? null : <small>{item.detail}</small>}
           </button>
         )
       })}
