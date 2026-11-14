@@ -2341,6 +2341,16 @@
     gap: 0.9rem;
   }
 
+  .industrial-view-panel:has(.industrial-add-device-grid) {
+    align-content: start;
+  }
+
+  @media (min-width: 760px) {
+    .industrial-console:has(.industrial-add-device-grid) {
+      height: min(100%, 720px);
+    }
+  }
+
   .industrial-view-panel--calibration {
     min-height: 0;
     max-height: 100%;

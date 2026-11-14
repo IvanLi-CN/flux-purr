@@ -799,6 +799,7 @@ export function ControlPlaneDemo({
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
   const explicitSelectedDeviceIdRef = useRef<string | null>(null)
+  const previousActiveViewRef = useRef<string | null>(null)
   const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
   const activeView = navigation
     ? navigation.state.kind === 'add-device'
@@ -1025,6 +1026,17 @@ export function ControlPlaneDemo({
       : '连接浏览器 Web Serial 端口后即可加载真实硬件状态。',
     tone: 'info',
   })
+  useEffect(() => {
+    if (activeView === 'add-device' && previousActiveViewRef.current !== 'add-device') {
+      setSelectedAddDeviceKind(defaultAddDeviceKind)
+      setFeedback({
+        title: 'WiFi / LAN',
+        detail: '输入设备地址并获取 LAN 租约，随后进入在线设备控制。',
+        tone: 'info',
+      })
+    }
+    previousActiveViewRef.current = activeView
+  }, [activeView])
   const activeScenario = liveScenario
   const deviceOptions = useMemo(
     () => [...activeScenario.devices, ...pendingDevices],
