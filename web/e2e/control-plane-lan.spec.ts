@@ -279,9 +279,9 @@ test.describe('control plane direct LAN', () => {
 
     expect(
       await page.evaluate(() =>
-        Object.keys(window.localStorage).filter((key) => key.startsWith('flux-purr:lan-device:'))
+        Object.keys(window.localStorage).filter((key) => key.startsWith('flux-purr:lan-device-id:'))
       )
-    ).toEqual([`flux-purr:lan-device:${deviceUrl}`])
+    ).toEqual(['flux-purr:lan-device-id:001122334455'])
 
     await page.reload()
     await expect
@@ -372,9 +372,7 @@ test.describe('control plane direct LAN', () => {
     await page.getByRole('button', { name: '连接设备' }).click()
 
     await expect(
-      page.getByText(
-        '浏览器阻止了对私网设备的访问。请确认使用 Chrome、Chromium 或 Edge，并允许私网访问。'
-      )
+      page.getByText('LAN 设备暂时无响应。请检查设备地址、网络连接或浏览器私网访问权限。')
     ).toBeVisible()
   })
 
@@ -485,19 +483,20 @@ test.describe('control plane direct LAN', () => {
     await expect(page.getByText('LAN 配对凭据已失效')).toBeVisible()
     expect(
       await page.evaluate(() => {
-        const raw = window.localStorage.getItem('flux-purr:lan-device:http://192.168.1.18')
+        const raw = window.localStorage.getItem('flux-purr:lan-device-id:001122334455')
         return {
           keys: Object.keys(window.localStorage)
-            .filter((key) => key.startsWith('flux-purr:lan-device:'))
+            .filter(
+              (key) =>
+                key.startsWith('flux-purr:lan-device:') ||
+                key.startsWith('flux-purr:lan-device-id:')
+            )
             .sort(),
           rejected: raw ? JSON.parse(raw) : null,
         }
       })
     ).toEqual({
-      keys: [
-        'flux-purr:lan-device:http://192.168.1.17',
-        'flux-purr:lan-device:http://192.168.1.18',
-      ],
+      keys: ['flux-purr:lan-device:http://192.168.1.17', 'flux-purr:lan-device-id:001122334455'],
       rejected: expect.objectContaining({
         baseUrl: 'http://192.168.1.18',
         deviceId,
