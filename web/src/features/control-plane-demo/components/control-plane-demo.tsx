@@ -2888,9 +2888,7 @@ export function ControlPlaneDemo({
       return authorizedLanRequest<ThermalTuningStatus>(
         session,
         'thermal-tuning',
-        'GET',
-        undefined,
-        visibleDeviceLeaseId
+        'GET'
       )
     }
     if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
