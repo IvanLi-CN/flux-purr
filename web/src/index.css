@@ -4036,7 +4036,7 @@
     .industrial-lan-pairing-panel__scan-results-panel {
     min-height: 0;
     flex: 1;
-    overflow: hidden;
+    overflow: visible;
   }
 
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
@@ -10772,7 +10772,7 @@
 }
 
 .industrial-lan-pairing-panel__scan-results-scroll .simplebar-track.simplebar-vertical {
-  right: 0;
+  right: -0.65rem;
   opacity: 1;
 }
 
