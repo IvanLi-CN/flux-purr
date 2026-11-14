@@ -1628,8 +1628,13 @@ export const LiveQuickAddDevice: Story = {
   name: 'Live / Quick Add Device',
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await step('quick add WiFi switches into the LAN connection form', async () => {
+      if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+        await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+        await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+      }
       await canvas.findByRole('heading', { name: '选择连接方式' })
       const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
         '.industrial-add-device-flow > .industrial-add-device-grid button'
@@ -1654,8 +1659,13 @@ export const LiveQuickAddBridgeDevice: Story = {
   },
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await step('quick add Bridge requires route and target selection before binding', async () => {
+      if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+        await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+        await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+      }
       await canvas.findByRole('heading', { name: '选择连接方式' })
       const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
         '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(3)'
@@ -1719,8 +1729,13 @@ export const LiveWebSerialConnectionTimeout: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
     await canvas.findByRole('heading', { name: '选择连接方式' })
     const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
       '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
@@ -1746,8 +1761,13 @@ export const LiveWebSerialPortSelectionCancelled: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
     await canvas.findByRole('heading', { name: '选择连接方式' })
     const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
       '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
@@ -2108,6 +2128,11 @@ export const LiveBridgeKeyboardFocus: Story = {
   },
   play: async ({ canvasElement, step }) => {
     const canvas = within(canvasElement)
+    const documentRoot = within(canvasElement.ownerDocument.body)
+    if (!canvas.queryByRole('heading', { name: '选择连接方式' })) {
+      await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
+      await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
+    }
     await canvas.findByRole('heading', { name: '选择连接方式' })
     await step('keyboard activation preserves the visible focus indicator', async () => {
       const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
