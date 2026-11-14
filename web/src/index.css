@@ -10776,9 +10776,18 @@
   opacity: 1;
 }
 
-.industrial-lan-pairing-panel__scan-results-scroll .simplebar-content-wrapper,
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-content-wrapper {
+  height: 100%;
+}
+
 .industrial-lan-pairing-panel__scan-results-scroll .simplebar-content {
   min-height: 100%;
+}
+
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-wrapper,
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-mask,
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-offset {
+  height: 100%;
 }
 
 .firmware-artifact-dialog [data-slot="radio-group"] > label {
