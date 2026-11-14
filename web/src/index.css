@@ -4084,9 +4084,9 @@
     display: grid;
     gap: 0.85rem;
     margin-top: 1rem;
-    border: 1px solid color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-muted) 62%);
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 68%, var(--industrial-light) 32%);
     border-radius: 10px;
-    background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-accent) 12%);
+    background: var(--industrial-panel);
     padding: 1rem;
   }
 
@@ -4112,7 +4112,7 @@
   .industrial-bridge-target-panel__discovery {
     display: grid;
     gap: 0.7rem;
-    border-top: 1px solid rgba(72, 125, 154, 0.2);
+    border-top: 1px solid color-mix(in oklch, var(--industrial-muted) 45%, transparent);
     padding-top: 0.85rem;
   }
 
@@ -4165,7 +4165,7 @@
   }
 
   .industrial-bridge-target-panel__transport [aria-pressed="true"] {
-    border-color: rgba(15, 120, 144, 0.48);
+    border-color: color-mix(in oklch, var(--industrial-accent) 58%, var(--industrial-muted) 42%);
     color: var(--industrial-accent);
     box-shadow:
       inset 3px 3px 6px var(--industrial-shadow),
@@ -4183,17 +4183,17 @@
     align-items: center;
     gap: 0.75rem;
     width: 100%;
-    border: 1px solid rgba(95, 128, 148, 0.24);
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 48%, var(--industrial-light) 52%);
     border-radius: 7px;
-    background: rgba(250, 253, 253, 0.38);
+    background: var(--industrial-bg);
     padding: 0.65rem 0.75rem;
     color: var(--industrial-text);
   }
 
   .industrial-bridge-target-panel__devices > div.is-selected {
-    border-color: rgba(15, 120, 144, 0.52);
+    border-color: color-mix(in oklch, var(--industrial-accent) 58%, var(--industrial-muted) 42%);
     color: var(--industrial-accent);
-    box-shadow: inset 0 0 0 1px rgba(15, 120, 144, 0.16);
+    box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--industrial-accent) 18%, transparent);
   }
 
   .industrial-bridge-target-panel__devices span,
@@ -4289,7 +4289,7 @@
 
   .industrial-bridge-target-panel__empty {
     margin: 0;
-    border-top: 1px solid rgba(72, 125, 154, 0.2);
+    border-top: 1px solid color-mix(in oklch, var(--industrial-muted) 45%, transparent);
     padding-top: 0.75rem;
   }
 
