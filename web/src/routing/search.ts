@@ -1,10 +1,12 @@
 import type { AppVariant } from '@/app-mode'
 import {
   type DemoArtifactState,
+  type DemoLanScanResultsPreset,
   type DemoLeaseState,
   type DemoNetworkState,
   type DemoPersonaId,
   type DemoSceneId,
+  type DemoWebSerialState,
   demoInspectorSearch,
   demoInspectorStateFromSearch,
 } from '@/features/control-plane-demo/demo-inspector-state'
@@ -21,6 +23,8 @@ export interface AppSearch {
   demoWifiCapability?: 'default' | 'read-only' | 'unavailable'
   demoLogs?: 'normal' | 'empty'
   demoTelemetry?: 'available' | 'unavailable'
+  demoLanScanResults?: DemoLanScanResultsPreset
+  demoWebSerialState?: DemoWebSerialState | 'cancelled'
 }
 
 export function validateAppSearch(search: Record<string, unknown>): AppSearch {

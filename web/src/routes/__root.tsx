@@ -15,6 +15,8 @@ export const Route = createRootRoute({
         'demoWifiCapability',
         'demoLogs',
         'demoTelemetry',
+        'demoLanScanResults',
+        'demoWebSerialState',
       ]),
     ],
   },

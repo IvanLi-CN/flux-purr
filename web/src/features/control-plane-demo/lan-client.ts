@@ -5,6 +5,7 @@ import type { DeviceTarget } from './types'
 const LAN_STORAGE_PREFIX = 'flux-purr:lan-device:'
 const LAN_ADDRESS_STORAGE_KEY = 'flux-purr:lan-address'
 const LAN_SCAN_CIDR_STORAGE_KEY = 'flux-purr:lan-scan-cidr'
+const LAN_SCAN_CIDRS_STORAGE_KEY = 'flux-purr:lan-scan-cidrs'
 const LAN_LEASE_TTL_MS = 30_000
 
 export type LanPairingMode = 'required' | 'optional' | 'unavailable'
@@ -34,6 +35,7 @@ export interface LanSubnetScanOptions {
   timeoutMs?: number
   signal?: AbortSignal
   onProgress?: (progress: { done: number; total: number }) => void
+  onDevice?: (device: DiscoveredLanDevice) => void
 }
 
 export interface LanDeviceSession {
@@ -291,6 +293,7 @@ export async function scanLanSubnet(
     timeoutMs = 900,
     signal,
     onProgress,
+    onDevice,
   }: LanSubnetScanOptions = {}
 ): Promise<DiscoveredLanDevice[]> {
   const hosts = parsePrivateLanCidr(cidr)
@@ -308,7 +311,9 @@ export async function scanLanSubnet(
       const baseUrl = `http://${hosts[index]}`
       try {
         const info = await getLanPublicInfo(baseUrl, withRequestTimeout(fetcher, timeoutMs, signal))
-        devices.set(info.deviceId, { baseUrl, info })
+        const device = { baseUrl, info }
+        devices.set(info.deviceId, device)
+        onDevice?.(device)
       } catch {
         // Unreachable hosts and non-Flux-Purr responses are expected during a scan.
       } finally {
@@ -528,6 +533,33 @@ export function storeLanScanCidr(cidr: string) {
 
 export function loadLanScanCidr(fallback: string) {
   return getStorage()?.getItem(LAN_SCAN_CIDR_STORAGE_KEY)?.trim() || fallback
+}
+
+export function loadRecentLanScanCidrs() {
+  const raw = getStorage()?.getItem(LAN_SCAN_CIDRS_STORAGE_KEY)
+  if (!raw) return []
+  try {
+    const value = JSON.parse(raw)
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function rememberLanScanCidr(cidr: string) {
+  const normalized = cidr.trim()
+  if (!normalized) return
+  const next = [
+    normalized,
+    ...loadRecentLanScanCidrs().filter((item) => item !== normalized),
+  ].slice(0, 12)
+  getStorage()?.setItem(LAN_SCAN_CIDRS_STORAGE_KEY, JSON.stringify(next))
+}
+
+export function clearRecentLanScanCidrs() {
+  getStorage()?.removeItem(LAN_SCAN_CIDRS_STORAGE_KEY)
 }
 
 export function loadLanDeviceSession(baseUrl: string): LanDeviceSession | null {
