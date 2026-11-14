@@ -85,7 +85,7 @@ interface DemoInspectorContentProps {
   onPlacementChange: (placement: DemoInspectorPlacement) => void
 }
 
-type DemoModuleKind = 'overview' | 'settings' | 'calibration' | 'update'
+type DemoModuleKind = 'devices' | 'overview' | 'settings' | 'calibration' | 'update'
 
 const scenes: Array<{
   id: DemoSceneId
@@ -133,43 +133,43 @@ const scenes: Array<{
     id: 'lan-scan-empty',
     label: 'LAN scan · Empty',
     description: 'No mock devices returned',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'lan-scan-typical',
     label: 'LAN scan · Typical',
     description: 'A short list of mock devices',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'lan-scan-long',
     label: 'LAN scan · Long list',
     description: 'A long mock result list',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'web-serial-idle',
     label: 'Web Serial · Choose device',
     description: 'Waiting for browser device selection',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'web-serial-connecting',
     label: 'Web Serial · Connecting',
     description: 'Browser chooser is open',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'web-serial-cancelled',
     label: 'Web Serial · Cancelled',
     description: 'Selection was cancelled or refused',
-    modules: ['overview'],
+    modules: ['devices'],
   },
   {
     id: 'web-serial-connected',
     label: 'Web Serial · Connected',
     description: 'Device identity is ready',
-    modules: ['overview'],
+    modules: ['devices'],
   },
 ]
 
@@ -216,49 +216,50 @@ const presetCatalog: Array<{
   },
   {
     id: 'lan-scan-empty',
-    module: 'overview',
+    module: 'devices',
     scene: 'lan-scan-empty',
     label: 'LAN scan · 0 results',
   },
   {
     id: 'lan-scan-typical',
-    module: 'overview',
+    module: 'devices',
     scene: 'lan-scan-typical',
     label: 'LAN scan · Typical list',
   },
   {
     id: 'lan-scan-long',
-    module: 'overview',
+    module: 'devices',
     scene: 'lan-scan-long',
     label: 'LAN scan · Long list',
   },
   {
     id: 'web-serial-idle',
-    module: 'overview',
+    module: 'devices',
     scene: 'web-serial-idle',
     label: 'Web Serial · Choose device',
   },
   {
     id: 'web-serial-connecting',
-    module: 'overview',
+    module: 'devices',
     scene: 'web-serial-connecting',
     label: 'Web Serial · Connecting',
   },
   {
     id: 'web-serial-cancelled',
-    module: 'overview',
+    module: 'devices',
     scene: 'web-serial-cancelled',
     label: 'Web Serial · Cancelled',
   },
   {
     id: 'web-serial-connected',
-    module: 'overview',
+    module: 'devices',
     scene: 'web-serial-connected',
     label: 'Web Serial · Connected',
   },
 ]
 
 function moduleKind(path: string): DemoModuleKind {
+  if (path === '/devices/new') return 'devices'
   if (path.includes('/calibration/')) return 'calibration'
   if (path.includes('/settings/')) return 'settings'
   if (path.endsWith('/update')) return 'update'
