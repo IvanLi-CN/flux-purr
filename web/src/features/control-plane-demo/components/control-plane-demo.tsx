@@ -2875,7 +2875,11 @@ export function ControlPlaneDemo({
   ])
   const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
     if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })
-    if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+    // LAN status reads are read-only on the device and do not require the
+    // mutation lease.  Keep the lease requirement for POST commands below;
+    // otherwise a healthy LAN device can be reported as "unsupported" while
+    // runtime/status reads continue to work.
+    if (lanDeviceBaseUrl) {
       const session = loadLanDeviceSession(lanDeviceBaseUrl)
       if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
       return authorizedLanRequest<ThermalTuningStatus>(
