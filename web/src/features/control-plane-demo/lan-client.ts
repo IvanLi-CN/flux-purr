@@ -35,6 +35,7 @@ export interface LanSubnetScanOptions {
   timeoutMs?: number
   signal?: AbortSignal
   onProgress?: (progress: { done: number; total: number }) => void
+  onDevice?: (device: DiscoveredLanDevice) => void
 }
 
 export interface LanDeviceSession {
@@ -292,6 +293,7 @@ export async function scanLanSubnet(
     timeoutMs = 900,
     signal,
     onProgress,
+    onDevice,
   }: LanSubnetScanOptions = {}
 ): Promise<DiscoveredLanDevice[]> {
   const hosts = parsePrivateLanCidr(cidr)
@@ -309,7 +311,9 @@ export async function scanLanSubnet(
       const baseUrl = `http://${hosts[index]}`
       try {
         const info = await getLanPublicInfo(baseUrl, withRequestTimeout(fetcher, timeoutMs, signal))
-        devices.set(info.deviceId, { baseUrl, info })
+        const device = { baseUrl, info }
+        devices.set(info.deviceId, device)
+        onDevice?.(device)
       } catch {
         // Unreachable hosts and non-Flux-Purr responses are expected during a scan.
       } finally {

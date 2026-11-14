@@ -29,6 +29,9 @@ export const demoSceneIds = [
   'blocked-artifact',
   'calibration-loading',
   'calibration-active',
+  'lan-scan-empty',
+  'lan-scan-typical',
+  'lan-scan-long',
 ] as const
 
 export type DemoSceneId = (typeof demoSceneIds)[number]
@@ -39,6 +42,7 @@ export type DemoArtifactState = 'ready' | 'blocked'
 export type DemoWifiCapabilityState = 'default' | 'read-only' | 'unavailable'
 export type DemoLogState = 'normal' | 'empty'
 export type DemoTelemetryState = 'available' | 'unavailable'
+export type DemoLanScanResultsPreset = 'none' | 'typical' | 'long'
 
 export const demoPersonas: Array<{
   id: DemoPersonaId
@@ -83,6 +87,7 @@ export interface DemoInspectorState {
   demoWifiCapability: DemoWifiCapabilityState
   demoLogs: DemoLogState
   demoTelemetry: DemoTelemetryState
+  demoLanScanResults: DemoLanScanResultsPreset
 }
 
 export const defaultDemoInspectorState: DemoInspectorState = {
@@ -94,6 +99,7 @@ export const defaultDemoInspectorState: DemoInspectorState = {
   demoWifiCapability: 'default',
   demoLogs: 'normal',
   demoTelemetry: 'available',
+  demoLanScanResults: 'none',
 }
 
 export function demoInspectorStateFromSearch(search: Record<string, unknown>): DemoInspectorState {
@@ -109,6 +115,10 @@ export function demoInspectorStateFromSearch(search: Record<string, unknown>): D
         : 'default',
     demoLogs: search.demoLogs === 'empty' ? 'empty' : 'normal',
     demoTelemetry: search.demoTelemetry === 'unavailable' ? 'unavailable' : 'available',
+    demoLanScanResults:
+      search.demoLanScanResults === 'typical' || search.demoLanScanResults === 'long'
+        ? search.demoLanScanResults
+        : 'none',
   }
 }
 
@@ -123,6 +133,7 @@ export function demoInspectorSearch(state: DemoInspectorState) {
       state.demoWifiCapability === 'default' ? undefined : state.demoWifiCapability,
     demoLogs: state.demoLogs === 'normal' ? undefined : state.demoLogs,
     demoTelemetry: state.demoTelemetry === 'available' ? undefined : state.demoTelemetry,
+    demoLanScanResults: state.demoLanScanResults === 'none' ? undefined : state.demoLanScanResults,
   }
 }
 

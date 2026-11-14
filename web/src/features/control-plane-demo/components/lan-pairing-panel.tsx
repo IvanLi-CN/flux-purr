@@ -136,6 +136,13 @@ export function LanPairingPanel({
       const devices = await scanDevices(scanCidr, {
         signal: controller.signal,
         onProgress: setScanProgress,
+        onDevice: (device) => {
+          setScanResults((current) =>
+            current.some((item) => item.info.deviceId === device.info.deviceId)
+              ? current
+              : [...current, device]
+          )
+        },
       })
       if (controller.signal.aborted) return
       rememberLanScanCidr(scanCidr)

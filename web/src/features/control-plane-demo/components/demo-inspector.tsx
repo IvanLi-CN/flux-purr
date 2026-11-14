@@ -129,6 +129,24 @@ const scenes: Array<{
     description: 'Leave guard active',
     modules: ['calibration'],
   },
+  {
+    id: 'lan-scan-empty',
+    label: 'LAN scan · Empty',
+    description: 'No mock devices returned',
+    modules: ['overview'],
+  },
+  {
+    id: 'lan-scan-typical',
+    label: 'LAN scan · Typical',
+    description: 'A short list of mock devices',
+    modules: ['overview'],
+  },
+  {
+    id: 'lan-scan-long',
+    label: 'LAN scan · Long list',
+    description: 'A long mock result list',
+    modules: ['overview'],
+  },
 ]
 
 const presetCatalog: Array<{
@@ -172,6 +190,24 @@ const presetCatalog: Array<{
     scene: 'calibration-active',
     label: 'Calibration · Running',
   },
+  {
+    id: 'lan-scan-empty',
+    module: 'overview',
+    scene: 'lan-scan-empty',
+    label: 'LAN scan · 0 results',
+  },
+  {
+    id: 'lan-scan-typical',
+    module: 'overview',
+    scene: 'lan-scan-typical',
+    label: 'LAN scan · Typical list',
+  },
+  {
+    id: 'lan-scan-long',
+    module: 'overview',
+    scene: 'lan-scan-long',
+    label: 'LAN scan · Long list',
+  },
 ]
 
 function moduleKind(path: string): DemoModuleKind {
@@ -201,6 +237,9 @@ const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
   'blocked-artifact': { demoPersona: 'maintainer', demoArtifact: 'blocked' },
   'calibration-loading': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'calibration-active': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'lan-scan-empty': { demoLanScanResults: 'none' },
+  'lan-scan-typical': { demoLanScanResults: 'typical' },
+  'lan-scan-long': { demoLanScanResults: 'long' },
 }
 
 const placementOptions: Array<{

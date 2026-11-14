@@ -40,6 +40,7 @@ function inspectorNavigationTargetKey(
     demoWifiCapability?: unknown
     demoLogs?: unknown
     demoTelemetry?: unknown
+    demoLanScanResults?: unknown
   }
 ) {
   return [
@@ -54,6 +55,7 @@ function inspectorNavigationTargetKey(
     search.demoWifiCapability,
     search.demoLogs,
     search.demoTelemetry,
+    search.demoLanScanResults,
   ].join('\u0001')
 }
 
@@ -158,6 +160,7 @@ function App() {
       demoWifiCapability: _demoWifiCapability,
       demoLogs: _demoLogs,
       demoTelemetry: _demoTelemetry,
+      demoLanScanResults: _demoLanScanResults,
       ...searchWithoutInspector
     } = search
     void navigate({
@@ -230,7 +233,8 @@ function App() {
         current.search.demoArtifact === next.search.demoArtifact &&
         current.search.demoWifiCapability === next.search.demoWifiCapability &&
         current.search.demoLogs === next.search.demoLogs &&
-        current.search.demoTelemetry === next.search.demoTelemetry
+        current.search.demoTelemetry === next.search.demoTelemetry &&
+        current.search.demoLanScanResults === next.search.demoLanScanResults
       if (current.pathname === next.pathname && sameSearch) return false
       const activeCalibrationPath = consoleRoutePath({
         kind: 'device',
@@ -475,6 +479,7 @@ function App() {
             demoWifiCapability: _demoWifiCapability,
             demoLogs: _demoLogs,
             demoTelemetry: _demoTelemetry,
+            demoLanScanResults: _demoLanScanResults,
             ...searchWithoutInspector
           } = inspectorSearchRef.current
           const nextSearch = {
@@ -543,6 +548,7 @@ function App() {
           demoWifiCapability: _demoWifiCapability,
           demoLogs: _demoLogs,
           demoTelemetry: _demoTelemetry,
+          demoLanScanResults: _demoLanScanResults,
           ...searchWithoutInspector
         } = inspectorSearchRef.current
         const nextSearch = { ...searchWithoutInspector, ...demoInspectorSearch(nextInspectorState) }
@@ -619,6 +625,7 @@ function App() {
         allowDemoControls={!isLive}
         mockOnly={mockOnly}
         demoThermalPlantRunLoading={!isLive && inspectorState.demoScene === 'calibration-loading'}
+        demoLanScanResults={inspectorState.demoLanScanResults}
         firmwareArtifacts={mockOnly ? firmwareDemoArtifacts : undefined}
         initialFirmwareActivity={mockOnly ? firmwareDemoActivity : undefined}
         devd={{

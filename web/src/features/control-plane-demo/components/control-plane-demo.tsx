@@ -108,6 +108,7 @@ import type {
   ThermalTuningStatus,
   VinCalibrationSample,
 } from '../contracts'
+import type { DemoLanScanResultsPreset } from '../demo-inspector-state'
 import {
   type DeviceChoice,
   type DeviceConnectionKind,
@@ -125,12 +126,14 @@ import {
 import {
   authorizedLanRequest,
   createLanLease,
+  type DiscoveredLanDevice,
   directLanStaleReadPath,
   getLanPublicInfo,
   isDirectLanDevice,
   type LanDeviceSession,
   type LanLease,
   type LanProbe,
+  type LanSubnetScanOptions,
   lanProbeToDeviceTarget,
   listSavedLanDeviceSessions,
   loadLanDeviceSession,
@@ -259,6 +262,7 @@ interface ControlPlaneDemoProps {
   firmwareArtifacts?: OfficialFirmwareArtifact[]
   initialFirmwareActivity?: FirmwareActivityEntry[]
   lanPairing?: LanPairingOverrides
+  demoLanScanResults?: DemoLanScanResultsPreset
   lanRuntime?: LanRuntimeDependencies
 }
 type CalibrationWorkbenchMode = 'vin_adc' | 'rtd_adc' | 'heater_curve'
@@ -267,6 +271,45 @@ type LogFilter = 'all' | EventLogEntry['tone']
 
 const defaultAddDeviceKind: AddDeviceKind = 'wifi'
 const mockOnlyTransportMessage = 'Public demo is mock-only and cannot connect to LAN devices.'
+
+function createDemoLanScan(
+  resultPreset: DemoLanScanResultsPreset
+): NonNullable<LanPairingOverrides['scanDevices']> {
+  return async (cidr, options: LanSubnetScanOptions = {}): Promise<DiscoveredLanDevice[]> => {
+    const prefix = Number(cidr.trim().split('/')[1])
+    const safePrefix = Number.isFinite(prefix) ? Math.min(24, Math.max(8, prefix)) : 24
+    const durationMs = 10_000 + (24 - safePrefix) * 1_250
+    const total = Math.min(256, Math.max(1, 2 ** Math.max(0, 32 - safePrefix) - 2))
+    const resultCount = resultPreset === 'long' ? 24 : resultPreset === 'typical' ? 6 : 0
+    const baseHost = cidr.trim().split('/')[0].split('.').slice(0, 3).join('.')
+    const devices: DiscoveredLanDevice[] = []
+    let emitted = 0
+
+    for (let step = 1; step <= total; step += 1) {
+      if (options.signal?.aborted) return devices
+      await new Promise<void>((resolve) => setTimeout(resolve, durationMs / total))
+      const nextCount = Math.min(resultCount, Math.floor((step / total) * resultCount))
+      while (emitted < nextCount) {
+        const host = `${baseHost}.${10 + emitted}`
+        const device: DiscoveredLanDevice = {
+          baseUrl: `http://${host}`,
+          info: {
+            api: 'v1',
+            deviceId: `demo-lan-${emitted + 1}`,
+            hostname: `demo-lan-${String(emitted + 1).padStart(2, '0')}`,
+            firmwareVersion: 'fw/v0.4.0-demo',
+            pairing: { mode: 'optional', active: true, attemptsRemaining: 3 },
+          },
+        }
+        devices.push(device)
+        options.onDevice?.(device)
+        emitted += 1
+      }
+      options.onProgress?.({ done: step, total })
+    }
+    return devices
+  }
+}
 
 export function shouldEnableAutomaticLiveDevdDiscovery({
   devdEnabled,
@@ -796,9 +839,17 @@ export function ControlPlaneDemo({
   firmwareArtifacts,
   initialFirmwareActivity,
   lanPairing,
+  demoLanScanResults = 'none',
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
+  const resolvedLanPairing = useMemo(() => {
+    if (!allowDemoControls || lanPairing?.scanDevices) return lanPairing
+    return {
+      ...lanPairing,
+      scanDevices: createDemoLanScan(demoLanScanResults),
+    }
+  }, [allowDemoControls, demoLanScanResults, lanPairing])
   const explicitSelectedDeviceIdRef = useRef<string | null>(null)
   const previousActiveViewRef = useRef<string | null>(null)
   const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
@@ -5001,7 +5052,7 @@ export function ControlPlaneDemo({
                 onAddDeviceStageChange={setAddDeviceStage}
                 recentDevices={knownDevices}
                 onLanPaired={handleLanPaired}
-                lanPairing={lanPairing}
+                lanPairing={resolvedLanPairing}
                 onFirmwareActivity={appendFirmwareActivity}
               />
             </section>
