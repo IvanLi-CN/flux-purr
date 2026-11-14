@@ -1630,6 +1630,7 @@ export const LiveQuickAddDevice: Story = {
     const canvas = within(canvasElement)
 
     await step('quick add WiFi switches into the LAN connection form', async () => {
+      await canvas.findByRole('heading', { name: '选择连接方式' })
       const wifiOption = canvasElement.querySelector<HTMLButtonElement>(
         '.industrial-add-device-flow > .industrial-add-device-grid button'
       )
@@ -1655,6 +1656,7 @@ export const LiveQuickAddBridgeDevice: Story = {
     const canvas = within(canvasElement)
 
     await step('quick add Bridge requires route and target selection before binding', async () => {
+      await canvas.findByRole('heading', { name: '选择连接方式' })
       const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
         '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(3)'
       )
@@ -1719,6 +1721,7 @@ export const LiveWebSerialConnectionTimeout: Story = {
     const canvas = within(canvasElement)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await canvas.findByRole('heading', { name: '选择连接方式' })
     const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
       '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
     )
@@ -1745,6 +1748,7 @@ export const LiveWebSerialPortSelectionCancelled: Story = {
     const canvas = within(canvasElement)
 
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
+    await canvas.findByRole('heading', { name: '选择连接方式' })
     const webSerialOption = canvasElement.querySelector<HTMLButtonElement>(
       '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(2)'
     )
@@ -2103,6 +2107,8 @@ export const LiveBridgeKeyboardFocus: Story = {
     webSerial: { enabled: false },
   },
   play: async ({ canvasElement, step }) => {
+    const canvas = within(canvasElement)
+    await canvas.findByRole('heading', { name: '选择连接方式' })
     await step('keyboard activation preserves the visible focus indicator', async () => {
       const bridgeOption = canvasElement.querySelector<HTMLButtonElement>(
         '.industrial-add-device-flow > .industrial-add-device-grid button:nth-child(3)'
@@ -2111,7 +2117,7 @@ export const LiveBridgeKeyboardFocus: Story = {
       bridgeOption.focus()
       await userEvent.keyboard('{Enter}')
 
-      await expect(bridgeOption).toHaveAttribute('aria-pressed', 'true')
+      await waitFor(() => expect(bridgeOption).toHaveAttribute('aria-pressed', 'true'))
       await expect(canvasElement.ownerDocument.activeElement).toBe(bridgeOption)
     })
   },
