@@ -228,16 +228,15 @@ pub(crate) async fn establish_lan_auth(
     if lan_bridge_read::<Identity>(&config_entry, "identity")
         .await
         .is_err()
+        && let Some(ip) = network.ip.as_ref().map(ToString::to_string)
     {
-        if let Some(ip) = network.ip.as_ref().map(ToString::to_string) {
-            config_entry.base_url =
-                lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(|_| {
-                    HttpError::bad_request(
-                        "invalid_network_address",
-                        "The USB network snapshot did not contain a valid private address.",
-                    )
-                })?;
-        }
+        config_entry.base_url =
+            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(|_| {
+                HttpError::bad_request(
+                    "invalid_network_address",
+                    "The USB network snapshot did not contain a valid private address.",
+                )
+            })?;
     }
     let mut config = read_user_config()
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
