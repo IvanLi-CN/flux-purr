@@ -4537,6 +4537,27 @@
     align-items: center;
     border-top: 1px solid rgba(72, 125, 154, 0.18);
     padding-top: 0.55rem;
+    cursor: pointer;
+  }
+
+  .industrial-lan-pairing-panel__scan-results li:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 2px;
+  }
+
+  .industrial-lan-pairing-panel__scan-select {
+    min-width: 0;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+  }
+
+  .industrial-lan-pairing-panel__scan-select:focus-visible {
+    outline: 2px solid var(--industrial-accent);
+    outline-offset: 2px;
   }
 
   .industrial-lan-pairing-panel__scan-results span,

@@ -37,6 +37,7 @@ export interface LanPairingPanelProps {
     session: LanDeviceSession,
     probe: Awaited<ReturnType<typeof probeLanDevice>>
   ) => void | Promise<void>
+  onMockConnected?: (info: LanPublicInfo) => void | Promise<void>
   initialAddress?: string
   supported?: boolean
   connectDevice?: (address: string) => Promise<LanPublicInfo>
@@ -75,6 +76,7 @@ export function lanPairingFailureMessage(error: unknown) {
 
 export function LanPairingPanel({
   onPaired,
+  onMockConnected,
   initialAddress = '',
   supported = isChromiumPrivateNetworkSupported(),
   connectDevice = getLanPublicInfo,
@@ -256,6 +258,7 @@ export function LanPairingPanel({
         return
       }
       setMessage(`已连接 ${info.hostname}。此设备仅提供基础低频信息读取。`)
+      await onMockConnected?.(info)
     } catch (error) {
       setState('error')
       setMessage(lanPairingFailureMessage(error))
@@ -267,6 +270,12 @@ export function LanPairingPanel({
     storeLanAddress(device.baseUrl)
     setSelectedScanBaseUrl(device.baseUrl)
     void connect(device.baseUrl)
+  }
+
+  const selectScanDevice = (device: DiscoveredLanDevice) => {
+    setSelectedScanBaseUrl(device.baseUrl)
+    setPublicInfo(device.info)
+    setMessage(`已选择 ${device.info.hostname}，点击连接以打开设备控制。`)
   }
 
   const refreshPairing = async () => {
@@ -429,14 +438,21 @@ export function LanPairingPanel({
                       key={`${device.info.deviceId}:${device.baseUrl}`}
                       className={selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined}
                     >
-                      <span>
+                      <button
+                        type="button"
+                        className="industrial-lan-pairing-panel__scan-select"
+                        onClick={() => selectScanDevice(device)}
+                      >
                         <strong>{device.info.hostname}</strong>
                         <small>{device.baseUrl}</small>
-                      </span>
+                      </button>
                       <Button
                         type="button"
                         variant="outline"
-                        onClick={() => connectScanDevice(device)}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          connectScanDevice(device)
+                        }}
                         disabled={state === 'connecting' || state === 'claiming'}
                         aria-pressed={selectedScanBaseUrl === device.baseUrl}
                         aria-label={`连接 ${device.info.hostname}`}

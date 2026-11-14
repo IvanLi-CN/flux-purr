@@ -855,15 +855,6 @@ export function ControlPlaneDemo({
   lanRuntime: lanRuntimeOptions,
 }: ControlPlaneDemoProps) {
   const [selectedDeviceId, setSelectedDeviceId] = useState(scenario.selectedDeviceId)
-  const resolvedLanPairing = useMemo(() => {
-    if (!allowDemoControls || lanPairing?.scanDevices) return lanPairing
-    return {
-      ...lanPairing,
-      connectDevice: createDemoLanConnection,
-      resumeSession: async () => null,
-      scanDevices: createDemoLanScan(demoLanScanResults),
-    }
-  }, [allowDemoControls, demoLanScanResults, lanPairing])
   const explicitSelectedDeviceIdRef = useRef<string | null>(null)
   const previousActiveViewRef = useRef<string | null>(null)
   const [localActiveView, setLocalActiveView] = useState<ConsoleView>(initialView)
@@ -2164,6 +2155,34 @@ export function ControlPlaneDemo({
     },
     [navigation, visibleCalibrationWorkspaceTab, visibleDevice]
   )
+
+  const resolvedLanPairing = useMemo(() => {
+    if (!allowDemoControls || lanPairing?.scanDevices) return lanPairing
+    return {
+      ...lanPairing,
+      connectDevice: createDemoLanConnection,
+      onMockConnected: async () => {
+        if (navigation) {
+          await navigation.navigate({
+            kind: 'device',
+            deviceId: scenario.selectedDeviceId,
+            view: 'dashboard',
+          })
+        } else {
+          await setConsoleView('dashboard')
+        }
+      },
+      resumeSession: async () => null,
+      scanDevices: createDemoLanScan(demoLanScanResults),
+    }
+  }, [
+    allowDemoControls,
+    demoLanScanResults,
+    lanPairing,
+    navigation,
+    scenario.selectedDeviceId,
+    setConsoleView,
+  ])
 
   const setWorkspaceTab = useCallback(
     (
