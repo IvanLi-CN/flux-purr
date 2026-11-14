@@ -4371,7 +4371,7 @@
 
   .industrial-lan-pairing-panel__connect-fields {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 0.65rem;
     align-items: end;
   }
