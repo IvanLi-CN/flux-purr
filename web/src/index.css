@@ -4041,6 +4041,7 @@
 
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
     .industrial-lan-pairing-panel__scan-results-scroll {
+    height: 100%;
     min-height: 0;
     overflow: hidden;
   }
@@ -10773,6 +10774,11 @@
 .industrial-lan-pairing-panel__scan-results-scroll .simplebar-track.simplebar-vertical {
   right: 0;
   opacity: 1;
+}
+
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-content-wrapper,
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-content {
+  min-height: 100%;
 }
 
 .firmware-artifact-dialog [data-slot="radio-group"] > label {
