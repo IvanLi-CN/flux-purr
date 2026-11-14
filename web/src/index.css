@@ -3947,9 +3947,9 @@
     display: grid;
     gap: 0.85rem;
     margin-top: 1rem;
-    border: 1px solid rgba(72, 125, 154, 0.38);
+    border: 1px solid color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-muted) 62%);
     border-radius: 10px;
-    background: rgba(213, 230, 234, 0.48);
+    background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-accent) 12%);
     padding: 1rem;
   }
 
@@ -3968,9 +3968,9 @@
     display: grid;
     gap: 0.85rem;
     margin-top: 1rem;
-    border: 1px solid rgba(72, 125, 154, 0.38);
+    border: 1px solid color-mix(in oklch, var(--industrial-accent) 38%, var(--industrial-muted) 62%);
     border-radius: 10px;
-    background: rgba(213, 230, 234, 0.48);
+    background: color-mix(in oklch, var(--industrial-panel) 88%, var(--industrial-accent) 12%);
     padding: 1rem;
   }
 
@@ -4635,6 +4635,7 @@
     border-radius: 16px;
     background: var(--industrial-bg);
     padding: 1rem;
+    min-height: 7rem;
     color: var(--industrial-text);
     text-align: left;
     box-shadow:

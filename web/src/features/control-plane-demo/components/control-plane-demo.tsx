@@ -472,7 +472,7 @@ const addDeviceOptions: Array<{
   {
     kind: 'wifi',
     label: 'WiFi',
-    detail: '预留后续站点地址，但不把硬件标记为在线。',
+    detail: '输入设备地址并获取 LAN 租约，随后进入在线设备控制。',
   },
   {
     kind: 'web-serial',
@@ -3007,12 +3007,24 @@ export function ControlPlaneDemo({
         })
         setLanLeasesByDevice((current) => ({ ...current, [target.id]: lease }))
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
+        const identityId = deviceIdentityId(leasedTarget)
+        setRequestedConnectionByIdentity((current) => ({
+          ...current,
+          [identityId]: { kind: 'wifi', targetId: leasedTarget.id },
+        }))
+        setRouteFallbackKind(undefined)
         setSelectedDeviceId(target.id)
+        explicitSelectedDeviceIdRef.current = target.id
         setSelectedAddDeviceKind(defaultAddDeviceKind)
+        setFeedback({
+          title: `${target.alias} connected over WiFi / LAN`,
+          detail: 'LAN lease acquired. The device dashboard will use the WiFi connection.',
+          tone: 'info',
+        })
         if (navigation) {
           await navigation.navigate({
             kind: 'device',
-            deviceId: deviceIdentityId(leasedTarget),
+            deviceId: identityId,
             view: 'dashboard',
           })
         } else {
