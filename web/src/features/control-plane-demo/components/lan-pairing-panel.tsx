@@ -132,14 +132,14 @@ export function LanPairingPanel({
     setScanResults([])
     setSelectedScanBaseUrl(null)
     setScanProgress({ done: 0, total: 0 })
-    rememberLanScanCidr(scanCidr)
-    setRecentCidrs(loadRecentLanScanCidrs())
     try {
       const devices = await scanDevices(scanCidr, {
         signal: controller.signal,
         onProgress: setScanProgress,
       })
       if (controller.signal.aborted) return
+      rememberLanScanCidr(scanCidr)
+      setRecentCidrs(loadRecentLanScanCidrs())
       setScanResults(devices)
       setScanState('ready')
     } catch (error) {
