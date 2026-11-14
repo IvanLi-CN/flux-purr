@@ -1872,7 +1872,10 @@ export function ControlPlaneDemo({
             device.id === deviceId
               ? {
                   ...device,
-                  leaseState: 'conflict',
+                  leaseState:
+                    error instanceof ControlPlaneClientError && error.code === 'lease_conflict'
+                      ? 'conflict'
+                      : 'expired',
                   transportIssue: error instanceof Error ? error.message : '无法获取 LAN lease。',
                 }
               : device
@@ -2875,15 +2878,17 @@ export function ControlPlaneDemo({
   ])
   const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
     if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })
-    if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+    // LAN status reads are read-only on the device and do not require the
+    // mutation lease.  Keep the lease requirement for POST commands below;
+    // otherwise a healthy LAN device can be reported as "unsupported" while
+    // runtime/status reads continue to work.
+    if (lanDeviceBaseUrl) {
       const session = loadLanDeviceSession(lanDeviceBaseUrl)
       if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
       return authorizedLanRequest<ThermalTuningStatus>(
         session,
         'thermal-tuning',
-        'GET',
-        undefined,
-        visibleDeviceLeaseId
+        'GET'
       )
     }
     if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {

@@ -49,8 +49,8 @@ export function lanPairingFailureMessage(error: unknown) {
   }
 
   switch (error.code) {
-    case 'lan_private_network_unavailable':
-      return '浏览器阻止了对私网设备的访问。请确认使用 Chrome、Chromium 或 Edge，并允许私网访问。'
+    case 'lan_transport_unavailable':
+      return '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。'
     case 'pairing_inactive':
       return '配对码尚未开启。请保持硬件的 WiFi Info 页面打开，再检查配对码。'
     case 'pairing_locked':
@@ -211,11 +211,15 @@ export function LanPairingPanel({
         if (error instanceof ControlPlaneClientError && error.code === 'unauthorized') {
           setPairingMessage(lanPairingFailureMessage(error))
         } else {
-          throw error
+          setState('error')
+          setMessage(`已找到已保存的配对凭据，但验证设备失败：${lanPairingFailureMessage(error)}`)
+          return
         }
       }
       if (info.pairing.mode === 'required') {
-        setMessage(`已连接 ${info.hostname}。输入四位配对码后才可启用控制。`)
+        setMessage(
+          `未找到 ${info.hostname} 的已保存配对凭据。首次在此浏览器中连接需要输入四位配对码；之后将自动复用。`
+        )
         setPairingDialogOpen(true)
         return
       }
@@ -549,7 +553,7 @@ async function pairLanDevice(address: string, code?: string): Promise<LanPairing
   } catch (error) {
     if (
       error instanceof ControlPlaneClientError &&
-      error.code === 'lan_private_network_unavailable'
+      error.code === 'lan_transport_unavailable'
     ) {
       throw new ControlPlaneClientError(
         'Paired device probe was interrupted.',

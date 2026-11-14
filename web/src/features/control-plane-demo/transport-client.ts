@@ -34,13 +34,37 @@ export class ControlPlaneClientError extends Error {
   readonly code: string
   readonly retryable: boolean
   readonly details?: unknown
+  readonly category?:
+    | 'unauthorized'
+    | 'thermal_tuning_unsupported'
+    | 'transport_unavailable'
+    | 'server_retryable'
+    | 'response_invalid'
+  readonly operation?: string
+  readonly endpoint?: string
+  readonly status?: number
 
-  constructor(message: string, code = 'request_failed', retryable = true, details?: unknown) {
+  constructor(
+    message: string,
+    code = 'request_failed',
+    retryable = true,
+    details?: unknown,
+    metadata?: {
+      category?: ControlPlaneClientError['category']
+      operation?: string
+      endpoint?: string
+      status?: number
+    }
+  ) {
     super(message)
     this.name = 'ControlPlaneClientError'
     this.code = code
     this.retryable = retryable
     this.details = details
+    this.category = metadata?.category
+    this.operation = metadata?.operation
+    this.endpoint = metadata?.endpoint
+    this.status = metadata?.status
   }
 }
 
