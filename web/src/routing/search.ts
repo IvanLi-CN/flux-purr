@@ -6,6 +6,7 @@ import {
   type DemoNetworkState,
   type DemoPersonaId,
   type DemoSceneId,
+  type DemoWebSerialState,
   demoInspectorSearch,
   demoInspectorStateFromSearch,
 } from '@/features/control-plane-demo/demo-inspector-state'
@@ -23,6 +24,7 @@ export interface AppSearch {
   demoLogs?: 'normal' | 'empty'
   demoTelemetry?: 'available' | 'unavailable'
   demoLanScanResults?: DemoLanScanResultsPreset
+  demoWebSerialState?: DemoWebSerialState | 'cancelled'
 }
 
 export function validateAppSearch(search: Record<string, unknown>): AppSearch {

@@ -147,6 +147,30 @@ const scenes: Array<{
     description: 'A long mock result list',
     modules: ['overview'],
   },
+  {
+    id: 'web-serial-idle',
+    label: 'Web Serial · Choose device',
+    description: 'Waiting for browser device selection',
+    modules: ['overview'],
+  },
+  {
+    id: 'web-serial-connecting',
+    label: 'Web Serial · Connecting',
+    description: 'Browser chooser is open',
+    modules: ['overview'],
+  },
+  {
+    id: 'web-serial-cancelled',
+    label: 'Web Serial · Cancelled',
+    description: 'Selection was cancelled or refused',
+    modules: ['overview'],
+  },
+  {
+    id: 'web-serial-connected',
+    label: 'Web Serial · Connected',
+    description: 'Device identity is ready',
+    modules: ['overview'],
+  },
 ]
 
 const presetCatalog: Array<{
@@ -208,6 +232,30 @@ const presetCatalog: Array<{
     scene: 'lan-scan-long',
     label: 'LAN scan · Long list',
   },
+  {
+    id: 'web-serial-idle',
+    module: 'overview',
+    scene: 'web-serial-idle',
+    label: 'Web Serial · Choose device',
+  },
+  {
+    id: 'web-serial-connecting',
+    module: 'overview',
+    scene: 'web-serial-connecting',
+    label: 'Web Serial · Connecting',
+  },
+  {
+    id: 'web-serial-cancelled',
+    module: 'overview',
+    scene: 'web-serial-cancelled',
+    label: 'Web Serial · Cancelled',
+  },
+  {
+    id: 'web-serial-connected',
+    module: 'overview',
+    scene: 'web-serial-connected',
+    label: 'Web Serial · Connected',
+  },
 ]
 
 function moduleKind(path: string): DemoModuleKind {
@@ -240,6 +288,10 @@ const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
   'lan-scan-empty': { demoLanScanResults: 'none' },
   'lan-scan-typical': { demoLanScanResults: 'typical' },
   'lan-scan-long': { demoLanScanResults: 'long' },
+  'web-serial-idle': { demoWebSerialState: 'idle' },
+  'web-serial-connecting': { demoWebSerialState: 'connecting' },
+  'web-serial-cancelled': { demoWebSerialState: 'error' },
+  'web-serial-connected': { demoWebSerialState: 'connected' },
 }
 
 const placementOptions: Array<{

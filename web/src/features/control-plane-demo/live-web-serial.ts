@@ -51,6 +51,7 @@ export function appendWebSerialEvents(
 
 export interface LiveWebSerialOptions {
   enabled?: boolean
+  demoState?: WebSerialConnectionState
   clientFactory?: () => WebSerialControlPlaneClient
   connectTimeoutMs?: number
   persistKnownDevices?: boolean
@@ -94,13 +95,16 @@ export function useLiveWebSerialScenario(
   scenario: ControlPlaneScenario,
   {
     enabled = true,
+    demoState,
     clientFactory,
     connectTimeoutMs = WEB_SERIAL_CONNECT_TIMEOUT_MS,
     persistKnownDevices = false,
   }: LiveWebSerialOptions = {}
 ): { scenario: ControlPlaneScenario; serial: LiveWebSerialControls } {
   const browserSerial = getBrowserSerial()
-  const supported = enabled && isWebSerialSupported(browserSerial)
+  const supported = demoState
+    ? demoState !== 'unsupported'
+    : enabled && isWebSerialSupported(browserSerial)
   const clientRef = useRef<WebSerialControlPlaneClient | null>(null)
   const recoveryPromiseRef = useRef<Promise<boolean> | null>(null)
   const refreshInFlightRef = useRef(false)
@@ -116,13 +120,20 @@ export function useLiveWebSerialScenario(
   const [preauthorizedPortsReady, setPreauthorizedPortsReady] = useState(
     !enabled || !browserSerial?.getPorts
   )
-  const [state, setState] = useState<WebSerialConnectionState>(supported ? 'idle' : 'unsupported')
+  const [state, setState] = useState<WebSerialConnectionState>(
+    demoState ?? (supported ? 'idle' : 'unsupported')
+  )
   const [device, setDevice] = useState<DeviceTarget | null>(null)
   const [events, setEvents] = useState<EventLogEntry[]>([])
   const [error, setError] = useState<string | undefined>()
   const [wifiOperationInterruption, setWifiOperationInterruption] = useState(0)
 
   useEffect(() => {
+    if (demoState) {
+      setState(demoState)
+      setError(demoState === 'error' ? '设备选择已取消。请重新打开浏览器设备选择窗口。' : undefined)
+      return
+    }
     if (!enabled) {
       connectAttemptRef.current += 1
       const client = clientRef.current
@@ -140,7 +151,7 @@ export function useLiveWebSerialScenario(
       }
       return current === 'unsupported' ? 'idle' : current
     })
-  }, [enabled, supported])
+  }, [demoState, enabled, supported])
 
   useEffect(() => {
     preauthorizedPortsRef.current = undefined
@@ -198,6 +209,7 @@ export function useLiveWebSerialScenario(
       expectedIdentityId?: string
     } = {}) => {
       if (signal?.aborted) return false
+      if (demoState) return false
       const attemptId = ++connectAttemptRef.current
       const isCurrentAttempt = () => connectAttemptRef.current === attemptId
       if (!enabled || !supported) {
@@ -341,6 +353,7 @@ export function useLiveWebSerialScenario(
       enabled,
       persistKnownDevices,
       supported,
+      demoState,
     ]
   )
 

@@ -41,6 +41,7 @@ function inspectorNavigationTargetKey(
     demoLogs?: unknown
     demoTelemetry?: unknown
     demoLanScanResults?: unknown
+    demoWebSerialState?: unknown
   }
 ) {
   return [
@@ -56,6 +57,7 @@ function inspectorNavigationTargetKey(
     search.demoLogs,
     search.demoTelemetry,
     search.demoLanScanResults,
+    search.demoWebSerialState,
   ].join('\u0001')
 }
 
@@ -161,6 +163,7 @@ function App() {
       demoLogs: _demoLogs,
       demoTelemetry: _demoTelemetry,
       demoLanScanResults: _demoLanScanResults,
+      demoWebSerialState: _demoWebSerialState,
       ...searchWithoutInspector
     } = search
     void navigate({
@@ -634,6 +637,7 @@ function App() {
         }}
         webSerial={{
           enabled: isLive && !mockOnly,
+          demoState: !isLive ? inspectorState.demoWebSerialState : undefined,
         }}
       />
       {!isLive && !search.uiDemo ? (

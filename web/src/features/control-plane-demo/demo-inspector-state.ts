@@ -32,6 +32,10 @@ export const demoSceneIds = [
   'lan-scan-empty',
   'lan-scan-typical',
   'lan-scan-long',
+  'web-serial-idle',
+  'web-serial-connecting',
+  'web-serial-cancelled',
+  'web-serial-connected',
 ] as const
 
 export type DemoSceneId = (typeof demoSceneIds)[number]
@@ -43,6 +47,7 @@ export type DemoWifiCapabilityState = 'default' | 'read-only' | 'unavailable'
 export type DemoLogState = 'normal' | 'empty'
 export type DemoTelemetryState = 'available' | 'unavailable'
 export type DemoLanScanResultsPreset = 'none' | 'typical' | 'long'
+export type DemoWebSerialState = 'idle' | 'connecting' | 'error' | 'connected'
 
 export const demoPersonas: Array<{
   id: DemoPersonaId
@@ -88,6 +93,7 @@ export interface DemoInspectorState {
   demoLogs: DemoLogState
   demoTelemetry: DemoTelemetryState
   demoLanScanResults: DemoLanScanResultsPreset
+  demoWebSerialState: DemoWebSerialState
 }
 
 export const defaultDemoInspectorState: DemoInspectorState = {
@@ -100,6 +106,7 @@ export const defaultDemoInspectorState: DemoInspectorState = {
   demoLogs: 'normal',
   demoTelemetry: 'available',
   demoLanScanResults: 'none',
+  demoWebSerialState: 'idle',
 }
 
 export function demoInspectorStateFromSearch(search: Record<string, unknown>): DemoInspectorState {
@@ -119,6 +126,15 @@ export function demoInspectorStateFromSearch(search: Record<string, unknown>): D
       search.demoLanScanResults === 'typical' || search.demoLanScanResults === 'long'
         ? search.demoLanScanResults
         : 'none',
+    demoWebSerialState:
+      search.demoWebSerialState === 'connecting' ||
+      search.demoWebSerialState === 'error' ||
+      search.demoWebSerialState === 'cancelled' ||
+      search.demoWebSerialState === 'connected'
+        ? search.demoWebSerialState === 'cancelled'
+          ? 'error'
+          : search.demoWebSerialState
+        : 'idle',
   }
 }
 
@@ -134,6 +150,7 @@ export function demoInspectorSearch(state: DemoInspectorState) {
     demoLogs: state.demoLogs === 'normal' ? undefined : state.demoLogs,
     demoTelemetry: state.demoTelemetry === 'available' ? undefined : state.demoTelemetry,
     demoLanScanResults: state.demoLanScanResults === 'none' ? undefined : state.demoLanScanResults,
+    demoWebSerialState: state.demoWebSerialState === 'idle' ? undefined : state.demoWebSerialState,
   }
 }
 
