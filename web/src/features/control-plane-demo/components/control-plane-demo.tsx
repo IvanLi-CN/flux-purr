@@ -6283,7 +6283,6 @@ function ViewPanel({
       <AddDeviceView
         allowDemoControls={allowDemoControls}
         webSerial={webSerial}
-        feedback={feedback}
         onAddDevice={onAddDevice}
         selectedAddDeviceKind={selectedAddDeviceKind}
         addDeviceStage={addDeviceStage}
@@ -6483,7 +6482,6 @@ function RouteRecoveryNotice({
 function AddDeviceView({
   allowDemoControls,
   webSerial,
-  feedback,
   onAddDevice,
   selectedAddDeviceKind,
   addDeviceStage,
@@ -6498,7 +6496,6 @@ function AddDeviceView({
 }: {
   allowDemoControls: boolean
   webSerial: Pick<LiveWebSerialControls, 'state' | 'supported'>
-  feedback: ActionFeedback
   onAddDevice: (kind: AddDeviceKind) => void
   selectedAddDeviceKind: AddDeviceKind
   addDeviceStage: 'choose' | 'configure'
@@ -6534,25 +6531,18 @@ function AddDeviceView({
             >
               返回连接方式
             </Button>
-            <PanelHeader
-              kicker="连接方案"
-              title={
-                addDeviceOptions.find((item) => item.kind === selectedAddDeviceKind)?.label ??
-                '连接'
-              }
+            <AddDeviceChoices
+              allowDemoControls={allowDemoControls}
+              webSerial={webSerial}
+              onAddDevice={onAddDevice}
+              selectedKind={selectedAddDeviceKind}
+              compact
             />
           </div>
-          <AddDeviceChoices
-            allowDemoControls={allowDemoControls}
-            webSerial={webSerial}
-            onAddDevice={onAddDevice}
-            selectedKind={selectedAddDeviceKind}
-            compact
-          />
-          {!allowDemoControls && selectedAddDeviceKind === 'wifi' ? (
+          {selectedAddDeviceKind === 'wifi' ? (
             <LanPairingPanel {...lanPairing} onPaired={onLanPaired} />
           ) : null}
-          {!allowDemoControls && selectedAddDeviceKind === 'bridge' ? (
+          {selectedAddDeviceKind === 'bridge' ? (
             <BridgeTargetPanel
               devices={knownDevices}
               onConnect={onBridgeTargetSelect}
@@ -6560,7 +6550,6 @@ function AddDeviceView({
               devdBaseUrl={devdBaseUrl}
             />
           ) : null}
-          {selectedAddDeviceKind === 'bridge' ? null : <ActionFeedbackPanel feedback={feedback} />}
         </>
       )}
     </div>
@@ -7006,7 +6995,7 @@ function AddDeviceChoices({
             }}
           >
             <span>{label}</span>
-            <small>{item.detail}</small>
+            {compact ? null : <small>{item.detail}</small>}
           </button>
         )
       })}
