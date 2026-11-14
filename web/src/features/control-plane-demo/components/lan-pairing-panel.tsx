@@ -526,7 +526,7 @@ export function LanPairingPanel({
         </>
       )}
 
-      {message ? (
+      {message && !(selectedScanBaseUrl && state === 'idle') ? (
         <output
           className={`industrial-lan-pairing-panel__message industrial-lan-pairing-panel__message--${state}`}
           aria-live="polite"
