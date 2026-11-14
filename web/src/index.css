@@ -4441,16 +4441,21 @@
   }
 
   .industrial-chip {
+    display: inline-flex;
+    align-items: center;
     flex: 0 0 auto;
     min-height: 1.8rem;
-    border: 1px solid color-mix(in oklch, var(--industrial-muted) 54%, var(--industrial-light) 46%);
+    border: 1px solid color-mix(in oklch, var(--industrial-muted) 42%, var(--industrial-light) 58%);
     border-radius: 999px;
-    background: var(--industrial-bg);
+    background: color-mix(in oklch, var(--industrial-panel) 78%, var(--industrial-bg) 22%);
     padding: 0.3rem 0.62rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
     font-size: 0.68rem;
     font-weight: 800;
+    box-shadow:
+      inset 1px 1px 2px color-mix(in oklch, var(--industrial-light) 72%, transparent),
+      1px 1px 2px color-mix(in oklch, var(--industrial-shadow) 28%, transparent);
   }
 
   .industrial-chip:hover,
