@@ -1560,7 +1560,7 @@ export const LiveLanAddDeviceSelection: Story = {
       await userEvent.click(await canvas.findByRole('button', { name: '目标设备' }))
       await userEvent.click(await documentRoot.findByRole('button', { name: '添加设备' }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '选择连接方式' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: /WiFi/ })).toHaveAttribute(
         'aria-pressed',
         'true'
@@ -1628,7 +1628,7 @@ export const LiveQuickAddDevice: Story = {
     await step('quick add WiFi switches into the LAN connection form', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '选择连接方式' })).toBeVisible()
       await expect(await canvas.findByLabelText('WiFi LAN pairing')).toBeVisible()
       await expect(await canvas.findByLabelText('设备地址')).toBeVisible()
       await expect(canvas.queryByRole('heading', { name: 'Runtime trace' })).not.toBeInTheDocument()
@@ -1650,7 +1650,7 @@ export const LiveQuickAddBridgeDevice: Story = {
     await step('quick add Bridge requires route and target selection before binding', async () => {
       await userEvent.click(await canvas.findByRole('button', { name: /桥接/ }))
 
-      await expect(await canvas.findByRole('heading', { name: 'Choose connection' })).toBeVisible()
+      await expect(await canvas.findByRole('heading', { name: '选择连接方式' })).toBeVisible()
       await expect(await canvas.findByRole('region', { name: 'DEVD 桥接目标' })).toBeVisible()
       await expect(await canvas.findByRole('button', { name: 'USB' })).toHaveAttribute(
         'aria-pressed',
@@ -1711,11 +1711,11 @@ export const LiveWebSerialConnectionTimeout: Story = {
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
     await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
 
-    await expect(await canvas.findByText(/正在等待浏览器选择串口/)).toBeVisible()
+    await expect(await canvas.findByText('正在连接 Web Serial')).toBeVisible()
     await expect(
       await canvas.findByText('Web Serial 连接超时，请重新选择设备。', {}, { timeout: 4_000 })
     ).toBeVisible()
-    await expect(await canvas.findByText('Web Serial unavailable')).toBeVisible()
+    await expect(await canvas.findByText('没有完成 Web Serial 连接')).toBeVisible()
   },
 }
 
@@ -1733,9 +1733,9 @@ export const LiveWebSerialPortSelectionCancelled: Story = {
     await expect(await canvas.findByRole('heading', { name: 'Choose target' })).toBeVisible()
     await userEvent.click(await canvas.findByRole('button', { name: /Web Serial/ }))
 
-    await expect(await canvas.findByText('Web Serial unavailable')).toBeVisible()
+    await expect(await canvas.findByText('没有完成 Web Serial 连接')).toBeVisible()
     await expect(
-      await canvas.findByText('浏览器未确认串口设备。请重新选择 Flux Purr USB JTAG/serial 设备。')
+      await canvas.findByText('设备选择已取消。请重新打开浏览器设备选择窗口。')
     ).toBeVisible()
     await expect(await canvas.findByRole('button', { name: /Web Serial/ })).toBeEnabled()
   },
@@ -2818,6 +2818,7 @@ export const LiveLanScanSelection: Story = {
     const canvas = within(canvasElement)
 
     await step('connecting a scan result starts the same direct LAN flow', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await expect(await canvas.findByText(lanIdentity.hostname)).toBeVisible()
       await userEvent.click(
@@ -2852,6 +2853,7 @@ export const LiveLanScanSelectionThenConnect: Story = {
     const canvas = within(canvasElement)
 
     await step('selecting a candidate and completing connection selects the hostname', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
       await userEvent.click(await canvas.findByRole('button', { name: '开始扫描' }))
       await userEvent.click(
         await canvas.findByRole('button', {
@@ -2881,6 +2883,7 @@ export const LiveLanPairingRegistersDeviceName: Story = {
     const canvas = within(canvasElement)
 
     await step('successful pairing and lease select the hostname target', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
       await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
       const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
       await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2908,6 +2911,7 @@ export const LiveLanLeaseFailureDoesNotBindTarget: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
     await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
     const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
     await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2933,6 +2937,7 @@ export const LiveLanHeartbeatExpiryRequiresExplicitReselection: Story = {
     const canvas = within(canvasElement)
 
     await step('heartbeat expiry leaves direct LAN controls read-only', async () => {
+      await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
       await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
       const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
       await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
@@ -2977,6 +2982,7 @@ export const LiveLanStaleWriteRefreshesWithoutReplay: Story = {
     await step(
       'a stale direct-LAN write refreshes device state without replaying the request',
       async () => {
+        await userEvent.click(await canvas.findByRole('button', { name: /WiFi/ }))
         await userEvent.click(await canvas.findByRole('button', { name: '连接设备' }))
         const dialog = within(await canvas.findByRole('dialog', { name: '输入 LAN 配对码' }))
         await userEvent.type(await dialog.findByLabelText('四位配对码'), '4827')
