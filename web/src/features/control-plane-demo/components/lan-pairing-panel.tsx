@@ -2,6 +2,7 @@ import { LoaderCircle, MonitorSmartphone, ScanSearch, Wifi, X } from 'lucide-rea
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   claimLanPairing,
   clearRecentLanScanCidrs,
@@ -430,36 +431,44 @@ export function LanPairingPanel({
                 </output>
               ) : null}
               {scanResults.length > 0 ? (
-                <ul className="industrial-lan-pairing-panel__scan-results" aria-label="发现的设备">
-                  {scanResults.map((device) => (
-                    <li
-                      key={`${device.info.deviceId}:${device.baseUrl}`}
-                      className={selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined}
-                    >
-                      <button
-                        type="button"
-                        className="industrial-lan-pairing-panel__scan-select"
-                        onClick={() => selectScanDevice(device)}
+                <ScrollArea
+                  className="industrial-lan-pairing-panel__scan-results-scroll"
+                  autoHide={false}
+                  ariaLabel="发现的设备"
+                >
+                  <ul className="industrial-lan-pairing-panel__scan-results">
+                    {scanResults.map((device) => (
+                      <li
+                        key={`${device.info.deviceId}:${device.baseUrl}`}
+                        className={
+                          selectedScanBaseUrl === device.baseUrl ? 'is-selected' : undefined
+                        }
                       >
-                        <strong>{device.info.hostname}</strong>
-                        <small>{device.baseUrl}</small>
-                      </button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          connectScanDevice(device)
-                        }}
-                        disabled={state === 'connecting' || state === 'claiming'}
-                        aria-pressed={selectedScanBaseUrl === device.baseUrl}
-                        aria-label={`连接 ${device.info.hostname}`}
-                      >
-                        连接
-                      </Button>
-                    </li>
-                  ))}
-                </ul>
+                        <button
+                          type="button"
+                          className="industrial-lan-pairing-panel__scan-select"
+                          onClick={() => selectScanDevice(device)}
+                        >
+                          <strong>{device.info.hostname}</strong>
+                          <small>{device.baseUrl}</small>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            connectScanDevice(device)
+                          }}
+                          disabled={state === 'connecting' || state === 'claiming'}
+                          aria-pressed={selectedScanBaseUrl === device.baseUrl}
+                          aria-label={`连接 ${device.info.hostname}`}
+                        >
+                          连接
+                        </Button>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
               ) : (
                 <div className="industrial-lan-pairing-panel__scan-empty">
                   <MonitorSmartphone aria-hidden="true" />

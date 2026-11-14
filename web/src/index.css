@@ -4040,9 +4040,15 @@
   }
 
   .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
+    .industrial-lan-pairing-panel__scan-results-scroll {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
     .industrial-lan-pairing-panel__scan-results {
     min-height: 0;
-    overflow: auto;
+    overflow: visible;
   }
 
   .industrial-recent-device-list {
@@ -10762,6 +10768,11 @@
     0 0 8px color-mix(in oklch, var(--industrial-light) 42%, transparent),
     inset 1px 1px 1px color-mix(in oklch, var(--industrial-light) 72%, transparent),
     inset -1px -1px 2px color-mix(in oklch, var(--industrial-shadow-deep) 42%, transparent);
+}
+
+.industrial-lan-pairing-panel__scan-results-scroll .simplebar-track.simplebar-vertical {
+  right: 0;
+  opacity: 1;
 }
 
 .firmware-artifact-dialog [data-slot="radio-group"] > label {
