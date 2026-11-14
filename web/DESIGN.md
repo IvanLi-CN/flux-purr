@@ -236,6 +236,12 @@ Panels may use subtle corner fasteners to imply mounting, but mechanical details
 - **Behavior:** Tracks auto-hide until hover, keyboard focus, or scrolling; content retains browser scrolling semantics and uses a visible focus path through its interactive children. Long content scrolls inside a bounded region rather than forcing an unexpected page-level scroll.
 - **Exceptions:** Do not wrap the page or `body`. Browser- or system-owned controls, such as textareas, native selects, file choosers, and third-party popups, retain their platform scrolling. A region that is intentionally clipped or always fits does not need a scroll container.
 
+### Lists
+
+- **Structure:** Application-owned lists keep a visible heading, count or status, and stable row geometry so the panel remains scannable while content changes.
+- **Overflow:** Long lists use a bounded `ScrollArea`; scrolling stays inside the list panel and does not move the surrounding workspace.
+- **Empty state:** Empty lists preserve the same panel geometry and show a calm placeholder with the next useful action. Empty, loading, error, and populated states must be designed together.
+
 ### Navigation
 
 Navigation is a set of physical keys rather than a generic sidebar. Each key combines a familiar Lucide icon, a direct label, and compact technical context. The active key is recessed and signal-red; hover lift never changes the layout.
