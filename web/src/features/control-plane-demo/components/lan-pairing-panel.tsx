@@ -134,6 +134,10 @@ export function LanPairingPanel({
     setScanError('')
     setScanResults([])
     setSelectedScanBaseUrl(null)
+    setPublicInfo(null)
+    setConnectedBaseUrl(null)
+    setConnectedAddress(null)
+    setPairingDialogOpen(false)
     setScanProgress({ done: 0, total: 0 })
     try {
       const devices = await scanDevices(scanCidr, {
@@ -173,6 +177,11 @@ export function LanPairingPanel({
     scanControllerRef.current?.abort()
     scanControllerRef.current = null
     setScanState('idle')
+    setSelectedScanBaseUrl(null)
+    setPublicInfo(null)
+    setConnectedBaseUrl(null)
+    setConnectedAddress(null)
+    setPairingDialogOpen(false)
   }
 
   const claim = async (baseUrl: string, pairingCode?: string) => {
@@ -274,6 +283,15 @@ export function LanPairingPanel({
   }
 
   const selectScanDevice = (device: DiscoveredLanDevice) => {
+    if (selectedScanBaseUrl === device.baseUrl) {
+      setSelectedScanBaseUrl(null)
+      setPublicInfo(null)
+      setConnectedBaseUrl(null)
+      setConnectedAddress(null)
+      setPairingDialogOpen(false)
+      setMessage('')
+      return
+    }
     setSelectedScanBaseUrl(device.baseUrl)
     setPublicInfo(device.info)
     setMessage(`已选择 ${device.info.hostname}，点击连接以打开设备控制。`)
