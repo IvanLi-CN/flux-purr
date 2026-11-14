@@ -11802,6 +11802,44 @@
   }
 }
 
+/* Adaptive canvases must keep focus rings, hover lifts, and panel shadows visible. */
+@media (max-width: 1279px), (max-height: 859px) {
+  .industrial-shell--fixed {
+    max-height: none;
+    overflow: auto;
+  }
+
+  .industrial-console-wrap {
+    min-width: 0;
+    min-height: 100dvh;
+    place-items: start center;
+    overflow: auto;
+  }
+
+  .industrial-console {
+    min-width: 0;
+    overflow: visible;
+  }
+
+  .industrial-console__workspace--add-device,
+  .industrial-console__workspace--add-device > *,
+  .industrial-console__workspace--add-device .industrial-view-panel {
+    min-width: 0;
+  }
+
+  .industrial-console__workspace--add-device .industrial-console__main,
+  .industrial-console__workspace--add-device .industrial-view-panel--calibration {
+    overflow: visible;
+  }
+}
+
+@media (max-width: 759px) {
+  .industrial-console {
+    height: auto;
+    min-height: calc(100dvh - 1rem);
+  }
+}
+
 .demo-inspector__scroll .simplebar-track.simplebar-vertical {
   right: -0.75rem;
 }
