@@ -603,7 +603,9 @@ describe('LAN browser client', () => {
       controlRevision: 7,
     }
 
-    await expect(authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher)).rejects.toMatchObject({
+    await expect(
+      authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher)
+    ).rejects.toMatchObject({
       code: 'lan_transport_unavailable',
       message: '设备已连接，但固件热控调优读取暂时失败，请稍后重试。',
     })

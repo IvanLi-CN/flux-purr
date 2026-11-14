@@ -2,7 +2,6 @@ import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucid
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
-import { ControlPlaneClientError } from '../transport-client'
 import {
   loadThermalTuningRecording,
   persistThermalTuningRecording,
@@ -13,6 +12,7 @@ import {
   type ThermalTuningRecording,
 } from '../thermal-tuning-recorder'
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
+import { ControlPlaneClientError } from '../transport-client'
 import './firmware-tuning-workspace.css'
 
 const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
@@ -90,10 +90,9 @@ export function FirmwareTuningWorkspace({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pollAttempt, setPollAttempt] = useState(0)
-  const [readRetryNonce, setReadRetryNonce] = useState(0)
-  const [readState, setReadState] = useState<'idle' | 'reading' | 'ready' | 'failed' | 'unsupported'>(
-    supported ? 'idle' : 'unsupported'
-  )
+  const [readState, setReadState] = useState<
+    'idle' | 'reading' | 'ready' | 'failed' | 'unsupported'
+  >(supported ? 'idle' : 'unsupported')
   const fileInput = useRef<HTMLInputElement>(null)
   const canceledGapRun = useRef<string | null>(null)
   const status = recording?.status
@@ -205,7 +204,6 @@ export function FirmwareTuningWorkspace({
     journalReady,
     pending,
     pollAttempt,
-    readRetryNonce,
     readState,
     readStatus,
     recordStatus,
@@ -242,7 +240,6 @@ export function FirmwareTuningWorkspace({
     setReadState('idle')
     setPollAttempt(0)
     setIdentityVerified(false)
-    setReadRetryNonce((nonce) => nonce + 1)
   }
 
   const importCandidate = async (file: File | undefined) => {
@@ -573,7 +570,10 @@ export function visibleTerminalDisposition(
 
 function messageOf(error: unknown) {
   if (error instanceof ControlPlaneClientError) {
-    if (error.category === 'thermal_tuning_unsupported' || error.code === 'thermal_tuning_unsupported') {
+    if (
+      error.category === 'thermal_tuning_unsupported' ||
+      error.code === 'thermal_tuning_unsupported'
+    ) {
       return '当前固件未提供热控调优接口。'
     }
     if (error.category === 'unauthorized' || error.code === 'unauthorized') {

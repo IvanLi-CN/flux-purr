@@ -3004,11 +3004,7 @@ export function ControlPlaneDemo({
     if (lanDeviceBaseUrl) {
       const session = loadLanDeviceSession(lanDeviceBaseUrl)
       if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
-      return authorizedLanRequest<ThermalTuningStatus>(
-        session,
-        'thermal-tuning',
-        'GET'
-      )
+      return authorizedLanRequest<ThermalTuningStatus>(session, 'thermal-tuning', 'GET')
     }
     if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
       return controlClient.getThermalTuning(devdBaseUrl, visibleDeviceId, visibleDeviceLeaseId)

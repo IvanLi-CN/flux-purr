@@ -657,10 +657,7 @@ async function pairLanDevice(address: string, code?: string): Promise<LanPairing
     const probe = await probeLanDevice(session, undefined, 'serial')
     return { session: rememberLanDeviceIdentity(session, probe), probe }
   } catch (error) {
-    if (
-      error instanceof ControlPlaneClientError &&
-      error.code === 'lan_transport_unavailable'
-    ) {
+    if (error instanceof ControlPlaneClientError && error.code === 'lan_transport_unavailable') {
       throw new ControlPlaneClientError(
         'Paired device probe was interrupted.',
         'lan_probe_unavailable',
