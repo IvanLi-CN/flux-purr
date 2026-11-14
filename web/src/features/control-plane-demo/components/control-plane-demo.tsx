@@ -6517,7 +6517,7 @@ function AddDeviceView({
             allowDemoControls={allowDemoControls}
             webSerial={webSerial}
             onAddDevice={onAddDevice}
-            selectedKind={selectedAddDeviceKind}
+            selectedKind={undefined}
           />
           <RecentDeviceList devices={recentDevices} />
         </>
