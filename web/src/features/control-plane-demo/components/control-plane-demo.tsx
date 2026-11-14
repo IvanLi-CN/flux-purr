@@ -2,6 +2,7 @@ import { Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   AlertTriangle,
+  ArrowLeft,
   Cable,
   CheckCircle2,
   ChevronDown,
@@ -6526,10 +6527,14 @@ function AddDeviceView({
           <div className="industrial-add-device-flow__toolbar">
             <Button
               type="button"
-              variant="outline"
+              variant="ghost"
+              size="icon-sm"
+              className="industrial-add-device-flow__back"
+              aria-label="返回连接方式"
+              title="返回连接方式"
               onClick={() => onAddDeviceStageChange('choose')}
             >
-              返回连接方式
+              <ArrowLeft aria-hidden="true" />
             </Button>
             <AddDeviceChoices
               allowDemoControls={allowDemoControls}

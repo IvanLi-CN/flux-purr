@@ -3992,6 +3992,15 @@
     gap: 1rem;
   }
 
+  .industrial-add-device-flow__back {
+    flex: 0 0 auto;
+    color: var(--industrial-muted-text);
+  }
+
+  .industrial-add-device-flow__back:hover {
+    color: var(--industrial-accent);
+  }
+
   .industrial-add-device-flow__toolbar .industrial-add-device-grid {
     flex: 1;
     min-width: 0;
