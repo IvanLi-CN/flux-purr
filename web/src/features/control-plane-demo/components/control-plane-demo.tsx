@@ -5007,7 +5007,7 @@ export function ControlPlaneDemo({
 
             {isFirmwareWorkspace ? (
               <FirmwareTransactionLog entries={firmwareActivity} />
-            ) : isDeviceAddFlowActive && addDeviceStage === 'configure' ? (
+            ) : !isDeviceAddFlowActive || addDeviceStage === 'configure' ? (
               <GlobalLogPanel events={visibleEvents} />
             ) : null}
           </div>
