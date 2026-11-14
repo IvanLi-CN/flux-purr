@@ -648,7 +648,8 @@ export function listSavedLanDeviceSessions(): LanDeviceSession[] {
   const sessions: LanDeviceSession[] = []
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index)
-    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX)) continue
+    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX))
+      continue
     const raw = storage.getItem(key)
     if (!raw) continue
     try {
@@ -687,7 +688,8 @@ export function invalidateLanDeviceAuthorization(baseUrl: string) {
   if (!storage) return
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index)
-    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX)) continue
+    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX))
+      continue
     const raw = storage.getItem(key)
     if (!raw) continue
     try {
@@ -779,10 +781,7 @@ export async function probeLanDevice(
       await probeLanDeviceRequests(session, fetcher, headers, rememberRevision, true)
     )
   } catch (error) {
-    if (
-      !(error instanceof ControlPlaneClientError) ||
-      error.code !== 'lan_transport_unavailable'
-    ) {
+    if (!(error instanceof ControlPlaneClientError) || error.code !== 'lan_transport_unavailable') {
       throw error
     }
     // Some shipped firmware revisions accept one TCP request at a time even
@@ -891,7 +890,8 @@ export async function* streamLanEvents(
         targetAddressSpace: 'private',
       } satisfies PrivateNetworkRequestInit
       const response = await fetcher(`${session.baseUrl}/api/v1/events`, request as RequestInit)
-      if (!response.ok || !response.body) throw await responseError(response, session.baseUrl, '/api/v1/events', 'events')
+      if (!response.ok || !response.body)
+        throw await responseError(response, session.baseUrl, '/api/v1/events', 'events')
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffered = ''
@@ -968,11 +968,17 @@ async function lanRequest<T = Record<string, unknown>>(
   try {
     return (await response.json()) as T
   } catch {
-    throw new ControlPlaneClientError('设备返回的数据格式无效。', 'lan_response_invalid', false, undefined, {
-      category: 'response_invalid',
-      operation,
-      endpoint: path,
-    })
+    throw new ControlPlaneClientError(
+      '设备返回的数据格式无效。',
+      'lan_response_invalid',
+      false,
+      undefined,
+      {
+        category: 'response_invalid',
+        operation,
+        endpoint: path,
+      }
+    )
   }
 }
 
@@ -1030,9 +1036,11 @@ async function responseError(response: Response, baseUrl: string, path = '', ope
       ? '当前固件未提供热控调优接口。'
       : response.status === 401
         ? '设备拒绝了当前配对凭据，请重新配对。'
-        : payload?.error?.message ?? `设备请求失败 (${response.status})`,
-    thermalUnsupported ? 'thermal_tuning_unsupported' : payload?.error?.code ?? 'lan_request_failed',
-    thermalUnsupported ? false : payload?.error?.retryable ?? response.status >= 500,
+        : (payload?.error?.message ?? `设备请求失败 (${response.status})`),
+    thermalUnsupported
+      ? 'thermal_tuning_unsupported'
+      : (payload?.error?.code ?? 'lan_request_failed'),
+    thermalUnsupported ? false : (payload?.error?.retryable ?? response.status >= 500),
     payload?.error,
     { category, operation, endpoint: path, status: response.status }
   )
