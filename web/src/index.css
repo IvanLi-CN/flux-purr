@@ -4031,6 +4031,12 @@
     .industrial-lan-pairing-panel__scan-results-panel {
     min-height: 0;
     flex: 1;
+    overflow: hidden;
+  }
+
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
+    .industrial-lan-pairing-panel__scan-results {
+    min-height: 0;
     overflow: auto;
   }
 
@@ -4460,6 +4466,7 @@
 
   .industrial-lan-pairing-panel__scan-results-panel {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     min-height: 13rem;
     align-content: start;
     gap: 0.65rem;
@@ -4516,6 +4523,7 @@
 
   .industrial-lan-pairing-panel__scan-results {
     display: grid;
+    min-height: 0;
     gap: 0.45rem;
     margin: 0;
     padding: 0;
