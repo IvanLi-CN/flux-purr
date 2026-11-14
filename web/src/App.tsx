@@ -637,7 +637,11 @@ function App() {
         }}
         webSerial={{
           enabled: isLive && !mockOnly,
-          demoState: !isLive ? inspectorState.demoWebSerialState : undefined,
+          demoState:
+            !isLive && inspectorState.demoScene.startsWith('web-serial-')
+              ? inspectorState.demoWebSerialState
+              : undefined,
+          demoPresetActive: !isLive && inspectorState.demoScene.startsWith('web-serial-'),
         }}
       />
       {!isLive && !search.uiDemo ? (

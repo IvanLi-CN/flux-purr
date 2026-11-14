@@ -904,9 +904,23 @@ export function ControlPlaneDemo({
             })
       )
   )
-  const [selectedAddDeviceKind, setSelectedAddDeviceKind] =
-    useState<AddDeviceKind>(defaultAddDeviceKind)
-  const [addDeviceStage, setAddDeviceStage] = useState<'choose' | 'configure'>('choose')
+  const [selectedAddDeviceKind, setSelectedAddDeviceKind] = useState<AddDeviceKind>(
+    webSerialOptions?.demoPresetActive ? 'web-serial' : defaultAddDeviceKind
+  )
+  const [addDeviceStage, setAddDeviceStage] = useState<'choose' | 'configure'>(
+    webSerialOptions?.demoPresetActive ? 'configure' : 'choose'
+  )
+
+  useEffect(() => {
+    if (!allowDemoControls || webSerialOptions?.demoPresetActive === undefined) return
+    if (webSerialOptions.demoPresetActive) {
+      setSelectedAddDeviceKind('web-serial')
+      setAddDeviceStage('configure')
+    } else {
+      setSelectedAddDeviceKind(defaultAddDeviceKind)
+      setAddDeviceStage('choose')
+    }
+  }, [allowDemoControls, webSerialOptions?.demoPresetActive])
   const routedRecoveryIdentityId =
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const devdLeaseAllowedForRoute =

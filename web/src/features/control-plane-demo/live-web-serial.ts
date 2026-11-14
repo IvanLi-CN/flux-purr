@@ -52,6 +52,7 @@ export function appendWebSerialEvents(
 export interface LiveWebSerialOptions {
   enabled?: boolean
   demoState?: WebSerialConnectionState
+  demoPresetActive?: boolean
   clientFactory?: () => WebSerialControlPlaneClient
   connectTimeoutMs?: number
   persistKnownDevices?: boolean
