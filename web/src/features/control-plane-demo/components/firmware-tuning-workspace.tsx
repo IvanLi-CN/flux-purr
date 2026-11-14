@@ -96,7 +96,7 @@ export function FirmwareTuningWorkspace({
   // Firmware keeps the terminal disposition at `running` in its idle wire
   // status for compatibility.  A run is only active when it has been armed
   // or carries a run identity; otherwise the workbench must show standby.
-  const terminal = status?.armed || status?.runId ? status.terminalDisposition : undefined
+  const terminal = visibleTerminalDisposition(status)
 
   useEffect(() => {
     let cancelled = false
@@ -531,6 +531,12 @@ function terminalLabel(value: ThermalTuningStatus['terminalDisposition'] | undef
     default:
       return '待命'
   }
+}
+
+export function visibleTerminalDisposition(
+  status: Pick<ThermalTuningStatus, 'armed' | 'runId' | 'terminalDisposition'> | undefined
+) {
+  return status?.armed || status?.runId ? status.terminalDisposition : undefined
 }
 
 function messageOf(error: unknown) {
