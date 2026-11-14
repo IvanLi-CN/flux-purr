@@ -151,10 +151,11 @@ impl Identity {
         push_str(&mut capabilities, "thermal_plant_run");
         push_str(&mut capabilities, "install_status");
         push_str(&mut capabilities, "flash_preparation");
+        #[cfg(any(feature = "web_serial", feature = "net_http"))]
+        push_str(&mut capabilities, "thermal_tuning");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
-            push_str(&mut capabilities, "thermal_tuning");
             push_str(&mut capabilities, "wifi_config");
             push_str(&mut capabilities, "monitor");
             push_str(&mut capabilities, "wifi_state_v2");

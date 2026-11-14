@@ -2,6 +2,7 @@ import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucid
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
+import { ControlPlaneClientError } from '../transport-client'
 import {
   loadThermalTuningRecording,
   persistThermalTuningRecording,
@@ -89,6 +90,10 @@ export function FirmwareTuningWorkspace({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pollAttempt, setPollAttempt] = useState(0)
+  const [readRetryNonce, setReadRetryNonce] = useState(0)
+  const [readState, setReadState] = useState<'idle' | 'reading' | 'ready' | 'failed' | 'unsupported'>(
+    supported ? 'idle' : 'unsupported'
+  )
   const fileInput = useRef<HTMLInputElement>(null)
   const canceledGapRun = useRef<string | null>(null)
   const status = recording?.status
@@ -104,6 +109,7 @@ export function FirmwareTuningWorkspace({
     setRecording(null)
     setJournalReady(false)
     setIdentityVerified(false)
+    setReadState(supported ? 'idle' : 'unsupported')
     void loadThermalTuningRecording(deviceId)
       .then((restored) => {
         if (cancelled) return
@@ -156,12 +162,14 @@ export function FirmwareTuningWorkspace({
       !journalReady ||
       pending ||
       recording?.gap ||
-      (recording?.complete && identityVerified)
+      (recording?.complete && identityVerified) ||
+      (readState === 'failed' && pollAttempt >= 3)
     )
       return
     let cancelled = false
     const timer = window.setTimeout(
       async () => {
+        setReadState('reading')
         try {
           const command = nextTuningReadCommand(recording, identityVerified)
           const confirmedSequence = command?.afterSequence ?? null
@@ -171,11 +179,17 @@ export function FirmwareTuningWorkspace({
             setIdentityVerified(true)
             setError(null)
             setPollAttempt(0)
+            setReadState('ready')
           }
         } catch (failure) {
           if (!cancelled) {
             setError(messageOf(failure))
-            setPollAttempt((attempt) => attempt + 1)
+            setReadState('failed')
+            setPollAttempt((attempt) =>
+              failure instanceof ControlPlaneClientError && !failure.retryable
+                ? 3
+                : Math.min(3, attempt + 1)
+            )
           }
         }
       },
@@ -191,6 +205,8 @@ export function FirmwareTuningWorkspace({
     journalReady,
     pending,
     pollAttempt,
+    readRetryNonce,
+    readState,
     readStatus,
     recordStatus,
     recording,
@@ -219,6 +235,14 @@ export function FirmwareTuningWorkspace({
     } finally {
       setPending(false)
     }
+  }
+
+  const retryRead = () => {
+    setError(null)
+    setReadState('idle')
+    setPollAttempt(0)
+    setIdentityVerified(false)
+    setReadRetryNonce((nonce) => nonce + 1)
   }
 
   const importCandidate = async (file: File | undefined) => {
@@ -365,12 +389,20 @@ export function FirmwareTuningWorkspace({
           <ShieldAlert aria-hidden="true" /> 当前设备固件不支持调优事件协议。
         </p>
       ) : null}
+      {supported && readState === 'failed' ? (
+        <div className="firmware-tuning__warning">
+          <span>{error ?? '固件调优读取失败。'}</span>
+          <Button type="button" variant="outline" size="sm" onClick={retryRead} disabled={pending}>
+            重试读取
+          </Button>
+        </div>
+      ) : null}
       {recording?.gap ? (
         <p className="firmware-tuning__warning">
           <ShieldAlert aria-hidden="true" /> 事件缺口：{recording.gapReason}
         </p>
       ) : null}
-      {error ? <p className="firmware-tuning__warning">{error}</p> : null}
+      {error && readState !== 'failed' ? <p className="firmware-tuning__warning">{error}</p> : null}
 
       <div className="firmware-tuning__facts">
         <Fact
@@ -540,5 +572,16 @@ export function visibleTerminalDisposition(
 }
 
 function messageOf(error: unknown) {
+  if (error instanceof ControlPlaneClientError) {
+    if (error.category === 'thermal_tuning_unsupported' || error.code === 'thermal_tuning_unsupported') {
+      return '当前固件未提供热控调优接口。'
+    }
+    if (error.category === 'unauthorized' || error.code === 'unauthorized') {
+      return '设备拒绝了当前配对凭据，请重新配对。'
+    }
+    if (error.category === 'transport_unavailable' || error.code === 'lan_transport_unavailable') {
+      return '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
+    }
+  }
   return error instanceof Error ? error.message : '设备操作失败。'
 }

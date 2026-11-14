@@ -85,3 +85,4 @@
 | worktree-bootstrap | active | `worktree-bootstrap/IMPLEMENTATION.md` | `worktree-bootstrap/SPEC.md` | - | Linked worktree bootstrap and shared Git hooks |
 | firmware-update-and-developer-flash | active | `firmware-update-and-developer-flash/IMPLEMENTATION.md` | `firmware-update-and-developer-flash/SPEC.md` | - | Explicit-port update, direct local ELF flash/recover, private raw Developer EEPROM backups, local CBOR control, and EEPROM-only persistence boundary |
 | firmware-runtime-modules | active | `firmware-runtime-modules/IMPLEMENTATION.md` | `firmware-runtime-modules/SPEC.md` | - | Source-backed firmware runtime module responsibilities, communication, safety, and physical-output ownership matrix |
+| lan-thermal-tuning-reliability | active | `lan-thermal-tuning-reliability/IMPLEMENTATION.md` | `lan-thermal-tuning-reliability/SPEC.md` | - | Device identity and LAN locator recovery, tuning read/write authorization, typed endpoint errors, and bounded retries |

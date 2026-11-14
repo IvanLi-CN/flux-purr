@@ -226,7 +226,7 @@ ADC 校准属于控制面设置，不属于 dashboard display offset。RTD 和 V
 - 如果平台支持，添加 mDNS/DNS-SD；否则提供明确 hostname convention。
 - daemon 通过 USB 发送 WiFi config，然后轮询 status，直到 network state 变为 `connected`。
 - Web UI 在 WiFi provisioning 成功后，把设备转换为 direct HTTP target。
-- LAN client 禁止跟随重定向。纯浏览器 direct LAN 可由 operator 主动执行受限私有 IPv4 CIDR scan，只匿名探测公开 `/health`，不得使用 mDNS、不得后台运行、不得调用 `devd`；CIDR 只可作为本地表单偏好恢复，不能触发自动扫描，且扫描输入、操作、进度和结果保持可见。native `devd`/CLI discovery 则独立提供 mDNS 与显式 CIDR scan。两条 discovery surface 都只持久化已验证的私网根地址，且未认证 discovery 不得改写已配对 token 对应的地址。设备地址变化时必须完成一次新的四位码配对后才可更新该 token 的目标。
+- LAN client 禁止跟随重定向。纯浏览器 direct LAN 可由 operator 主动执行受限私有 IPv4 CIDR scan，只匿名探测公开 `/health`，不得使用 mDNS、不得后台运行、不得调用 `devd`；CIDR 只可作为本地表单偏好恢复，不能触发自动扫描，且扫描输入、操作、进度和结果保持可见。native `devd`/CLI discovery 则独立提供 mDNS 与显式 CIDR scan。两条 discovery surface 都只持久化已验证的私网根地址；LAN session 以稳定 `deviceId` 归属，地址变化时先用新地址验证同一设备身份，再更新 locator 并复用 bearer，不因 DHCP 地址变化重复四位码配对。身份不匹配时不得向新地址发送旧 bearer。
 - “Bridge” 是 transport family，不是 device identity。Web 选择本机桥接后仍必须先区分 DEVD USB 与 DEVD WiFi/LAN，再从对应 discovery/registry 结果中显式选择具体目标；点击 transport card 不得创建 pending device、自动领取 lease 或改写当前目标。路径切换必须清空旧选择，direct browser LAN records 与 DEVD bridge records 必须保持不同所有权。
 - DEVD Bridge 的 LAN 候选不能来自通用 USB `/api/v1/devices` 轮询。Web 应先读取 daemon 的 LAN registry，再把 mDNS refresh 与有界 CIDR scan 暴露为明确的 operator 动作；页面加载不得自动扫描网络。发现结果按稳定 LAN ID 合并并以 hostname 为主名称，发现错误保留已有候选，direct browser LAN session 与 USB record 不进入该集合。DNS-SD encoder 应独立于硬件任务接受 host 测试：PTR 是 shared record，只有 SRV/TXT/A 等 unique records 设置 cache-flush。发现候选在完成配对、probe 和 lease 前不得进入在线目标列表。
 
@@ -292,6 +292,8 @@ Flux Purr 已经有 Web surface 与 ESP32-S3 firmware 工作。最低风险采�
 ## Flux Purr Web Demo 承接
 
 Flux Purr 的当前 Web demo surface 由 `docs/specs/web-control-plane-demo/SPEC.md` 冻结。该 demo 只实现 mock-first 的轻量热控 bench 工具界面：低频选择一个设备，查看 Dashboard 热板运行态，在 Settings 调整 preset / fan policy，并在 Update 中执行 firmware dry-check。公开 Demo 变体使用同一 console 与确定性 fixture，并通过 Inspector 切换 scene、lease/network/artifact 故障和模拟动作；share URL 只携带这些枚举状态与稳定 device identity，不携带地址、transport target 或凭据。公开域名不连接 devd、Web Serial、direct LAN 或真实写入。
+
+LAN 设备身份、网络定位地址、配对凭据复用、热控调优 GET/POST 租约边界和端点级错误状态由 `docs/specs/lan-thermal-tuning-reliability/SPEC.md` 冻结；该主题优先于早期把 LAN 地址变化解释为重新配对的临时约定。
 
 后续真实 transport work 应复用 demo 中的领域语言和状态分组，但不要把本 demo 扩张成 fleet 管理后台；接口契约仍应在对应 firmware/native/Web spec 中单独冻结。
 

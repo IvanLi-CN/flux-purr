@@ -220,9 +220,18 @@ pub(crate) async fn lan_bridge_read<T: DeserializeOwned>(
     device: &lan::LanDeviceConfig,
     path: &str,
 ) -> Result<T, HttpError> {
-    let value = lan::authorized_json(device, Method::GET, path, None, None)
+    let value = match lan::authorized_json(device, Method::GET, path, None, None)
         .await
-        .map_err(lan_bridge_error)?;
+        .map_err(lan_bridge_error)
+    {
+        Err(error) if path == "thermal-tuning" && error.status == StatusCode::NOT_FOUND => {
+            return Err(HttpError::not_found(
+                "thermal_tuning_unsupported",
+                "The LAN firmware does not provide thermal tuning.",
+            ));
+        }
+        result => result?,
+    };
     serde_json::from_value(value).map_err(|_| {
         HttpError::bad_request(
             "lan_bridge_invalid_response",
