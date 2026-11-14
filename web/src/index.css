@@ -11833,10 +11833,50 @@
   }
 }
 
+.industrial-console__workspace--add-device .industrial-console__main,
+.industrial-console__workspace--add-device .industrial-view-panel--calibration {
+  overflow: visible;
+}
+
 @media (max-width: 759px) {
+  .industrial-console__top {
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+  }
+
+  .industrial-console__top > *,
+  .industrial-console__identity,
+  .industrial-status-strip {
+    min-width: 0;
+  }
+
+  .industrial-status-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .industrial-status-strip .industrial-target-picker,
+  .industrial-status-strip__button {
+    grid-column: 1 / -1;
+  }
+
   .industrial-console {
     height: auto;
     min-height: calc(100dvh - 1rem);
+  }
+}
+
+@media (min-width: 760px) and (max-width: 939px) {
+  .industrial-console__top {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .industrial-status-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .industrial-status-strip .industrial-target-picker,
+  .industrial-status-strip__button {
+    grid-column: 1 / -1;
   }
 }
 
