@@ -41,7 +41,7 @@ pub const LAN_HTTP_BODY_MAX_LEN: usize = 6 * 1024;
 /// Public and snapshot-backed reads never need the mutation-sized envelope.
 /// Keeping this bounded separately lets the TCP adapter serve concurrent
 /// low-frequency readers without duplicating the six-KiB write workspace.
-pub const LAN_HTTP_LIGHT_BODY_MAX_LEN: usize = 512;
+pub const LAN_HTTP_LIGHT_BODY_MAX_LEN: usize = 1536;
 /// Largest complete HTTP header emitted by the LAN server. It covers a
 /// 128-byte development origin, PNA approval, and an optimistic revision.
 pub const HTTP_RESPONSE_HEADER_MAX_LEN: usize = 640;
