@@ -4007,6 +4007,33 @@
     margin-block: 0;
   }
 
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel) {
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100%;
+  }
+
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel) .industrial-lan-pairing-panel {
+    display: flex;
+    min-height: 0;
+    height: 100%;
+    flex-direction: column;
+  }
+
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
+    .industrial-lan-pairing-panel__scan {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  .industrial-add-device-flow:has(.industrial-lan-pairing-panel)
+    .industrial-lan-pairing-panel__scan-results-panel {
+    min-height: 0;
+    flex: 1;
+    overflow: auto;
+  }
+
   .industrial-recent-device-list {
     display: grid;
     min-height: 0;
