@@ -415,14 +415,12 @@ export function LanPairingPanel({
             >
               <header>
                 <span>扫描结果</span>
-                <small>{scanResults.length} 台</small>
+                <small aria-live="polite">
+                  {scanState === 'scanning'
+                    ? `已扫描 ${scanProgress.done} / ${scanProgress.total || '...'}`
+                    : `${scanResults.length} 台`}
+                </small>
               </header>
-              {scanState === 'scanning' ? (
-                <output className="industrial-lan-pairing-panel__scan-status" aria-live="polite">
-                  <LoaderCircle className="animate-spin" aria-hidden="true" />
-                  已扫描 {scanProgress.done} / {scanProgress.total || '...'}
-                </output>
-              ) : null}
               {scanError ? (
                 <output
                   className="industrial-lan-pairing-panel__scan-status industrial-lan-pairing-panel__scan-status--error"
