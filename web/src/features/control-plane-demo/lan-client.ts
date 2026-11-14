@@ -3,6 +3,7 @@ import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
 const LAN_STORAGE_PREFIX = 'flux-purr:lan-device:'
+const LAN_IDENTITY_STORAGE_PREFIX = 'flux-purr:lan-device-id:'
 const LAN_ADDRESS_STORAGE_KEY = 'flux-purr:lan-address'
 const LAN_SCAN_CIDR_STORAGE_KEY = 'flux-purr:lan-scan-cidr'
 const LAN_LEASE_TTL_MS = 30_000
@@ -171,6 +172,9 @@ export function rememberLanDeviceIdentity(session: LanDeviceSession, probe: LanP
     buildId: probe.identity.buildId,
   }
   storeLanDeviceSession(remembered)
+  if (session.baseUrl !== remembered.baseUrl) {
+    getStorage()?.removeItem(`${LAN_STORAGE_PREFIX}${normalizeLanBaseUrl(session.baseUrl)}`)
+  }
   return remembered
 }
 
@@ -495,7 +499,16 @@ export async function claimLanPairing(
 }
 
 export function storeLanDeviceSession(session: LanDeviceSession) {
-  getStorage()?.setItem(`${LAN_STORAGE_PREFIX}${session.baseUrl}`, JSON.stringify(session))
+  const storage = getStorage()
+  if (!storage) return
+  const normalized = { ...session, baseUrl: normalizeLanBaseUrl(session.baseUrl) }
+  const key = normalized.deviceId
+    ? `${LAN_IDENTITY_STORAGE_PREFIX}${normalized.deviceId}`
+    : `${LAN_STORAGE_PREFIX}${normalized.baseUrl}`
+  storage.setItem(key, JSON.stringify(normalized))
+  if (normalized.deviceId) {
+    storage.removeItem(`${LAN_STORAGE_PREFIX}${normalized.baseUrl}`)
+  }
 }
 
 /** Stores the last explicit browser-side device address, never a credential. */
@@ -532,7 +545,10 @@ export function loadLanScanCidr(fallback: string) {
 
 export function loadLanDeviceSession(baseUrl: string): LanDeviceSession | null {
   const normalized = normalizeLanBaseUrl(baseUrl)
-  const raw = getStorage()?.getItem(`${LAN_STORAGE_PREFIX}${normalized}`)
+  const storage = getStorage()
+  const legacyRaw = storage?.getItem(`${LAN_STORAGE_PREFIX}${normalized}`)
+  const indexed = listSavedLanDeviceSessions().find((session) => session.baseUrl === normalized)
+  const raw = legacyRaw ?? (indexed ? JSON.stringify(indexed) : null)
   if (!raw) return null
   try {
     const session = JSON.parse(raw) as LanDeviceSession
@@ -572,13 +588,15 @@ export async function resumeLanDeviceSession(
   // anonymous health probe before resuming the authenticated session.
   const currentSession =
     session.baseUrl === normalizedBaseUrl ? session : { ...session, baseUrl: normalizedBaseUrl }
-  if (currentSession !== session) storeLanDeviceSession(currentSession)
 
   try {
     const snapshot = await probe(currentSession)
     if (snapshot.identity.deviceId !== health.deviceId) {
       forgetLanDeviceSession(baseUrl)
       return null
+    }
+    if (session.baseUrl !== normalizedBaseUrl) {
+      getStorage()?.removeItem(`${LAN_STORAGE_PREFIX}${normalizeLanBaseUrl(session.baseUrl)}`)
     }
     return {
       session: rememberLanDeviceIdentity(currentSession, snapshot),
@@ -598,7 +616,7 @@ export function listSavedLanDeviceSessions(): LanDeviceSession[] {
   const sessions: LanDeviceSession[] = []
   for (let index = 0; index < storage.length; index += 1) {
     const key = storage.key(index)
-    if (!key?.startsWith(LAN_STORAGE_PREFIX)) continue
+    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX)) continue
     const raw = storage.getItem(key)
     if (!raw) continue
     try {
@@ -611,28 +629,43 @@ export function listSavedLanDeviceSessions(): LanDeviceSession[] {
       // Ignore malformed local records rather than letting them block LAN setup.
     }
   }
-  return sessions.sort((left, right) => left.baseUrl.localeCompare(right.baseUrl))
+  const unique = new Map<string, LanDeviceSession>()
+  for (const session of sessions) {
+    const key = session.deviceId ? `device:${session.deviceId}` : `url:${session.baseUrl}`
+    unique.set(key, session)
+  }
+  return [...unique.values()].sort((left, right) => left.baseUrl.localeCompare(right.baseUrl))
 }
 
 export function forgetLanDeviceSession(baseUrl: string) {
-  getStorage()?.removeItem(`${LAN_STORAGE_PREFIX}${normalizeLanBaseUrl(baseUrl)}`)
+  const storage = getStorage()
+  if (!storage) return
+  const normalized = normalizeLanBaseUrl(baseUrl)
+  storage.removeItem(`${LAN_STORAGE_PREFIX}${normalized}`)
+  for (const session of listSavedLanDeviceSessions()) {
+    if (session.baseUrl === normalized && session.deviceId) {
+      storage.removeItem(`${LAN_IDENTITY_STORAGE_PREFIX}${session.deviceId}`)
+    }
+  }
 }
 
 export function invalidateLanDeviceAuthorization(baseUrl: string) {
   const normalized = normalizeLanBaseUrl(baseUrl)
   const storage = getStorage()
-  const raw = storage?.getItem(`${LAN_STORAGE_PREFIX}${normalized}`)
-  if (!storage || !raw) return
-  try {
-    const session = JSON.parse(raw) as LanDeviceSession
-    if (session.baseUrl === normalized && /^[a-f0-9]{64}$/i.test(session.token)) {
-      storage.setItem(
-        `${LAN_STORAGE_PREFIX}${normalized}`,
-        JSON.stringify({ ...session, authorizationState: 'invalid' })
-      )
+  if (!storage) return
+  for (let index = 0; index < storage.length; index += 1) {
+    const key = storage.key(index)
+    if (!key?.startsWith(LAN_STORAGE_PREFIX) && !key?.startsWith(LAN_IDENTITY_STORAGE_PREFIX)) continue
+    const raw = storage.getItem(key)
+    if (!raw) continue
+    try {
+      const session = JSON.parse(raw) as LanDeviceSession
+      if (normalizeLanBaseUrl(session.baseUrl) === normalized) {
+        storage.setItem(key, JSON.stringify({ ...session, authorizationState: 'invalid' }))
+      }
+    } catch {
+      // Malformed records remain unavailable to control requests.
     }
-  } catch {
-    // Malformed records are ignored and remain unavailable to control requests.
   }
 }
 
@@ -826,7 +859,7 @@ export async function* streamLanEvents(
         targetAddressSpace: 'private',
       } satisfies PrivateNetworkRequestInit
       const response = await fetcher(`${session.baseUrl}/api/v1/events`, request as RequestInit)
-      if (!response.ok || !response.body) throw await responseError(response, session.baseUrl)
+      if (!response.ok || !response.body) throw await responseError(response, session.baseUrl, '/api/v1/events', 'events')
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
       let buffered = ''
@@ -865,6 +898,11 @@ async function lanRequest<T = Record<string, unknown>>(
   init: RequestInit = {},
   onRevision?: (revision: number) => void
 ): Promise<T> {
+  const operation = path.includes('thermal-tuning')
+    ? init.method === 'GET' || !init.method
+      ? 'thermal_tuning_read'
+      : 'thermal_tuning_write'
+    : path.replace(/^\//, '')
   const headers = {
     Accept: 'application/json',
     ...(init.body ? { 'Content-Type': 'application/json' } : {}),
@@ -881,20 +919,28 @@ async function lanRequest<T = Record<string, unknown>>(
   } catch (error) {
     if (error instanceof TypeError) {
       throw new ControlPlaneClientError(
-        '无法连接 LAN 设备。请检查设备地址、网络连接或浏览器私网访问权限。',
+        operation === 'thermal_tuning_read'
+          ? '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
+          : 'LAN 设备暂时无响应，请稍后重试。',
         'lan_transport_unavailable',
-        false
+        true,
+        undefined,
+        { category: 'transport_unavailable', operation, endpoint: path }
       )
     }
     throw error
   }
-  if (!response.ok) throw await responseError(response, baseUrl)
+  if (!response.ok) throw await responseError(response, baseUrl, path, operation)
   const revision = Number(response.headers.get('X-Flux-Purr-Revision'))
   if (Number.isSafeInteger(revision) && revision >= 0) onRevision?.(revision)
   try {
     return (await response.json()) as T
   } catch {
-    throw new ControlPlaneClientError('设备返回的数据格式无效。', 'lan_response_invalid', false)
+    throw new ControlPlaneClientError('设备返回的数据格式无效。', 'lan_response_invalid', false, undefined, {
+      category: 'response_invalid',
+      operation,
+      endpoint: path,
+    })
   }
 }
 
@@ -934,15 +980,29 @@ function bearerHeaders(session: LanDeviceSession) {
   return { Authorization: `Bearer ${session.token}` }
 }
 
-async function responseError(response: Response, baseUrl: string) {
+async function responseError(response: Response, baseUrl: string, path = '', operation = path) {
   const payload = (await response.json().catch(() => null)) as {
     error?: { code?: string; message?: string; retryable?: boolean }
   } | null
   if (response.status === 401) invalidateLanDeviceAuthorization(baseUrl)
+  const thermalUnsupported = path.includes('thermal-tuning') && response.status === 404
+  const category = thermalUnsupported
+    ? 'thermal_tuning_unsupported'
+    : response.status === 401
+      ? 'unauthorized'
+      : response.status >= 500
+        ? 'server_retryable'
+        : undefined
   return new ControlPlaneClientError(
-    payload?.error?.message ?? `设备请求失败 (${response.status})`,
-    payload?.error?.code ?? 'lan_request_failed',
-    payload?.error?.retryable ?? response.status >= 500
+    thermalUnsupported
+      ? '当前固件未提供热控调优接口。'
+      : response.status === 401
+        ? '设备拒绝了当前配对凭据，请重新配对。'
+        : payload?.error?.message ?? `设备请求失败 (${response.status})`,
+    thermalUnsupported ? 'thermal_tuning_unsupported' : payload?.error?.code ?? 'lan_request_failed',
+    thermalUnsupported ? false : payload?.error?.retryable ?? response.status >= 500,
+    payload?.error,
+    { category, operation, endpoint: path, status: response.status }
   )
 }
 
