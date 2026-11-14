@@ -93,7 +93,10 @@ export function FirmwareTuningWorkspace({
   const canceledGapRun = useRef<string | null>(null)
   const status = recording?.status
   const armed = status?.armed === true
-  const terminal = status?.terminalDisposition
+  // Firmware keeps the terminal disposition at `running` in its idle wire
+  // status for compatibility.  A run is only active when it has been armed
+  // or carries a run identity; otherwise the workbench must show standby.
+  const terminal = status?.armed || status?.runId ? status.terminalDisposition : undefined
 
   useEffect(() => {
     let cancelled = false
