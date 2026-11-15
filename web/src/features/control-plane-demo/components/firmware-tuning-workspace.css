@@ -1,7 +1,14 @@
 .firmware-tuning {
+  --tuning-surface: var(--industrial-panel);
+  --tuning-surface-soft: var(--industrial-panel-tint);
+  --tuning-border: var(--industrial-panel-border);
+  --tuning-border-strong: var(--industrial-panel-border-strong);
+  --tuning-text: var(--industrial-text);
+  --tuning-muted: var(--industrial-muted-text);
+  --tuning-accent: var(--industrial-accent);
   min-width: 0;
-  padding: 20px 0 32px;
-  color: #1c2930;
+  padding: 24px 0 32px;
+  color: var(--tuning-text);
 }
 
 .firmware-tuning__header,
@@ -16,44 +23,49 @@
 
 .firmware-tuning__header {
   justify-content: space-between;
-  border-bottom: 1px solid #d5dee0;
+  border-bottom: 1px solid var(--tuning-border);
   padding-bottom: 16px;
 }
 
 .firmware-tuning__header h2 {
-  font-size: 18px;
+  font-size: 1.12rem;
   font-weight: 650;
 }
 
 .firmware-tuning__header p {
-  color: #62757c;
-  font-size: 12px;
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
   overflow-wrap: anywhere;
 }
 
 .firmware-tuning__outcome {
-  border-left: 3px solid #75848b;
-  padding: 5px 10px;
-  background: #edf1f2;
-  font-size: 12px;
+  border: 1px solid var(--tuning-border-strong);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: var(--tuning-surface-soft);
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
   font-weight: 650;
 }
 
 .firmware-tuning__outcome--candidate_ready,
 .firmware-tuning__outcome--running {
-  border-color: #2d789c;
-  background: #e6f2f6;
+  border-color: color-mix(in oklch, var(--tuning-accent) 42%, var(--tuning-border));
+  background: color-mix(in oklch, var(--tuning-accent) 10%, var(--tuning-surface));
+  color: var(--tuning-accent);
 }
 
 .firmware-tuning__outcome--passed {
-  border-color: #277d58;
-  background: #e8f3ec;
+  border-color: color-mix(in oklch, var(--industrial-green) 46%, var(--tuning-border));
+  background: color-mix(in oklch, var(--industrial-green) 12%, var(--tuning-surface));
+  color: color-mix(in oklch, var(--industrial-green) 72%, var(--tuning-text));
 }
 
 .firmware-tuning__outcome--failed,
 .firmware-tuning__outcome--canceled {
-  border-color: #ae4543;
-  background: #faece9;
+  border-color: color-mix(in oklch, var(--destructive) 46%, var(--tuning-border));
+  background: color-mix(in oklch, var(--destructive) 10%, var(--tuning-surface));
+  color: var(--destructive);
 }
 
 .firmware-tuning__toolbar {
@@ -67,26 +79,31 @@
   gap: 8px;
 }
 
+.firmware-tuning__primary-actions > button,
+.firmware-tuning__advanced-content > button {
+  min-height: 44px;
+}
+
 .firmware-tuning__primary-actions > button:first-child {
   order: -1;
 }
 
 .firmware-tuning__advanced {
-  border-top: 1px solid #d5dee0;
+  border-top: 1px solid var(--tuning-border);
   padding-top: 10px;
 }
 
 .firmware-tuning__advanced summary {
   width: fit-content;
   cursor: pointer;
-  color: #53676e;
-  font-size: 12px;
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
   font-weight: 650;
   list-style-position: inside;
 }
 
 .firmware-tuning__advanced summary::marker {
-  color: #2d789c;
+  color: var(--tuning-accent);
 }
 
 .firmware-tuning__advanced-content {
@@ -105,8 +122,8 @@
 
 .firmware-tuning__candidate {
   max-width: 240px;
-  color: #63757c;
-  font-size: 12px;
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -116,31 +133,33 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 0;
-  padding: 9px 12px;
-  border-left: 3px solid #b34c46;
-  background: #f9eeeb;
-  color: #812f2c;
-  font-size: 12px;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklch, var(--destructive) 34%, var(--tuning-border));
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--destructive) 8%, var(--tuning-surface));
+  color: color-mix(in oklch, var(--destructive) 72%, var(--tuning-text));
+  font-size: 0.82rem;
+  line-height: 1.5;
 }
 
 .firmware-tuning__facts {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  margin-top: 14px;
+  margin-top: 16px;
   overflow: hidden;
-  border: 1px solid #d5dee0;
+  border: 1px solid var(--tuning-border);
   border-radius: 8px;
-  background: #f7faf9;
+  background: var(--tuning-surface-soft);
 }
 
 .firmware-tuning__parameters {
   margin: 16px 0 0;
   overflow: hidden;
-  border: 1px solid #d4e0e2;
-  border-radius: 9px;
-  background: #f7faf9;
-  box-shadow: 0 1px 2px rgb(37 59 65 / 5%);
+  border: 1px solid var(--tuning-border-strong);
+  border-radius: var(--radius);
+  background: var(--tuning-surface);
+  box-shadow: var(--industrial-surface-inset);
 }
 
 .firmware-tuning__parameters > header {
@@ -149,28 +168,28 @@
   justify-content: space-between;
   gap: 16px;
   padding: 13px 15px;
-  border-bottom: 1px solid #d4e0e2;
-  background: #edf4f4;
+  border-bottom: 1px solid var(--tuning-border);
+  background: var(--tuning-surface-soft);
 }
 
 .firmware-tuning__parameters h3 {
-  color: #243940;
-  font-size: 15px;
+  color: var(--tuning-text);
+  font-size: 0.9rem;
   font-weight: 650;
 }
 
 .firmware-tuning__parameters p,
 .firmware-tuning__parameters > header > span {
-  color: #65777f;
-  font-size: 11px;
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
 }
 
 .firmware-tuning__parameters > header > span {
   padding: 4px 8px;
-  border: 1px solid #c5dfe5;
+  border: 1px solid color-mix(in oklch, var(--tuning-accent) 34%, var(--tuning-border));
   border-radius: 999px;
-  background: #e4f1f3;
-  color: #256b82;
+  background: color-mix(in oklch, var(--tuning-accent) 10%, var(--tuning-surface));
+  color: var(--tuning-accent);
   font-weight: 650;
   white-space: nowrap;
 }
@@ -183,9 +202,9 @@
 .firmware-tuning__parameter-grid > div {
   min-width: 0;
   padding: 12px 14px;
-  border-right: 1px solid #dce5e6;
-  border-bottom: 1px solid #dce5e6;
-  background: #f9fbfa;
+  border-right: 1px solid var(--tuning-border);
+  border-bottom: 1px solid var(--tuning-border);
+  background: color-mix(in oklch, var(--tuning-surface) 72%, var(--tuning-surface-soft));
 }
 
 .firmware-tuning__parameter-grid > div:nth-child(6n) {
@@ -202,19 +221,19 @@
 }
 
 .firmware-tuning__parameter-grid span {
-  color: #65777f;
-  font-size: 11px;
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
 }
 
 .firmware-tuning__parameter-grid strong {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 0.82rem;
 }
 
 .firmware-tuning__facts > div {
   min-width: 0;
   padding: 12px;
-  border-right: 1px solid #d5dee0;
+  border-right: 1px solid var(--tuning-border);
 }
 
 .firmware-tuning__facts > div:last-child {
@@ -227,13 +246,13 @@
 }
 
 .firmware-tuning__facts span {
-  color: #65777f;
-  font-size: 11px;
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
 }
 
 .firmware-tuning__facts strong {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 0.82rem;
   overflow-wrap: anywhere;
 }
 
@@ -247,15 +266,15 @@
 .firmware-tuning__detail > section {
   min-width: 0;
   padding: 14px;
-  border: 1px solid #d5dee0;
+  border: 1px solid var(--tuning-border);
   border-radius: 8px;
-  background: #f7faf9;
+  background: var(--tuning-surface-soft);
 }
 
 .firmware-tuning__detail h3 {
   margin-bottom: 10px;
-  color: #243940;
-  font-size: 14px;
+  color: var(--tuning-text);
+  font-size: 0.88rem;
   font-weight: 650;
 }
 
@@ -263,11 +282,11 @@
   display: grid;
   grid-template-columns: 110px minmax(0, 1fr);
   gap: 9px;
-  font-size: 12px;
+  font-size: 0.76rem;
 }
 
 .firmware-tuning__detail dt {
-  color: #687a80;
+  color: var(--tuning-muted);
 }
 
 .firmware-tuning__detail dd {
@@ -279,27 +298,27 @@
 .firmware-tuning__event-scroll {
   max-height: 480px;
   overflow: auto;
-  border-top: 1px solid #d5dee0;
+  border-top: 1px solid var(--tuning-border);
 }
 
 .firmware-tuning__event-scroll table {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
-  font-size: 12px;
+  font-size: 0.76rem;
 }
 
 .firmware-tuning__event-scroll th,
 .firmware-tuning__event-scroll td {
   padding: 8px 10px;
-  border-bottom: 1px solid #e1e7e8;
+  border-bottom: 1px solid var(--tuning-border);
   white-space: nowrap;
 }
 
 .firmware-tuning__event-scroll th {
   position: sticky;
   top: 0;
-  background: #f1f5f5;
+  background: var(--tuning-surface-soft);
 }
 
 @media (max-width: 1000px) {
@@ -316,7 +335,7 @@
   }
 
   .firmware-tuning__parameter-grid > div:nth-last-child(-n + 6) {
-    border-bottom: 1px solid #dce5e6;
+    border-bottom: 1px solid var(--tuning-border);
   }
 
   .firmware-tuning__parameter-grid > div:nth-last-child(-n + 3) {
@@ -358,7 +377,7 @@
   }
 
   .firmware-tuning__parameter-grid > div:nth-last-child(-n + 3) {
-    border-bottom: 1px solid #dce5e6;
+    border-bottom: 1px solid var(--tuning-border);
   }
 
   .firmware-tuning__parameter-grid > div:nth-last-child(-n + 2) {
