@@ -190,7 +190,14 @@ export function useLiveDevdScenario(
           return
         }
 
-        if (liveRecord.connection === 'busy') {
+        // An active tuning run marks the device busy while the current page
+        // still owns its lease. Keep heartbeating that lease; dropping it here
+        // lets the 30s devd TTL expire during a legitimate long run.
+        const busyOwnedByCurrentPage =
+          liveRecord.connection === 'busy' &&
+          activeLeaseRef.current != null &&
+          activeLeaseDeviceIdRef.current === liveRecord.id
+        if (liveRecord.connection === 'busy' && !busyOwnedByCurrentPage) {
           activeLeaseRef.current = null
           activeLeaseDeviceIdRef.current = null
           if (!cancelled) {
