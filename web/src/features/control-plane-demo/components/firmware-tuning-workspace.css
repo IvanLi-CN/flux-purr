@@ -299,6 +299,7 @@
   display: flex;
   min-width: 0;
   align-items: center;
+  flex-wrap: wrap;
   gap: 5px;
 }
 
@@ -340,8 +341,7 @@
 }
 
 .firmware-tuning__identifier-details {
-  position: relative;
-  flex: 0 0 auto;
+  display: contents;
 }
 
 .firmware-tuning__identifier-details summary {
@@ -353,18 +353,17 @@
 }
 
 .firmware-tuning__identifier-details code {
-  position: absolute;
-  z-index: 2;
-  top: calc(100% + 5px);
-  right: 0;
-  width: max-content;
-  max-width: min(360px, 45vw);
+  display: block;
+  flex: 1 0 100%;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 4px;
   padding: 8px 10px;
   border: 1px solid var(--tuning-border-strong);
   border-radius: 6px;
   background: var(--tuning-surface);
   color: var(--tuning-text);
-  box-shadow: 4px 6px 12px color-mix(in oklch, var(--tuning-border-strong) 28%, transparent);
+  box-shadow: inset 2px 2px 5px color-mix(in oklch, var(--tuning-border-strong) 18%, transparent);
   font: 0.7rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: normal;
   overflow-wrap: anywhere;
