@@ -280,38 +280,55 @@
 
 .firmware-tuning__detail dl {
   display: grid;
-  grid-template-columns: 110px minmax(0, 1fr);
-  gap: 9px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
   font-size: 0.76rem;
 }
 
-.firmware-tuning__detail dt {
+.firmware-tuning__detail-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 9px;
+}
+
+.firmware-tuning__detail-row dt {
   color: var(--tuning-muted);
 }
 
-.firmware-tuning__detail dd {
+.firmware-tuning__detail-row dd {
   min-width: 0;
   margin: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.firmware-tuning__identifier {
-  display: flex;
+.firmware-tuning__identifier-field {
+  display: grid;
   min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.firmware-tuning__identifier-header {
+  display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 5px;
+  justify-content: space-between;
+  min-width: 0;
+  color: var(--tuning-muted);
+  font-family: var(--font-sans, Manrope, 'Noto Sans SC', sans-serif);
+  font-size: 0.72rem;
+  font-weight: 650;
 }
 
 .firmware-tuning__identifier-summary {
+  display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--tuning-text);
 }
 
-.firmware-tuning__identifier-copy,
-.firmware-tuning__identifier-details summary {
+.firmware-tuning__identifier-copy {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -323,14 +340,11 @@
   border-radius: 5px;
   background: var(--tuning-surface);
   color: var(--tuning-muted);
-  font-family: inherit;
-  font-size: 0.66rem;
   line-height: 1;
   cursor: pointer;
 }
 
-.firmware-tuning__identifier-copy:hover,
-.firmware-tuning__identifier-details summary:hover {
+.firmware-tuning__identifier-copy:hover:not(:disabled) {
   border-color: var(--tuning-border-strong);
   color: var(--tuning-accent);
 }
@@ -340,32 +354,10 @@
   height: 13px;
 }
 
-.firmware-tuning__identifier-details {
-  display: contents;
-}
-
-.firmware-tuning__identifier-details summary {
-  list-style: none;
-}
-
-.firmware-tuning__identifier-details summary::-webkit-details-marker {
-  display: none;
-}
-
-.firmware-tuning__identifier-details code {
-  display: block;
-  flex: 1 0 100%;
-  width: 100%;
-  max-width: 100%;
-  margin-top: 4px;
+.firmware-tuning__identifier-tooltip {
+  max-width: min(420px, 50vw);
   padding: 8px 10px;
-  border: 1px solid var(--tuning-border-strong);
-  border-radius: 6px;
-  background: var(--tuning-surface);
-  color: var(--tuning-text);
-  box-shadow: inset 2px 2px 5px color-mix(in oklch, var(--tuning-border-strong) 18%, transparent);
   font: 0.7rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
-  white-space: normal;
   overflow-wrap: anywhere;
 }
 

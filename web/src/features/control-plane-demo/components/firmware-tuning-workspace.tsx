@@ -2,6 +2,7 @@ import { Clipboard, Copy, Download, LoaderCircle, Save, ShieldAlert, Square, Upl
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import type {
   ThermalControlRuntime,
   ThermalTuningCommand,
@@ -496,32 +497,30 @@ export function FirmwareTuningWorkspace({
         <section>
           <h3>候选与保存</h3>
           <dl>
-            <dt>Candidate</dt>
-            <dd>
-              <IdentifierValue
-                kind="candidate"
-                value={status?.candidateId}
-                copied={copiedIdentifier === 'candidate'}
-                onCopy={copyIdentifier}
-              />
-            </dd>
-            <dt>Hash</dt>
-            <dd>
-              <IdentifierValue
-                kind="hash"
-                value={status?.candidateHash}
-                copied={copiedIdentifier === 'hash'}
-                onCopy={copyIdentifier}
-              />
-            </dd>
-            <dt>RAM preview</dt>
-            <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
-            <dt>EEPROM</dt>
-            <dd>
-              {status?.saveReceipt?.readbackVerified
-                ? `已读回 · revision ${status.saveReceipt.bankRevision}`
-                : '未保存'}
-            </dd>
+            <IdentifierValue
+              kind="candidate"
+              value={status?.candidateId}
+              copied={copiedIdentifier === 'candidate'}
+              onCopy={copyIdentifier}
+            />
+            <IdentifierValue
+              kind="hash"
+              value={status?.candidateHash}
+              copied={copiedIdentifier === 'hash'}
+              onCopy={copyIdentifier}
+            />
+            <div className="firmware-tuning__detail-row">
+              <dt>RAM preview</dt>
+              <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
+            </div>
+            <div className="firmware-tuning__detail-row">
+              <dt>EEPROM</dt>
+              <dd>
+                {status?.saveReceipt?.readbackVerified
+                  ? `已读回 · revision ${status.saveReceipt.bankRevision}`
+                  : '未保存'}
+              </dd>
+            </div>
           </dl>
         </section>
         <section>
@@ -580,29 +579,40 @@ function IdentifierValue({
   copied: boolean
   onCopy: (kind: 'candidate' | 'hash', value: string | null | undefined) => void
 }) {
-  if (!value) return <span className="firmware-tuning__identifier-empty">—</span>
   const label = kind === 'candidate' ? 'Candidate' : 'Hash'
+  const summary = compactIdentifier(value)
   return (
-    <span className="firmware-tuning__identifier">
-      <span className="firmware-tuning__identifier-summary" title={value}>
-        {compactIdentifier(value)}
-      </span>
-      <button
-        type="button"
-        className="firmware-tuning__identifier-copy"
-        aria-label={`复制完整${label}`}
-        title={copied ? '已复制' : `复制完整${label}`}
-        onClick={() => onCopy(kind, value)}
-      >
-        {copied ? <Clipboard aria-hidden="true" /> : <Copy aria-hidden="true" />}
-      </button>
-      <details className="firmware-tuning__identifier-details">
-        <summary aria-label={`查看完整${label}`} title={`查看完整${label}`}>
-          查看
-        </summary>
-        <code>{value}</code>
-      </details>
-    </span>
+    <TooltipProvider>
+      <div className="firmware-tuning__identifier-field">
+        <div className="firmware-tuning__identifier-header">
+          <span>{label}</span>
+          <button
+            type="button"
+            className="firmware-tuning__identifier-copy"
+            aria-label={`复制完整${label}`}
+            title={copied ? '已复制' : `复制完整${label}`}
+            disabled={!value}
+            onClick={() => onCopy(kind, value)}
+          >
+            {copied ? <Clipboard aria-hidden="true" /> : <Copy aria-hidden="true" />}
+          </button>
+        </div>
+        {value ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="firmware-tuning__identifier-summary">{summary}</span>
+            </TooltipTrigger>
+            <TooltipContent className="firmware-tuning__identifier-tooltip">
+              {value}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <span className="firmware-tuning__identifier-summary firmware-tuning__identifier-empty">
+            {summary}
+          </span>
+        )}
+      </div>
+    </TooltipProvider>
   )
 }
 
