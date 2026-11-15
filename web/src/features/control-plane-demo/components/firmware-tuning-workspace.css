@@ -296,9 +296,14 @@
 }
 
 .firmware-tuning__event-scroll {
-  max-height: 480px;
-  overflow: auto;
+  max-height: 240px;
+  overflow: hidden;
   border-top: 1px solid var(--tuning-border);
+}
+
+.firmware-tuning__event-scroll .simplebar-scrollbar::before {
+  background: color-mix(in oklch, var(--tuning-accent) 68%, var(--tuning-surface));
+  opacity: 0.72;
 }
 
 .firmware-tuning__event-scroll table {
@@ -344,6 +349,29 @@
 
   .firmware-tuning__detail {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1180px) {
+  .firmware-tuning {
+    padding-block: 12px;
+  }
+
+  .firmware-tuning__toolbar {
+    margin-block: 12px;
+  }
+
+  .firmware-tuning__parameters,
+  .firmware-tuning__facts {
+    margin-top: 12px;
+  }
+
+  .firmware-tuning__detail {
+    margin-top: 16px;
+  }
+
+  .firmware-tuning__event-scroll {
+    max-height: 152px;
   }
 }
 
