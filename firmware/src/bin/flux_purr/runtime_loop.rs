@@ -3533,7 +3533,14 @@ fn runtime_record_thermal_tuning_sample(
     pid_snapshot: HeaterPidSnapshot,
     requested_duty_percent: u8,
 ) -> bool {
-    if !state.thermal_tuning.armed || state.tuning_pd_wait_started_ms.is_some() {
+    // A PPS voltage change is a bounded transition: the old contract remains
+    // observable until the pending request is confirmed. Do not combine that
+    // old contract with the new requested voltage into one tuning sample; the
+    // next confirmed control cycle will provide the valid evidence.
+    if !state.thermal_tuning.armed
+        || state.tuning_pd_wait_started_ms.is_some()
+        || state.pending_automatic_power_request.is_some()
+    {
         return false;
     }
     let Some(observation) = state.last_pd_observation else {
