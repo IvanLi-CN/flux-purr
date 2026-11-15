@@ -97,6 +97,41 @@ export interface ControlPlaneStatus {
   calibration: CalibrationRuntimeState
   frontpanelKey?: 'center' | 'right' | 'down' | 'left' | 'up' | null
   network: NetworkSummary
+  /** Resolved thermal profile metadata returned by the firmware status snapshot. */
+  thermalProfileMode?: 'auto' | '65w' | '100w' | string
+  thermalProfileResolvedBank?: 'pps3a' | 'pps5a' | string
+  thermalControl?: ThermalControlRuntime
+}
+
+export interface ThermalControlRuntime {
+  profileActive: boolean
+  profileCoversTarget: boolean
+  profileSource: string
+  targetTempC: number
+  brakeDistanceCentiC: number
+  warmupPowerPermille: number
+  approachPowerPermille: number
+  approachFloorPowerPermille: number
+  approachDampingExponentPermille: number
+  approachTailWindowCentiC?: number
+  holdPowerPermille: number
+  holdReheatPowerPermille: number
+  holdEntryCentiC: number
+  holdExitCentiC: number
+  holdOnCentiC: number
+  holdOffCentiC: number
+  overshootCutoffCentiC: number
+  holdKpPermillePerC: number
+  holdKiPermillePerCTick: number
+  holdBlendTicks: number
+  approachLeadTicks: number
+  holdLeadTicks: number
+  tempFilterAlphaPermille: number
+  warmupReenterCentiC: number
+  approachMaxTicks: number
+  approachMinPowerRatioPermille: number
+  autoAdjustableWorkingFloorMv: number
+  heaterCurrentReserveMa: number
 }
 
 export interface AdcDiagnostics {

@@ -131,6 +131,68 @@
   border-bottom: 1px solid #d5dee0;
 }
 
+.firmware-tuning__parameters {
+  margin: 16px 0 0;
+  border: 1px solid #d5dee0;
+  background: #f4f7f7;
+}
+
+.firmware-tuning__parameters > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #d5dee0;
+}
+
+.firmware-tuning__parameters h3 {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.firmware-tuning__parameters p,
+.firmware-tuning__parameters > header > span {
+  color: #65777f;
+  font-size: 11px;
+}
+
+.firmware-tuning__parameters > header > span {
+  color: #2d789c;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.firmware-tuning__parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.firmware-tuning__parameter-grid > div {
+  min-width: 0;
+  padding: 11px 12px;
+  border-right: 1px solid #d5dee0;
+}
+
+.firmware-tuning__parameter-grid > div:last-child {
+  border-right: 0;
+}
+
+.firmware-tuning__parameter-grid span,
+.firmware-tuning__parameter-grid strong {
+  display: block;
+}
+
+.firmware-tuning__parameter-grid span {
+  color: #65777f;
+  font-size: 11px;
+}
+
+.firmware-tuning__parameter-grid strong {
+  margin-top: 4px;
+  font-size: 13px;
+}
+
 .firmware-tuning__facts > div {
   min-width: 0;
   padding: 12px;
@@ -222,6 +284,10 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .firmware-tuning__parameter-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .firmware-tuning__detail {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -240,5 +306,19 @@
     align-items: flex-start;
     flex-direction: column;
     padding-left: 0;
+  }
+
+  .firmware-tuning__parameters > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .firmware-tuning__parameter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-child(2n) {
+    border-right: 0;
   }
 }

@@ -7,6 +7,7 @@ import type {
   HeatingFanGuardMode,
   NetworkFailureCode,
   PostHeatCoolingMode,
+  ThermalControlRuntime,
 } from './contracts'
 
 export type TransportKind = 'http' | 'serial' | 'devd' | 'mock' | 'wifi' | 'bridge'
@@ -79,6 +80,9 @@ export interface DeviceTarget {
   transportIssue?: string
   heaterLockReason?: HeaterLockReason | null
   heaterCurve?: HeaterCurveState
+  thermalProfileMode?: string
+  thermalProfileResolvedBank?: string
+  thermalControl?: ThermalControlRuntime
 }
 
 export interface ControlPlaneMetric {

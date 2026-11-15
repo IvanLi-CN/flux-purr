@@ -1,7 +1,12 @@
 import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import type { ThermalTuningCommand, ThermalTuningEvent, ThermalTuningStatus } from '../contracts'
+import type {
+  ThermalControlRuntime,
+  ThermalTuningCommand,
+  ThermalTuningEvent,
+  ThermalTuningStatus,
+} from '../contracts'
 import {
   loadThermalTuningRecording,
   persistThermalTuningRecording,
@@ -69,12 +74,18 @@ export function FirmwareTuningWorkspace({
   supported,
   deviceId,
   transport,
+  parameterSnapshot,
   readStatus,
   sendCommand,
 }: {
   supported: boolean
   deviceId: string
   transport: string
+  parameterSnapshot?: {
+    mode?: string
+    bank?: string
+    control?: ThermalControlRuntime
+  }
   readStatus: () => Promise<ThermalTuningStatus>
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
@@ -408,6 +419,47 @@ export function FirmwareTuningWorkspace({
       ) : null}
       {error && readState !== 'failed' ? <p className="firmware-tuning__warning">{error}</p> : null}
 
+      {parameterSnapshot?.control ? (
+        <section className="firmware-tuning__parameters" aria-label="当前热控参数">
+          <header>
+            <div>
+              <h3>当前参数</h3>
+              <p>
+                {parameterSourceLabel(parameterSnapshot.control.profileSource)} ·{' '}
+                {parameterSnapshot.bank ?? '未解析功率档位'}
+                {parameterSnapshot.mode ? ` · ${parameterSnapshot.mode}` : ''}
+              </p>
+            </div>
+            <span>
+              {parameterSnapshot.control.profileCoversTarget ? '覆盖当前目标' : '工厂缺省基线'}
+            </span>
+          </header>
+          <div className="firmware-tuning__parameter-grid">
+            <Parameter label="目标温度" value={`${parameterSnapshot.control.targetTempC}°C`} />
+            <Parameter
+              label="预热功率"
+              value={permillePercent(parameterSnapshot.control.warmupPowerPermille)}
+            />
+            <Parameter
+              label="接近功率"
+              value={permillePercent(parameterSnapshot.control.approachPowerPermille)}
+            />
+            <Parameter
+              label="保持功率"
+              value={permillePercent(parameterSnapshot.control.holdPowerPermille)}
+            />
+            <Parameter
+              label="刹车距离"
+              value={`${(parameterSnapshot.control.brakeDistanceCentiC / 100).toFixed(1)}°C`}
+            />
+            <Parameter
+              label="温度滤波"
+              value={permillePercent(parameterSnapshot.control.tempFilterAlphaPermille)}
+            />
+          </div>
+        </section>
+      ) : null}
+
       <div className="firmware-tuning__facts">
         <Fact
           label="目标"
@@ -468,6 +520,32 @@ export function FirmwareTuningWorkspace({
         </section>
       </div>
     </section>
+  )
+}
+
+function parameterSourceLabel(source: string) {
+  switch (source) {
+    case 'default':
+      return '固件工厂缺省基线'
+    case 'saved':
+      return '设备已保存参数'
+    case 'preview':
+      return '当前预览参数'
+    default:
+      return source || '参数来源未知'
+  }
+}
+
+function permillePercent(value: number) {
+  return `${(value / 10).toFixed(1)}%`
+}
+
+function Parameter({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   )
 }
 

@@ -5139,6 +5139,11 @@ export function ControlPlaneDemo({
                     supported={visibleDevice.capabilities.includes('thermal_tuning')}
                     deviceId={visibleDevice.id}
                     transport={visibleDeviceTransport}
+                    parameterSnapshot={{
+                      mode: visibleDevice.thermalProfileMode,
+                      bank: visibleDevice.thermalProfileResolvedBank,
+                      control: visibleDevice.thermalControl,
+                    }}
                     readStatus={readFirmwareTuning}
                     sendCommand={commandFirmwareTuning}
                   />

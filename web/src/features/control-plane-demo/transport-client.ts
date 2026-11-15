@@ -533,6 +533,9 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     leaseState: record.transport === 'mock' ? undefined : 'none',
     transportIssue,
     heaterCurve: record.heaterCurve,
+    thermalProfileMode: record.status.thermalProfileMode,
+    thermalProfileResolvedBank: record.status.thermalProfileResolvedBank,
+    thermalControl: record.status.thermalControl,
   }
 }
 
