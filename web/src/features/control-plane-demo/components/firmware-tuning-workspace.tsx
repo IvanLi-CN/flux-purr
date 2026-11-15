@@ -595,6 +595,7 @@ function IdentifierValue({
             onClick={() => onCopy(kind, value)}
           >
             {copied ? <Clipboard aria-hidden="true" /> : <Copy aria-hidden="true" />}
+            <span>{copied ? '已复制' : '复制'}</span>
           </button>
         </div>
         {value ? (

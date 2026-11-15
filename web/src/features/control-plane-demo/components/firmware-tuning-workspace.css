@@ -305,7 +305,7 @@
   display: grid;
   min-width: 0;
   grid-template-columns: minmax(0, 1fr);
-  gap: 4px;
+  gap: 2px;
 }
 
 .firmware-tuning__identifier-header {
@@ -315,8 +315,9 @@
   min-width: 0;
   color: var(--tuning-muted);
   font-family: var(--font-sans, Manrope, 'Noto Sans SC', sans-serif);
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 650;
+  line-height: 1.15;
 }
 
 .firmware-tuning__identifier-summary {
@@ -333,13 +334,17 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 5px;
+  min-width: 0;
+  height: 21px;
+  padding: 0 6px;
+  gap: 4px;
   border: 1px solid var(--tuning-border);
-  border-radius: 5px;
+  border-radius: 8px;
   background: var(--tuning-surface);
   color: var(--tuning-muted);
+  font-family: var(--font-sans, Manrope, 'Noto Sans SC', sans-serif);
+  font-size: 0.66rem;
+  font-weight: 650;
   line-height: 1;
   cursor: pointer;
 }
@@ -350,8 +355,8 @@
 }
 
 .firmware-tuning__identifier-copy svg {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
 .firmware-tuning__identifier-tooltip {
