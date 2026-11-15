@@ -3606,6 +3606,17 @@ fn runtime_record_thermal_tuning_sample(
         state.rtd_control_measurement_guard.last_accepted_at_ms,
         elapsed_ms,
     );
+    let requested_mv = state
+        .pending_automatic_power_request
+        .map(|pending| pending.request.voltage_mv())
+        .unwrap_or_else(|| state.heater_power_backend.pd_request_mv());
+    let pps_power_ceiling_mv = runtime_tuning_safe_ceiling_mv(state, adjustable_max_mv);
+    // The control loop and safety model can observe a bounded ceiling change
+    // on different cycles. Wait for a coherent sample instead of terminating
+    // an otherwise safe run on that transient mismatch.
+    if u32::from(requested_mv) > pps_power_ceiling_mv {
+        return false;
+    }
     let sample = flux_purr_firmware::thermal_tuning::ThermalTuningSample {
         sequence: state.thermal_tuning.events.len() as u32 + 1,
         elapsed_ms,
@@ -3622,11 +3633,8 @@ fn runtime_record_thermal_tuning_sample(
             kind: power_class,
             confirmed: observation.status.pd_active,
         },
-        requested_mv: state
-            .pending_automatic_power_request
-            .map(|pending| pending.request.voltage_mv())
-            .unwrap_or_else(|| state.heater_power_backend.pd_request_mv()),
-        pps_power_ceiling_mv: runtime_tuning_safe_ceiling_mv(state, adjustable_max_mv),
+        requested_mv,
+        pps_power_ceiling_mv,
         heater_requested_output_permille: u16::from(requested_duty_percent).saturating_mul(10),
         heater_output_permille: u16::from(HeaterPwmGate::applied_duty_percent()).saturating_mul(10),
         measurement_valid: temperature.measurement_valid,
