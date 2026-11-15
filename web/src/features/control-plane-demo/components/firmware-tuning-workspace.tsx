@@ -115,6 +115,7 @@ export function FirmwareTuningWorkspace({
   // status for compatibility.  A run is only active when it has been armed
   // or carries a run identity; otherwise the workbench must show standby.
   const terminal = visibleTerminalDisposition(status)
+  const powerClass = resolveTuningPowerClass(parameterSnapshot?.bank, status?.powerClass)
 
   useEffect(() => {
     let cancelled = false
@@ -280,13 +281,14 @@ export function FirmwareTuningWorkspace({
   }
 
   const start = () => {
-    const runId = `web-5a-${crypto.randomUUID()}`
+    if (!powerClass) return
+    const runId = `web-${powerClass}-${crypto.randomUUID()}`
     void apply({
       op: 'start',
       runId,
       candidateId: candidate?.hash ? runId : undefined,
       candidateHash: candidate?.hash,
-      powerClass: 'pps5a',
+      powerClass,
       targetsC: EXECUTION_ORDER,
       candidateProfile: candidate
         ? { op: 'preview', bank: 'pps5a', profile: candidate.profile }
@@ -333,7 +335,10 @@ export function FirmwareTuningWorkspace({
   return (
     <section className="firmware-tuning" aria-label="固件热控调优">
       <header className="firmware-tuning__header">
-        <p className="firmware-tuning__context">PPS 5A · {status?.runId ?? '未运行'}</p>
+        <p className="firmware-tuning__context">
+          {powerClass ? `${powerClassLabel(powerClass)} · ` : '功率档位未知 · '}
+          {status?.runId ?? '未运行'}
+        </p>
         <span
           className={`firmware-tuning__outcome firmware-tuning__outcome--${terminal ?? 'idle'}`}
         >
@@ -349,6 +354,7 @@ export function FirmwareTuningWorkspace({
               !supported ||
               !journalReady ||
               !identityVerified ||
+              !powerClass ||
               armed ||
               terminal === 'candidate_ready' ||
               pending
@@ -422,6 +428,11 @@ export function FirmwareTuningWorkspace({
             重试读取
           </Button>
         </div>
+      ) : null}
+      {supported && !powerClass ? (
+        <p className="firmware-tuning__warning">
+          <ShieldAlert aria-hidden="true" /> 当前设备尚未解析出 PPS 功率档位，无法安全启动调优。
+        </p>
       ) : null}
       {recording?.gap ? (
         <p className="firmware-tuning__warning">
@@ -562,10 +573,23 @@ function parameterSourceLabel(source: string) {
   }
 }
 
+function powerClassLabel(powerClass: 'pps3a' | 'pps5a') {
+  return powerClass === 'pps3a' ? 'PPS 3A' : 'PPS 5A'
+}
+
 export function compactIdentifier(value: string | null | undefined) {
   if (!value) return '—'
   if (value.length <= 24) return value
   return `${value.slice(0, 12)}…${value.slice(-8)}`
+}
+
+export function resolveTuningPowerClass(
+  bank: string | undefined,
+  statusPowerClass: ThermalTuningStatus['powerClass'] | undefined
+): ThermalTuningStatus['powerClass'] {
+  if (bank === 'pps3a' || bank === 'pps5a') return bank
+  if (statusPowerClass === 'pps3a' || statusPowerClass === 'pps5a') return statusPowerClass
+  return null
 }
 
 function IdentifierValue({

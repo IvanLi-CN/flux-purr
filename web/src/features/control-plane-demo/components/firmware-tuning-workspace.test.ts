@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   FirmwareTuningWorkspace,
   compactIdentifier,
+  resolveTuningPowerClass,
   validateCandidate,
   visibleTerminalDisposition,
 } from './firmware-tuning-workspace'
@@ -14,6 +15,12 @@ describe('firmware tuning workspace', () => {
     expect(compactIdentifier(value)).toBe('sha256:d0c6c…0ebec9ec')
     expect(compactIdentifier(value)).not.toBe(value)
     expect(compactIdentifier('short-id')).toBe('short-id')
+  })
+
+  it('uses the firmware-resolved PPS bank instead of guessing pps5a', () => {
+    expect(resolveTuningPowerClass('pps3a', null)).toBe('pps3a')
+    expect(resolveTuningPowerClass('pps5a', 'pps3a')).toBe('pps5a')
+    expect(resolveTuningPowerClass(undefined, null)).toBeNull()
   })
 
   it('does not present firmware compatibility running as an active tuning run', () => {
