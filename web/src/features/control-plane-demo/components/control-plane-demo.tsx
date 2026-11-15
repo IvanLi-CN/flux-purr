@@ -8662,7 +8662,9 @@ function CalibrationView({
             style={calibrationWorkspaceTab === 'firmware_tuning' ? undefined : { display: 'none' }}
             forceMount
           >
-            {firmwareTuningWorkspace}
+            <ScrollArea className="industrial-calibration-tabs__firmware-scroll" autoHide>
+              {firmwareTuningWorkspace}
+            </ScrollArea>
           </TabsContent>
           <TabsContent value="rtd_adc" className="industrial-calibration-tabs__content">
             <section className="industrial-calibration-mode-panel" aria-label="温度标定">

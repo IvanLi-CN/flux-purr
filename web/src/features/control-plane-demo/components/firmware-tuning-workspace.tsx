@@ -485,9 +485,16 @@ export function FirmwareTuningWorkspace({
           <h3>候选与保存</h3>
           <dl>
             <dt>Candidate</dt>
-            <dd>{status?.candidateId ?? '—'}</dd>
+            <dd title={status?.candidateId ?? undefined} aria-label={status?.candidateId ?? '未生成'}>
+              {compactIdentifier(status?.candidateId)}
+            </dd>
             <dt>Hash</dt>
-            <dd>{status?.candidateHash ?? '—'}</dd>
+            <dd
+              title={status?.candidateHash ?? undefined}
+              aria-label={status?.candidateHash ?? '未生成'}
+            >
+              {compactIdentifier(status?.candidateHash)}
+            </dd>
             <dt>RAM preview</dt>
             <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
             <dt>EEPROM</dt>
@@ -535,6 +542,12 @@ function parameterSourceLabel(source: string) {
     default:
       return source || '参数来源未知'
   }
+}
+
+function compactIdentifier(value: string | null | undefined) {
+  if (!value) return '—'
+  if (value.length <= 24) return value
+  return `${value.slice(0, 12)}…${value.slice(-8)}`
 }
 
 function reviewDispositionLabel(
