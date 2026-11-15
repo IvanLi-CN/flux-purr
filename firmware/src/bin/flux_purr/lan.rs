@@ -1332,7 +1332,11 @@ fn thermal_tuning_start_response(
 ) -> UsbFrame {
     match result {
         Ok(()) => {
-            context.ui_state.heater_enabled = false;
+            // A tuning run owns the heater intent for its duration.  Keep the
+            // intent armed while the runtime negotiates PPS; the runtime
+            // interlock still holds the physical output off until the
+            // contract, sensor and thermal safety gates are satisfied.
+            context.ui_state.heater_enabled = true;
             usb_response(
                 request_id,
                 UsbResponsePayload::ThermalTuning(thermal_tuning_status(context, None, true)),
