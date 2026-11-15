@@ -6197,3 +6197,35 @@ fn sample_candidate_identity_mismatch_disarms() {
         ThermalTuningTerminalDisposition::Failed
     );
 }
+
+#[test]
+fn factory_default_profile_seeds_both_power_classes_without_upload() {
+    for power_class in [
+        ThermalTuningPowerClass::Pps3a,
+        ThermalTuningPowerClass::Pps5a,
+    ] {
+        let profile = factory_default_profile(power_class);
+        assert!(
+            profile.points[..THERMAL_TUNING_TARGETS_C.len()]
+                .iter()
+                .all(Option::is_some)
+        );
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("factory-run"),
+                candidate_id: id("factory-run"),
+                candidate_hash: hash("unsealed"),
+                power_class,
+                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: None,
+            })
+            .unwrap();
+        assert!(runtime.armed);
+        assert_eq!(runtime.seed_source.as_str(), "factory_default");
+        assert!(runtime.candidate_hash.is_some());
+    }
+}

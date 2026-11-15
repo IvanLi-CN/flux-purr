@@ -255,16 +255,17 @@ export function FirmwareTuningWorkspace({
   }
 
   const start = () => {
-    if (!candidate) return
     const runId = `web-5a-${crypto.randomUUID()}`
     void apply({
       op: 'start',
       runId,
-      candidateId: runId,
-      candidateHash: candidate.hash,
+      candidateId: candidate?.hash ? runId : undefined,
+      candidateHash: candidate?.hash,
       powerClass: 'pps5a',
       targetsC: EXECUTION_ORDER,
-      candidateProfile: { op: 'preview', bank: 'pps5a', profile: candidate.profile },
+      candidateProfile: candidate
+        ? { op: 'preview', bank: 'pps5a', profile: candidate.profile }
+        : undefined,
     })
   }
 
@@ -330,7 +331,7 @@ export function FirmwareTuningWorkspace({
           <Upload aria-hidden="true" /> 导入候选
         </Button>
         <span className="firmware-tuning__candidate" title={candidate?.hash}>
-          {candidate?.name ?? '未选择候选'}
+          {candidate?.name ?? '使用固件工厂缺省基线'}
         </span>
         <Button
           type="button"
@@ -338,7 +339,6 @@ export function FirmwareTuningWorkspace({
             !supported ||
             !journalReady ||
             !identityVerified ||
-            !candidate ||
             armed ||
             terminal === 'candidate_ready' ||
             pending

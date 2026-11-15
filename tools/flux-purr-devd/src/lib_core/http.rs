@@ -925,7 +925,12 @@ pub(crate) async fn configure_thermal_tuning(
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
         let mut state_lock = state.lock()?;
-        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        // Stopping an active tuning run is the authenticated safety escape
+        // hatch. Start/seal/save still require the devd control lease, while
+        // any client with an authenticated device session may request stop.
+        if payload.op != ThermalTuningCommandOp::Cancel {
+            state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        }
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {

@@ -51,6 +51,45 @@ pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
 // `sha256:` plus 64 hexadecimal characters.
 pub const THERMAL_TUNING_HASH_LEN: usize = 71;
 
+/// Factory-safe seed used when a device has no persisted calibration profile
+/// and the host did not upload a candidate. It is deliberately compiled into
+/// firmware so the tuning flow never treats an empty `Default` profile as a
+/// usable thermal model.
+pub fn factory_default_profile(
+    power_class: ThermalTuningPowerClass,
+) -> ThermalControlProfileConfig {
+    let mut profile = ThermalControlProfileConfig::default();
+    let warmup_power_permille = match power_class {
+        ThermalTuningPowerClass::Pps3a => 650,
+        ThermalTuningPowerClass::Pps5a => 850,
+    };
+    for (index, target_temp_c) in THERMAL_TUNING_TARGETS_C.iter().copied().enumerate() {
+        profile.points[index] = Some(ThermalControlProfilePointConfig {
+            target_temp_c,
+            brake_distance_centi_c: 500,
+            warmup_power_permille,
+            warmup_reenter_centi_c: 400,
+            approach_power_permille: warmup_power_permille,
+            approach_floor_power_permille: 150,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 300,
+            hold_power_permille: 180,
+            hold_reheat_power_permille: 120,
+            hold_entry_centi_c: 90,
+            hold_exit_centi_c: 200,
+            hold_on_centi_c: 30,
+            hold_off_centi_c: 5,
+            overshoot_cutoff_centi_c: 25,
+            hold_kp_permille_per_c: 120,
+            hold_ki_permille_per_c_tick: 12,
+            hold_blend_ticks: 12,
+            approach_lead_ticks: 0,
+            hold_lead_ticks: 0,
+        });
+    }
+    profile
+}
+
 pub type TuningId = String<THERMAL_TUNING_ID_MAX_LEN>;
 pub type TuningHash = String<THERMAL_TUNING_HASH_LEN>;
 pub type TuningReason = String<THERMAL_TUNING_REASON_MAX_LEN>;
@@ -715,6 +754,7 @@ impl ThermalTuningRuntime {
             calibration_conflict,
             candidate_profile,
         } = request;
+        let supplied_candidate = candidate_profile.is_some();
         if self.armed {
             return Err(ThermalTuningError::AlreadyRunning);
         }
@@ -724,8 +764,16 @@ impl ThermalTuningRuntime {
         self.run_id = Some(run_id);
         self.candidate_id = Some(candidate_id);
         self.candidate_hash = Some(candidate_hash);
-        self.candidate_profile = candidate_profile;
-        self.seed_source = bounded_reason("initial_candidate");
+        self.candidate_profile =
+            candidate_profile.or_else(|| Some(factory_default_profile(power_class)));
+        if !supplied_candidate && let Some(profile) = self.candidate_profile {
+            self.candidate_hash = hash_profile(&profile);
+        }
+        self.seed_source = bounded_reason(if supplied_candidate {
+            "initial_candidate"
+        } else {
+            "factory_default"
+        });
         if targets.is_empty() || targets.len() > THERMAL_TUNING_MAX_TARGETS {
             self.fail("invalid_target_scope");
             return Err(ThermalTuningError::InvalidTargets);

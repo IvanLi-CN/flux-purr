@@ -950,16 +950,39 @@ export function redactWifiConfigFrame(frame: UsbWifiConfigFrame): UsbWifiConfigF
 }
 
 async function requestJson<T>(fetcher: typeof fetch, url: string, init?: RequestInit): Promise<T> {
-  const response = await fetcher(url, init)
+  const operation = init?.method?.toUpperCase() === 'POST' ? 'write' : 'read'
+  const endpoint = new URL(url, 'http://localhost').pathname
+  let response: Response
+  try {
+    response = await fetcher(url, init)
+  } catch (cause) {
+    throw new ControlPlaneClientError(
+      '无法访问设备端点，请检查设备连接或本地 devd 状态。',
+      'transport_unavailable',
+      true,
+      cause instanceof Error ? cause.message : cause,
+      { category: 'transport_unavailable', operation, endpoint }
+    )
+  }
   const payload = (await response.json().catch(() => null)) as T | ApiErrorEnvelope | null
 
   if (!response.ok) {
     const envelope = payload as ApiErrorEnvelope | null
+    const code = envelope?.error.code ?? `http_${response.status}`
+    const category =
+      response.status === 401
+        ? 'unauthorized'
+        : response.status === 404 && endpoint.includes('thermal-tuning')
+          ? 'thermal_tuning_unsupported'
+          : response.status >= 500
+            ? 'server_retryable'
+            : undefined
     throw new ControlPlaneClientError(
       envelope?.error.message ?? `Request failed with ${response.status}`,
-      envelope?.error.code,
-      envelope?.error.retryable,
-      envelope?.error.details
+      code,
+      envelope?.error.retryable ?? response.status >= 500,
+      envelope?.error.details,
+      { category, operation, endpoint, status: response.status }
     )
   }
 

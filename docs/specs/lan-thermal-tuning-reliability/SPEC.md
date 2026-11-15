@@ -16,6 +16,8 @@
 - `device connection`: 浏览器已经验证目标设备身份，并能读取基础身份、网络或运行态事实的状态。
 - `tuning read state`: 固件热控调优页面针对最近一次调优读取操作的状态；它不改变顶部设备连接状态。
 - `control lease`: 允许修改设备控制输入的短生命周期租约；只读请求不因缺少租约而失败。
+- `factory default thermal control baseline`: 固件内置、可独立用于受控加热和调优启动的完整热控参数集合；当前按 `pps3a` 与 `pps5a` 两个供电功率档位提供。
+- `resolved tuning profile`: 根据已确认的供电功率档位，从设备标定数据或对应工厂缺省基线解析出的本次调优起点；它不是用户上传文件，也不是已保存结果。
 - Interface: firmware `/api/v1/identity`, `/api/v1/status`, `/api/v1/thermal-tuning`, `/health`, `/api/v1/pairing/claim`; Web `lan-client.ts` and `FirmwareTuningWorkspace`.
 
 ## Requirements
@@ -98,6 +100,28 @@
 - Firmware MUST expose this operation only on the USB control channel and MUST persist or reuse the device bearer internally.
 - devd MUST bind the resulting credential to the verified USB `deviceId`, derive the `flux-purr-<deviceId>.local` locator from the verified identity, validate LAN identity/status before registering the bridge, and never serialize the bearer to Web callers or logs.
 - Web callers MUST receive only the authenticated devd bridge record and its verified mDNS locator.
+
+### REQ-LTR-012 Factory baseline and thermal-parameter start gate
+
+- Firmware MUST embed exactly two complete factory default thermal control baselines: `pps3a` for PPS 3A / 65W and `pps5a` for PPS 5A / 100W.
+- Each factory baseline MUST include the output curve or equivalent output model, thermal plant initial values, controller parameters, and safety voltage, current, and temperature limits.
+- Firmware MUST select a baseline only after the power class is confirmed. An unknown power class MUST prevent tuning start and heater output; firmware MUST NOT guess or silently fall back to another power class.
+- A tuning run MUST resolve either valid device calibration data or the selected factory baseline before enabling heater output. If neither source is available, the operation MUST fail with `thermal_parameters_unavailable` and keep heater output disabled.
+
+### REQ-LTR-013 Resolved profile precedence and persistence
+
+- Valid device heater-curve or thermal-plant calibration data MUST take precedence over the corresponding factory baseline values when resolving a tuning profile.
+- When device calibration data is absent, the selected factory baseline MUST be used without requiring a file upload or user-supplied candidate.
+- Tuning changes MUST remain in RAM as a candidate until the tuning initiator explicitly confirms save. Stop, power loss, or a failed run MUST preserve the last persisted profile for that power class.
+- A confirmed save MUST update only the selected power-class profile bank and MUST retain the other bank unchanged.
+
+### REQ-LTR-014 Tuning run ownership and cross-client writes
+
+- A device MUST have at most one active tuning run at a time.
+- While a tuning run is active, all clients MAY read device and tuning state, but all tuning writes and unrelated control writes MUST be rejected by the device and rendered disabled by the Web UI.
+- Any authenticated client MAY request an idempotent stop for the active tuning run.
+- Only the client that started the active tuning run MAY confirm and persist its candidate.
+- The Web UI MUST show a page-level global notice while the run is active and explain which writes are disabled and that stopping remains available.
 
 ## Verification
 
@@ -215,9 +239,40 @@
 - covers: `REQ-LTR-010`
 - Pass condition: The Demo never starts LAN, Web Serial, or `devd` activity while reproducing the same state model.
 
+### VER-LTR-020 Factory baseline completeness and power-class gate
+
+- Method: Inspect both firmware baseline banks and exercise tuning start with confirmed `pps3a`, confirmed `pps5a`, and unknown power class.
+- covers: `REQ-LTR-012`
+- Pass condition: Both banks contain complete safe parameters; the matching bank is selected for each confirmed class; unknown class prevents heater output and tuning start.
+
+### VER-LTR-021 Calibration and factory fallback
+
+- Method: Start tuning with valid device calibration, with calibration absent but a factory baseline present, and with both sources absent.
+- covers: `REQ-LTR-012`, `REQ-LTR-013`
+- Pass condition: Calibration is preferred; the factory baseline permits operation without upload; missing both returns `thermal_parameters_unavailable` and leaves heater output disabled.
+
+### VER-LTR-022 Candidate persistence and rollback
+
+- Method: Produce a tuning candidate, stop or fail before save, reload the device, then repeat with explicit confirmation and inspect both power-class banks.
+- covers: `REQ-LTR-013`
+- Pass condition: Unconfirmed results never replace persisted values; confirmed save updates only the selected bank and survives reload.
+
+### VER-LTR-023 Cross-client tuning write gate
+
+- Method: Start tuning from client A, attempt reads and writes from client B, stop from client B, and attempt save from both clients.
+- covers: `REQ-LTR-014`
+- Pass condition: Reads work; writes are rejected; client B can stop; only client A can save; the Web page shows the global active-tuning notice.
+
+### VER-LTR-024 USB-assisted LAN authentication fixture
+
+- Method: Acquire the authorized USB/devd session, derive the verified mDNS locator, validate LAN identity and status, and inspect all bridge and UI diagnostics.
+- covers: `REQ-LTR-011`
+- Pass condition: LAN authentication is established without a second pairing-code prompt; the credential remains inside firmware/devd; the Web client receives only the verified bridge record and locator.
+
 ## Related ADRs
 
 - [ADR 0026: Separate device identity, network locator, and operation readiness](../../adr/0026-separate-device-identity-network-locator-and-operation-readiness.md)
+- [ADR 0027: Embedded factory thermal baselines before tuning](../../adr/0027-embedded-factory-thermal-baselines.md)
 
 ## Visual Evidence
 
