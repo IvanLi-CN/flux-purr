@@ -470,10 +470,13 @@ export function FirmwareTuningWorkspace({
         <Fact label="阶段" value={status?.phase ?? '—'} />
         <Fact label="轮次" value={status?.trialPurpose ?? '—'} />
         <Fact label="设备事件" value={`${recording?.events.length ?? 0}`} />
-        <Fact label="审查" value={status?.reviewDisposition ?? '—'} />
+        <Fact
+          label="审查"
+          value={reviewDispositionLabel(status?.reviewDisposition, Boolean(recording?.runId))}
+        />
         <Fact
           label="追踪"
-          value={recording?.complete ? '完整' : recording?.gap ? '缺口' : '收集中'}
+          value={trackingLabel(recording)}
         />
       </div>
 
@@ -532,6 +535,30 @@ function parameterSourceLabel(source: string) {
     default:
       return source || '参数来源未知'
   }
+}
+
+function reviewDispositionLabel(
+  disposition: ThermalTuningStatus['reviewDisposition'] | undefined,
+  hasRun: boolean
+) {
+  if (!hasRun) return '未开始'
+  switch (disposition) {
+    case 'complete':
+      return '已完成'
+    case 'review_incomplete':
+      return '审查不完整'
+    case 'pending':
+      return '待审查'
+    default:
+      return '未开始'
+  }
+}
+
+function trackingLabel(next: ThermalTuningRecording | null) {
+  if (!next?.runId) return '未开始'
+  if (next.complete) return '完整'
+  if (next.gap) return '缺口'
+  return '收集中'
 }
 
 function permillePercent(value: number) {
