@@ -5,6 +5,7 @@
 ## Current Status
 
 - Implementation: 固件缺省基线与 Web/devd 调优启动路径已覆盖；LAN 会话迁移、完整 owner proof 和浏览器证据仍待收口。
+- 电源状态语义已明确：空闲时固定 5V/1A 属于正常安全状态；只有调优运行意图存在时才触发 PPS 协商。PPS 未确认前固件不加热、不采样，Web 应显示电源合同等待或失败原因，不得显示设备连接失败。
 - Lifecycle: active
 - Catalog note: Web LAN session 与 tuning GET/POST 已有基础实现，但能力声明、错误分类和轮询收敛尚未完整符合主题契约。
 
