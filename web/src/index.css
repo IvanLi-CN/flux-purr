@@ -738,6 +738,13 @@
   scrollbar-gutter: auto;
 }
 
+/* Firmware tuning uses the full calibration canvas; its event list already
+   owns its own scroll surface, so the generic tab content inset is redundant. */
+.industrial-calibration-tabs__content:has(.firmware-tuning) {
+  padding-right: 0;
+  scrollbar-gutter: auto;
+}
+
 .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
   height: 100%;
   min-height: 0;
