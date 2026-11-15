@@ -753,9 +753,24 @@ function EventRow({ event }: { event: ThermalTuningEvent }) {
       <td>{(event.elapsedMs / 1000).toFixed(1)}s</td>
       <td>{event.kind}</td>
       <td>{event.targetC ?? '—'}</td>
-      <td>{event.reason ?? event.decision?.stopReason?.toString() ?? '—'}</td>
+      <td>{eventReasonLabel(event.reason ?? event.decision?.stopReason?.toString())}</td>
     </tr>
   )
+}
+
+function eventReasonLabel(reason: string | undefined) {
+  switch (reason) {
+    case 'pd_contract_lost':
+      return '未建立有效 PPS 电源合同，固件已安全停止加热'
+    case 'pps_request_timeout':
+      return 'PPS 电源合同协商超时，固件已安全停止加热'
+    case 'unsafe_sample':
+      return '采样未满足 PPS 安全条件，固件已安全停止加热'
+    case 'invalid_pps_voltage_ceiling':
+      return 'PPS 电压请求超出当前安全上限，固件已安全停止加热'
+    default:
+      return reason ?? '—'
+  }
 }
 
 function terminalLabel(value: ThermalTuningStatus['terminalDisposition'] | undefined) {

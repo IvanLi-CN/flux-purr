@@ -3541,6 +3541,18 @@ fn runtime_record_thermal_tuning_sample(
         state.ui_state.heater_enabled = false;
         return true;
     };
+    if observation.contract.kind != ContractKind::Pps
+        || !observation.status.pd_active
+        || observation.contract_voltage_mv.is_none()
+    {
+        // A fixed 5 V contract can report enough instantaneous current to
+        // look like a 3 A run. Never reinterpret it as PPS evidence: tuning
+        // samples must come from a confirmed PPS contract with a known
+        // voltage, otherwise the request/ceiling pair is meaningless.
+        runtime_fail_tuning_pd(state, "pd_contract_lost", "sample", elapsed_ms);
+        state.ui_state.heater_enabled = false;
+        return true;
+    }
     let power_class = if observation.current_ma >= 5_000 {
         flux_purr_firmware::thermal_tuning::ThermalTuningPowerClass::Pps5a
     } else {
