@@ -5,7 +5,9 @@
 }
 
 .firmware-tuning__header,
-.firmware-tuning__toolbar {
+.firmware-tuning__toolbar,
+.firmware-tuning__primary-actions,
+.firmware-tuning__advanced-content {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -55,7 +57,44 @@
 }
 
 .firmware-tuning__toolbar {
-  margin: 18px 0;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+  margin: 18px 0 16px;
+}
+
+.firmware-tuning__primary-actions {
+  gap: 8px;
+}
+
+.firmware-tuning__primary-actions > button:first-child {
+  order: -1;
+}
+
+.firmware-tuning__advanced {
+  border-top: 1px solid #d5dee0;
+  padding-top: 10px;
+}
+
+.firmware-tuning__advanced summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #53676e;
+  font-size: 12px;
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.firmware-tuning__advanced summary::marker {
+  color: #2d789c;
+}
+
+.firmware-tuning__advanced-content {
+  padding: 10px 0 2px 18px;
+}
+
+.firmware-tuning__advanced-content > button {
+  min-height: 34px;
 }
 
 .firmware-tuning__toolbar svg,
@@ -193,7 +232,13 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .firmware-tuning__toolbar > button {
+  .firmware-tuning__primary-actions > button {
     flex: 1 1 140px;
+  }
+
+  .firmware-tuning__advanced-content {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-left: 0;
   }
 }

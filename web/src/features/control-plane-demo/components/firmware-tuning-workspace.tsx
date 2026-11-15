@@ -320,6 +320,54 @@ export function FirmwareTuningWorkspace({
       </header>
 
       <div className="firmware-tuning__toolbar">
+        <div className="firmware-tuning__primary-actions" aria-label="调优操作">
+          <Button
+            type="button"
+            disabled={
+              !supported ||
+              !journalReady ||
+              !identityVerified ||
+              armed ||
+              terminal === 'candidate_ready' ||
+              pending
+            }
+            onClick={start}
+          >
+            {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
+            开始调优
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={!supported || !identityVerified || !armed || pending}
+            onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
+          >
+            <Square aria-hidden="true" /> 停止
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!canSeal || pending}
+            onClick={() => void apply({ op: 'seal', ...identity })}
+          >
+            封存候选
+          </Button>
+          <Button
+            type="button"
+            disabled={!canSave || pending}
+            onClick={() => void apply({ op: 'confirm_save', ...identity })}
+          >
+            <Save aria-hidden="true" /> 确认保存
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!recording?.runId || pending}
+            onClick={() => void exportReport()}
+          >
+            <Download aria-hidden="true" /> 导出报告
+          </Button>
+        </div>
         <details className="firmware-tuning__advanced">
           <summary>高级选项：导入候选</summary>
           <div className="firmware-tuning__advanced-content">
@@ -338,52 +386,6 @@ export function FirmwareTuningWorkspace({
             </span>
           </div>
         </details>
-        <Button
-          type="button"
-          disabled={
-            !supported ||
-            !journalReady ||
-            !identityVerified ||
-            armed ||
-            terminal === 'candidate_ready' ||
-            pending
-          }
-          onClick={start}
-        >
-          {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
-          开始调优
-        </Button>
-        <Button
-          type="button"
-          variant="destructive"
-          disabled={!supported || !identityVerified || !armed || pending}
-          onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
-        >
-          <Square aria-hidden="true" /> 停止
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={!canSeal || pending}
-          onClick={() => void apply({ op: 'seal', ...identity })}
-        >
-          封存候选
-        </Button>
-        <Button
-          type="button"
-          disabled={!canSave || pending}
-          onClick={() => void apply({ op: 'confirm_save', ...identity })}
-        >
-          <Save aria-hidden="true" /> 确认保存
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          disabled={!recording?.runId || pending}
-          onClick={() => void exportReport()}
-        >
-          <Download aria-hidden="true" /> 导出报告
-        </Button>
       </div>
 
       {!supported ? (
