@@ -320,19 +320,24 @@ export function FirmwareTuningWorkspace({
       </header>
 
       <div className="firmware-tuning__toolbar">
-        <input
-          ref={fileInput}
-          type="file"
-          accept=".json,application/json"
-          hidden
-          onChange={(event) => void importCandidate(event.currentTarget.files?.[0])}
-        />
-        <Button type="button" variant="outline" onClick={() => fileInput.current?.click()}>
-          <Upload aria-hidden="true" /> 导入候选
-        </Button>
-        <span className="firmware-tuning__candidate" title={candidate?.hash}>
-          {candidate?.name ?? '使用固件工厂缺省基线'}
-        </span>
+        <details className="firmware-tuning__advanced">
+          <summary>高级选项：导入候选</summary>
+          <div className="firmware-tuning__advanced-content">
+            <input
+              ref={fileInput}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              onChange={(event) => void importCandidate(event.currentTarget.files?.[0])}
+            />
+            <Button type="button" variant="outline" onClick={() => fileInput.current?.click()}>
+              <Upload aria-hidden="true" /> 导入候选
+            </Button>
+            <span className="firmware-tuning__candidate" title={candidate?.hash}>
+              {candidate?.name ?? '未选择高级候选，使用固件工厂缺省基线'}
+            </span>
+          </div>
+        </details>
         <Button
           type="button"
           disabled={
