@@ -396,6 +396,12 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
             &message,
             retryable,
         ),
+        lan::LanClientError::Request(error) => HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "transport_unavailable",
+            &format!("LAN request failed: {error}"),
+            true,
+        ),
         error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
     }
 }
@@ -881,10 +887,7 @@ pub(crate) async fn device_thermal_tuning(
     Query(query): Query<LeaseQuery>,
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
-        let mut state_lock = state.lock()?;
-        if requires_lease(&state_lock, &device_id) {
-            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
-        }
+        let state_lock = state.lock()?;
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {

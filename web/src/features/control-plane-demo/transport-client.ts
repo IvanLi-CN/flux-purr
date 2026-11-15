@@ -136,7 +136,7 @@ export interface ControlPlaneHttpClient {
   getThermalTuning(
     devdBaseUrl: string,
     deviceId: string,
-    leaseId: string
+    leaseId?: string
   ): Promise<ThermalTuningStatus>
   configureThermalTuning(
     devdBaseUrl: string,
@@ -349,7 +349,7 @@ export function createControlPlaneHttpClient(
     getThermalTuning(devdBaseUrl, deviceId, leaseId) {
       return requestJson<ThermalTuningStatus>(
         fetcher,
-        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning?lease_id=${encodeURIComponent(leaseId)}`
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning${leaseId ? `?lease_id=${encodeURIComponent(leaseId)}` : ''}`
       )
     },
     configureThermalTuning(devdBaseUrl, deviceId, request) {
