@@ -320,10 +320,7 @@ export function FirmwareTuningWorkspace({
   return (
     <section className="firmware-tuning" aria-label="固件热控调优">
       <header className="firmware-tuning__header">
-        <div>
-          <h2>固件热控调优</h2>
-          <p>PPS 5A · {status?.runId ?? '未运行'}</p>
-        </div>
+        <p className="firmware-tuning__context">PPS 5A · {status?.runId ?? '未运行'}</p>
         <span
           className={`firmware-tuning__outcome firmware-tuning__outcome--${terminal ?? 'idle'}`}
         >

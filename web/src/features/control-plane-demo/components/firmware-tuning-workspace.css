@@ -27,15 +27,15 @@
   padding-bottom: 16px;
 }
 
-.firmware-tuning__header h2 {
-  font-size: 1.12rem;
-  font-weight: 650;
-}
-
 .firmware-tuning__header p {
   color: var(--tuning-muted);
   font-size: 0.76rem;
   overflow-wrap: anywhere;
+}
+
+.firmware-tuning__context {
+  margin: 0;
+  font-weight: 650;
 }
 
 .firmware-tuning__outcome {
