@@ -152,6 +152,12 @@ export function FirmwareTuningWorkspace({
   const recordStatus = useCallback(
     async (next: ThermalTuningStatus, confirmedSequence: number | null = null) => {
       const updated = recordThermalTuningPage(recordingRef.current, next, confirmedSequence)
+      // Acknowledging the device page must not wait for IndexedDB. The
+      // firmware keeps a bounded event ring; delaying the next afterSequence
+      // request behind a growing journal write can make that ring overflow
+      // and turn a healthy run into device_trace_gap.
+      recordingRef.current = updated
+      setRecording(updated)
       try {
         if (updated.runId) await persistThermalTuningRecording(deviceId, updated)
       } catch (failure) {
@@ -164,8 +170,6 @@ export function FirmwareTuningWorkspace({
         }
         throw failure
       }
-      recordingRef.current = updated
-      setRecording(updated)
     },
     [deviceId, sendCommand]
   )
