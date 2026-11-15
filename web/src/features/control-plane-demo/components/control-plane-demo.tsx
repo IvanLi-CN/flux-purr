@@ -3050,7 +3050,6 @@ export function ControlPlaneDemo({
     effectiveDevdDeviceId,
     effectiveDevdLeaseId,
     visibleDeviceIsDirectWebSerial,
-    visibleDeviceLeaseId,
     visibleDeviceTransport,
     webSerial,
   ])
