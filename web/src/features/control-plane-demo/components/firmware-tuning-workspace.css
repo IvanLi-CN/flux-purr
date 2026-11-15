@@ -357,6 +357,10 @@
     padding-block: 12px;
   }
 
+  .firmware-tuning__header {
+    padding-bottom: 8px;
+  }
+
   .firmware-tuning__toolbar {
     margin-block: 12px;
   }

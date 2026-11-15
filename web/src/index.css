@@ -7198,6 +7198,11 @@
     overflow: visible;
   }
 
+  .industrial-calibration-tabs__list-row .industrial-calibration-tabs__list {
+    width: 100% !important;
+    min-width: 0;
+  }
+
   .industrial-calibration-tabs__status {
     display: inline-flex;
     align-items: center;
