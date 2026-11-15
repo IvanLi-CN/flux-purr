@@ -1,6 +1,7 @@
 import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
 import type {
   ThermalControlRuntime,
   ThermalTuningCommand,
@@ -499,7 +500,7 @@ export function FirmwareTuningWorkspace({
         </section>
         <section>
           <h3>设备事件</h3>
-          <div className="firmware-tuning__event-scroll">
+          <ScrollArea className="firmware-tuning__event-scroll" autoHide>
             <table>
               <thead>
                 <tr>
@@ -516,7 +517,7 @@ export function FirmwareTuningWorkspace({
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollArea>
         </section>
       </div>
     </section>

@@ -738,6 +738,16 @@
   scrollbar-gutter: auto;
 }
 
+/* The firmware tuning workspace owns its event-list viewport. Keeping the
+   tab content fixed prevents a second browser scrollbar at desktop sizes. */
+.industrial-calibration-tabs__content:has(.firmware-tuning) {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  padding-right: 0;
+  scrollbar-gutter: auto;
+}
+
 .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
   height: 100%;
   min-height: 0;
