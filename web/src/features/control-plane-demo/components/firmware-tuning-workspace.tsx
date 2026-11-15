@@ -1,4 +1,4 @@
-import { Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
+import { Clipboard, Copy, Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -102,6 +102,7 @@ export function FirmwareTuningWorkspace({
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [pollAttempt, setPollAttempt] = useState(0)
+  const [copiedIdentifier, setCopiedIdentifier] = useState<'candidate' | 'hash' | null>(null)
   const [readState, setReadState] = useState<
     'idle' | 'reading' | 'ready' | 'failed' | 'unsupported'
   >(supported ? 'idle' : 'unsupported')
@@ -252,6 +253,17 @@ export function FirmwareTuningWorkspace({
     setReadState('idle')
     setPollAttempt(0)
     setIdentityVerified(false)
+  }
+
+  const copyIdentifier = async (kind: 'candidate' | 'hash', value: string | null | undefined) => {
+    if (!value || !navigator.clipboard) return
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopiedIdentifier(kind)
+      window.setTimeout(() => setCopiedIdentifier((current) => (current === kind ? null : current)), 1600)
+    } catch {
+      setCopiedIdentifier(null)
+    }
   }
 
   const importCandidate = async (file: File | undefined) => {
@@ -485,15 +497,22 @@ export function FirmwareTuningWorkspace({
           <h3>候选与保存</h3>
           <dl>
             <dt>Candidate</dt>
-            <dd title={status?.candidateId ?? undefined} aria-label={status?.candidateId ?? '未生成'}>
-              {compactIdentifier(status?.candidateId)}
+            <dd>
+              <IdentifierValue
+                kind="candidate"
+                value={status?.candidateId}
+                copied={copiedIdentifier === 'candidate'}
+                onCopy={copyIdentifier}
+              />
             </dd>
             <dt>Hash</dt>
-            <dd
-              title={status?.candidateHash ?? undefined}
-              aria-label={status?.candidateHash ?? '未生成'}
-            >
-              {compactIdentifier(status?.candidateHash)}
+            <dd>
+              <IdentifierValue
+                kind="hash"
+                value={status?.candidateHash}
+                copied={copiedIdentifier === 'hash'}
+                onCopy={copyIdentifier}
+              />
             </dd>
             <dt>RAM preview</dt>
             <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
@@ -544,10 +563,47 @@ function parameterSourceLabel(source: string) {
   }
 }
 
-function compactIdentifier(value: string | null | undefined) {
+export function compactIdentifier(value: string | null | undefined) {
   if (!value) return '—'
   if (value.length <= 24) return value
   return `${value.slice(0, 12)}…${value.slice(-8)}`
+}
+
+function IdentifierValue({
+  kind,
+  value,
+  copied,
+  onCopy,
+}: {
+  kind: 'candidate' | 'hash'
+  value: string | null | undefined
+  copied: boolean
+  onCopy: (kind: 'candidate' | 'hash', value: string | null | undefined) => void
+}) {
+  if (!value) return <span className="firmware-tuning__identifier-empty">—</span>
+  const label = kind === 'candidate' ? 'Candidate' : 'Hash'
+  return (
+    <span className="firmware-tuning__identifier">
+      <span className="firmware-tuning__identifier-summary" title={value}>
+        {compactIdentifier(value)}
+      </span>
+      <button
+        type="button"
+        className="firmware-tuning__identifier-copy"
+        aria-label={`复制完整${label}`}
+        title={copied ? '已复制' : `复制完整${label}`}
+        onClick={() => onCopy(kind, value)}
+      >
+        {copied ? <Clipboard aria-hidden="true" /> : <Copy aria-hidden="true" />}
+      </button>
+      <details className="firmware-tuning__identifier-details">
+        <summary aria-label={`查看完整${label}`} title={`查看完整${label}`}>
+          查看
+        </summary>
+        <code>{value}</code>
+      </details>
+    </span>
+  )
 }
 
 function reviewDispositionLabel(

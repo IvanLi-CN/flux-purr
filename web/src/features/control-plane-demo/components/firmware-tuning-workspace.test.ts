@@ -3,11 +3,19 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
   FirmwareTuningWorkspace,
+  compactIdentifier,
   validateCandidate,
   visibleTerminalDisposition,
 } from './firmware-tuning-workspace'
 
 describe('firmware tuning workspace', () => {
+  it('keeps full machine identifiers available while compacting the default row', () => {
+    const value = 'sha256:d0c6ccbd8efc209d8febcf9dfeff4f3ba1cfa2702e3711840ebec9ec'
+    expect(compactIdentifier(value)).toBe('sha256:d0c6c…0ebec9ec')
+    expect(compactIdentifier(value)).not.toBe(value)
+    expect(compactIdentifier('short-id')).toBe('short-id')
+  })
+
   it('does not present firmware compatibility running as an active tuning run', () => {
     expect(
       visibleTerminalDisposition({ armed: false, runId: null, terminalDisposition: 'running' })
