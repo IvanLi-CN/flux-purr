@@ -151,13 +151,16 @@ impl Identity {
         push_str(&mut capabilities, "thermal_plant_run");
         push_str(&mut capabilities, "install_status");
         push_str(&mut capabilities, "flash_preparation");
+        #[cfg(any(feature = "web_serial", feature = "net_http"))]
+        push_str(&mut capabilities, "thermal_tuning");
         #[cfg(feature = "web_serial")]
         {
             push_str(&mut capabilities, "usb_jsonl");
-            push_str(&mut capabilities, "thermal_tuning");
             push_str(&mut capabilities, "wifi_config");
             push_str(&mut capabilities, "monitor");
             push_str(&mut capabilities, "wifi_state_v2");
+            #[cfg(feature = "net_http")]
+            push_str(&mut capabilities, "lan_usb_auth");
         }
         #[cfg(feature = "net_http")]
         {
@@ -3019,6 +3022,7 @@ pub enum UsbRequestOp {
     GetStatus,
     GetThermalStatus,
     GetLanPairingCode,
+    GetLanAuth,
     OpenLanPairingWindow,
     CloseLanPairingWindow,
     GetCalibration,
@@ -3043,6 +3047,7 @@ impl UsbRequestOp {
             Self::GetStatus => "get_status",
             Self::GetThermalStatus => "get_thermal_status",
             Self::GetLanPairingCode => "get_lan_pairing_code",
+            Self::GetLanAuth => "get_lan_auth",
             Self::OpenLanPairingWindow => "open_lan_pairing_window",
             Self::CloseLanPairingWindow => "close_lan_pairing_window",
             Self::GetCalibration => "get_calibration",
@@ -3110,6 +3115,7 @@ pub enum UsbResponsePayload {
     #[serde(rename = "thermalStatus")]
     ThermalStatus(ThermalStatusWire),
     LanPairingCode(LanPairingCode),
+    LanAuth(LanAuth),
     Wifi(WifiConfigReceipt),
     Calibration(CalibrationStateWire),
     CalibrationJob(CalibrationJobStateWire),
@@ -3204,6 +3210,13 @@ pub struct LanPairingCode {
     pub active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String<4>>,
+}
+
+/// A LAN bearer delivered only over an already-authorized USB control channel.
+/// Host tooling may persist it locally; browser-facing APIs must never serialize it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanAuth {
+    pub token: String<64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3617,6 +3630,7 @@ fn parse_usb_request_op(value: Option<&str>) -> Result<UsbRequestOp, UsbFrameErr
         Some("get_status") => Ok(UsbRequestOp::GetStatus),
         Some("get_thermal_status") => Ok(UsbRequestOp::GetThermalStatus),
         Some("get_lan_pairing_code") => Ok(UsbRequestOp::GetLanPairingCode),
+        Some("get_lan_auth") => Ok(UsbRequestOp::GetLanAuth),
         Some("open_lan_pairing_window") => Ok(UsbRequestOp::OpenLanPairingWindow),
         Some("close_lan_pairing_window") => Ok(UsbRequestOp::CloseLanPairingWindow),
         Some("get_calibration") => Ok(UsbRequestOp::GetCalibration),

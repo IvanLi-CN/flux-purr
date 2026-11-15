@@ -1861,6 +1861,7 @@ const bridgeConnectionClient = {
       status: bridgeProbeStatus,
     }
   },
+  async establishDevdLanAuth() {},
   async releaseDevdLease() {},
 } as unknown as ControlPlaneHttpClient
 

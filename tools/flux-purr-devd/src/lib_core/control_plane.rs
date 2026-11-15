@@ -334,6 +334,10 @@ pub fn app(state: AppState) -> Router {
         .route("/api/v1/devices/{device_id}/bind", post(bind_device))
         .route("/api/v1/devices/{device_id}/connect", post(connect_device))
         .route(
+            "/api/v1/devices/{device_id}/lan-auth/establish",
+            post(establish_lan_auth),
+        )
+        .route(
             "/api/v1/devices/{device_id}/disconnect",
             post(disconnect_device),
         )

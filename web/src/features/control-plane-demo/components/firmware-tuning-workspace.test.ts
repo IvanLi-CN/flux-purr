@@ -1,9 +1,22 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
-import { FirmwareTuningWorkspace, validateCandidate } from './firmware-tuning-workspace'
+import {
+  FirmwareTuningWorkspace,
+  validateCandidate,
+  visibleTerminalDisposition,
+} from './firmware-tuning-workspace'
 
 describe('firmware tuning workspace', () => {
+  it('does not present firmware compatibility running as an active tuning run', () => {
+    expect(
+      visibleTerminalDisposition({ armed: false, runId: null, terminalDisposition: 'running' })
+    ).toBeUndefined()
+    expect(
+      visibleTerminalDisposition({ armed: true, runId: 'run-1', terminalDisposition: 'running' })
+    ).toBe('running')
+  })
+
   it('keeps unsupported firmware controls disabled', () => {
     const html = renderToStaticMarkup(
       createElement(FirmwareTuningWorkspace, {

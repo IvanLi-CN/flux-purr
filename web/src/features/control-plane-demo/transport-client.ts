@@ -34,13 +34,37 @@ export class ControlPlaneClientError extends Error {
   readonly code: string
   readonly retryable: boolean
   readonly details?: unknown
+  readonly category?:
+    | 'unauthorized'
+    | 'thermal_tuning_unsupported'
+    | 'transport_unavailable'
+    | 'server_retryable'
+    | 'response_invalid'
+  readonly operation?: string
+  readonly endpoint?: string
+  readonly status?: number
 
-  constructor(message: string, code = 'request_failed', retryable = true, details?: unknown) {
+  constructor(
+    message: string,
+    code = 'request_failed',
+    retryable = true,
+    details?: unknown,
+    metadata?: {
+      category?: ControlPlaneClientError['category']
+      operation?: string
+      endpoint?: string
+      status?: number
+    }
+  ) {
     super(message)
     this.name = 'ControlPlaneClientError'
     this.code = code
     this.retryable = retryable
     this.details = details
+    this.category = metadata?.category
+    this.operation = metadata?.operation
+    this.endpoint = metadata?.endpoint
+    this.status = metadata?.status
   }
 }
 
@@ -79,6 +103,11 @@ export interface ControlPlaneHttpClient {
     deviceId: string,
     leaseId: string
   ): Promise<DevdDeviceRecord>
+  establishDevdLanAuth(
+    devdBaseUrl: string,
+    deviceId: string,
+    leaseId: string
+  ): Promise<DevdDeviceRecord>
   disconnectDevdDevice(
     devdBaseUrl: string,
     deviceId: string,
@@ -107,7 +136,7 @@ export interface ControlPlaneHttpClient {
   getThermalTuning(
     devdBaseUrl: string,
     deviceId: string,
-    leaseId: string
+    leaseId?: string
   ): Promise<ThermalTuningStatus>
   configureThermalTuning(
     devdBaseUrl: string,
@@ -244,6 +273,13 @@ export function createControlPlaneHttpClient(
         }
       )
     },
+    establishDevdLanAuth(devdBaseUrl, deviceId, leaseId) {
+      return requestJson<DevdDeviceRecord>(
+        fetcher,
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/lan-auth/establish?lease_id=${encodeURIComponent(leaseId)}`,
+        { method: 'POST' }
+      )
+    },
     disconnectDevdDevice(devdBaseUrl, deviceId, leaseId) {
       return requestJson<DevdDeviceRecord>(
         fetcher,
@@ -313,7 +349,7 @@ export function createControlPlaneHttpClient(
     getThermalTuning(devdBaseUrl, deviceId, leaseId) {
       return requestJson<ThermalTuningStatus>(
         fetcher,
-        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning?lease_id=${encodeURIComponent(leaseId)}`
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning${leaseId ? `?lease_id=${encodeURIComponent(leaseId)}` : ''}`
       )
     },
     configureThermalTuning(devdBaseUrl, deviceId, request) {

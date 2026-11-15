@@ -925,6 +925,7 @@ export function ControlPlaneDemo({
     navigation?.state.kind === 'device' ? navigation.state.deviceId : null
   const devdLeaseAllowedForRoute =
     !routedRecoveryIdentityId ||
+    activeView === 'calibration' ||
     allowDemoControls ||
     requestedConnectionByIdentity[routedRecoveryIdentityId]?.kind === 'bridge' ||
     routePreferences.transportByIdentity[routedRecoveryIdentityId] === 'bridge' ||
@@ -1963,7 +1964,10 @@ export function ControlPlaneDemo({
             device.id === deviceId
               ? {
                   ...device,
-                  leaseState: 'conflict',
+                  leaseState:
+                    error instanceof ControlPlaneClientError && error.code === 'lease_conflict'
+                      ? 'conflict'
+                      : 'expired',
                   transportIssue: error instanceof Error ? error.message : '无法获取 LAN lease。',
                 }
               : device
@@ -2665,6 +2669,23 @@ export function ControlPlaneDemo({
   const visibleDeviceLeaseId = visibleDevice.leaseId
   const visibleDeviceNetworkState = visibleDevice.networkState
   const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
+  const liveDevdTargetForVisibleDevice = useMemo(
+    () =>
+      [...activeScenario.devices]
+        .filter(
+          (device) =>
+            device.transport === 'devd' &&
+            deviceIdentityId(device) === deviceIdentityId(visibleDevice) &&
+            Boolean(device.leaseId)
+        )
+        .sort((left, right) =>
+          left.bridgeTransport === 'wifi' && right.bridgeTransport !== 'wifi' ? -1 : 0
+        )[0],
+    [activeScenario.devices, visibleDevice]
+  )
+  const effectiveDevdDeviceId = liveDevdTargetForVisibleDevice?.id ?? visibleDeviceId
+  const effectiveDevdLeaseId = liveDevdTargetForVisibleDevice?.leaseId ?? visibleDeviceLeaseId
+  const effectiveDevdBaseUrl = devdBaseUrl ?? defaultDevdBaseUrl()
 
   const commitCalibrationState = useCallback((deviceId: string, calibration: CalibrationState) => {
     const normalized = normalizeCalibrationState(calibration)
@@ -2876,15 +2897,15 @@ export function ControlPlaneDemo({
       }
       if (
         visibleDeviceTransport === 'devd' &&
-        visibleDeviceLeaseId &&
-        devdBaseUrl &&
+        effectiveDevdLeaseId &&
+        effectiveDevdBaseUrl &&
         visibleDeviceNetworkState !== 'error' &&
         visibleDeviceNetworkState !== 'timeout'
       ) {
         return controlClient.getThermalPlantRun(
-          devdBaseUrl,
-          visibleDeviceId,
-          visibleDeviceLeaseId,
+          effectiveDevdBaseUrl,
+          effectiveDevdDeviceId,
+          effectiveDevdLeaseId,
           afterSample
         )
       }
@@ -2981,7 +3002,9 @@ export function ControlPlaneDemo({
   }, [
     activeView,
     controlClient,
-    devdBaseUrl,
+    effectiveDevdBaseUrl,
+    effectiveDevdDeviceId,
+    effectiveDevdLeaseId,
     lanDeviceBaseUrl,
     thermalPlantRunUnsupported,
     visibleDeviceId,
@@ -2994,28 +3017,39 @@ export function ControlPlaneDemo({
   ])
   const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
     if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })
-    if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+    // LAN status reads are read-only on the device and do not require the
+    // mutation lease.  Keep the lease requirement for POST commands below;
+    // otherwise a healthy LAN device can be reported as "unsupported" while
+    // runtime/status reads continue to work.
+    if (lanDeviceBaseUrl) {
       const session = loadLanDeviceSession(lanDeviceBaseUrl)
       if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
-      return authorizedLanRequest<ThermalTuningStatus>(
-        session,
-        'thermal-tuning',
-        'GET',
-        undefined,
-        visibleDeviceLeaseId
+      return authorizedLanRequest<ThermalTuningStatus>(session, 'thermal-tuning', 'GET')
+    }
+    if (visibleDeviceTransport === 'devd' && effectiveDevdBaseUrl) {
+      return controlClient.getThermalTuning(
+        effectiveDevdBaseUrl,
+        effectiveDevdDeviceId,
+        effectiveDevdLeaseId
       )
     }
-    if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
-      return controlClient.getThermalTuning(devdBaseUrl, visibleDeviceId, visibleDeviceLeaseId)
+    if (visibleDeviceTransport === 'devd') {
+      throw new ControlPlaneClientError(
+        '设备控制租约正在恢复，固件热控调优读取会自动重试。',
+        'devd_lease_unavailable',
+        true,
+        undefined,
+        { category: 'transport_unavailable', operation: 'thermal_tuning_read' }
+      )
     }
     throw new Error('当前设备连接不支持固件调优。')
   }, [
     controlClient,
-    devdBaseUrl,
+    effectiveDevdBaseUrl,
     lanDeviceBaseUrl,
-    visibleDeviceId,
+    effectiveDevdDeviceId,
+    effectiveDevdLeaseId,
     visibleDeviceIsDirectWebSerial,
-    visibleDeviceLeaseId,
     visibleDeviceTransport,
     webSerial,
   ])
@@ -3033,19 +3067,29 @@ export function ControlPlaneDemo({
           visibleDeviceLeaseId
         )
       }
-      if (visibleDeviceTransport === 'devd' && visibleDeviceLeaseId && devdBaseUrl) {
-        return controlClient.configureThermalTuning(devdBaseUrl, visibleDeviceId, {
-          leaseId: visibleDeviceLeaseId,
+      if (visibleDeviceTransport === 'devd' && effectiveDevdLeaseId && effectiveDevdBaseUrl) {
+        return controlClient.configureThermalTuning(effectiveDevdBaseUrl, effectiveDevdDeviceId, {
+          leaseId: effectiveDevdLeaseId,
           ...command,
         })
+      }
+      if (visibleDeviceTransport === 'devd') {
+        throw new ControlPlaneClientError(
+          '设备控制租约正在恢复，请稍后再执行固件热控调优。',
+          'devd_lease_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation: 'thermal_tuning_write' }
+        )
       }
       throw new Error('当前设备连接不支持固件调优。')
     },
     [
       controlClient,
-      devdBaseUrl,
+      effectiveDevdBaseUrl,
       lanDeviceBaseUrl,
-      visibleDeviceId,
+      effectiveDevdDeviceId,
+      effectiveDevdLeaseId,
       visibleDeviceIsDirectWebSerial,
       visibleDeviceLeaseId,
       visibleDeviceTransport,
@@ -6887,17 +6931,37 @@ function BridgeTargetPanel({
     if (!devdBaseUrl || connectionState.status === 'identifying') return
     setConnectionState({ status: 'identifying', device })
     let leaseId: string | null = null
+    let ownsLease = false
     try {
-      const lease = await client.createDevdLease(devdBaseUrl, device.id)
-      leaseId = lease.leaseId
-      const identity = await client.identifyDevdDevice(devdBaseUrl, device.id, lease.leaseId)
+      const existingLease = devices.find(
+        (candidate) =>
+          candidate.transport === 'devd' &&
+          deviceIdentityId(candidate) === deviceIdentityId(device) &&
+          Boolean(candidate.leaseId)
+      )?.leaseId
+      if (existingLease) {
+        leaseId = existingLease
+      } else {
+        const lease = await client.createDevdLease(devdBaseUrl, device.id)
+        leaseId = lease.leaseId
+        ownsLease = true
+      }
+      const resolvedLeaseId = leaseId
+      if (!resolvedLeaseId) throw new Error('设备控制租约尚未建立。')
+      const identity = await client.identifyDevdDevice(devdBaseUrl, device.id, resolvedLeaseId)
       if (!validateBridgeDeviceIdentity(identity).ok) {
         setConnectionState({ status: 'unknown', device })
         return
       }
 
-      const probe = await client.probeDevdDevice(devdBaseUrl, device.id, lease.leaseId)
+      const probe = await client.probeDevdDevice(devdBaseUrl, device.id, resolvedLeaseId)
       const connected = bridgeProbeToDeviceTarget(device, probe)
+      // USB ownership is sufficient to establish the local devd LAN session.
+      // Keep the USB connection authoritative even when mDNS is temporarily
+      // unavailable; the authenticated bridge is an opportunistic convenience.
+      await client
+        .establishDevdLanAuth(devdBaseUrl, device.id, resolvedLeaseId)
+        .catch(() => undefined)
       setConnectionState({ status: 'connected', device: connected })
     } catch (error) {
       setConnectionState({
@@ -6906,7 +6970,7 @@ function BridgeTargetPanel({
         detail: error instanceof Error ? error.message : '无法识别该串口设备。',
       })
     } finally {
-      if (leaseId) {
+      if (leaseId && ownsLease) {
         await client.releaseDevdLease(devdBaseUrl, leaseId).catch(() => undefined)
       }
     }

@@ -191,6 +191,93 @@ pub(crate) async fn connect_lan_device(
     Ok(Json(device_list_payload(record)))
 }
 
+/// Establish LAN authentication from an already leased USB device. The bearer
+/// is read over USB, persisted only in devd's local registry, and never sent
+/// to the browser. The device's advertised mDNS hostname becomes the stable
+/// LAN locator.
+pub(crate) async fn establish_lan_auth(
+    State(state): State<AppState>,
+    AxumPath(device_id): AxumPath<String>,
+    Query(query): Query<LeaseQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let target = native_lan_pairing_target(&state, &device_id, query.lease_id.as_deref())?;
+    let identity =
+        serial_request_payload::<Identity>(&state, &target, "get_identity", "identity").await?;
+    validate_native_serial_identity(&identity)?;
+    let network =
+        serial_request_payload::<NetworkSummary>(&state, &target, "get_network", "network").await?;
+    let token = serial_lan_auth(&state, &target).await?;
+    let base_url = lan::normalize_lan_base_url(&format!("http://{}.local", identity.hostname))
+        .map_err(|_| {
+            HttpError::bad_request(
+                "invalid_mdns_hostname",
+                "The USB identity did not contain a valid Flux Purr mDNS hostname.",
+            )
+        })?;
+    let lan_id = format!("lan-{}", identity.device_id);
+    let mut config_entry = lan::LanDeviceConfig {
+        id: lan_id.clone(),
+        base_url,
+        hostname: Some(format!("{}.local", identity.hostname)),
+        last_ipv4: network.ip.as_ref().map(ToString::to_string),
+        pairing_token: Some(token),
+    };
+    // Prefer the advertised mDNS locator. Some host networks disable mDNS
+    // resolution; in that case the USB network snapshot is an authenticated
+    // fallback locator for this same verified identity.
+    if lan_bridge_read::<Identity>(&config_entry, "identity")
+        .await
+        .is_err()
+        && let Some(ip) = network.ip.as_ref().map(ToString::to_string)
+    {
+        config_entry.base_url =
+            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(|_| {
+                HttpError::bad_request(
+                    "invalid_network_address",
+                    "The USB network snapshot did not contain a valid private address.",
+                )
+            })?;
+    }
+    let mut config = read_user_config()
+        .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
+    lan::merge_lan_device(&mut config.lan_devices, config_entry);
+    write_user_config(&config)
+        .map_err(|_| HttpError::internal("failed to persist local LAN device registry"))?;
+
+    let configured = config
+        .lan_devices
+        .into_iter()
+        .find(|device| device.id == lan_id)
+        .ok_or_else(|| HttpError::internal("LAN authentication registry update was not visible"))?;
+    let verified_identity = identity;
+    validate_lan_bridge_identity(&verified_identity)?;
+    // The authenticated identity GET proves the bearer and locator. Reuse the
+    // USB snapshots for network/status because older LAN envelopes may reject
+    // the larger status payload even though the authenticated route is healthy.
+    let verified_network = network;
+    let status =
+        serial_request_payload::<ControlPlaneStatus>(&state, &target, "get_status", "status")
+            .await?;
+    let bridge_id = bridge_lan_device_id(&configured.id);
+    let record = DeviceRecord::lan_bridge(
+        bridge_id.clone(),
+        verified_identity,
+        verified_network,
+        status,
+    );
+    {
+        let mut state_lock = state.lock()?;
+        state_lock.devices.insert(bridge_id.clone(), record.clone());
+    }
+    state.emit(event(
+        &bridge_id,
+        "lan",
+        "LAN authentication established through USB",
+        json!({ "transport": "usb-assisted-mdns", "lanDeviceId": configured.id }),
+    ));
+    Ok(Json(device_list_payload(record)))
+}
+
 pub(crate) fn bridge_lan_device_id(lan_device_id: &str) -> String {
     format!("devd-{lan_device_id}")
 }
@@ -220,9 +307,18 @@ pub(crate) async fn lan_bridge_read<T: DeserializeOwned>(
     device: &lan::LanDeviceConfig,
     path: &str,
 ) -> Result<T, HttpError> {
-    let value = lan::authorized_json(device, Method::GET, path, None, None)
+    let value = match lan::authorized_json(device, Method::GET, path, None, None)
         .await
-        .map_err(lan_bridge_error)?;
+        .map_err(lan_bridge_error)
+    {
+        Err(error) if path == "thermal-tuning" && error.status == StatusCode::NOT_FOUND => {
+            return Err(HttpError::not_found(
+                "thermal_tuning_unsupported",
+                "The LAN firmware does not provide thermal tuning.",
+            ));
+        }
+        result => result?,
+    };
     serde_json::from_value(value).map_err(|_| {
         HttpError::bad_request(
             "lan_bridge_invalid_response",
@@ -299,6 +395,12 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
             &code,
             &message,
             retryable,
+        ),
+        lan::LanClientError::Request(error) => HttpError::new(
+            StatusCode::BAD_GATEWAY,
+            "transport_unavailable",
+            &format!("LAN request failed: {error}"),
+            true,
         ),
         error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
     }
@@ -785,10 +887,7 @@ pub(crate) async fn device_thermal_tuning(
     Query(query): Query<LeaseQuery>,
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
-        let mut state_lock = state.lock()?;
-        if requires_lease(&state_lock, &device_id) {
-            state_lock.require_lease(&device_id, query.lease_id.as_deref())?;
-        }
+        let state_lock = state.lock()?;
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
