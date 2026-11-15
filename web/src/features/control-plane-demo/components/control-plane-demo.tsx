@@ -3893,6 +3893,55 @@ export function ControlPlaneDemo({
     setSelectedAddDeviceKind(defaultAddDeviceKind)
   }
 
+  const handleRecoveryDeviceSelect = async (deviceId: string) => {
+    const device = deviceOptions.find((candidate) => candidate.id === deviceId)
+    if (!device || device.transport !== 'devd' || !bridgeDevdBaseUrl) {
+      handleDeviceChange(deviceId)
+      return
+    }
+
+    let leaseId = device.leaseId ?? null
+    let ownsLease = false
+    try {
+      if (!leaseId) {
+        const lease = await controlClient.createDevdLease(bridgeDevdBaseUrl, device.id)
+        leaseId = lease.leaseId
+        ownsLease = true
+      }
+      if (!leaseId) throw new Error('设备控制租约尚未建立。')
+
+      const identity = await controlClient.identifyDevdDevice(
+        bridgeDevdBaseUrl,
+        device.id,
+        leaseId
+      )
+      const identityValidation = validateBridgeDeviceIdentity(identity)
+      if (!identityValidation.ok) {
+        throw new Error('无法读取设备身份，请重试 USB 桥接。')
+      }
+      const probe = await controlClient.probeDevdDevice(bridgeDevdBaseUrl, device.id, leaseId)
+      const resolved = bridgeProbeToDeviceTarget(device, probe)
+      if (ownsLease) {
+        resolved.leaseId = undefined
+        resolved.leaseState = 'none'
+      } else {
+        resolved.leaseId = leaseId
+        resolved.leaseState = 'active'
+      }
+      handleDeviceChange(resolved.id, resolved)
+    } catch (error) {
+      setFeedback({
+        title: '设备身份读取失败',
+        detail: error instanceof Error ? error.message : 'USB 桥接设备尚未完成识别，请重试。',
+        tone: 'warning',
+      })
+    } finally {
+      if (leaseId && ownsLease) {
+        await controlClient.releaseDevdLease(bridgeDevdBaseUrl, leaseId).catch(() => undefined)
+      }
+    }
+  }
+
   const handleQuickAddDevice = async (kind: AddDeviceKind) => {
     await requestCalibrationLeave(
       {
@@ -4946,7 +4995,7 @@ export function ControlPlaneDemo({
         webSerial={webSerial}
         transport={routeConnectionKind}
         retry={() => window.location.reload()}
-        onDeviceSelect={handleDeviceChange}
+        onDeviceSelect={handleRecoveryDeviceSelect}
         onAddDevice={handleQuickAddDevice}
         feedback={feedback}
         leaveGuard={recoveryLeaveGuard}
