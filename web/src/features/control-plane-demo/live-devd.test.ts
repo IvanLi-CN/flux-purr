@@ -25,6 +25,18 @@ import type { ControlPlaneHttpClient } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('live devd selection', () => {
+  it('leases the selected LAN route instead of the same device USB route', () => {
+    const usb = { ...makeBusyRecord('usb-target'), connection: 'connected' as const }
+    const lan = {
+      ...usb,
+      id: 'devd-lan-target',
+      transport: 'lan' as const,
+    }
+    expect(selectLiveDevdRecord([usb, lan], lan.id)).toBe(lan)
+    expect(selectLiveDevdRecord([usb, { ...lan, connection: 'busy' }], lan.id)?.id).toBe(lan.id)
+    expect(selectLiveDevdRecord([usb], lan.id)).toBeUndefined()
+  })
+
   it('retains an authorized native placeholder as a recovery-only target', () => {
     const placeholder: DevdDeviceRecord = {
       id: 'serial-recovery',

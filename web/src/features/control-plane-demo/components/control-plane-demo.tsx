@@ -944,6 +944,7 @@ export function ControlPlaneDemo({
       preferredTransport: preferredLiveTransport,
     }),
     nativeRuntimeProbeEnabled: activeView !== 'update',
+    preferredDeviceId: selectedDeviceId,
     leaseEnabled:
       activeView !== 'add-device' &&
       shouldHoldDevdLease(selectedDeviceId) &&
@@ -2729,6 +2730,7 @@ export function ControlPlaneDemo({
         .filter(
           (device) =>
             device.transport === 'devd' &&
+            (visibleDevice.transport !== 'devd' || device.id === visibleDevice.id) &&
             deviceIdentityId(device) === deviceIdentityId(visibleDevice) &&
             Boolean(device.leaseId)
         )
@@ -3100,7 +3102,8 @@ export function ControlPlaneDemo({
         return controlClient.getThermalTuning(
           effectiveDevdBaseUrl,
           effectiveDevdDeviceId,
-          effectiveDevdLeaseId
+          effectiveDevdLeaseId,
+          cursor
         )
       }
       if (visibleDeviceTransport === 'devd') {

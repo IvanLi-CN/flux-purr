@@ -20,6 +20,19 @@ function jsonResponse(value: unknown) {
 }
 
 describe('control-plane transport client', () => {
+  it('carries the run-bound event cursor on read-only tuning GET without a lease', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({}))
+    const client = createControlPlaneHttpClient(fetcher)
+    await client.getThermalTuning('http://127.0.0.1:4170', 'devd-lan-device', undefined, {
+      runId: 'run/one',
+      afterSequence: 0,
+    })
+    expect(fetcher).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/api/v1/devices/devd-lan-device/thermal-tuning?run_id=run%2Fone&after_sequence=0',
+      undefined
+    )
+  })
+
   it('keeps firmware tuning commands on the device event contract', async () => {
     const status = {
       phase: 'idle',

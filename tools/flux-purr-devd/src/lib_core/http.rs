@@ -311,7 +311,10 @@ pub(crate) async fn lan_bridge_read<T: DeserializeOwned>(
         .await
         .map_err(lan_bridge_error)
     {
-        Err(error) if path == "thermal-tuning" && error.status == StatusCode::NOT_FOUND => {
+        Err(error)
+            if path.split('?').next() == Some("thermal-tuning")
+                && error.status == StatusCode::NOT_FOUND =>
+        {
             return Err(HttpError::not_found(
                 "thermal_tuning_unsupported",
                 "The LAN firmware does not provide thermal tuning.",
@@ -884,7 +887,7 @@ pub(crate) async fn device_thermal_status(
 pub(crate) async fn device_thermal_tuning(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
-    Query(query): Query<LeaseQuery>,
+    Query(query): Query<ThermalTuningReadQuery>,
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
         let state_lock = state.lock()?;
@@ -894,12 +897,12 @@ pub(crate) async fn device_thermal_tuning(
         let payload = ThermalTuningRequest {
             lease_id: query.lease_id.unwrap_or_default(),
             op: ThermalTuningCommandOp::Read,
-            run_id: None,
+            run_id: query.run_id,
             candidate_id: None,
             candidate_hash: None,
             power_class: None,
             targets_c: None,
-            after_sequence: None,
+            after_sequence: query.after_sequence,
             candidate_profile: None,
         };
         return Ok(Json(
@@ -909,13 +912,30 @@ pub(crate) async fn device_thermal_tuning(
     if target.transport == DeviceTransport::Lan {
         let configured = lan_bridge_config(&target)?;
         return Ok(Json(
-            lan_bridge_read::<ThermalTuningStatus>(&configured, "thermal-tuning").await?,
+            lan_bridge_read::<ThermalTuningStatus>(&configured, &thermal_tuning_read_path(&query))
+                .await?,
         ));
     }
     Err(HttpError::bad_request(
         "thermal_tuning_unavailable",
         "Firmware thermal tuning requires a connected device transport.",
     ))
+}
+
+pub(crate) fn thermal_tuning_read_path(query: &ThermalTuningReadQuery) -> String {
+    let mut url =
+        reqwest::Url::parse("http://localhost/thermal-tuning").expect("static tuning URL");
+    if let Some(run_id) = &query.run_id {
+        url.query_pairs_mut().append_pair("run_id", run_id);
+    }
+    if let Some(after_sequence) = query.after_sequence {
+        url.query_pairs_mut()
+            .append_pair("after_sequence", &after_sequence.to_string());
+    }
+    match url.query() {
+        Some(query) => format!("thermal-tuning?{query}"),
+        None => "thermal-tuning".into(),
+    }
 }
 
 pub(crate) async fn configure_thermal_tuning(

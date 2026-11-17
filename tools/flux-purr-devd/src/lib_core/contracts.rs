@@ -1714,6 +1714,13 @@ pub struct LeaseQuery {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ThermalTuningReadQuery {
+    pub lease_id: Option<String>,
+    pub run_id: Option<String>,
+    pub after_sequence: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ThermalPlantRunQuery {
     pub lease_id: Option<String>,
     pub after_sample: Option<u8>,

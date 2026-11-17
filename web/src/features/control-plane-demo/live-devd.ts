@@ -41,6 +41,7 @@ export interface LiveDevdOptions {
   enabled?: boolean
   leaseEnabled?: boolean
   nativeRuntimeProbeEnabled?: boolean
+  preferredDeviceId?: string | null
   devdBaseUrl?: string | null
   httpClient?: ControlPlaneHttpClient
   includeMockDevices?: boolean
@@ -84,6 +85,7 @@ export function useLiveDevdScenario(
     enabled = true,
     leaseEnabled = true,
     nativeRuntimeProbeEnabled = true,
+    preferredDeviceId,
     devdBaseUrl = defaultDevdBaseUrl(),
     httpClient,
     includeMockDevices = true,
@@ -103,8 +105,10 @@ export function useLiveDevdScenario(
   const activeLeaseDeviceIdRef = useRef<string | null>(null)
   const refreshInFlightRef = useRef(false)
   const liveDevdDeviceId = useMemo(
-    () => devices.find((device) => device.transport === 'devd')?.id,
-    [devices]
+    () =>
+      devices.find((device) => device.id === preferredDeviceId)?.id ??
+      devices.find((device) => device.transport === 'devd')?.id,
+    [devices, preferredDeviceId]
   )
 
   useEffect(() => {
@@ -168,7 +172,7 @@ export function useLiveDevdScenario(
           ? records
           : records.filter((record) => record.transport !== 'mock')
         const baseDevices = visibleRecords.map(devdRecordToDeviceTarget)
-        const liveRecord = selectLiveDevdRecord(records)
+        const liveRecord = selectLiveDevdRecord(records, preferredDeviceId)
         if (!liveRecord) {
           activeLeaseRef.current = null
           activeLeaseDeviceIdRef.current = null
@@ -286,7 +290,15 @@ export function useLiveDevdScenario(
       setStreamEvents([])
       void releaseActiveLease()
     }
-  }, [client, devdBaseUrl, enabled, includeMockDevices, leaseEnabled, nativeRuntimeProbeEnabled])
+  }, [
+    client,
+    devdBaseUrl,
+    enabled,
+    includeMockDevices,
+    leaseEnabled,
+    nativeRuntimeProbeEnabled,
+    preferredDeviceId,
+  ])
 
   useEffect(() => {
     if (!enabled || !devdBaseUrl || !liveDevdDeviceId || typeof EventSource === 'undefined') {
@@ -498,7 +510,22 @@ export function mergeDevdProbeRecord(
  * valid recovery target. It must obtain a lease, but it must never be treated
  * as update-capable until the runtime probe verifies its identity.
  */
-export function selectLiveDevdRecord(records: DevdDeviceRecord[]) {
+export function selectLiveDevdRecord(
+  records: DevdDeviceRecord[],
+  preferredDeviceId?: string | null
+) {
+  if (preferredDeviceId) {
+    const selected = records.find(
+      (record) =>
+        record.id === preferredDeviceId &&
+        (record.transport === 'native_serial' || record.transport === 'lan')
+    )
+    if (selected) return selected
+    // A selected bridge that is temporarily absent must not acquire another
+    // route's lease, especially the USB route for the same physical device.
+    if (preferredDeviceId.startsWith('devd-lan-') || preferredDeviceId.startsWith('serial-'))
+      return undefined
+  }
   return (
     records.find(
       (record) =>

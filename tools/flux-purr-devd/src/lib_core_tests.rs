@@ -3,6 +3,38 @@ use std::process::ExitStatus;
 use tempfile::tempdir;
 
 #[test]
+fn thermal_tuning_get_preserves_run_bound_zero_and_full_width_cursors_without_a_lease() {
+    for after_sequence in [0, u32::MAX] {
+        let query = ThermalTuningReadQuery {
+            lease_id: None,
+            run_id: Some("run/one & two".into()),
+            after_sequence: Some(after_sequence),
+        };
+        let path = thermal_tuning_read_path(&query);
+        let url = reqwest::Url::parse(&format!("http://localhost/{path}")).unwrap();
+        let pairs: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("run_id").map(String::as_str),
+            Some("run/one & two")
+        );
+        assert_eq!(
+            pairs.get("after_sequence"),
+            Some(&after_sequence.to_string())
+        );
+        assert!(!pairs.contains_key("lease_id"));
+        assert_eq!(url.path(), "/thermal-tuning");
+    }
+    assert_eq!(
+        thermal_tuning_read_path(&ThermalTuningReadQuery {
+            lease_id: None,
+            run_id: None,
+            after_sequence: None,
+        }),
+        "thermal-tuning"
+    );
+}
+
+#[test]
 fn calibration_bridge_preserves_the_firmware_shutdown_response() {
     let response = flux_purr_firmware::thermal_response::HeatResponse {
         delay_ms: 0,
