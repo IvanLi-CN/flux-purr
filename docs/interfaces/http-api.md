@@ -586,6 +586,8 @@ Web Update dry-check uses the catalog plus verify endpoint. Browser CORS preflig
 
 ## User CLI
 
+Native LAN clients admit at most two requests per device origin, with a 3s queue deadline. Authenticated GET requests, including the revision snapshot before a mutation, have a 6s complete-response deadline so bounded device TCP buffers can finish a valid status or tuning body. Mutation requests keep their 3s deadline and are never automatically replayed. A response deadline includes the body, not only headers.
+
 The released command-line control surface is `flux-purr`. It talks to `flux-purr-devd`, creates a device lease, heartbeats it during long operations, releases it before exit, and supports `--json` for machine-readable output.
 
 Core commands:

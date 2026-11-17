@@ -23,7 +23,9 @@
 - 镜像 `d037989c` 的并发公开 health 回归使用 `just lan-http-read-check http://192.168.31.207 d0cf1308a148 30 3`，30 次请求中 10 次成功、20 次连接拒绝；五组三并发探针均只有一个成功，单并发五次全部成功。故障位于单 acceptor 的 TCP 接入窗口，不能归因于配对或调优 capability。该路径依赖 Embassy 网络调度和设备 TCP 栈，host 路由单测不能替代匹配镜像的相同并发探针。
 - Web 经 devd LAN HTTP 启动 `web-pps3a-3b40a1bb-99f4-41f5-a8fe-29775e331893` 返回 200，设备进入调优。临时诊断确认租约申请、写入和释放均返回 200，历史 `lease_busy` 未复现，原因仍未确定；诊断日志代码已移除。活动期间，另一已认证 HTTP 客户端持有自己的有效租约并提交保持原目标温度的 runtime 写入，返回 `409 thermal_tuning_active`，随后租约释放成功。Web 主动停止后，设备为 `canceled / armed=false`，sequence 0–1792 完整、无 gap；这是协议定向验收，不是整轮调优通过。
 
-- 单 acceptor 改为三个独立监听 worker 后，90 次三并发读取仍出现 2–3 次拒绝，停止 devd 或把批间隔从 50ms 改到 200ms 都未消除。四个 worker 保留三个请求槽和一个收尾重叠备用槽后，隔离三并发 100/100 成功；Web 正常 HTTP 调优、状态轮询并行时，额外公开 health 读取 100/100 成功。该实验镜像基于 `da5ba372` 加备用槽改动，ELF SHA-256 `1406be6156f111a52137a3431d576c47bafa7ffaddc7d348c73c8263d69f5f8a`，镜像 2,084,368 / 2,097,152B，LAN 栈余量 37,284B、嵌套 PD 余量 84,884B。烧录完成且跳过 EEPROM 备份，EEPROM 健康状态未知。Web 无文件 HTTP 启动 `web-pps3a-2ab03b5e-0a74-4bfb-9eac-d852d51139d8`，进入 warmup/approach、事件持续推进且无 gap；完整调优结果仍未通过。
+- 单 acceptor 改为三个独立监听 worker 后，90 次三并发读取仍出现 2–3 次拒绝，停止 devd 或把批间隔从 50ms 改到 200ms 都未消除。四个 worker 保留三个请求槽和一个收尾重叠备用槽后，隔离三并发 100/100 成功；Web 正常 HTTP 调优、状态轮询并行时，额外公开 health 读取 100/100 成功。该实验镜像基于 `da5ba372` 加备用槽改动，ELF SHA-256 `1406be6156f111a52137a3431d576c47bafa7ffaddc7d348c73c8263d69f5f8a`，镜像 2,084,368 / 2,097,152B，LAN 栈余量 37,284B、嵌套 PD 余量 84,884B。烧录完成且跳过 EEPROM 备份，EEPROM 健康状态未知。Web 无文件 HTTP 启动 `web-pps3a-2ab03b5e-0a74-4bfb-9eac-d852d51139d8`，进入 warmup/approach。持续运行至 sequence 2191 后，页面再次耗尽连接拒绝重试预算；手动恢复时设备为 `failed / armed=false`，trace.lastSequence=2448、gap=true，未保存。四槽改动改善短时接入，但不能据此宣告长时间 HTTP 可靠性通过；完整调优仍失败。
+
+- 隔离页面后的状态/调优双读取探针各 30 次均返回有效 JSON，但完整响应分别最高耗时 3,307ms / 4,023ms，超过 devd 原有 3s 整体期限。分段 HTTP body fixture 在修复前以 `Body / TimedOut` 失败，修复后完整读取成功；原生已认证 GET（包括写入前 revision GET）单独使用 6s 整体期限，队列和 mutation 仍为 3s，不增加自动写入重放。真实长时间运行仍须复测，不能仅用该 fixture 宣告 HTTP 连续失败已消除。
 
 ## Implementation Coverage
 

@@ -17,6 +17,10 @@ use sha2::{Digest, Sha256};
 
 pub const LAN_API_VERSION: &str = "v1";
 pub const LAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+// Complete status/tuning bodies can take 4s on the device's bounded TCP
+// buffers. Let a valid read finish instead of abandoning its socket while the
+// MCU is still transmitting. Writes and queue admission retain the 3s bound.
+pub const LAN_READ_REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 // Leave a TCP slot available for another client or safety-stop request.
 // This schedules requests, not control ownership; every client remains usable.
@@ -352,6 +356,7 @@ async fn authorized_json_with_client(
     let revision = if is_control_write {
         let response = client
             .get(format!("{base_url}/api/{LAN_API_VERSION}/status"))
+            .timeout(LAN_READ_REQUEST_TIMEOUT)
             .bearer_auth(token)
             .send()
             .await?;
@@ -368,7 +373,11 @@ async fn authorized_json_with_client(
     } else {
         None
     };
+    let is_read = method == reqwest::Method::GET;
     let mut request = client.request(method, url).bearer_auth(token);
+    if is_read {
+        request = request.timeout(LAN_READ_REQUEST_TIMEOUT);
+    }
     if let Some(lease_id) = lease_id {
         request = request.header("X-Flux-Purr-Lease", lease_id);
     }
@@ -922,6 +931,70 @@ mod tests {
         .await;
         server.abort();
         assert_eq!(result.unwrap()["armed"], false);
+    }
+
+    async fn serve_split_tuning_body(listener: TcpListener, payload: String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut header = [0; 1024];
+        let mut received = 0;
+        while !header[..received]
+            .windows(4)
+            .any(|part| part == b"\r\n\r\n")
+        {
+            let count = socket.read(&mut header[received..]).await.unwrap();
+            assert!(count > 0, "fixture request ended before its header");
+            received += count;
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            payload.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+        let midpoint = payload.len() / 2;
+        socket
+            .write_all(&payload.as_bytes()[..midpoint])
+            .await
+            .unwrap();
+        // HIL captured valid 3.3s status and 4.0s tuning responses. The
+        // deadline covers the complete body, not merely receipt of headers.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let _ = socket.write_all(&payload.as_bytes()[midpoint..]).await;
+    }
+
+    #[tokio::test]
+    async fn tuning_read_consumes_a_valid_body_beyond_the_mutation_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload = json!({"armed": false, "padding": "x".repeat(4_800)}).to_string();
+        let server = tokio::spawn(serve_split_tuning_body(listener, payload));
+        let device = LanDeviceConfig {
+            id: "lan-001122334455".into(),
+            base_url: format!("http://flux-purr-001122334455.local:{}", address.port()),
+            hostname: None,
+            last_ipv4: None,
+            pairing_token: Some("a".repeat(64)),
+        };
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(LAN_REQUEST_TIMEOUT)
+            .resolve("flux-purr-001122334455.local", address)
+            .build()
+            .unwrap();
+        let result = authorized_json_with_client(
+            &device,
+            reqwest::Method::GET,
+            "thermal-tuning",
+            None,
+            None,
+            client,
+        )
+        .await;
+        server.abort();
+        let value = result.expect("a valid device response must finish within the read budget");
+        assert_eq!(value["armed"], false);
+        assert_eq!(value["padding"].as_str().unwrap().len(), 4_800);
     }
 
     #[tokio::test]
