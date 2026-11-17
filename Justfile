@@ -21,3 +21,7 @@ buzzer-play *selector:
 # Run the host daemon and CLI test suite.
 check-devd:
     @bun run check:devd
+
+# Generate an offline factory image and verify its application partition size; no hardware access.
+firmware-image-check elf="firmware/target/xtensa-esp32s3-none-elf/release/flux-purr":
+    @bash scripts/check-firmware-image-size.sh {{ quote(elf) }}
