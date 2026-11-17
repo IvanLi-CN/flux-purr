@@ -317,7 +317,9 @@ export function FirmwareTuningWorkspace({
   }, [recordStatus, recording, sendCommand])
 
   const apply = async (command: DeviceCommand) => {
-    if (!journalReady || !identityVerified) return
+    // Stopping is the authenticated safety exception: read/journal recovery
+    // must never prevent a user from stopping the last observed active run.
+    if (command.op !== 'cancel' && (!journalReady || !identityVerified)) return
     setPending(true)
     setError(null)
     try {
@@ -451,7 +453,7 @@ export function FirmwareTuningWorkspace({
           <Button
             type="button"
             variant="destructive"
-            disabled={!supported || !identityVerified || !armed || pending}
+            disabled={!supported || !armed || pending}
             onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
           >
             <Square aria-hidden="true" /> 停止
