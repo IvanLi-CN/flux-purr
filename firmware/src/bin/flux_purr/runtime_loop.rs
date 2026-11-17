@@ -3003,6 +3003,16 @@ pub(crate) async fn runtime_force_heater_safe_off(
         return false;
     }
     state.ui_state.heater_output_percent = 0;
+    if state.thermal_tuning.armed {
+        // A trial boundary disarms the MOS, not the run's working supply.
+        // The generic idle path below resets the PPS cache to 12 V. Feeding
+        // that artificial value into the next cooldown frame requests 12.5 V
+        // even when a safe 20.9 V contract is still confirmed, then spends
+        // the cooldown ramping back up. Keep the real supply state; the next
+        // ordinary output cycle still applies its live ceiling and guards.
+        apply_heater_duty(&mut state.heater_pwm, 0, &mut state.last_heater_duty);
+        return true;
+    }
     let _ = apply_heater_power_output(HeaterPowerOutputContext {
         pd_port: &state.pd_port,
         heater_pwm: &mut state.heater_pwm,

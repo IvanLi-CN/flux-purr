@@ -31,6 +31,7 @@
 - 唯一本地 Web 页面经 devd LAN HTTP 发起 `web-pps3a-eb29c928-8a7e-4d57-8247-514e0bf1df0a`，sequence 0–3317 共 3318 条事件完整。60°C 在 213.711 秒完成独立 60 秒保持确认；220°C 的前三次预热没有实际输出中断，但各自在 180 秒内未到达接近阶段。第四次预热在 797.897 秒因实时安全上限降为 20.2V、已有合同仍为 20.9V 而实际关闭输出，整轮在 976.071 秒失败、未保存。该保护不得放宽；冷却到预热的工作点选择仍需可复现诊断。测试期间 Vite 开发刷新后继续同一 run，不能将其宣称为无页面刷新的长测。
 - 随后通过 Web 页面级“停止调优”结束短测 `web-pps3a-5f1f1dc8-109a-47ab-bdbc-d9f46b6c9cad`，设备返回 canceled；之后 USB 状态确认 `thermalTuningActive=false`、实际输出 0、固定 5V。再次检查 HTTP 时旧地址连接被拒绝；USB 读回固件未重启，Wi-Fi 为 error、无 IP，错误为 `WiFi configuration could not be applied.`。不能把缓存中的旧地址或网络状态作为实时 LAN 连通证明。
 - 通过授权 USB 端口向同一设备重新提交原有 SSID，省略 password、staticIpv4 和 telemetry 字段以保留已存配置后，原地址的公开 HTTP health 恢复且身份匹配；同一本地页面选择 devd LAN 后收取八条完整取消事件。该恢复不证明 Wi-Fi driver configuration failure 的根因已修复。标准桌面 1280×860 下，调优主体 viewport 为 583px、scrollHeight 为 583px，无横向溢出；事件列表使用自身的 SimpleBar 区域。活动运行与读取失败布局仍需独立实机验收。
+- `eb29` 轨迹的同目标 warmup→cooldown 回放显示：安全上限仍为 21V 时，合同由 20.9V 降至 12.5V。`runtime_force_heater_safe_off` 在试验边界调用普通 idle 输出路径，将 PPS 后端缓存清回 12V；下一周期据此从 12.5V 重新升压，使全速冷却继续十多秒。活动调优的边界停热改为立即清零 MOS，保留供电后端与在途请求；下一正常输出周期继续执行实时边界和原有安全守卫。终止、失败和普通停热保持原有清理路径。该硬件运行时仅在 Xtensa 编译，host 测试不直接执行此入口；匹配镜像的转换轨迹与完整运行是修复验收依据，尚未通过前不能宣告已解决。
 
 ## USB 与 Wi-Fi 故障隔离
 
