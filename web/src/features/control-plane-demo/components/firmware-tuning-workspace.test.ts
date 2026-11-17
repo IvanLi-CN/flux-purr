@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ControlPlaneClientError } from '../transport-client'
 import {
+  buildTuningStartCommand,
   compactIdentifier,
   FirmwareTuningWorkspace,
   messageOf,
@@ -96,7 +97,10 @@ describe('firmware tuning workspace', () => {
     expect(shouldPollTuningRead({ ...base, reading: true })).toBe(false)
   })
 
-  it('checks the canonical device profile hash and rejects mock candidates', async () => {
+  it.each([
+    'pps3a',
+    'pps5a',
+  ] as const)('checks the canonical device profile hash for %s and isolates its start bank', async (powerClass) => {
     const settingsFields = [
       'tempFilterAlphaPermille',
       'warmupReenterCentiC',
@@ -143,13 +147,31 @@ describe('firmware tuning workspace', () => {
       targetTempC,
     }))
     const value = {
-      powerClass: 'pps5a',
+      powerClass,
       candidateHash: 'sha256:896e40c0087904f10eee7db9ddacad5e391cfaf5915923aacf27f83f3ddefe53',
-      profile: { bank: 'pps5a', value: { settings, points } },
+      profile: { bank: powerClass, value: { settings, points } },
     }
     await expect(validateCandidate(value, 'candidate.json')).resolves.toMatchObject({
       name: 'candidate.json',
+      powerClass,
       profile: { settings, points },
+    })
+    const candidate = await validateCandidate(value, 'candidate.json')
+    expect(buildTuningStartCommand('run-1', powerClass, candidate)).toMatchObject({
+      op: 'start',
+      powerClass,
+      candidateHash: value.candidateHash,
+      candidateProfile: { op: 'preview', bank: powerClass, profile: { settings, points } },
+    })
+    const otherBank = powerClass === 'pps3a' ? 'pps5a' : 'pps3a'
+    expect(() => buildTuningStartCommand('run-1', otherBank, candidate)).toThrow('档位')
+    await expect(
+      validateCandidate({ ...value, profile: { ...value.profile, bank: otherBank } }, 'bank.json')
+    ).rejects.toThrow('档位')
+    expect(buildTuningStartCommand('run-2', powerClass, null)).toMatchObject({
+      op: 'start',
+      powerClass,
+      candidateProfile: undefined,
     })
     await expect(validateCandidate({ ...value, runId: 'mock-run' }, 'mock.json')).rejects.toThrow(
       'Mock'

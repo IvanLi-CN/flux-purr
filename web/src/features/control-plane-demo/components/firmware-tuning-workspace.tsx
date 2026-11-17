@@ -107,6 +107,7 @@ export function shouldPollTuningRead({
 }
 
 interface ImportedCandidate {
+  powerClass: 'pps3a' | 'pps5a'
   hash: string
   profile: Record<string, unknown>
   name: string
@@ -386,17 +387,11 @@ export function FirmwareTuningWorkspace({
   const start = () => {
     if (!powerClass) return
     const runId = `web-${powerClass}-${crypto.randomUUID()}`
-    void apply({
-      op: 'start',
-      runId,
-      candidateId: candidate?.hash ? runId : undefined,
-      candidateHash: candidate?.hash,
-      powerClass,
-      targetsC: EXECUTION_ORDER,
-      candidateProfile: candidate
-        ? { op: 'preview', bank: 'pps5a', profile: candidate.profile }
-        : undefined,
-    })
+    try {
+      void apply(buildTuningStartCommand(runId, powerClass, candidate))
+    } catch (failure) {
+      setError(messageOf(failure, 'write'))
+    }
   }
 
   const exportReport = async () => {
@@ -787,12 +782,36 @@ function Parameter({ label, value }: { label: string; value: string }) {
   )
 }
 
+export function buildTuningStartCommand(
+  runId: string,
+  powerClass: 'pps3a' | 'pps5a',
+  candidate: ImportedCandidate | null
+): DeviceCommand {
+  if (candidate && candidate.powerClass !== powerClass) {
+    throw new Error('候选功率档位与设备当前档位不一致，请重新导入匹配的候选。')
+  }
+  return {
+    op: 'start',
+    runId,
+    candidateId: candidate ? runId : undefined,
+    candidateHash: candidate?.hash,
+    powerClass,
+    targetsC: EXECUTION_ORDER,
+    candidateProfile: candidate
+      ? { op: 'preview', bank: powerClass, profile: candidate.profile }
+      : undefined,
+  }
+}
+
 export async function validateCandidate(value: unknown, name: string): Promise<ImportedCandidate> {
   if (!value || typeof value !== 'object') throw new Error('候选文件不是 JSON 对象。')
   const candidate = value as Record<string, unknown>
   const packageProfile = candidate.profile
-  if (candidate.powerClass !== 'pps5a' || typeof candidate.candidateHash !== 'string') {
-    throw new Error('候选必须包含 pps5a powerClass 和 candidateHash。')
+  if (
+    (candidate.powerClass !== 'pps3a' && candidate.powerClass !== 'pps5a') ||
+    typeof candidate.candidateHash !== 'string'
+  ) {
+    throw new Error('候选必须包含 pps3a 或 pps5a powerClass 和 candidateHash。')
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(candidate.candidateHash)) {
     throw new Error('候选 hash 不是完整的 SHA-256。')
@@ -806,6 +825,9 @@ export async function validateCandidate(value: unknown, name: string): Promise<I
   if (!packageProfile || typeof packageProfile !== 'object')
     throw new Error('候选缺少完整 profile。')
   const wrapped = packageProfile as Record<string, unknown>
+  if (wrapped.bank !== undefined && wrapped.bank !== candidate.powerClass) {
+    throw new Error('候选 profile bank 与 powerClass 的功率档位不一致。')
+  }
   const profile = wrapped.value ?? packageProfile
   if (!profile || typeof profile !== 'object') throw new Error('候选缺少设备 profile。')
   const importedProfile = profile as Record<string, unknown>
@@ -826,7 +848,7 @@ export async function validateCandidate(value: unknown, name: string): Promise<I
       populatedPoints.some((point) => point?.targetTempC === target)
     )
   ) {
-    throw new Error('候选必须覆盖完整八目标 PPS 5A 范围。')
+    throw new Error('候选必须覆盖完整八目标调优范围。')
   }
   const values = [
     ...SETTINGS_FIELDS.map((field) => settings[field]),
@@ -837,10 +859,17 @@ export async function validateCandidate(value: unknown, name: string): Promise<I
   }
   const hash = await candidateProfileHash(values as number[])
   if (hash !== candidate.candidateHash) throw new Error('候选 hash 与设备参数不一致。')
-  return { hash: candidate.candidateHash, profile: profile as Record<string, unknown>, name }
+  return {
+    powerClass: candidate.powerClass,
+    hash: candidate.candidateHash,
+    profile: profile as Record<string, unknown>,
+    name,
+  }
 }
 
 async function candidateProfileHash(values: number[]) {
+  // Firmware retains this historical content-hash encoding for both banks;
+  // power class is validated separately before importing or starting a run.
   const bytes = [...new TextEncoder().encode('thermal-tuning-v2/candidate/pps5a')]
   for (const value of values) bytes.push(value & 0xff, (value >> 8) & 0xff)
   const digest = await crypto.subtle.digest('SHA-256', Uint8Array.from(bytes))
