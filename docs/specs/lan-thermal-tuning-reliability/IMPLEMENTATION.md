@@ -7,6 +7,7 @@
 - Implementation: 固件缺省基线与 Web/devd 调优启动路径已覆盖；LAN 身份存储和端点错误已有实现；完整 owner proof、跨客户端门禁和浏览器验收仍待收口。
 - 电源状态语义已明确：空闲时固定 5V/1A 属于正常安全状态；只有调优运行意图存在时才触发 PPS 协商。PPS 未确认前固件不加热、不采样，Web 应显示电源合同等待或失败原因，不得显示设备连接失败。
 - 显式开始调优会建立待恢复的加热意图；实际输出仍须等待已确认的 PPS 合同，并继续通过传感器、过温、commissioning 和持久化安全门禁。调优进入 warmup 后，只有这些门禁全部满足才会驱动加热器。
+- Web 固定 5V 提示说明这是正常空闲供电，启动后固件自动协商 PPS；未确认 PPS 只能说明暂时不加热，不应解释为无法发起调优。
 - Lifecycle: active
 - Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
 
@@ -43,6 +44,8 @@
 - Web HTTP 运行 `web-pps3a-5a44b5b5-5bf9-4b64-ae51-c30250e4412a` 在约 367.3 秒由 `host_cancel` 结束，事件范围为 0..1313；该运行未完成八目标资格。其烧录 ELF 在最后的恢复逻辑编辑前已生成，不能证明当前工作树的固件修复有效，也不能作为当前 Candidate 的通过证据。必须在目标产物安全检查通过后重新烧录并取得匹配产物身份的完整验证。
 - 固件 `d746a1277a1e404b138fab91c6fa5962a1cade99` 的 Web HTTP 运行 `web-pps3a-cb6d1e73-0f5c-44ca-b543-5b4cbcf7b404` 收取 989 条事件，在 271.4 秒由页面停止；预热连续 118 个样本未出现零输出，运行进入后续候选试验，但 HTTP 读取反复失败，未完成整轮调优。相同镜像的 20 次只读 health 检查出现连接拒绝（19 次成功、1 次失败）；socket 回收修复仍需匹配镜像烧录后的同路径复测。
 - 固件 `0dc39f96cd321a73b2c0771d37801ae82287690b` 已经 devd/CLI 烧录到授权端口，ELF SHA-256 为 `b726bda6647d77673c6bfd8c55a9359a37854b6bfd6da6b7df06359a0a71d8ca`；HTTP identity 确认匹配版本，旧凭据保持有效。准备阶段一个 PPS 档位余量的回归测试覆盖已确认、未确认、低于工作点和越过上限的合同。Web 经 devd LAN HTTP 发起运行 `web-pps3a-58ea705a-73cb-4101-91ae-b0886add96ee`，已进入预热和后续候选试验，完整运行结果待观察；高频 health 额外负载的 100 次读取仍有 3 次连接拒绝，不能宣告 HTTP 并发验收通过。烧录按授权跳过 EEPROM 备份，未生成备份归档，EEPROM 健康状态未知。
+- devd `9b4540d1` 的 Web HTTP 运行 `web-pps3a-469a34d8-2aee-4724-bad5-dcbac09d45b9` 在约 556 秒后由页面停止，期间同一页面额外发出的八个并发状态读取全部返回 200，调优读取未停轮询。60°C 试验仍被物理全输出资格拒绝，220°C 试验发生预热超时并按既有安全规则从较暖起点重试；这不是完整调优通过证据。
+- 固件 `a271705e795bc062cfeba1bc0eae913c259defbc` 已通过 672 项库测试、605 项运行时测试、Xtensa Clippy、2,079,200B 镜像和栈门禁，烧录后 HTTP identity 核验匹配，ELF SHA-256 为 `32d56a52845e1b0b466879a355091465633637797c8d7838aad434ee653acf44`。Web HTTP 运行 `web-pps3a-59426f47-b9d6-45f8-9a16-5dd56605825b` 已实际启动并进入候选比较；完整结果仍待验证。
 
 - 已有 LAN client 测试覆盖 read-only thermal tuning GET 不携带 lease，以及基础传输错误映射。
 - 已有 firmware route 和 Web Serial thermal tuning 测试覆盖命令解析与状态读取基础路径。

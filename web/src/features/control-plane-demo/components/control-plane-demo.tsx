@@ -2722,8 +2722,8 @@ export function ControlPlaneDemo({
     visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'pps'
   const thermalTuningPowerBlockedReason =
     visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'fixed'
-      ? '当前电源合同为固定 5V，不是 PPS，固件会保持加热关闭。'
-      : '当前尚未建立有效 PPS 电源合同，无法安全启动固件热控调优。'
+      ? '空闲供电为固定 5V；开始调优后固件会自动协商 PPS，确认前保持加热关闭。'
+      : '尚未确认 PPS 合同；开始调优后由固件检查供电能力并协商，确认前不加热。'
   const liveDevdTargetForVisibleDevice = useMemo(
     () =>
       [...activeScenario.devices]
