@@ -32,11 +32,35 @@ fn factory_candidate_search_qualifies_a_calibrated_long_delay_plant() {
     }
 }
 
+#[test]
+fn factory_candidate_search_handles_a_colder_environment_than_calibration() {
+    let mut replay = PlantReplay::new(28_000.0);
+    // The physical room can cool after calibration. Its stored reference
+    // remains 30 C; accepted measurements still contain bounded disturbance.
+    replay.actual_ambient_c = 25.0;
+    replay.noise_c = 0.75;
+    for now_ms in (0..=tuning::THERMAL_TUNING_TARGET_BUDGET_MS).step_by(50) {
+        replay.step(now_ms);
+        if !replay.tuning.armed {
+            break;
+        }
+    }
+    assert_eq!(
+        replay.tuning.accepted_target_mask, 1,
+        "terminal={:?}, trials={}, decisions={:?}",
+        replay.tuning.terminal_disposition, replay.tuning.trial_index, replay.decisions
+    );
+    assert_eq!(replay.tuning.failed_target_mask, 0);
+    assert!(!replay.tuning.armed);
+    assert!(!replay.tuning.save_confirmed);
+}
+
 struct PlantReplay {
     tuning: tuning::ThermalTuningRuntime,
     controller: HeaterController,
     input: ThermalPlantRuntimeInput,
     plate_c: f32,
+    actual_ambient_c: f32,
     noise_c: f32,
     peak_c: f32,
     delayed_power: std::collections::VecDeque<(u64, f32)>,
@@ -73,6 +97,7 @@ impl PlantReplay {
             tuning,
             controller: HeaterController::new(),
             plate_c: input.measured_temp_c,
+            actual_ambient_c: input.ambient_temp_c,
             noise_c: 0.0,
             peak_c: input.measured_temp_c,
             input,
@@ -92,7 +117,7 @@ impl PlantReplay {
         let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
             self.input.model,
             self.plate_c,
-            self.input.ambient_temp_c,
+            self.actual_ambient_c,
         ) * if self.tuning.phase == tuning::ThermalTuningPhase::Cooldown {
             3.0
         } else {

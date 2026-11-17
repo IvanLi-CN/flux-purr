@@ -31,6 +31,42 @@ impl ForecastBias {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct EnergySlope {
+    count: u32,
+    time_mean_s: f32,
+    energy_mean_mj: f32,
+    time_variance: f32,
+    time_energy_covariance: f32,
+}
+
+impl EnergySlope {
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            time_mean_s: 0.0,
+            energy_mean_mj: 0.0,
+            time_variance: 0.0,
+            time_energy_covariance: 0.0,
+        }
+    }
+
+    fn observe(&mut self, time_s: f32, energy_mj: f32) {
+        self.count += 1;
+        let delta_time = time_s - self.time_mean_s;
+        let delta_energy = energy_mj - self.energy_mean_mj;
+        self.time_mean_s += delta_time / self.count as f32;
+        self.energy_mean_mj += delta_energy / self.count as f32;
+        self.time_variance += delta_time * (time_s - self.time_mean_s);
+        self.time_energy_covariance += delta_time * (energy_mj - self.energy_mean_mj);
+    }
+
+    fn power_mw(self) -> Option<f32> {
+        (self.count >= 2 && self.time_variance > 0.0)
+            .then(|| self.time_energy_covariance / self.time_variance)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct HeatTransferObservation {
     origin: Option<(u64, f32)>,
     last_measurement_ms: Option<u64>,
@@ -42,6 +78,7 @@ struct HeatTransferObservation {
     loss_energy_mj: f32,
     delayed_energy_mj: f32,
     received_energy_mj: f32,
+    energy_slope: EnergySlope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,6 +158,7 @@ impl AppliedHeatHistory {
                 loss_energy_mj: 0.0,
                 delayed_energy_mj: 0.0,
                 received_energy_mj: 0.0,
+                energy_slope: EnergySlope::new(),
             },
         }
     }
@@ -487,18 +525,23 @@ impl AppliedHeatHistory {
             self.correct_response_heat(origin_ms, now_ms, plant);
             return;
         }
-        // Accumulate only intervals with their own accepted temperature
-        // origin. PPS gaps and ADC shifts contribute no time or temperature
-        // difference; valid evidence on either side may share this average.
+        // Fit the cumulative energy discrepancy over all accepted intervals.
+        // A free intercept removes the noisy first-temperature anchor; using
+        // only two endpoints converts quantization into a large false power.
+        // PPS gaps contribute neither time nor temperature differences.
+        self.transfer.energy_slope.observe(
+            self.transfer.valid_ms as f32 / 1_000.0,
+            self.transfer.loss_energy_mj
+                + plant.model.thermal_capacity_mj_per_c * self.transfer.temperature_delta_c
+                - self.transfer.delayed_energy_mj,
+        );
         if self.transfer.valid_ms < delay_ms.max(100) {
             return;
         }
-        let valid_s = self.transfer.valid_ms as f32 / 1_000.0;
-        let residual_mw = ((self.transfer.loss_energy_mj
-            + plant.model.thermal_capacity_mj_per_c * self.transfer.temperature_delta_c
-            - self.transfer.delayed_energy_mj)
-            / valid_s)
-            .clamp(-plant.max_power_mw, plant.max_power_mw);
+        let Some(residual_mw) = self.transfer.energy_slope.power_mw() else {
+            return;
+        };
+        let residual_mw = residual_mw.clamp(-plant.max_power_mw, plant.max_power_mw);
         self.transfer.residual = Some((now_ms, residual_mw));
         self.clear_transfer_energy_window();
     }
@@ -581,6 +624,7 @@ impl AppliedHeatHistory {
         self.transfer.loss_energy_mj = 0.0;
         self.transfer.delayed_energy_mj = 0.0;
         self.transfer.received_energy_mj = 0.0;
+        self.transfer.energy_slope = EnergySlope::new();
     }
 
     fn residual_at(&self, now_ms: u64, future_ms: u64, plant: TrajectoryPlant) -> f32 {

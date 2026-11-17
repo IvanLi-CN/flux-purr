@@ -110,6 +110,7 @@
 - Firmware MUST select a baseline only after the power class is confirmed. An unknown power class MUST prevent tuning start and heater output; firmware MUST NOT guess or silently fall back to another power class.
 - A tuning run MUST resolve either valid device calibration data or the selected factory baseline before enabling heater output. If neither source is available, the operation MUST fail with `thermal_parameters_unavailable` and keep heater output disabled.
 - During an active run, an available PD service rediscovering its source without a detach or fatal fault MUST use the existing bounded 30-second recovery wait. The heater MUST remain disabled and qualification sampling MUST pause until a valid working PPS contract is confirmed; detach, unavailable service and recovery timeout MUST still terminate the run.
+- For a pure-delay plant, online heat-discrepancy estimation MUST use the accepted observation window rather than a noisy pair of endpoint temperatures. PPS measurement-origin changes and unobserved intervals MUST contribute no temperature jump or elapsed time; stale corrections MUST expire, and no online correction may increase the permitted electrical power or relax qualification gates.
 
 ### REQ-LTR-013 Resolved profile precedence and persistence
 

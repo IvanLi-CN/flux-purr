@@ -567,6 +567,43 @@ fn duplicate_epoch_shift_and_expired_observations_cannot_invent_heat() {
 }
 
 #[test]
+fn delayed_heat_residual_rejects_endpoint_noise_without_hiding_extra_loss() {
+    let plant = TrajectoryPlant {
+        model: ThermalPlantProjection {
+            convection_mw_per_c: 211.08168,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 30_753.62,
+            transport_delay_ms: 4_500,
+        },
+        ambient_c: 30.0,
+        max_power_mw: 28_000.0,
+    };
+    let mut history = AppliedHeatHistory::new();
+    history.configure(4_500);
+    // The same plate stays at 60 C in a room 5 C colder than calibration.
+    let applied_mw = plant.loss_mw(60.0) + 5.0 * plant.model.convection_mw_per_c;
+    let expected_residual_mw = plant.loss_mw(60.0) - applied_mw;
+    for now_ms in (0..=18_000).step_by(50) {
+        history.observe(now_ms, applied_mw);
+        let noise_c = if (now_ms / 300).is_multiple_of(2) {
+            0.75
+        } else {
+            -0.75
+        };
+        history.observe_temperature(now_ms, 60.0 + noise_c, plant);
+        if let Some((observed_ms, residual_mw)) = history.transfer.residual
+            && observed_ms == now_ms
+        {
+            assert!(
+                (residual_mw - expected_residual_mw).abs() < 1_000.0,
+                "at {now_ms}ms: expected {expected_residual_mw}mW, got {residual_mw}mW"
+            );
+        }
+    }
+    assert!(history.transfer.residual.is_some());
+}
+
+#[test]
 fn small_quantization_does_not_create_a_full_power_correction() {
     let plant = plant(700);
     let mut history = AppliedHeatHistory::new();
