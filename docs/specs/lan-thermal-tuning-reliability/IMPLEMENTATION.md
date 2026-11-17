@@ -13,6 +13,7 @@
 
 ## 中间升压与运行活动状态
 
+- 固件 `be8bcfa6` 的 1,304 项固件测试、583 项 devd/CLI/integration 测试通过（另有 4 项显式 ignored），host/Xtensa Clippy 与样式检查通过。完整镜像经 `just firmware-image-check` 确认为 2,089,184 / 2,097,152B，ELF SHA-256 为 `e8faf66f6fccefef1912579242af309deeb6454fa3d81c3061d51178e84ea3d8`；LAN 栈余量 37,284B、嵌套 PD 余量 84,836B。授权端口烧录完成，HTTP identity 为 `0.30.10-dev.be8bcfa`；跳过 EEPROM 备份且健康状态未知。同一 Web 页面由 devd LAN HTTP 发起 `web-pps3a-702a8056-ae63-4cd4-806b-ab5b21f0269e`，活动模型 transaction `1470196405`，普通 HTTP status 读回 `thermalTuningActive=true` 与实际输出 100%。该轮尚在运行，不构成整轮通过证据。
 - Web 经 devd LAN HTTP 发起的 `web-pps3a-3da26d45-eb63-4e51-8d71-3dd1891b6cc6` 使用固件 `5d1b5746`，完整收取 sequence 0–2987 共 2988 条事件。60°C 目标在 690.349 秒通过 60 秒保持确认；220°C 因预热实际输出中断，整轮在 874.669 秒失败且未保存。HTTP 状态读回 heater disabled、实际输出 0、29.81°C、固定 5V，不能把单目标通过当作整轮成功。
 - 事件 1312 的已确认合同为 13.4V，但后端缓存仍为 12.9V，RTD 边缘的安全上限回到 13.0V。中间升压档位不匹配只识别完整工作点的回落保持逻辑。回归同时覆盖中间档位、协议确认领先缓存、未到边缘不得提前升压、超过 3°C 窗口必须回到冷边界；仅保留已准入档位本身，不提前提升到较暖观测的完整上限。真实匹配镜像复测尚待完成。
 - 普通 status 提供 `thermalTuningActive`，USB/LAN 共用运行时 `armed` 来源，devd 透传该字段；旧固件缺少字段时兼容解码为 false。该字段不携带 owner proof，不读取或确认事件游标。Web 全局提示和禁写尚待接入。
