@@ -92,6 +92,24 @@ fn power_safe_terminal_tracking_point_round_trips_and_is_valid() {
 
 #[test]
 fn confirmed_tracking_request_survives_a_narrow_temperature_dip() {
+    assert_tracking_request_survives_a_narrow_temperature_dip(11_000, 11_000);
+}
+
+#[test]
+fn reserved_tracking_request_survives_a_narrow_temperature_dip() {
+    // Automatic heating requests one 100 mV quantum below the observed cap.
+    assert_tracking_request_survives_a_narrow_temperature_dip(10_900, 11_000);
+}
+
+#[test]
+fn lower_tracking_request_does_not_promote_a_warmer_point() {
+    assert_tracking_request_survives_a_narrow_temperature_dip(10_800, 10_000);
+}
+
+fn assert_tracking_request_survives_a_narrow_temperature_dip(
+    current_request_mv: u16,
+    expected_mv: u16,
+) {
     let mut value = SupplyBoundary {
         adc: BoundaryAdcMetadata {
             divider_supply_mv: 3_328,
@@ -133,7 +151,7 @@ fn confirmed_tracking_request_survives_a_narrow_temperature_dip() {
             BoundaryQuery {
                 temperature_centi_c: 10_800,
                 current_rtd_mv: Some(1_080),
-                current_request_mv: Some(11_000),
+                current_request_mv: Some(current_request_mv),
                 current_ma: 3_000,
                 wifi_started: true,
                 source_min_mv: 5_500,
@@ -150,14 +168,14 @@ fn confirmed_tracking_request_survives_a_narrow_temperature_dip() {
             },
         )
         .expect("the confirmed point remains available across a narrow dip");
-    assert_eq!(selected.tracking_request_mv, 11_000);
+    assert_eq!(selected.tracking_request_mv, expected_mv);
 
     let colder = value
         .safe_point(
             BoundaryQuery {
                 temperature_centi_c: 10_600,
                 current_rtd_mv: Some(1_060),
-                current_request_mv: Some(11_000),
+                current_request_mv: Some(current_request_mv),
                 current_ma: 3_000,
                 wifi_started: true,
                 source_min_mv: 5_500,

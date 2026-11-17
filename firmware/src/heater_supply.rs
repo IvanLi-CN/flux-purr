@@ -327,7 +327,18 @@ impl SupplyBoundary {
             // transient temperature drop; a new capability or a different
             // request still has to pass the normal lookup.
             let confirmed_request_handoff_allowed = point.tracking_only
-                && query.current_request_mv == Some(point.tracking_request_mv)
+                && query.current_request_mv.is_some_and(|request_mv| {
+                    // Automatic control reserves one encoded PPS voltage
+                    // quantum below this observed ceiling. That working
+                    // request identifies the same point as the unreserved
+                    // calibration request; requiring exact equality loses
+                    // the existing bounded RTD-dip protection in production.
+                    request_mv == point.tracking_request_mv
+                        || request_mv
+                            == point
+                                .tracking_request_mv
+                                .saturating_sub(crate::adapters::pd::PD_PPS_VOLTAGE_STEP_MV)
+                })
                 && (0..=i32::from(MAX_CONFIRMED_REQUEST_HANDOFF_GAP_CENTI_C))
                     .contains(&terminal_temperature_gap);
             if !live_rtd_reached
