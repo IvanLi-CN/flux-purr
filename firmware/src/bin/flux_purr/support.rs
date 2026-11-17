@@ -421,6 +421,9 @@ pub(crate) static HEATER_OUTPUT_ZERO_CAUSE: AtomicU8 = AtomicU8::new(0);
 pub(crate) static PPS_OUTPUT_PAUSE_CONTEXT: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(target_arch = "xtensa")]
+pub(crate) static PPS_OUTPUT_PAUSE_LIMITS: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "xtensa")]
 impl HeaterPwmGate {
     pub(crate) const fn new() -> Self {
         Self

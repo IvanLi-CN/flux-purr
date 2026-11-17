@@ -3747,6 +3747,7 @@ pub(crate) fn tuning_output_pause_reason(
     latch: bool,
     settling: bool,
     pause: u32,
+    limits: u32,
 ) -> flux_purr_firmware::thermal_tuning::TuningReason {
     use core::fmt::Write as _;
 
@@ -3759,7 +3760,7 @@ pub(crate) fn tuning_output_pause_reason(
     let mut reason = flux_purr_firmware::thermal_tuning::TuningReason::new();
     let _ = write!(
         reason,
-        "output_paused:{} permit={} latch={} settle={} flags={} cached={} next={}",
+        "output_paused:{} p{} l{} s{} flags{} cached{} next{} active{} cap{}",
         cause,
         u8::from(permit),
         u8::from(latch),
@@ -3767,6 +3768,8 @@ pub(crate) fn tuning_output_pause_reason(
         pause & 7,
         ((pause >> 8) & 255) * 100,
         ((pause >> 16) & 255) * 100,
+        limits & 65535,
+        limits >> 16,
     );
     reason
 }
@@ -3794,6 +3797,7 @@ fn runtime_commit_tuning_sample_with_output_diagnostic(
                 state.automatic_supply_response_latched,
                 settle,
                 PPS_OUTPUT_PAUSE_CONTEXT.load(Ordering::Acquire),
+                PPS_OUTPUT_PAUSE_LIMITS.load(Ordering::Acquire),
             );
             Some(reason)
         } else {

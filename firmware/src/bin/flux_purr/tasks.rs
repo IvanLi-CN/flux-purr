@@ -2210,29 +2210,33 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
-fn record_pps_output_pause<PWM>(
-    context: &HeaterPowerOutputContext<'_, PWM>,
+fn record_pps_output_pause(
+    active: Option<ConfirmedActiveContract>,
     transition: &PpsVoltageTransition,
     current_request_mv: u16,
     source_request_ceiling_mv: u16,
-    pps_min_mv: u16,
-    pps_max_mv: u16,
+    pps_range: (u16, u16),
 ) {
     // Preserve the branch and cached/desired voltage that armed
     // the heater-off window; no admission or protection rule is changed.
     if transition.blank_heater {
         let flags = u32::from(transition.safety_recovery_required)
             | (u32::from(automatic_pps_reconciliation_requires_pause(
-                context.pd_port.snapshot().active,
+                active,
                 source_request_ceiling_mv,
             )) << 1)
             | (u32::from(should_blank_heater_for_pps_range_change(
                 current_request_mv,
                 transition.request_mv,
                 transition.mode_changed,
-                pps_min_mv,
-                pps_max_mv,
+                pps_range.0,
+                pps_range.1,
             )) << 2);
+        let active_mv = active.map_or(0, |active| active.voltage_mv);
+        PPS_OUTPUT_PAUSE_LIMITS.store(
+            u32::from(active_mv) | (u32::from(source_request_ceiling_mv) << 16),
+            Ordering::Release,
+        );
         PPS_OUTPUT_PAUSE_CONTEXT.store(
             flags
                 | (u32::from(current_request_mv / 100) << 8)
@@ -2289,9 +2293,10 @@ where
     );
     let request_mode = adjustable_mode_for_request(request_mv, pps_max_mv);
     let mode_changed = !manual_pps_active && current_mode != Some(request_mode);
+    let active = context.pd_port.snapshot().active;
     let active_contract_requires_reconciliation = automatic_pps_contract_requires_reconciliation(
         context.normal_auto,
-        context.pd_port.snapshot().active,
+        active,
         request_mv,
         request_current_ma,
     );
@@ -2308,10 +2313,7 @@ where
         // The active contract may be ahead of the cached backend request after
         // a healthy confirmation. A lower desired request is not a safety
         // violation: only the actual live ceiling can invalidate that contract.
-        automatic_pps_reconciliation_requires_pause(
-            context.pd_port.snapshot().active,
-            source_request_ceiling_mv,
-        ),
+        automatic_pps_reconciliation_requires_pause(active, source_request_ceiling_mv),
         should_blank_heater_for_pps_range_change(
             current_request_mv,
             request_mv,
@@ -2332,12 +2334,11 @@ where
         blank_heater,
     };
     record_pps_output_pause(
-        context,
+        active,
         &transition,
         current_request_mv,
         source_request_ceiling_mv,
-        pps_min_mv,
-        pps_max_mv,
+        (pps_min_mv, pps_max_mv),
     );
     if pps_transition_should_clear_pwm(&transition) {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
