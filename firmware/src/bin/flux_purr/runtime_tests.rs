@@ -18831,22 +18831,73 @@ fn fixed_contract_does_not_emit_liveness_probes() {
 #[test]
 fn continuous_calibration_pps_transition_keeps_the_global_heater_permit() {
     assert!(continuous_pps_transition_keeps_heater_permit(
-        true, true, true, true, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        false, true, true, true, true
+        None, true, true, true, true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, false, true, true, true
+        Some(PowerIntentOwner::Calibration),
+        false,
+        true,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, false, true, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        false,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, true, false, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        false,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, true, true, false
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        true,
+        false
+    ));
+}
+
+#[test]
+fn automatic_thermal_pps_steps_preserve_the_gate_without_bypassing_interlocks() {
+    // Thermal tuning uses the production AutomaticThermal ticket, including
+    // Warmup's successive voltage steps on the confirmed APDO/current.
+    assert!(continuous_pps_transition_keeps_heater_permit(
+        Some(PowerIntentOwner::AutomaticThermal),
+        true,
+        true,
+        true,
+        true
+    ));
+    for denied_condition in 0..4 {
+        let mut conditions = [true; 4];
+        conditions[denied_condition] = false;
+        assert!(!continuous_pps_transition_keeps_heater_permit(
+            Some(PowerIntentOwner::AutomaticThermal),
+            conditions[0],
+            conditions[1],
+            conditions[2],
+            conditions[3],
+        ));
+    }
+    assert!(!continuous_pps_transition_keeps_heater_permit(
+        Some(PowerIntentOwner::ManualOperator),
+        true,
+        true,
+        true,
+        true
     ));
 }
 

@@ -22,14 +22,22 @@ pub(crate) fn pd_service_delay_ms(elapsed_ms: u64, acquired_bus: bool) -> u64 {
 
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) const fn continuous_pps_transition_keeps_heater_permit(
-    owner_allows_continuity: bool,
+    owner: Option<PowerIntentOwner>,
     pps_request: bool,
     same_apdo_and_current: bool,
     source_capabilities_stable: bool,
     request_healthy: bool,
 ) -> bool {
-    owner_allows_continuity
-        && pps_request
+    // AutomaticThermal is also the production actuator used by tuning. A
+    // healthy step on its confirmed APDO/current must not blank Warmup PWM.
+    matches!(
+        owner,
+        Some(
+            PowerIntentOwner::Calibration
+                | PowerIntentOwner::ThermalPlantAuto
+                | PowerIntentOwner::AutomaticThermal
+        )
+    ) && pps_request
         && same_apdo_and_current
         && source_capabilities_stable
         && request_healthy
@@ -402,10 +410,7 @@ fn publish_pd_snapshot(
                 }
             });
         Some(continuous_pps_transition_keeps_heater_permit(
-            matches!(
-                ticket.owner(),
-                Some(PowerIntentOwner::Calibration | PowerIntentOwner::ThermalPlantAuto)
-            ),
+            ticket.owner(),
             request.mode() == PdContractRequestMode::Pps,
             same_apdo_and_safe_current,
             !runtime.source_capabilities_refresh_pending,
