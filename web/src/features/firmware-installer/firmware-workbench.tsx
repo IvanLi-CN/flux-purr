@@ -97,6 +97,7 @@ export interface FirmwareWorkbenchProps {
   devdBaseUrl?: string | null
   officialArtifacts?: OfficialFirmwareArtifact[]
   artifactBlocked?: boolean
+  writesBlocked?: boolean
   executionMode?: FirmwareWorkbenchExecutionMode
   onActivity?: (entry: FirmwareActivityInput) => void
 }
@@ -122,6 +123,7 @@ export interface FirmwareNativeTarget {
   updateEligible: boolean
   currentTemperatureC?: number
   heaterEnabled?: boolean
+  thermalTuningActive?: boolean
   online?: boolean
 }
 
@@ -142,6 +144,7 @@ export function FirmwareWorkbench({
   devdBaseUrl,
   officialArtifacts,
   artifactBlocked = false,
+  writesBlocked = false,
   executionMode = 'live',
   onActivity,
 }: FirmwareWorkbenchProps) {
@@ -237,7 +240,9 @@ export function FirmwareWorkbench({
         nativeTarget.online !== false &&
         nativeTarget.updateEligible
       : browserAvailable
+  const tuningBlocksWrites = writesBlocked || nativeTarget?.thermalTuningActive === true
   const canRun =
+    !tuningBlocksWrites &&
     operation !== null &&
     transportAvailable &&
     !artifactBlocked &&
@@ -638,7 +643,7 @@ export function FirmwareWorkbench({
   }
 
   const runPreflight = async () => {
-    if (!operation) return
+    if (!operation || tuningBlocksWrites) return
     setExecutionOutcome('idle')
     setExecutionProgressValue(0)
     setExecutionStageIndex(0)
@@ -934,7 +939,7 @@ export function FirmwareWorkbench({
   }
 
   const runInstall = async () => {
-    if (!operation) return
+    if (!operation || tuningBlocksWrites) return
     if (
       !mockExecution &&
       ((transport === 'devd' &&

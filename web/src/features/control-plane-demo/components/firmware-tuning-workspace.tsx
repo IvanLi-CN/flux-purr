@@ -115,6 +115,7 @@ interface ImportedCandidate {
 
 export function FirmwareTuningWorkspace({
   supported,
+  writesBlocked = false,
   powerReady = true,
   powerBlockedReason,
   deviceId,
@@ -124,6 +125,7 @@ export function FirmwareTuningWorkspace({
   sendCommand,
 }: {
   supported: boolean
+  writesBlocked?: boolean
   powerReady?: boolean
   powerBlockedReason?: string
   deviceId: string
@@ -455,6 +457,7 @@ export function FirmwareTuningWorkspace({
               !identityVerified ||
               !powerClass ||
               armed ||
+              writesBlocked ||
               terminal === 'candidate_ready' ||
               pending
             }
@@ -474,14 +477,14 @@ export function FirmwareTuningWorkspace({
           <Button
             type="button"
             variant="outline"
-            disabled={!canSeal || pending}
+            disabled={!canSeal || writesBlocked || pending}
             onClick={() => void apply({ op: 'seal', ...identity })}
           >
             封存候选
           </Button>
           <Button
             type="button"
-            disabled={!canSave || pending}
+            disabled={!canSave || writesBlocked || pending}
             onClick={() => void apply({ op: 'confirm_save', ...identity })}
           >
             <Save aria-hidden="true" /> 确认保存
@@ -533,7 +536,7 @@ export function FirmwareTuningWorkspace({
           <ShieldAlert aria-hidden="true" /> 当前设备尚未解析出 PPS 功率档位，无法安全启动调优。
         </p>
       ) : null}
-      {supported && powerClass && !powerReady ? (
+      {supported && powerClass && !powerReady && !error && !commandError ? (
         <p className="firmware-tuning__warning">
           <ShieldAlert aria-hidden="true" />{' '}
           {powerBlockedReason ?? '当前电源合同尚未切换到 PPS；开始调优后固件会先完成安全协商。'}

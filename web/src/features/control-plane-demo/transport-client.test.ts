@@ -21,6 +21,57 @@ function jsonResponse(value: unknown) {
 }
 
 describe('control-plane transport client', () => {
+  it.each([
+    'headers',
+    'body',
+  ])('bounds a tuning read stalled at %s without replaying it', async (stage) => {
+    vi.useFakeTimers()
+    try {
+      const response = jsonResponse({})
+      vi.spyOn(response, 'json').mockImplementation(() => new Promise(() => {}))
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockImplementation(() =>
+          stage === 'headers' ? new Promise(() => {}) : Promise.resolve(response)
+        )
+      let outcome: unknown
+      void createControlPlaneHttpClient(fetcher)
+        .getThermalTuning('http://127.0.0.1:4170', 'devd-lan-device')
+        .catch((error: unknown) => {
+          outcome = error
+        })
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(outcome).toMatchObject({
+        category: 'transport_unavailable',
+        operation: 'thermal_tuning_read',
+        endpoint: '/api/v1/devices/devd-lan-device/thermal-tuning',
+        retryable: true,
+      })
+      expect(fetcher).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    'not json',
+    'null',
+    '42',
+    '"status"',
+    '[]',
+  ])('rejects invalid successful tuning JSON: %s', async (body) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body))
+    await expect(
+      createControlPlaneHttpClient(fetcher).getThermalTuning('http://127.0.0.1:4170', 'device')
+    ).rejects.toMatchObject({
+      category: 'response_invalid',
+      retryable: false,
+      operation: 'thermal_tuning_read',
+      status: 200,
+    })
+  })
+
   it('carries the run-bound event cursor on read-only tuning GET without a lease', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse({}))
     const client = createControlPlaneHttpClient(fetcher)
@@ -30,7 +81,7 @@ describe('control-plane transport client', () => {
     })
     expect(fetcher).toHaveBeenCalledWith(
       'http://127.0.0.1:4170/api/v1/devices/devd-lan-device/thermal-tuning?run_id=run%2Fone&after_sequence=0',
-      undefined
+      { signal: expect.any(AbortSignal) }
     )
   })
 
@@ -40,7 +91,7 @@ describe('control-plane transport client', () => {
       trialPurpose: 'scout',
       events: { events: [], nextSequence: null },
     }
-    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(status))
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse(status))
     const client = createControlPlaneHttpClient(fetcher)
 
     await client.getThermalTuning('http://127.0.0.1:4170', 'device/5a', 'lease 1')
@@ -54,7 +105,7 @@ describe('control-plane transport client', () => {
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
       'http://127.0.0.1:4170/api/v1/devices/device%2F5a/thermal-tuning?lease_id=lease%201',
-      undefined
+      { signal: expect.any(AbortSignal) }
     )
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
@@ -237,6 +288,13 @@ describe('control-plane transport client', () => {
       record.status.network = record.network
     }
     const target = devdRecordToDeviceTarget(record)
+    expect(target.thermalTuningActive).toBe(false)
+    expect(
+      devdRecordToDeviceTarget({
+        ...record,
+        status: { ...record.status, thermalTuningActive: true },
+      }).thermalTuningActive
+    ).toBe(true)
 
     expect(target.transportIssue).toBeUndefined()
     expect(target.connectionAvailable).toBe(true)

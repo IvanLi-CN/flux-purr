@@ -283,7 +283,9 @@
 
 ## Visual Evidence
 
-- None
+- 经主人授权截取的本地 Web 实机页面，1280×860，devd LAN/HTTP，显示已取消的短测与未保存状态。仅证明该空闲终态的布局和已恢复读取，不代表活动运行布局、完整调优或全部视觉门禁通过。
+
+![本地 HTTP 调优工作台](assets/http-workbench-idle.png)
 
 ## References
 

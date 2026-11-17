@@ -28,6 +28,7 @@ import type {
   UsbWifiConfigFrame,
   WifiConfigRequest,
 } from './contracts'
+import { withReadDeadline } from './read-deadline'
 import type { DeviceTarget, EventLogEntry, FirmwareArtifact } from './types'
 
 export class ControlPlaneClientError extends Error {
@@ -519,6 +520,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     calibration: record.status.calibration,
     storedCalibration: record.calibration,
     heaterEnabled: record.status.heaterEnabled,
+    thermalTuningActive: record.status.thermalTuningActive ?? false,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
     postHeatCoolingMode:
@@ -965,8 +967,36 @@ export function redactWifiConfigFrame(frame: UsbWifiConfigFrame): UsbWifiConfigF
 }
 
 async function requestJson<T>(fetcher: typeof fetch, url: string, init?: RequestInit): Promise<T> {
-  const operation = init?.method?.toUpperCase() === 'POST' ? 'write' : 'read'
   const endpoint = new URL(url, 'http://localhost').pathname
+  const write = init?.method?.toUpperCase() === 'POST'
+  const tuningRead = !write && endpoint.endsWith('/thermal-tuning')
+  const operation = tuningRead ? 'thermal_tuning_read' : write ? 'write' : 'read'
+  if (tuningRead) {
+    // Allow the daemon's 3 s queue + 6 s complete device read budget, while
+    // still terminating a stalled localhost connection or response body.
+    return withReadDeadline(
+      12_000,
+      () =>
+        new ControlPlaneClientError(
+          '固件热控调优读取超时，请重试读取。',
+          'transport_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation, endpoint }
+        ),
+      (signal) => requestJsonResponse<T>(fetcher, url, { ...init, signal }, operation, endpoint)
+    )
+  }
+  return requestJsonResponse<T>(fetcher, url, init, operation, endpoint)
+}
+
+async function requestJsonResponse<T>(
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit | undefined,
+  operation: string,
+  endpoint: string
+): Promise<T> {
   let response: Response
   try {
     response = await fetcher(url, init)
@@ -983,7 +1013,7 @@ async function requestJson<T>(fetcher: typeof fetch, url: string, init?: Request
 
   if (!response.ok) {
     const envelope = payload as ApiErrorEnvelope | null
-    const code = envelope?.error.code ?? `http_${response.status}`
+    const code = envelope?.error?.code ?? `http_${response.status}`
     const category =
       response.status === 401
         ? 'unauthorized'
@@ -993,11 +1023,21 @@ async function requestJson<T>(fetcher: typeof fetch, url: string, init?: Request
             ? 'server_retryable'
             : undefined
     throw new ControlPlaneClientError(
-      envelope?.error.message ?? `Request failed with ${response.status}`,
+      envelope?.error?.message ?? `Request failed with ${response.status}`,
       code,
-      envelope?.error.retryable ?? response.status >= 500,
-      envelope?.error.details,
+      envelope?.error?.retryable ?? response.status >= 500,
+      envelope?.error?.details,
       { category, operation, endpoint, status: response.status }
+    )
+  }
+
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new ControlPlaneClientError(
+      '设备返回的数据格式无效。',
+      'response_invalid',
+      false,
+      undefined,
+      { category: 'response_invalid', operation, endpoint, status: response.status }
     )
   }
 

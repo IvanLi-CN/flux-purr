@@ -4,7 +4,7 @@
 
 ## Current Status
 
-- Implementation: 无文件调优启动、LAN 身份存储、端点错误、owner proof 和固件活动运行写保护已有实现；两份完整工厂基线、Web 全局禁写、adapter parity 和完整调优验收仍待收口。现有控制参数种子不能当作完整工厂基线。
+- Implementation: 无文件调优启动、LAN 身份存储、端点错误、owner proof、固件活动运行写保护及 Web 全局禁写已有实现；两份完整工厂基线、完整跨客户端验收、adapter parity 和完整调优验收仍待收口。现有控制参数种子不能当作完整工厂基线。
 - 电源状态语义已明确：空闲时固定 5V/1A 属于正常安全状态；只有调优运行意图存在时才触发 PPS 协商。PPS 未确认前固件不加热、不采样，Web 应显示电源合同等待或失败原因，不得显示设备连接失败。
 - 显式开始调优会建立待恢复的加热意图；实际输出仍须等待已确认的 PPS 合同，并继续通过传感器、过温、commissioning 和持久化安全门禁。调优进入 warmup 后，只有这些门禁全部满足才会驱动加热器。
 - Web 固定 5V 提示说明这是正常空闲供电，启动后固件自动协商 PPS；未确认 PPS 只能说明暂时不加热，不应解释为无法发起调优。
@@ -17,7 +17,20 @@
 - 固件 `be8bcfa6` 的 1,304 项固件测试、583 项 devd/CLI/integration 测试通过（另有 4 项显式 ignored），host/Xtensa Clippy 与样式检查通过。完整镜像经 `just firmware-image-check` 确认为 2,089,184 / 2,097,152B，ELF SHA-256 为 `e8faf66f6fccefef1912579242af309deeb6454fa3d81c3061d51178e84ea3d8`；LAN 栈余量 37,284B、嵌套 PD 余量 84,836B。授权端口烧录完成，HTTP identity 为 `0.30.10-dev.be8bcfa`；跳过 EEPROM 备份且健康状态未知。同一 Web 页面由 devd LAN HTTP 发起 `web-pps3a-702a8056-ae63-4cd4-806b-ab5b21f0269e`，活动模型 transaction `1470196405`，普通 HTTP status 读回 `thermalTuningActive=true` 与实际输出 100%。该轮 sequence 0–1369 共 1370 条事件完整，60°C 在 215.461 秒通过 60 秒保持确认，但 220°C 预热因实际输出中断，整轮在 399.675 秒失败且未保存。
 - Web 经 devd LAN HTTP 发起的 `web-pps3a-3da26d45-eb63-4e51-8d71-3dd1891b6cc6` 使用固件 `5d1b5746`，完整收取 sequence 0–2987 共 2988 条事件。60°C 目标在 690.349 秒通过 60 秒保持确认；220°C 因预热实际输出中断，整轮在 874.669 秒失败且未保存。HTTP 状态读回 heater disabled、实际输出 0、29.81°C、固定 5V，不能把单目标通过当作整轮成功。
 - 事件 1312 的已确认合同为 13.4V，但后端缓存仍为 12.9V，RTD 边缘的安全上限回到 13.0V。中间升压档位不匹配只识别完整工作点的回落保持逻辑。回归同时覆盖中间档位、协议确认领先缓存、未到边缘不得提前升压、超过 3°C 窗口必须回到冷边界；仅保留已准入档位本身，不提前提升到较暖观测的完整上限。真实匹配镜像复测尚待完成。
-- 普通 status 提供 `thermalTuningActive`，USB/LAN 共用运行时 `armed` 来源，devd 透传该字段；旧固件缺少字段时兼容解码为 false。该字段不携带 owner proof，不读取或确认事件游标。Web 全局提示和禁写尚待接入。
+- 普通 status 提供 `thermalTuningActive`，USB/LAN 共用运行时 `armed` 来源，devd 透传该字段；旧固件缺少字段时兼容解码为 false。该字段不携带 owner proof，不读取或确认事件游标。Web 依据此字段显示页面级运行保护和安全停止按钮，预设温度、运行配置、手动 PPS、风扇策略、Wi-Fi、标定和固件安装写入停用，连接状态和只读浏览保持独立。预设温度待提交计时器在禁写生效时取消，停止不要求 mutation lease；解除运行保护后恢复原有权限判断。组件三个交互状态与整页 Dashboard / Settings 禁写回归通过，完整跨客户端矩阵仍待验收。
+
+## 完整读取期限与失败展示
+
+- 调优 GET 的期限覆盖连接、响应头和完整 JSON 正文。direct LAN 为 5 秒；Web → devd 为 12 秒，覆盖 daemon 的 3 秒排队和 6 秒设备读取预算。期限到达时取消请求并结束等待，即使 fetch adapter 忽略 AbortSignal 也会向页面返回可重试的 `transport_unavailable`；每次读取只发送一次请求，重试仍由页面的有限预算控制。成功、失败和超时均释放计时器；写入不适用读取期限，不自动重放。
+- direct LAN 和 devd 成功 HTTP 响应的无效 JSON、null、标量和数组均返回不可重试的 `response_invalid`，保留操作、路径与 HTTP status。调优页不显示加热曲线标定模块的后台读取指示；调优错误显示在自身工作区。读取失败时不叠加正常 Fixed idle 供电说明。
+- 响应头和正文停滞的四条 adapter 回归在修复前均未结束等待；devd 无效 JSON 回归错误地成功返回 null，成功 JSON 非对象的回归另复现五项失败。修复后 Web 406 项单元测试通过，期限回归同时检查没有请求重放、没有遗留计时器。54 项页面/组件交互测试、Web 类型检查与构建通过。端点超时控制不能证明设备网络连接恢复或完整调优通过。
+
+## 真实 HTTP 长测与安全停止
+
+- 固件 `58227acb` 的完整功能镜像经 `just firmware-image-check` 检查为 2,090,048 / 2,097,152B；LAN 栈余量 37,284B、嵌套 PD 余量 84,836B，1,305 项固件测试及 devd 测试通过。授权端口烧录完成，health 验证 `0.30.10-dev.58227ac`，ELF SHA-256 为 `5cfcf7bc38f5cda1a3f33e63236a1b4eb87df7655031483979984b67ce82450d`；跳过 EEPROM 备份且健康状态未知。
+- 唯一本地 Web 页面经 devd LAN HTTP 发起 `web-pps3a-eb29c928-8a7e-4d57-8247-514e0bf1df0a`，sequence 0–3317 共 3318 条事件完整。60°C 在 213.711 秒完成独立 60 秒保持确认；220°C 的前三次预热没有实际输出中断，但各自在 180 秒内未到达接近阶段。第四次预热在 797.897 秒因实时安全上限降为 20.2V、已有合同仍为 20.9V 而实际关闭输出，整轮在 976.071 秒失败、未保存。该保护不得放宽；冷却到预热的工作点选择仍需可复现诊断。测试期间 Vite 开发刷新后继续同一 run，不能将其宣称为无页面刷新的长测。
+- 随后通过 Web 页面级“停止调优”结束短测 `web-pps3a-5f1f1dc8-109a-47ab-bdbc-d9f46b6c9cad`，设备返回 canceled；之后 USB 状态确认 `thermalTuningActive=false`、实际输出 0、固定 5V。再次检查 HTTP 时旧地址连接被拒绝；USB 读回固件未重启，Wi-Fi 为 error、无 IP，错误为 `WiFi configuration could not be applied.`。不能把缓存中的旧地址或网络状态作为实时 LAN 连通证明。
+- 通过授权 USB 端口向同一设备重新提交原有 SSID，省略 password、staticIpv4 和 telemetry 字段以保留已存配置后，原地址的公开 HTTP health 恢复且身份匹配；同一本地页面选择 devd LAN 后收取八条完整取消事件。该恢复不证明 Wi-Fi driver configuration failure 的根因已修复。标准桌面 1280×860 下，调优主体 viewport 为 583px、scrollHeight 为 583px，无横向溢出；事件列表使用自身的 SimpleBar 区域。活动运行与读取失败布局仍需独立实机验收。
 
 ## USB 与 Wi-Fi 故障隔离
 
@@ -81,7 +94,7 @@
 - `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份控制器起点 profile；无上传候选时可以解析匹配起点，并保留独立安全门禁。输出模型、热模型初值、安全边界与工厂数据来源的完整性审计尚未完成，不能将控制器 profile 等同于完整工厂基线验收。
 - `REQ-LTR-013`: 启动时设备候选优先、缺省时工厂基线兜底；候选仍保持 RAM 预览并按功率档位保存。Web 高级导入接受 `pps3a` 和 `pps5a`，校验文件的 `powerClass` 与包装层 `profile.bank` 一致，并在启动时再次核对设备当前解析的档位；档位变化或不匹配时拒绝发送启动请求。预览命令使用匹配的 bank。两档均保留固件的历史内容哈希编码 `thermal-tuning-v2/candidate/pps5a`，哈希不代替独立的 bank 和功率档位校验；普通无文件启动继续省略 `candidateProfile`。
 - `REQ-LTR-014`: 调优停止在固件 HTTP 网关、排队命令执行、devd LAN bridge 与 direct LAN Web 中作为已认证安全例外执行，不获取 mutation lease、不读取 optimistic revision；重复停止保持已停机状态和原有终态证据。start、seal、confirm-save 和其它写入继续受原有租约与 revision 保护。固件成功启动时生成 owner proof，仅在启动响应返回；只读状态构造为不含证明。保存入口在 EEPROM 写入前校验证明，运行域在提交回执前再次校验；停止、失败、新运行和成功保存均失效。devd USB/LAN 透传证明并在诊断输出脱敏；Web 启动命令将证明隔离在发起页面的 RAM/sessionStorage，普通状态进入 React/journal/report 前移除证明，确认保存时才注入请求；其他页面保存按钮不可用，停止仍不要求证明。失败、停止、替换运行和成功保存清除页面证明。匹配镜像的浏览器保存验收仍待完成。
-- 活动运行在固件共同 USB/LAN 命令分发处拒绝客户端写入并返回 `thermal_tuning_active`；只读和调优安全停止仍允许。判定覆盖运行配置、Wi-Fi、标定、持久化、加热曲线、其它调优写入和蜂鸣器写入；蜂鸣器状态读取仍允许。devd 将该 USB 协议错误保留为 HTTP 409，避免误报为通信网关故障。Web 全局禁写提示与置灰、匹配镜像的跨客户端实测仍待完成。
+- 活动运行在固件共同 USB/LAN 命令分发处拒绝客户端写入并返回 `thermal_tuning_active`；只读和调优安全停止仍允许。判定覆盖运行配置、Wi-Fi、标定、持久化、加热曲线、其它调优写入和蜂鸣器写入；蜂鸣器状态读取仍允许。devd 将该 USB 协议错误保留为 HTTP 409，避免误报为通信网关故障。Web 全局禁写提示与置灰已实现，匹配镜像的完整跨客户端矩阵仍待完成。
 
 ## Verification / Rollout
 

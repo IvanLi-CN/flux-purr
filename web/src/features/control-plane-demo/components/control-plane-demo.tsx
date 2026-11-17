@@ -164,6 +164,7 @@ import { controlPlaneScenario, degradedControlPlaneScenario } from '../mock-data
 import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
+  deviceWriteBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
   heaterConfirmationNowMs,
   heaterLockReasonText,
@@ -192,7 +193,7 @@ import type {
 import { UNAVAILABLE_TEMPERATURE_C } from '../types'
 import { isDirectWebSerialDevice } from '../web-serial'
 import { resolveWifiSettingsAccess } from '../wifi-settings-access'
-import { FirmwareTuningWorkspace } from './firmware-tuning-workspace'
+import { FirmwareTuningWorkspace, messageOf as tuningMessageOf } from './firmware-tuning-workspace'
 import { LanPairingPanel, type LanPairingPanelProps } from './lan-pairing-panel'
 import {
   createDefaultThermalPlantSnapshot,
@@ -201,6 +202,7 @@ import {
   ThermalPlantRunCardStatus,
   thermalPlantRunCardPresentation,
 } from './thermal-plant-run-card'
+import { TuningWriteNotice } from './tuning-write-notice'
 import { WifiNetworkSettings, type WifiNetworkSettingsDraft } from './wifi-network-settings'
 
 export interface LanRuntimeDependencies {
@@ -1105,6 +1107,11 @@ export function ControlPlaneDemo({
   const [heaterConfirmationNow, setHeaterConfirmationNow] = useState(0)
   const [calibrationLeaveGuard, setCalibrationLeaveGuard] =
     useState<CalibrationLeaveGuardState | null>(null)
+  const [globalTuningStop, setGlobalTuningStop] = useState<{
+    deviceId: string
+    pending: boolean
+    error?: string
+  } | null>(null)
   const [feedback, setFeedback] = useState<ActionFeedback>({
     title: allowDemoControls ? '运行时已同步' : '暂无在线目标',
     detail: allowDemoControls
@@ -1938,11 +1945,13 @@ export function ControlPlaneDemo({
         detail: `${device.location} · ${device.leaseState === 'active' ? '租约就绪' : '需要租约'}`,
         leaseId: device.leaseId ?? null,
         updateEligible:
+          !device.thermalTuningActive &&
           device.firmware !== 'unknown' &&
           device.severity !== 'offline' &&
           (device.capabilities.includes('install_status') || device.capabilities.includes('flash')),
         currentTemperatureC: device.currentTempC,
         heaterEnabled: device.heaterEnabled,
+        thermalTuningActive: device.thermalTuningActive,
         online: device.severity !== 'offline',
       }))
   }, [liveDevd.firmwareDevices, mockOnly, visibleDevice])
@@ -3145,6 +3154,9 @@ export function ControlPlaneDemo({
   )
   const commandFirmwareTuning = useCallback(
     async (command: Omit<ThermalTuningCommand, 'leaseId'>): Promise<ThermalTuningStatus> => {
+      if (command.op !== 'cancel' && command.op !== 'read' && visibleDevice.thermalTuningActive) {
+        throw new Error('设备正在执行固件热控调优；仅允许读取和停止调优。')
+      }
       if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning(command)
       if (lanDeviceBaseUrl) {
         const session = loadLanDeviceSession(lanDeviceBaseUrl)
@@ -3220,6 +3232,7 @@ export function ControlPlaneDemo({
       visibleDeviceId,
       visibleDeviceLeaseId,
       visibleDeviceTransport,
+      visibleDevice.thermalTuningActive,
       lanRuntime,
       webSerial,
     ]
@@ -3430,7 +3443,7 @@ export function ControlPlaneDemo({
       },
       failureMessage: string
     ) => {
-      const blockedReason = deviceControlBlockReason(visibleDevice)
+      const blockedReason = deviceWriteBlockReason(visibleDevice)
       if (blockedReason) {
         setFeedback({
           title: 'Runtime update blocked',
@@ -4267,7 +4280,7 @@ export function ControlPlaneDemo({
   const handleTargetTempChange = (nextTargetTemp: number) => {
     const clampedTarget = clampTargetTemp(nextTargetTemp)
     const deviceId = visibleDevice.id
-    const blockedReason = deviceControlBlockReason(visibleDevice)
+    const blockedReason = deviceWriteBlockReason(visibleDevice)
     if (blockedReason) {
       setFeedback({
         title: visibleDevice.leaseState === 'conflict' ? '目标温度更新被阻止' : '硬件连接受阻',
@@ -4613,6 +4626,8 @@ export function ControlPlaneDemo({
   }
 
   const updateCalibrationDraft = async (request: Omit<CalibrationConfigRequest, 'leaseId'>) => {
+    const blocked = deviceWriteBlockReason(visibleDevice)
+    if (blocked) throw new Error(blocked)
     if (isDirectWebSerialDevice(visibleDevice)) {
       const calibration = await webSerial.configureCalibration(request)
       commitCalibrationState(visibleDevice.id, calibration)
@@ -4643,7 +4658,7 @@ export function ControlPlaneDemo({
       return
     }
     if (visibleDeviceIsLive) {
-      const blockedReason = deviceControlBlockReason(visibleDevice)
+      const blockedReason = deviceWriteBlockReason(visibleDevice)
       if (blockedReason) {
         throw new Error(blockedReason)
       }
@@ -4773,6 +4788,8 @@ export function ControlPlaneDemo({
 
   const updateHeaterCurveState = useCallback(
     async (request: Omit<HeaterCurveConfigRequest, 'leaseId'>) => {
+      const blocked = deviceWriteBlockReason(visibleDevice)
+      if (blocked) throw new Error(blocked)
       if (isDirectWebSerialDevice(visibleDevice)) {
         if (request.op === 'preview' && request.package) {
           const next = await webSerial.previewHeaterCurve(request.package)
@@ -4824,7 +4841,7 @@ export function ControlPlaneDemo({
         }
       }
       if (visibleDeviceIsLive) {
-        const blockedReason = deviceControlBlockReason(visibleDevice)
+        const blockedReason = deviceWriteBlockReason(visibleDevice)
         if (blockedReason) {
           throw new Error(blockedReason)
         }
@@ -4980,7 +4997,7 @@ export function ControlPlaneDemo({
       },
       failureMessage: string
     ) => {
-      const blockedReason = deviceControlBlockReason(visibleDevice)
+      const blockedReason = deviceWriteBlockReason(visibleDevice)
       if (blockedReason) {
         setFeedback({
           title: '自动校准被阻止',
@@ -5298,132 +5315,163 @@ export function ControlPlaneDemo({
             </nav>
           ) : null}
 
-          <div
-            className={
-              isDeviceAddFlowActive
-                ? `industrial-console__workspace ${
-                    addDeviceStage === 'configure'
-                      ? 'industrial-console__workspace--add-device'
-                      : 'industrial-console__workspace--selection'
-                  }`
-                : isFirmwareWorkspace
-                  ? 'industrial-console__workspace industrial-console__workspace--firmware'
-                  : 'industrial-console__workspace'
-            }
-          >
-            <section className="industrial-panel industrial-console__main">
-              <ViewPanel
-                view={activeView}
-                navigation={navigation}
-                device={visibleDevice}
-                showDeviceSelection={showDeviceSelection}
-                knownDevices={knownDevices}
-                allowDemoControls={allowDemoControls}
-                mockOnly={mockOnly}
-                webSerial={webSerial}
-                selectedPresetIndex={selectedPresetIndex}
-                presetTemps={visiblePresetTemps}
-                presetEnabled={visiblePresetEnabled}
-                postHeatCoolingMode={visiblePostHeatCoolingMode}
-                heatingFanGuardMode={visibleHeatingFanGuardMode}
-                settingsWorkspaceTab={visibleSettingsWorkspaceTab}
-                artifact={selectedArtifact}
-                feedback={feedback}
-                calibration={visibleCalibration}
-                heaterCurve={visibleHeaterCurve}
-                thermalPlantRun={visibleThermalPlantRun}
-                thermalPlantRunUnsupported={thermalPlantRunUnsupported}
-                thermalPlantRunLoading={thermalPlantRunLoading}
-                thermalPlantRunReadError={thermalPlantRunReadError}
-                firmwareTuningWorkspace={
-                  <FirmwareTuningWorkspace
-                    key={visibleDevice.id}
-                    // A persisted LAN session may be rendered before its
-                    // identity probe has repopulated capabilities. The
-                    // read-only endpoint itself is the authoritative support
-                    // check; a 404 is mapped to the unsupported state.
-                    supported={
-                      visibleDevice.capabilities.includes('thermal_tuning') ||
-                      isDirectLanDevice(visibleDevice)
-                    }
-                    powerReady={thermalTuningPowerReady}
-                    powerBlockedReason={thermalTuningPowerBlockedReason}
-                    deviceId={visibleDevice.id}
-                    transport={visibleDeviceTransport}
-                    parameterSnapshot={{
-                      mode: visibleDevice.thermalProfileMode,
-                      bank: visibleDevice.thermalProfileResolvedBank,
-                      control: visibleDevice.thermalControl,
-                    }}
-                    readStatus={readFirmwareTuning}
-                    sendCommand={commandFirmwareTuning}
-                  />
+          <div className="industrial-console__work-area">
+            {visibleDevice.thermalTuningActive ? (
+              <TuningWriteNotice
+                stopping={
+                  globalTuningStop?.deviceId === visibleDevice.id && globalTuningStop.pending
                 }
-                runtimeCalibration={visibleRuntimeCalibration}
-                calibrationRefs={visibleCalibrationRefs}
-                calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
-                firmwareNativeTargets={firmwareNativeTargets}
-                firmwareArtifacts={firmwareArtifacts}
-                artifactBlocked={selectedArtifact?.compatibility === 'blocked'}
-                onTargetTempChange={handleTargetTempChange}
-                onPresetSlotChange={handlePresetSlotChange}
-                onPresetTempChange={handlePresetTempChange}
-                onPresetEnabledChange={handlePresetEnabledChange}
-                onPostHeatCoolingChange={handlePostHeatCoolingChange}
-                onHeatingFanGuardChange={handleHeatingFanGuardChange}
-                onFanSettingsSave={handleFanSettingsSave}
-                onSettingsWorkspaceTabChange={setSettingsWorkspaceTab}
-                onWifiSave={handleWifiSave}
-                onWifiClear={handleWifiClear}
-                onWifiCancel={handleWifiCancel}
-                onWifiOperationEvent={(message, tone) => emitEvent('webserial', message, tone)}
-                onManualPpsApply={handleManualPpsApply}
-                onManualPpsClear={handleManualPpsClear}
-                onHeaterHoldToggle={handleHeaterHoldToggle}
-                onFaultAttentionAcknowledge={handleFaultAttentionAcknowledge}
-                onCalibrationReferenceChange={setCalibrationReference}
-                onCalibrationCapture={handleCalibrationCapture}
-                onCalibrationDelete={handleCalibrationDelete}
-                onCalibrationImport={handleCalibrationImport}
-                onCalibrationSetActiveSlot={handleCalibrationSetActiveSlot}
-                onCalibrationSetSlotFit={handleCalibrationSetSlotFit}
-                onCalibrationModeEnter={handleCalibrationModeEnter}
-                onCalibrationModeExit={handleCalibrationModeExit}
-                onCalibrationRuntimeChange={(request, failureMessage) =>
-                  void updateCalibrationRuntime(request, failureMessage)
+                error={
+                  globalTuningStop?.deviceId === visibleDevice.id
+                    ? globalTuningStop.error
+                    : undefined
                 }
-                onCalibrationJobChange={(request, failureMessage) =>
-                  void updateCalibrationJob(request, failureMessage)
-                }
-                onHeaterCurvePreview={handleHeaterCurvePreview}
-                onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
-                onHeaterCurveSave={handleHeaterCurveSave}
-                onCalibrationWorkspaceTabChange={handleGuardedWorkspaceTabChange}
-                calibrationLeaveGuard={activeView === 'calibration' ? calibrationLeaveGuard : null}
-                onCalibrationLeaveGuardDismiss={cancelCalibrationLeaveGuard}
-                onCalibrationLeaveGuardClear={dismissCalibrationLeaveGuard}
-                onDeviceSelect={handleDeviceChange}
-                onBridgeTargetSelect={handleBridgeTargetSelect}
-                controlClient={controlClient}
-                devdBaseUrl={devdBaseUrl}
-                bridgeDevdBaseUrl={bridgeDevdBaseUrl}
-                onQuickAddDevice={handleQuickAddDevice}
-                onAddDevice={handleAddDeviceChoice}
-                selectedAddDeviceKind={selectedAddDeviceKind}
-                addDeviceStage={addDeviceStage}
-                onAddDeviceStageChange={setAddDeviceStage}
-                recentDevices={knownDevices}
-                onLanPaired={handleLanPaired}
-                lanPairing={resolvedLanPairing}
-                onFirmwareActivity={appendFirmwareActivity}
+                onStop={() => {
+                  const deviceId = visibleDevice.id
+                  if (globalTuningStop?.deviceId === deviceId && globalTuningStop.pending) return
+                  setGlobalTuningStop({ deviceId, pending: true })
+                  void commandFirmwareTuning({ op: 'cancel' }).then(
+                    () => setGlobalTuningStop({ deviceId, pending: false }),
+                    (error: unknown) =>
+                      setGlobalTuningStop({
+                        deviceId,
+                        pending: false,
+                        error: tuningMessageOf(error, 'write'),
+                      })
+                  )
+                }}
               />
-            </section>
-
-            {isFirmwareWorkspace ? (
-              <FirmwareTransactionLog entries={firmwareActivity} />
-            ) : !isDeviceAddFlowActive || addDeviceStage === 'configure' ? (
-              <GlobalLogPanel events={visibleEvents} />
             ) : null}
+            <div
+              className={
+                isDeviceAddFlowActive
+                  ? `industrial-console__workspace ${
+                      addDeviceStage === 'configure'
+                        ? 'industrial-console__workspace--add-device'
+                        : 'industrial-console__workspace--selection'
+                    }`
+                  : isFirmwareWorkspace
+                    ? 'industrial-console__workspace industrial-console__workspace--firmware'
+                    : 'industrial-console__workspace'
+              }
+            >
+              <section className="industrial-panel industrial-console__main">
+                <ViewPanel
+                  view={activeView}
+                  navigation={navigation}
+                  device={visibleDevice}
+                  showDeviceSelection={showDeviceSelection}
+                  knownDevices={knownDevices}
+                  allowDemoControls={allowDemoControls}
+                  mockOnly={mockOnly}
+                  webSerial={webSerial}
+                  selectedPresetIndex={selectedPresetIndex}
+                  presetTemps={visiblePresetTemps}
+                  presetEnabled={visiblePresetEnabled}
+                  postHeatCoolingMode={visiblePostHeatCoolingMode}
+                  heatingFanGuardMode={visibleHeatingFanGuardMode}
+                  settingsWorkspaceTab={visibleSettingsWorkspaceTab}
+                  artifact={selectedArtifact}
+                  feedback={feedback}
+                  calibration={visibleCalibration}
+                  heaterCurve={visibleHeaterCurve}
+                  thermalPlantRun={visibleThermalPlantRun}
+                  thermalPlantRunUnsupported={thermalPlantRunUnsupported}
+                  thermalPlantRunLoading={thermalPlantRunLoading}
+                  thermalPlantRunReadError={thermalPlantRunReadError}
+                  firmwareTuningWorkspace={
+                    <FirmwareTuningWorkspace
+                      key={visibleDevice.id}
+                      // A persisted LAN session may be rendered before its
+                      // identity probe has repopulated capabilities. The
+                      // read-only endpoint itself is the authoritative support
+                      // check; a 404 is mapped to the unsupported state.
+                      supported={
+                        visibleDevice.capabilities.includes('thermal_tuning') ||
+                        isDirectLanDevice(visibleDevice)
+                      }
+                      writesBlocked={visibleDevice.thermalTuningActive}
+                      powerReady={thermalTuningPowerReady}
+                      powerBlockedReason={thermalTuningPowerBlockedReason}
+                      deviceId={visibleDevice.id}
+                      transport={visibleDeviceTransport}
+                      parameterSnapshot={{
+                        mode: visibleDevice.thermalProfileMode,
+                        bank: visibleDevice.thermalProfileResolvedBank,
+                        control: visibleDevice.thermalControl,
+                      }}
+                      readStatus={readFirmwareTuning}
+                      sendCommand={commandFirmwareTuning}
+                    />
+                  }
+                  runtimeCalibration={visibleRuntimeCalibration}
+                  calibrationRefs={visibleCalibrationRefs}
+                  calibrationWorkspaceTab={visibleCalibrationWorkspaceTab}
+                  firmwareNativeTargets={firmwareNativeTargets}
+                  firmwareArtifacts={firmwareArtifacts}
+                  artifactBlocked={selectedArtifact?.compatibility === 'blocked'}
+                  onTargetTempChange={handleTargetTempChange}
+                  onPresetSlotChange={handlePresetSlotChange}
+                  onPresetTempChange={handlePresetTempChange}
+                  onPresetEnabledChange={handlePresetEnabledChange}
+                  onPostHeatCoolingChange={handlePostHeatCoolingChange}
+                  onHeatingFanGuardChange={handleHeatingFanGuardChange}
+                  onFanSettingsSave={handleFanSettingsSave}
+                  onSettingsWorkspaceTabChange={setSettingsWorkspaceTab}
+                  onWifiSave={handleWifiSave}
+                  onWifiClear={handleWifiClear}
+                  onWifiCancel={handleWifiCancel}
+                  onWifiOperationEvent={(message, tone) => emitEvent('webserial', message, tone)}
+                  onManualPpsApply={handleManualPpsApply}
+                  onManualPpsClear={handleManualPpsClear}
+                  onHeaterHoldToggle={handleHeaterHoldToggle}
+                  onFaultAttentionAcknowledge={handleFaultAttentionAcknowledge}
+                  onCalibrationReferenceChange={setCalibrationReference}
+                  onCalibrationCapture={handleCalibrationCapture}
+                  onCalibrationDelete={handleCalibrationDelete}
+                  onCalibrationImport={handleCalibrationImport}
+                  onCalibrationSetActiveSlot={handleCalibrationSetActiveSlot}
+                  onCalibrationSetSlotFit={handleCalibrationSetSlotFit}
+                  onCalibrationModeEnter={handleCalibrationModeEnter}
+                  onCalibrationModeExit={handleCalibrationModeExit}
+                  onCalibrationRuntimeChange={(request, failureMessage) =>
+                    void updateCalibrationRuntime(request, failureMessage)
+                  }
+                  onCalibrationJobChange={(request, failureMessage) =>
+                    void updateCalibrationJob(request, failureMessage)
+                  }
+                  onHeaterCurvePreview={handleHeaterCurvePreview}
+                  onHeaterCurveClearPreview={handleHeaterCurveClearPreview}
+                  onHeaterCurveSave={handleHeaterCurveSave}
+                  onCalibrationWorkspaceTabChange={handleGuardedWorkspaceTabChange}
+                  calibrationLeaveGuard={
+                    activeView === 'calibration' ? calibrationLeaveGuard : null
+                  }
+                  onCalibrationLeaveGuardDismiss={cancelCalibrationLeaveGuard}
+                  onCalibrationLeaveGuardClear={dismissCalibrationLeaveGuard}
+                  onDeviceSelect={handleDeviceChange}
+                  onBridgeTargetSelect={handleBridgeTargetSelect}
+                  controlClient={controlClient}
+                  devdBaseUrl={devdBaseUrl}
+                  bridgeDevdBaseUrl={bridgeDevdBaseUrl}
+                  onQuickAddDevice={handleQuickAddDevice}
+                  onAddDevice={handleAddDeviceChoice}
+                  selectedAddDeviceKind={selectedAddDeviceKind}
+                  addDeviceStage={addDeviceStage}
+                  onAddDeviceStageChange={setAddDeviceStage}
+                  recentDevices={knownDevices}
+                  onLanPaired={handleLanPaired}
+                  lanPairing={resolvedLanPairing}
+                  onFirmwareActivity={appendFirmwareActivity}
+                />
+              </section>
+
+              {isFirmwareWorkspace ? (
+                <FirmwareTransactionLog entries={firmwareActivity} />
+              ) : !isDeviceAddFlowActive || addDeviceStage === 'configure' ? (
+                <GlobalLogPanel events={visibleEvents} />
+              ) : null}
+            </div>
           </div>
         </section>
       </div>
@@ -6036,6 +6084,7 @@ function applyLanStatus(device: DeviceTarget, status: ControlPlaneStatus): Devic
     thermalControl: status.thermalControl,
     calibration: status.calibration,
     heaterEnabled: status.heaterEnabled,
+    thermalTuningActive: status.thermalTuningActive ?? false,
     heaterOutputPercent: status.heaterOutputPercent,
     activeCoolingEnabled: status.activeCoolingEnabled,
     fanState: status.fanDisplayState,
@@ -6674,6 +6723,7 @@ function ViewPanel({
   if (view === 'update') {
     return (
       <UpdateView
+        writesBlocked={device.thermalTuningActive}
         browserAvailable={
           mockOnly ||
           (typeof navigator !== 'undefined' && 'serial' in navigator && window.isSecureContext)
@@ -7585,7 +7635,7 @@ function DashboardView({
   }, [advancedOpen, device.id, manualPpsDefaultMv, manualPpsDraftDirty])
   const heaterState = runtimeHeaterState(device)
   const powerCapabilityMa = effectivePpsCurrentCapabilityMa(device) ?? 0
-  const controlsBlocked = deviceControlBlockReason(device) != null
+  const controlsBlocked = deviceWriteBlockReason(device) != null
   return (
     <div className="industrial-view-panel">
       <PanelHeader kicker="Dashboard" title="Thermal runtime" />
@@ -7691,7 +7741,7 @@ function ManualPpsPanel({
 }) {
   const range = ppsCapabilityRange(device)
   const maxMa = effectivePpsCurrentCapabilityMa(device)
-  const controlsBlocked = deviceControlBlockReason(device) != null
+  const controlsBlocked = deviceWriteBlockReason(device) != null
   const disabled = controlsBlocked || !range || maxMa == null
   const clearDisabled = controlsBlocked || !device.manualPpsEnabled
   const capabilityText = range
@@ -8099,6 +8149,7 @@ function SettingsView({
   onWifiOperationEvent: (message: string, tone: EventLogEntry['tone']) => void
   wifiOperationInterruption: number
 }) {
+  const writesBlocked = deviceWriteBlockReason(device) != null
   const wifiAccess = resolveWifiSettingsAccess(device)
   const suppressesRedundantWifiTransportFeedback =
     settingsWorkspaceTab === 'wifi' &&
@@ -8154,6 +8205,7 @@ function SettingsView({
             <section className="industrial-settings-section industrial-settings-section--presets">
               <h3 className="industrial-section-title">Preset temperatures</h3>
               <PresetTemperatureEditor
+                disabled={writesBlocked}
                 selectedPresetIndex={selectedPresetIndex}
                 presetTemps={presetTemps}
                 presetEnabled={presetEnabled}
@@ -8169,6 +8221,7 @@ function SettingsView({
           <section className="industrial-settings-section industrial-settings-section--controls fan-policy-section">
             <div className="fan-policy-stack">
               <ModeSegmentedSetting
+                disabled={writesBlocked}
                 label="主动降温"
                 value={postHeatCoolingMode}
                 options={[
@@ -8179,6 +8232,7 @@ function SettingsView({
                 onChange={onPostHeatCoolingChange}
               />
               <ModeSegmentedSetting
+                disabled={writesBlocked}
                 label="加热防过热"
                 value={heatingFanGuardMode}
                 options={[
@@ -8195,6 +8249,7 @@ function SettingsView({
               <button
                 type="button"
                 className="industrial-button industrial-button--primary"
+                disabled={writesBlocked}
                 onClick={() => void onFanSettingsSave()}
               >
                 <Save aria-hidden="true" size={16} />
@@ -8373,7 +8428,7 @@ function CalibrationView({
   const rtdTargetAdcCommitVersionRef = useRef(0)
   const ppsCommitTimerRef = useRef<number | null>(null)
   const ppsCommitVersionRef = useRef(0)
-  const transportBlockedReason = deviceControlBlockReason(device)
+  const transportBlockedReason = deviceWriteBlockReason(device)
   const controlsBlocked = transportBlockedReason != null
   const requestedWorkbenchMode = calibrationWorkspaceTab
   const activeWorkbenchMode = asWorkbenchMode(runtimeCalibration.mode)
@@ -8811,7 +8866,7 @@ function CalibrationView({
                 电压读数标定
               </CalibrationRouteTab>
             </TabsList>
-            {thermalPlantRunLoading ? (
+            {calibrationWorkspaceTab === 'firmware_tuning' ? null : thermalPlantRunLoading ? (
               <output
                 className="industrial-calibration-tabs__status"
                 aria-label="校准读取状态"
@@ -10428,6 +10483,7 @@ function applyLocalHeaterCurveSave(current: HeaterCurveState): HeaterCurveState 
 }
 
 function PresetTemperatureEditor({
+  disabled = false,
   selectedPresetIndex,
   presetTemps,
   presetEnabled,
@@ -10435,6 +10491,7 @@ function PresetTemperatureEditor({
   onPresetTempChange,
   onPresetEnabledChange,
 }: {
+  disabled?: boolean
   selectedPresetIndex: number
   presetTemps: number[]
   presetEnabled: boolean[]
@@ -10454,7 +10511,7 @@ function PresetTemperatureEditor({
   useEffect(() => {
     const clampedDraftTemp = clampTargetTemp(draftTemp)
 
-    if (!draftIsDirty) {
+    if (disabled || !draftIsDirty) {
       return
     }
 
@@ -10463,7 +10520,7 @@ function PresetTemperatureEditor({
     }, PRESET_COMMIT_DEBOUNCE_MS)
 
     return () => window.clearTimeout(timer)
-  }, [draftIsDirty, draftTemp, onPresetTempChange])
+  }, [disabled, draftIsDirty, draftTemp, onPresetTempChange])
 
   const handleDraftTempChange = (nextTempC: number) => {
     setDraftTemp(clampTargetTemp(nextTempC))
@@ -10484,6 +10541,7 @@ function PresetTemperatureEditor({
               className={[isSelected ? 'is-selected' : '', isEnabled ? '' : 'is-disabled'].join(
                 ' '
               )}
+              disabled={disabled}
               aria-pressed={isSelected}
               aria-label={`${slotId} ${formatPresetTemp(tempC, isEnabled)} ${isEnabled ? 'enabled' : 'disabled'}`}
               onClick={() => void onPresetSlotChange(index)}
@@ -10511,7 +10569,7 @@ function PresetTemperatureEditor({
           inputId="preset-temperature"
           inputName="presetTemperature"
           value={draftTemp}
-          disabled={!selectedEnabled}
+          disabled={disabled || !selectedEnabled}
           onChange={handleDraftTempChange}
         />
         <div className="industrial-preset-switch">
@@ -10522,6 +10580,7 @@ function PresetTemperatureEditor({
           <span className="industrial-preset-switch__assembly">
             <span aria-hidden="true">OFF</span>
             <Switch
+              disabled={disabled}
               checked={selectedEnabled}
               size="industrial"
               className="industrial-preset-switch__control"
@@ -10537,6 +10596,7 @@ function PresetTemperatureEditor({
 }
 
 function UpdateView({
+  writesBlocked,
   browserAvailable,
   nativeTargets,
   devdBaseUrl,
@@ -10545,6 +10605,7 @@ function UpdateView({
   mockOnly,
   onActivity,
 }: {
+  writesBlocked?: boolean
   browserAvailable: boolean
   nativeTargets: FirmwareNativeTarget[]
   devdBaseUrl: string | null
@@ -10556,6 +10617,7 @@ function UpdateView({
   return (
     <div className="industrial-view-panel">
       <FirmwareWorkbench
+        writesBlocked={writesBlocked}
         browserAvailable={browserAvailable}
         nativeTargets={nativeTargets}
         devdBaseUrl={devdBaseUrl}
@@ -10801,11 +10863,13 @@ function StatusCard({
 }
 
 function ModeSegmentedSetting<T extends string>({
+  disabled = false,
   label,
   value,
   options,
   onChange,
 }: {
+  disabled?: boolean
   label: string
   value: T
   options: Array<[T, string]>
@@ -10813,6 +10877,7 @@ function ModeSegmentedSetting<T extends string>({
 }) {
   return (
     <fieldset
+      disabled={disabled}
       className="industrial-setting-control industrial-segmented-setting"
       data-option-count={options.length}
     >

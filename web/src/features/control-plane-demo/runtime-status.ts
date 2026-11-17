@@ -128,6 +128,18 @@ export function deviceControlBlockReason(
   return null
 }
 
+export const TUNING_WRITE_BLOCK_REASON = '设备正在执行固件热控调优；仅允许读取和停止调优。'
+
+/** Connection health remains independent from the firmware's active-run write interlock. */
+export function deviceWriteBlockReason(
+  device: Parameters<typeof deviceControlBlockReason>[0] & Pick<DeviceTarget, 'thermalTuningActive'>
+) {
+  return (
+    deviceControlBlockReason(device) ??
+    (device.thermalTuningActive ? TUNING_WRITE_BLOCK_REASON : null)
+  )
+}
+
 export function runtimeHeaterState(
   device: Pick<DeviceTarget, 'severity' | 'heaterLockReason' | 'pdState' | 'heaterOutputPercent'>
 ) {

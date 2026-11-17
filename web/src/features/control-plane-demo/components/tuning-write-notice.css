@@ -1,0 +1,82 @@
+.industrial-console__work-area {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  gap: 0.5rem;
+}
+
+.industrial-console__work-area > .industrial-console__workspace {
+  flex: 1;
+  min-height: 0;
+}
+
+.tuning-write-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.4rem 0.7rem;
+  border-left: 3px solid var(--industrial-accent);
+  background: var(--industrial-panel);
+  color: var(--industrial-text);
+  font-size: 0.75rem;
+}
+
+.tuning-write-notice output {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  min-width: 0;
+}
+
+.tuning-write-notice [role="alert"] {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* The standard desktop keeps all tuning controls visible when the page
+   interlock appears. Only spacing changes; identifiers and actions stay intact. */
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__header,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__header {
+    padding-bottom: 2px;
+  }
+
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__parameters > header,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__parameters > header {
+    padding-block: 8px;
+  }
+
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__parameter-grid > div,
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__facts > div,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__parameter-grid > div,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__facts > div {
+    padding-block: 8px;
+  }
+
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__detail > section,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__detail > section {
+    padding-block: 10px;
+  }
+
+  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__detail dl,
+  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__detail dl {
+    gap: 6px;
+  }
+}
+
+.tuning-write-notice .industrial-button {
+  flex: none;
+  min-height: 2rem;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 759px) {
+  .tuning-write-notice .industrial-button {
+    min-height: 48px;
+  }
+}

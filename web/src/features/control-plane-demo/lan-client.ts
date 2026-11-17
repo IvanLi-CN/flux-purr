@@ -1,4 +1,5 @@
 import type { ControlPlaneStatus, Identity, NetworkSummary } from './contracts'
+import { withReadDeadline } from './read-deadline'
 import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
@@ -156,6 +157,7 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     thermalControl: status.thermalControl,
     calibration: status.calibration,
     heaterEnabled: status.heaterEnabled,
+    thermalTuningActive: status.thermalTuningActive ?? false,
     heaterOutputPercent: status.heaterOutputPercent,
     activeCoolingEnabled: status.activeCoolingEnabled,
     postHeatCoolingMode:
@@ -974,59 +976,64 @@ async function lanRequest<T = Record<string, unknown>>(
     headers,
     targetAddressSpace: 'private',
   } satisfies PrivateNetworkRequestInit
-  const readTimeoutMs = operation === 'thermal_tuning_read' ? 5_000 : undefined
-  const timeoutController = readTimeoutMs == null ? null : new AbortController()
-  const timeoutId =
-    timeoutController == null
-      ? undefined
-      : globalThis.setTimeout(() => timeoutController.abort(), readTimeoutMs)
-  if (timeoutController) request.signal = timeoutController.signal
-  let response: Response
-  try {
-    response = await fetcher(`${baseUrl}${path}`, request as RequestInit)
-  } catch (error) {
-    if (timeoutController?.signal.aborted) {
-      throw new ControlPlaneClientError(
-        '设备已连接，但固件热控调优读取超时，请稍后重试。',
-        'lan_transport_unavailable',
-        true,
-        undefined,
-        { category: 'transport_unavailable', operation, endpoint: path }
-      )
-    }
-    if (error instanceof TypeError) {
-      throw new ControlPlaneClientError(
-        operation === 'thermal_tuning_read'
-          ? '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
-          : 'LAN 设备暂时无响应，请稍后重试。',
-        'lan_transport_unavailable',
-        true,
-        undefined,
-        { category: 'transport_unavailable', operation, endpoint: path }
-      )
-    }
-    throw error
-  } finally {
-    if (timeoutId != null) globalThis.clearTimeout(timeoutId)
-  }
-  if (!response.ok) throw await responseError(response, baseUrl, path, operation)
-  const revision = Number(response.headers.get('X-Flux-Purr-Revision'))
-  if (Number.isSafeInteger(revision) && revision >= 0) onRevision?.(revision)
-  try {
-    return (await response.json()) as T
-  } catch {
-    throw new ControlPlaneClientError(
-      '设备返回的数据格式无效。',
-      'lan_response_invalid',
-      false,
-      undefined,
-      {
-        category: 'response_invalid',
-        operation,
-        endpoint: path,
+  const read = async (signal?: AbortSignal): Promise<T> => {
+    if (signal) request.signal = signal
+    let response: Response
+    try {
+      response = await fetcher(`${baseUrl}${path}`, request as RequestInit)
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new ControlPlaneClientError(
+          operation === 'thermal_tuning_read'
+            ? '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
+            : 'LAN 设备暂时无响应，请稍后重试。',
+          'lan_transport_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation, endpoint: path }
+        )
       }
-    )
+      throw error
+    }
+    if (!response.ok) throw await responseError(response, baseUrl, path, operation)
+    try {
+      const payload = (await response.json()) as T
+      signal?.throwIfAborted()
+      if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Expected a JSON object')
+      }
+      const revision = Number(response.headers.get('X-Flux-Purr-Revision'))
+      if (Number.isSafeInteger(revision) && revision >= 0) onRevision?.(revision)
+      return payload
+    } catch {
+      throw new ControlPlaneClientError(
+        '设备返回的数据格式无效。',
+        'lan_response_invalid',
+        false,
+        undefined,
+        {
+          category: 'response_invalid',
+          operation,
+          endpoint: path,
+          status: response.status,
+        }
+      )
+    }
   }
+  return operation === 'thermal_tuning_read'
+    ? withReadDeadline(
+        5_000,
+        () =>
+          new ControlPlaneClientError(
+            '设备已连接，但固件热控调优读取超时，请稍后重试。',
+            'lan_transport_unavailable',
+            true,
+            undefined,
+            { category: 'transport_unavailable', operation, endpoint: path }
+          ),
+        read
+      )
+    : read()
 }
 
 function requireLanControlRevision(session: LanDeviceSession) {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   createPendingHeaterFeedback,
   deviceControlBlockReason,
+  deviceWriteBlockReason,
   HEATER_CONFIRMATION_TIMEOUT_MS,
   heaterConfirmationNowMs,
   lanLeaseAcquisitionRequest,
@@ -72,6 +73,14 @@ function makeDevice(overrides: Partial<DeviceTarget> = {}): DeviceTarget {
 }
 
 describe('pending heater confirmation', () => {
+  it('blocks ordinary writes during tuning without treating the target as disconnected', () => {
+    const device = makeDevice({ thermalTuningActive: true })
+    expect(deviceWriteBlockReason(device)).toBe('设备正在执行固件热控调优；仅允许读取和停止调优。')
+    expect(deviceControlBlockReason(device)).toBeNull()
+    expect(device.severity).toBe('nominal')
+    expect(deviceWriteBlockReason({ ...device, thermalTuningActive: false })).toBeNull()
+  })
+
   it('uses the timer timestamp after the confirmation deadline fires', () => {
     expect(heaterConfirmationNowMs(1_000, 0)).toBe(1_000)
     expect(heaterConfirmationNowMs(1_000, 3_500)).toBe(3_500)

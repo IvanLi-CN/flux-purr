@@ -61,6 +61,7 @@ export interface ControlPlaneStatus {
   selectedPresetSlot?: number
   presetsC?: Array<number | null>
   heaterEnabled: boolean
+  thermalTuningActive?: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
   postHeatCoolingMode?: PostHeatCoolingMode

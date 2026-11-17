@@ -1,3 +1,4 @@
+import { TUNING_WRITE_BLOCK_REASON } from './runtime-status'
 import type { DeviceTarget } from './types'
 
 export type WifiSettingsAccessMode = 'hidden' | 'read-only' | 'read-write'
@@ -19,12 +20,17 @@ export function resolveWifiSettingsAccess(
     | 'connectionAvailable'
     | 'networkState'
     | 'transportIssue'
+    | 'thermalTuningActive'
   >
 ): WifiSettingsAccess {
   const hasWifiCapability =
     device.capabilities.includes('wifi_config') || device.capabilities.includes('wifi_state_v2')
   if (!hasWifiCapability) {
     return { mode: 'hidden' }
+  }
+
+  if (device.thermalTuningActive) {
+    return { mode: 'read-only', reason: TUNING_WRITE_BLOCK_REASON }
   }
 
   if (device.transportIssue) {

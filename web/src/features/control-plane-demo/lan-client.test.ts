@@ -28,6 +28,60 @@ import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('LAN browser client', () => {
+  it.each([
+    'null',
+    '42',
+    '"status"',
+    '[]',
+  ])('rejects a successful tuning response that is not an object: %s', async (body) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body))
+    await expect(
+      authorizedLanRequest(
+        { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) },
+        'thermal-tuning',
+        'GET',
+        undefined,
+        undefined,
+        fetcher
+      )
+    ).rejects.toMatchObject({ category: 'response_invalid', retryable: false, status: 200 })
+  })
+
+  it.each(['headers', 'body'])('bounds the entire tuning GET stalled at %s', async (stage) => {
+    vi.useFakeTimers()
+    try {
+      const session = { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }
+      const response = new Response('{}')
+      vi.spyOn(response, 'json').mockImplementation(() => new Promise(() => {}))
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockImplementation(() =>
+          stage === 'headers' ? new Promise(() => {}) : Promise.resolve(response)
+        )
+      let outcome: unknown
+      void authorizedLanRequest(
+        session,
+        'thermal-tuning',
+        'GET',
+        undefined,
+        undefined,
+        fetcher
+      ).catch((error: unknown) => {
+        outcome = error
+      })
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(outcome).toMatchObject({
+        category: 'transport_unavailable',
+        retryable: true,
+        operation: 'thermal_tuning_read',
+      })
+      expect(fetcher).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('sends an authenticated safety stop without a revision preflight or write lease', async () => {
     const session = { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
@@ -843,6 +897,7 @@ describe('LAN browser client', () => {
           currentTempC: 25,
           targetTempC: 120,
           heaterEnabled: false,
+          thermalTuningActive: true,
           heaterOutputPercent: 0,
           activeCoolingEnabled: true,
           fanDisplayState: 'AUTO',
@@ -896,6 +951,7 @@ describe('LAN browser client', () => {
         },
       }
     )
+    expect(target.thermalTuningActive).toBe(true)
     expect(target.transport).toBe('wifi')
     expect(target.thermalProfileResolvedBank).toBe('pps3a')
     expect(target.thermalControl?.profileSource).toBe('default')

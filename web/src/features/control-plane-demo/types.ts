@@ -59,6 +59,7 @@ export interface DeviceTarget {
   calibration: CalibrationRuntimeState
   storedCalibration?: CalibrationState
   heaterEnabled: boolean
+  thermalTuningActive?: boolean
   heaterOutputPercent: number
   activeCoolingEnabled: boolean
   fanState: 'OFF' | 'AUTO' | 'RUN' | 'SAFE'
