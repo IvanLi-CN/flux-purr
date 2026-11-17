@@ -100,8 +100,9 @@
 
 - An authorized USB/devd lease MAY establish LAN authentication without user-entered pairing code.
 - Firmware MUST expose this operation only on the USB control channel and MUST persist or reuse the device bearer internally.
-- devd MUST bind the resulting credential to the verified USB `deviceId`, derive the `flux-purr-<deviceId>.local` locator from the verified identity, validate LAN identity/status before registering the bridge, and never serialize the bearer to Web callers or logs.
-- Web callers MUST receive only the authenticated devd bridge record and its verified mDNS locator.
+- devd MUST bind the resulting credential to the verified USB `deviceId`, retain the `flux-purr-<deviceId>.local` hostname from the verified identity, validate LAN identity/status before registering the bridge, and never serialize the bearer to Web callers or logs.
+- When USB reports a current private IPv4 address, devd SHOULD prefer that locator after anonymous `/health` identity verification; mDNS remains the discovery name and fallback locator. An address reporting another device MUST NOT receive the bearer. An authenticated identity probe MUST match the USB identity before the locator is persisted.
+- Web callers MUST receive only the authenticated devd bridge record and its verified locator, with the advertised mDNS hostname retained independently.
 
 ### REQ-LTR-012 Factory baseline and thermal-parameter start gate
 

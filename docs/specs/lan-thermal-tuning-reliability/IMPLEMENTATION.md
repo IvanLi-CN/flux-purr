@@ -137,6 +137,8 @@
 
 ## Remaining Gaps
 
+- USB 辅助认证保留设备公布的 mDNS 名称，优先对 USB 网络快照中的私有 IPv4 执行匿名 health 身份核验，再以 bearer 读取 HTTP identity，匹配 USB deviceId 后才保存 locator。真机测量中 `.local` 的 health/status 请求分别耗时约 5.05/5.14 秒，IP 请求约 0.04/0.17 秒；原 GET 6 秒预算可成功，POST 3 秒预算则超时，导致页面可读温度却无法开始。认证后经 Web HTTP 发起 `web-pps3a-9cc7d46b-ca12-4548-a987-6ceaed30772d` 已进入运行，完整调优结果仍待核验。匿名身份核验测试覆盖匹配、错设备和不发送 Authorization；devd 测试 584 项通过、4 项忽略，严格 Clippy 通过。
+
 - 固件 `1b09a174` 的完整功能镜像为 2,085,296 / 2,097,152B，ELF SHA-256 为 `fac873a463f9e3be37349468a27b6f6446508b714d72cfb153625cb964fef402`；授权烧录完成，HTTP identity 读回 `0.30.10-dev.1b09a17`。烧录按授权跳过 EEPROM 备份，未生成归档且健康状态未知。本地唯一 Web 页面经 devd LAN HTTP 发起 `web-pps3a-3263afdf-6cf1-4e63-96a5-9b63469544c7`，818.154 秒连续收取 sequence 0–2873 共 2,874 条事件。60°C trial 4 通过 scout，但独立 hold_confirm 未通过；trial 6 冷却期间 PD 服务以 available=true、discovering、无 fault/contract/ticket 状态触发 `pd_contract_lost`，整轮失败、heater off、未保存。随后 HTTP status 显示 PPS 12V/3A 已恢复，最后协议故障为 `pd_fusb_pending_request_timeout`，设备未重启。该结果证明这一轮 HTTP 追踪完整，不证明调优通过或请求超时原因已解决。
 - 调优恢复状态回归使用生产 `PowerState::from_observation` 构造真实重新发现快照；无故障的 Discovering 与既有可恢复故障使用相同的 30 秒有界等待，等待期间不授予加热许可、不记录资格样本。明确断开、服务不可用和超过恢复期限仍失败。
 - 固件 `9d2c68ab` 的完整功能镜像经 `just firmware-image-check` 确认为 2,085,392 / 2,097,152B，ELF SHA-256 为 `150cf79462ceab3a2cda8e42ddcbed2ea8e7d58f8dd1c52865cd2cb77aa053dc`。授权端口烧录完成，HTTP health 读回 `0.30.10-dev.9d2c68a`；跳过 EEPROM 备份且健康状态未知。本地唯一 Web 页面经 devd LAN HTTP 发起 `web-pps3a-4865b584-e567-45f4-8911-4901de6af48c`，1,743.395 秒连续收取 sequence 0–6197 共 6,198 条事件，未因 PD 合同恢复中断、未耗尽 HTTP 重试预算。60°C 十次试验均未通过接近时限；220°C 三次预热均以实际和请求全输出运行，但末温分别约 100.78°C、108.20°C、110.15°C，180 秒阶段超时。最终其余区间因无合格边界剪枝，整轮失败；HTTP status 确认 heaterEnabled=false、实际与请求输出均为零、固定 5V/1A，未保存。该证据不证明未出现的 PD 重新发现路径被实际覆盖，也不证明完整调优通过。

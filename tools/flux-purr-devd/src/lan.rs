@@ -267,7 +267,14 @@ pub async fn pair_device(request: LanPairRequest) -> Result<LanDeviceConfig, Lan
 }
 
 async fn public_info(base_url: &str) -> Result<LanPublicInfo, LanClientError> {
-    let summary = http_client()
+    public_info_with_client(base_url, http_client()).await
+}
+
+async fn public_info_with_client(
+    base_url: &str,
+    client: Client,
+) -> Result<LanPublicInfo, LanClientError> {
+    let summary = client
         .get(format!("{base_url}/health"))
         .send()
         .await?
@@ -285,6 +292,26 @@ async fn public_info(base_url: &str) -> Result<LanPublicInfo, LanClientError> {
         return Err(LanClientError::InvalidPublicInfo);
     }
     Ok(summary)
+}
+
+/// Verify a USB-provided locator anonymously before sending its device bearer.
+pub async fn verify_device_locator(
+    base_url: &str,
+    expected_device_id: &str,
+) -> Result<(), LanClientError> {
+    verify_device_locator_with_client(base_url, expected_device_id, http_client()).await
+}
+
+async fn verify_device_locator_with_client(
+    base_url: &str,
+    expected_device_id: &str,
+    client: Client,
+) -> Result<(), LanClientError> {
+    let summary = public_info_with_client(base_url, client).await?;
+    if summary.device_id != expected_device_id {
+        return Err(LanClientError::InvalidPublicInfo);
+    }
+    Ok(())
 }
 
 fn pairing_claim_body(mode: LanPairingMode, code: Option<String>) -> Result<Value, LanClientError> {
@@ -886,6 +913,40 @@ mod tests {
             devices[0].pairing_token.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
+    }
+
+    #[tokio::test]
+    async fn usb_locator_verification_is_anonymous_and_rejects_another_device() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/health",
+            get(|headers: axum::http::HeaderMap| async move {
+                assert!(!headers.contains_key("authorization"));
+                axum::Json(json!({
+                    "ok": true, "api": "v1", "deviceId": "001122334455",
+                    "hostname": "flux-purr-001122334455",
+                    "pairing": {"mode": "required", "active": false, "attemptsRemaining": 5}
+                }))
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("flux-purr-001122334455.local", address)
+            .build()
+            .unwrap();
+        let url = format!("http://flux-purr-001122334455.local:{}", address.port());
+        assert!(
+            verify_device_locator_with_client(&url, "001122334455", client.clone())
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            verify_device_locator_with_client(&url, "aabbccddeeff", client).await,
+            Err(LanClientError::InvalidPublicInfo)
+        ));
+        server.abort();
     }
 
     #[tokio::test]

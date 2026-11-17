@@ -222,21 +222,29 @@ pub(crate) async fn establish_lan_auth(
         last_ipv4: network.ip.as_ref().map(ToString::to_string),
         pairing_token: Some(token),
     };
-    // Prefer the advertised mDNS locator. Some host networks disable mDNS
-    // resolution; in that case the USB network snapshot is an authenticated
-    // fallback locator for this same verified identity.
-    if lan_bridge_read::<Identity>(&config_entry, "identity")
+    // Keep the advertised hostname for discovery, but prefer the current USB
+    // network locator after anonymous identity verification. Resolving .local
+    // can exceed the mutation deadline even when longer GETs still succeed.
+    if let Some(ip) = network.ip.as_ref().map(ToString::to_string) {
+        let candidate =
+            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(lan_bridge_error)?;
+        if lan::verify_device_locator(&candidate, &identity.device_id)
+            .await
+            .is_ok()
+        {
+            config_entry.base_url = candidate;
+        }
+    }
+    lan::verify_device_locator(&config_entry.base_url, &identity.device_id)
         .await
-        .is_err()
-        && let Some(ip) = network.ip.as_ref().map(ToString::to_string)
-    {
-        config_entry.base_url =
-            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(|_| {
-                HttpError::bad_request(
-                    "invalid_network_address",
-                    "The USB network snapshot did not contain a valid private address.",
-                )
-            })?;
+        .map_err(lan_bridge_error)?;
+    let verified_identity = lan_bridge_read::<Identity>(&config_entry, "identity").await?;
+    validate_lan_bridge_identity(&verified_identity)?;
+    if verified_identity.device_id != identity.device_id {
+        return Err(HttpError::bad_request(
+            "lan_identity_mismatch",
+            "The HTTP device does not match the USB device.",
+        ));
     }
     let mut config = read_user_config()
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
@@ -249,8 +257,6 @@ pub(crate) async fn establish_lan_auth(
         .into_iter()
         .find(|device| device.id == lan_id)
         .ok_or_else(|| HttpError::internal("LAN authentication registry update was not visible"))?;
-    let verified_identity = identity;
-    validate_lan_bridge_identity(&verified_identity)?;
     // The authenticated identity GET proves the bearer and locator. Reuse the
     // USB snapshots for network/status because older LAN envelopes may reject
     // the larger status payload even though the authenticated route is healthy.
