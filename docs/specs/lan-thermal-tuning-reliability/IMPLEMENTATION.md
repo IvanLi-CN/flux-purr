@@ -37,6 +37,11 @@
 
 - `calibrated_long_delay_plant_handoff_handles_sparse_measurements` 将该设备读到的 4,500ms 延迟、211.08168mW/°C 对流系数与 30,753.619mJ/°C 热容用于匹配的理想闭环模型，分别检验 28W、35W、65W 恒定可用功率与 500ms 有效采样间隔。在由模型计算的刹车起点下，控制器可在原有 10s 接近门槛内进入 Hold，峰值不越过原有 3°C 上限。该测试不回放真机的电压变化、采样噪声和候选搜索，也不证明工厂起点或整轮调优通过；它不能替代失败轨迹的可复现诊断。
 
+## 纯延迟制动闭环回归
+
+- `factory_candidate_search_qualifies_a_calibrated_long_delay_plant` 将生产控制器与固件调优域状态机闭环连接，以该设备的4,500ms纯延迟投影、28W/35W/65W恒定功率和60°C单目标验证无文件候选搜索；28W另施加每250ms交替的±0.75°C已接纳测温扰动。保留旧斜率制动时该扰动场景连续十次试验耗尽接近时限，未接受目标；改为既有供热历史预测后完成scout及独立确认。测试保持原时限、真实全输出预热、物理Hold入口及3°C热指标，并断言不确认保存。冷却损失乘三是主动风扇场景假设，不是设备拟合结果；测温扰动不经过真实ADC/PPS守卫，不能冒充原始轨迹回放、跨目标或HTTP实机验收。±1°C扰动的探索仍未完成搜索资格，当前实机完整八目标调优仍未通过。
+- `delayed_forecast_retains_heat_from_a_stronger_previous_pps_contract` 验证60W历史供热在未来能力降至20W后仍按原热量预测：原实现将预测63°C错误压成约61°C，修正后保留63°C；该测试只证明在途能量不被降档抹除，不提高未来请求上限或放宽保护。
+
 ## Implementation Coverage
 
 - `REQ-LTR-001`: `web/src/features/control-plane-demo/lan-client.ts` 已能依据稳定 `deviceId` 合并 LAN 目标并更新地址；`storeLanDeviceSession` 按身份键保存并兼容旧地址记录；`resumeLanDeviceSession` 在匿名 health 身份匹配后复用凭据并迁移 locator，身份不符不发送 bearer。

@@ -423,6 +423,24 @@ fn held_temperature_forecast_also_accounts_for_unpowered_cooling() {
 }
 
 #[test]
+fn delayed_forecast_retains_heat_from_a_stronger_previous_pps_contract() {
+    let mut plant = plant(1_000);
+    plant.model.convection_mw_per_c = 0.0;
+    let mut history = AppliedHeatHistory::new();
+    history.configure(1_000);
+    history.observe(0, 60_000.0);
+    history.observe(1_000, 0.0);
+    let before_reduction = history.forecast(1_000, 60.0, 0.0, plant);
+    plant.max_power_mw = 20_000.0;
+    let after_reduction = history.forecast(1_000, 60.0, 0.0, plant);
+    assert!(
+        (before_reduction.temperature_c - after_reduction.temperature_c).abs() < 0.001,
+        "a new command limit cannot erase previously applied heat: {before_reduction:?} / {after_reduction:?}"
+    );
+    assert!((after_reduction.temperature_c - 63.0).abs() < 0.001);
+}
+
+#[test]
 fn forecast_keeps_old_full_power_then_expires_it_at_the_real_delay() {
     let mut history = AppliedHeatHistory::new();
     let plant = plant(700);

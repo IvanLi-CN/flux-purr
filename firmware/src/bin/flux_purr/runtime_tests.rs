@@ -3,6 +3,9 @@ use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
 include!("calibration_cutoff_fixture.rs");
 
+#[path = "thermal_tuning_plant_tests.rs"]
+mod tuning_plant;
+
 #[test]
 fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
     struct Pwm {

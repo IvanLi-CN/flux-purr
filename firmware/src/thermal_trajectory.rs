@@ -644,13 +644,15 @@ impl AppliedHeatHistory {
             let end_ms = ((at_ms / self.width_ms + 1) * self.width_ms).min(now_ms);
             let arrival_ms = at_ms.saturating_add(delay_ms);
             let power_mw = self.power_at(at_ms).map_or(inferred_mw, |power_mw| {
+                // A weaker new PPS limit constrains future commands, not
+                // energy already applied under a stronger confirmed contract.
                 (power_mw
                     + self.residual_at(
                         arrival_ms.min(now_ms),
                         arrival_ms.saturating_sub(now_ms),
                         plant,
                     ))
-                .clamp(0.0, plant.max_power_mw)
+                .clamp(0.0, power_mw.max(plant.max_power_mw))
             });
             temperature_c +=
                 plant.rise(temperature_c, power_mw) * (end_ms - at_ms) as f32 / 1_000.0;
@@ -667,7 +669,7 @@ impl AppliedHeatHistory {
                 temperature_c,
                 self.power_at(now_ms).map_or(inferred_mw, |power_mw| {
                     (power_mw + self.residual_at(now_ms, delay_ms, plant))
-                        .clamp(0.0, plant.max_power_mw)
+                        .clamp(0.0, power_mw.max(plant.max_power_mw))
                 }),
             ),
         }

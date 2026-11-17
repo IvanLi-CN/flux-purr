@@ -1850,6 +1850,12 @@ impl HeaterController {
         let delayed_heat_rate = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0);
         let model_brake =
             (delayed_heat_rate + future_rate.or(rate).unwrap_or(0.0)).max(0.0) * delay_s;
+        // Use the same arriving-energy forecast as Approach. A noisy positive
+        // derivative alone must not invent several seconds of extra full heat
+        // and prematurely end Warmup; recorded stronger PPS heat still counts.
+        let model_brake = self
+            .applied_heat_brake(measured_temp_c, slope_c_per_s)
+            .unwrap_or(model_brake);
         // Keep live environmental prediction, but apply the candidate's braking
         // correction relative to a calibration-only full-power reference. An
         // uncorrected model maximum would mask every lower-distance proposal.
@@ -1873,6 +1879,25 @@ impl HeaterController {
             corrected_model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c),
         );
         (rate, delay_s, feedforward, brake)
+    }
+
+    fn applied_heat_brake(&self, measured_c: f32, slope_c_per_s: f32) -> Option<f32> {
+        let input = self.natural_cooling_input?;
+        if !input.max_power_mw.is_finite() || input.max_power_mw <= 0.0 {
+            return None;
+        }
+        let predicted = self.applied_heat.forecast_from_measurement(
+            input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
+            measured_c,
+            slope_c_per_s,
+            flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                model: input.model,
+                ambient_c: input.ambient_temp_c,
+                max_power_mw: input.max_power_mw,
+            },
+        );
+        Some((predicted.temperature_c - measured_c).max(0.0))
     }
 
     fn full_response_brake(
