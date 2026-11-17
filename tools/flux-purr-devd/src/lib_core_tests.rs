@@ -4400,6 +4400,80 @@ fn lan_bridge_error_preserves_remote_conflict_status_and_code() {
     assert!(!error.error.retryable);
 }
 
+#[tokio::test]
+async fn lan_transport_failure_reports_safe_cause_without_request_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let failure = reqwest::Client::new()
+        .get(format!(
+            "http://{addr}/api/v1/status?token=private-query-value"
+        ))
+        .bearer_auth("private-bearer-value")
+        .send()
+        .await
+        .unwrap_err();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "transport_unavailable");
+    assert!(error.error.retryable);
+    assert_eq!(
+        error.error.details.as_ref().unwrap()["transportKind"],
+        "connect"
+    );
+    assert_eq!(
+        error.error.details.as_ref().unwrap()["ioKind"],
+        "ConnectionRefused"
+    );
+    let encoded = serde_json::to_string(&error.error).unwrap();
+    assert!(!encoded.contains("private-query-value"));
+    assert!(!encoded.contains("private-bearer-value"));
+    assert!(!encoded.contains("http://"));
+}
+
+#[tokio::test]
+async fn lan_response_decode_failure_is_not_a_retryable_connection_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route("/status", axum::routing::get(|| async { "invalid-json" }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let failure = reqwest::get(format!("http://{addr}/status"))
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap_err();
+    server.abort();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "response_invalid");
+    assert!(!error.error.retryable);
+    assert_eq!(error.error.details.unwrap()["transportKind"], "decode");
+}
+
+#[tokio::test]
+async fn lan_timeout_reports_typed_retryable_cause() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/status",
+        axum::routing::get(|| async {
+            std::future::pending::<()>().await;
+            "unreachable"
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let failure = reqwest::Client::new()
+        .get(format!("http://{addr}/status"))
+        .timeout(Duration::from_millis(25))
+        .send()
+        .await
+        .unwrap_err();
+    server.abort();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "transport_unavailable");
+    assert!(error.error.retryable);
+    assert_eq!(error.error.details.unwrap()["transportKind"], "timeout");
+}
+
 #[test]
 fn lan_bridge_error_preserves_remote_unauthorized_status_and_code() {
     let error = lan_bridge_error(lan::LanClientError::RemoteApi {

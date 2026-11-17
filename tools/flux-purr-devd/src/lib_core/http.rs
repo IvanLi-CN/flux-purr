@@ -416,14 +416,63 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
             &message,
             retryable,
         ),
-        lan::LanClientError::Request(error) => HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "transport_unavailable",
-            &format!("LAN request failed: {error}"),
-            true,
-        ),
+        lan::LanClientError::Request(error) => lan_transport_error(error),
         error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
     }
+}
+
+fn lan_transport_error(error: reqwest::Error) -> HttpError {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_body() {
+        "body"
+    } else {
+        "request"
+    };
+    // Error Display/source strings can embed request URLs and credentials.
+    // Only export typed causes and OS codes, never the original chain text.
+    let mut cause = std::error::Error::source(&error);
+    let mut io_cause = None;
+    for _ in 0..8 {
+        let Some(current) = cause else { break };
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            io_cause = Some(io);
+            break;
+        }
+        cause = current.source();
+    }
+    let message = match io_cause.map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::ConnectionRefused) => "设备 HTTP 连接被拒绝，请重试读取。",
+        Some(std::io::ErrorKind::ConnectionReset) => "设备 HTTP 连接被重置，请重试读取。",
+        Some(std::io::ErrorKind::ConnectionAborted) => "设备 HTTP 连接中断，请重试读取。",
+        _ => match kind {
+            "timeout" => "设备 HTTP 请求超时，请重试读取。",
+            "connect" => "设备 HTTP 连接未能建立，请重试读取。",
+            "decode" => "设备 HTTP 响应格式无效。",
+            "body" => "设备 HTTP 响应未完整读取，请重试读取。",
+            _ => "设备 HTTP 请求未能完成，请重试读取。",
+        },
+    };
+    let mut result = HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        if kind == "decode" {
+            "response_invalid"
+        } else {
+            "transport_unavailable"
+        },
+        message,
+        kind != "decode",
+    );
+    result.error.details = Some(json!({
+        "transportKind": kind,
+        "ioKind": io_cause.map(|io| format!("{:?}", io.kind())),
+        "osCode": io_cause.and_then(std::io::Error::raw_os_error),
+    }));
+    result
 }
 
 pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
