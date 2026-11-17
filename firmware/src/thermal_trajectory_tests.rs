@@ -708,3 +708,15 @@ fn reference_converges_and_every_rate_has_feasible_positive_power() {
         assert!(trajectory.reference.rise_c_per_s.abs() < 0.01);
     }
 }
+
+#[test]
+fn observed_projection_deficit_cannot_outlive_its_measurement_horizon() {
+    let plant = plant(700);
+    let mut history = AppliedHeatHistory::new();
+    history.transfer.residual = Some((1_000, -5_000.0));
+    assert_eq!(history.residual_at(1_000, 700, plant), -5_000.0);
+    assert_eq!(history.residual_at(1_600, 800, plant), -5_000.0);
+    assert_eq!(history.residual_at(1_600, 801, plant), 0.0);
+    assert_eq!(history.residual_at(2_401, 0, plant), 0.0);
+    assert_eq!(history.residual_at(999, 0, plant), 0.0);
+}

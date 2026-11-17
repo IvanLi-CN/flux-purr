@@ -636,6 +636,17 @@ impl AppliedHeatHistory {
         if now_ms < observed_ms || age_ms > horizon_ms * 2 {
             return 0.0;
         }
+        if residual_mw < 0.0 {
+            // A fresh measured heat deficit can be a continuing extra loss,
+            // not stored heat that vanishes before the next command arrives.
+            // Keep it over the existing two-delay observation horizon only;
+            // neither future prediction nor a blind interval renews evidence.
+            return if age_ms.saturating_add(future_ms) <= horizon_ms * 2 {
+                residual_mw
+            } else {
+                0.0
+            };
+        }
         // A bounded two-delay decay expresses model uncertainty, not a newly
         // fitted thermal constant. No persistent or cross-run learned state.
         let decay = 1.0 + (age_ms + future_ms) as f32 / (horizon_ms * 2) as f32;

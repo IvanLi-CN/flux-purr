@@ -167,6 +167,37 @@ fn factory_candidate_search_qualifies_the_recorded_high_temperature_projection()
 }
 
 #[test]
+fn high_temperature_search_handles_an_observed_extra_cooling_load() {
+    let mut replay = PlantReplay::with_target(68_250.0, 220);
+    replay.plate_c = 199.9;
+    replay.input.measured_temp_c = replay.plate_c;
+    replay.input.ambient_temp_c = 25.5;
+    replay.actual_ambient_c = 25.5;
+    replay.extra_cooling_mw = 18_000.0;
+    replay.input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+        convection_mw_per_c: 228.28497,
+        radiation_mw_per_k4: 0.0,
+        thermal_capacity_mj_per_c: 29_687.969,
+        transport_delay_ms: 3_100,
+    };
+    for now_ms in (0..=tuning::THERMAL_TUNING_TARGET_BUDGET_MS + 180_000).step_by(50) {
+        replay.step(now_ms);
+        if !replay.tuning.armed {
+            break;
+        }
+    }
+    assert_eq!(
+        replay.tuning.accepted_target_mask,
+        1 << 7,
+        "terminal={:?}, trials={}, decisions={:?}",
+        replay.tuning.terminal_disposition,
+        replay.tuning.trial_index,
+        replay.decisions
+    );
+    assert_eq!(replay.tuning.failed_target_mask, 0);
+}
+
+#[test]
 fn projection_only_hold_supplies_its_modelled_passive_loss() {
     let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps3a);
     let mut profile = production_test_profile(1_000);
@@ -211,6 +242,7 @@ struct PlantReplay {
     input: ThermalPlantRuntimeInput,
     plate_c: f32,
     actual_ambient_c: f32,
+    extra_cooling_mw: f32,
     noise_c: f32,
     peak_c: f32,
     delayed_power: std::collections::VecDeque<(u64, f32)>,
@@ -253,6 +285,7 @@ impl PlantReplay {
             controller: HeaterController::new(),
             plate_c: input.measured_temp_c,
             actual_ambient_c: input.ambient_temp_c,
+            extra_cooling_mw: 0.0,
             noise_c: 0.0,
             peak_c: input.measured_temp_c,
             input,
@@ -278,6 +311,12 @@ impl PlantReplay {
         } else {
             1.0
         };
+        let loss = loss
+            + if self.tuning.phase == tuning::ThermalTuningPhase::Cooldown {
+                0.0
+            } else {
+                self.extra_cooling_mw
+            };
         self.plate_c +=
             (self.delayed_power[0].1 - loss) / self.input.model.thermal_capacity_mj_per_c * 0.05;
         // Deterministic accepted-sample disturbance, not an ADC/guard replay.
