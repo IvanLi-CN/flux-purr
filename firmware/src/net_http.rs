@@ -22,9 +22,10 @@ pub const HTTP_SERVICE_TXT: [&str; 3] = ["api=v1", "path=/api/v1", "pairing=fron
 /// Each fixed worker owns a socket and independently listens for connections.
 /// Snapshot-backed reads do not allocate a full request workspace. Two reader
 /// slots keep status/event traffic independent from a control request, while
-/// the control mailbox serializes mutations.
+/// the control mailbox serializes mutations. One extra listener covers
+/// connection teardown overlap without allocating another request workspace.
 pub const fn http_socket_slot_count(active_request_budget: usize) -> usize {
-    active_request_budget.saturating_add(2)
+    active_request_budget.saturating_add(3)
 }
 
 /// Request workspaces carry the bounded request and response bodies. They are
@@ -1031,8 +1032,8 @@ mod tests {
     }
 
     #[test]
-    fn http_socket_budget_supports_two_reads_with_one_mutation_workspace() {
-        assert_eq!(http_socket_slot_count(1), 3);
+    fn http_socket_budget_reserves_a_listener_beyond_two_reads_and_one_write() {
+        assert_eq!(http_socket_slot_count(1), 4);
         assert_eq!(http_workspace_slot_count(1), 1);
     }
 

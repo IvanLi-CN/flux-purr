@@ -53,9 +53,9 @@ pub type SharedI2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 use serde::Serialize;
 use static_cell::StaticCell;
 
-// Three sockets at 1 KiB per direction keep the event stream, status
-// snapshots, and one short-lived probe independent while preserving the
-// existing static-memory budget. The control mailbox serializes mutations.
+// Three request slots plus a spare listener absorb short connection-teardown
+// overlap without allocating another full request workspace. Buffers stay at
+// 1 KiB per direction; the control mailbox still serializes mutations.
 const HTTP_TCP_BUFFER_LEN: usize = 1024;
 const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
 const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
@@ -114,9 +114,11 @@ static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
 static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_RX_3: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_TX_3: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_WORKSPACE_COUNT> =
     Channel::new();
 
@@ -606,6 +608,11 @@ where
             stack,
             HTTP_RX_2.init([0; HTTP_TCP_BUFFER_LEN]),
             HTTP_TX_2.init([0; HTTP_TCP_BUFFER_LEN]),
+        ),
+        TcpSocket::new(
+            stack,
+            HTTP_RX_3.init([0; HTTP_TCP_BUFFER_LEN]),
+            HTTP_TX_3.init([0; HTTP_TCP_BUFFER_LEN]),
         ),
     ];
     for mut socket in sockets {
@@ -1127,7 +1134,7 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
 // hands established sockets to workers leaves only one socket in LISTEN: two
 // SYNs processed in the same network poll then reject the second connection,
 // even when the other workers and buffers are idle.
-#[embassy_executor::task(pool_size = 3)]
+#[embassy_executor::task(pool_size = 4)]
 async fn http_connection_task(stack: Stack<'static>, socket: HttpSocket) {
     let mut socket = socket.0;
     loop {

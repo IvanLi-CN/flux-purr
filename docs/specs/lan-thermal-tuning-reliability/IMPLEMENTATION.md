@@ -16,6 +16,8 @@
 - 镜像 `d037989c` 的并发公开 health 回归使用 `just lan-http-read-check http://192.168.31.207 d0cf1308a148 30 3`，30 次请求中 10 次成功、20 次连接拒绝；五组三并发探针均只有一个成功，单并发五次全部成功。故障位于单 acceptor 的 TCP 接入窗口，不能归因于配对或调优 capability。该路径依赖 Embassy 网络调度和设备 TCP 栈，host 路由单测不能替代匹配镜像的相同并发探针。
 - Web 经 devd LAN HTTP 启动 `web-pps3a-3b40a1bb-99f4-41f5-a8fe-29775e331893` 返回 200，设备进入调优。临时诊断确认租约申请、写入和释放均返回 200，历史 `lease_busy` 未复现，原因仍未确定；诊断日志代码已移除。活动期间，另一已认证 HTTP 客户端持有自己的有效租约并提交保持原目标温度的 runtime 写入，返回 `409 thermal_tuning_active`，随后租约释放成功。Web 主动停止后，设备为 `canceled / armed=false`，sequence 0–1792 完整、无 gap；这是协议定向验收，不是整轮调优通过。
 
+- 单 acceptor 改为三个独立监听 worker 后，90 次三并发读取仍出现 2–3 次拒绝，停止 devd 或把批间隔从 50ms 改到 200ms 都未消除。四个 worker 保留三个请求槽和一个收尾重叠备用槽后，隔离三并发 100/100 成功；Web 正常 HTTP 调优、状态轮询并行时，额外公开 health 读取 100/100 成功。该实验镜像基于 `da5ba372` 加备用槽改动，ELF SHA-256 `1406be6156f111a52137a3431d576c47bafa7ffaddc7d348c73c8263d69f5f8a`，镜像 2,084,368 / 2,097,152B，LAN 栈余量 37,284B、嵌套 PD 余量 84,884B。烧录完成且跳过 EEPROM 备份，EEPROM 健康状态未知。Web 无文件 HTTP 启动 `web-pps3a-2ab03b5e-0a74-4bfb-9eac-d852d51139d8`，进入 warmup/approach、事件持续推进且无 gap；完整调优结果仍未通过。
+
 ## Implementation Coverage
 
 - `REQ-LTR-001`: `web/src/features/control-plane-demo/lan-client.ts` 已能依据稳定 `deviceId` 合并 LAN 目标并更新地址；`storeLanDeviceSession` 按身份键保存并兼容旧地址记录；`resumeLanDeviceSession` 在匿名 health 身份匹配后复用凭据并迁移 locator，身份不符不发送 bearer。
@@ -33,7 +35,7 @@
 - 已确认的 PPS 合同可能领先后端缓存的请求值；重同步是否关断须依据实时安全电压上限，不能把低于当前合同的目标请求值当成安全上限。模式变化和实际越界仍关断；同一安全范围内的重同步保持物理输出。
 - devd 活动会话和调优请求绑定页面选中的具体 bridge 目标，不得在显示 LAN 时借用同设备 USB 目标的租约。调优 GET 在 Web、devd USB 和 devd LAN 间透传 `run_id` 与完整宽度 `after_sequence`，包括零值；缺少游标会重复返回旧页、无法确认已收事件，最终耗尽设备事件缓冲并使运行失败。
 - 固件事件确认保持单调且幂等：较新请求已确认并回收事件后，较旧请求重复已确认游标不会制造全局追踪缺口；未交付事件的未来确认仍被拒绝。Web 只因自身的记录失败或缺口自动停止本页发起的运行，观察者仍可手动安全停止。
-- HTTP socket 由三个固定 worker 独立监听、处理和复用；不得只由单个 acceptor 接入后再移交，否则同一网络轮询中的并发 SYN 会在其他缓冲空闲时仍被拒绝。回收必须结束连接两端后再重新监听。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id> [requests] [concurrency]`，不携带凭据、不跟随重定向，身份不符立即停止。
+- HTTP socket 由四个固定 worker 独立监听、处理和复用（三个请求槽和一个收尾重叠备用槽）；不得只由单个 acceptor 接入后再移交，否则同一网络轮询中的并发 SYN 会在其他缓冲空闲时仍被拒绝。回收必须结束连接两端后再重新监听。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id> [requests] [concurrency]`，不携带凭据、不跟随重定向，身份不符立即停止。
 - devd 对同一规范化 HTTP origin 的已认证请求共享两个在途槽，其余请求公平等待，等待超过 3 秒返回可重试的 `503 server_retryable`。这是请求调度预算，不限制客户端数量或取得控制权；不同 origin 使用独立预算。写入前用于读取 revision 的 status 响应必须完整收取，再发送写入，避免丢弃正文占用设备连接。八个并发 HTTP 读取的回归测试在限流前超过两个在途请求，限流后通过。
 - `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份控制器起点 profile；无上传候选时可以解析匹配起点，并保留独立安全门禁。输出模型、热模型初值、安全边界与工厂数据来源的完整性审计尚未完成，不能将控制器 profile 等同于完整工厂基线验收。
 - `REQ-LTR-013`: 启动时设备候选优先、缺省时工厂基线兜底；候选仍保持 RAM 预览并按功率档位保存。
