@@ -14698,7 +14698,60 @@ fn automatic_heater_pps_request_ramps_large_voltage_changes() {
 }
 
 #[test]
-fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
+fn warmup_quantized_ceiling_noise_does_not_blank_the_confirmed_gate() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let mut current_mv = 5_500;
+    // Replay the 10.0V -> 9.9V ceiling boundary from the HTTP trace. The
+    // working point must remain inside both envelopes without cycling PWM.
+    for ceiling_mv in [10_000, 9_900, 10_000, 10_100, 10_000, 10_100] {
+        let active = ConfirmedActiveContract::from_private_contract(
+            source
+                .select_exact_contract(PdContractRequest::automatic_pps(current_mv, 3_000).unwrap())
+                .unwrap(),
+            source,
+        );
+        let next_mv = automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            current_mv,
+            ceiling_mv,
+            5_500,
+            ceiling_mv,
+        );
+        assert!(next_mv <= ceiling_mv);
+        assert!(
+            !automatic_pps_reconciliation_requires_pause(active, next_mv),
+            "safe Warmup transition {current_mv} -> {next_mv} under {ceiling_mv} must not blank"
+        );
+        current_mv = next_mv;
+    }
+}
+
+#[test]
+fn warmup_ceiling_headroom_never_retains_an_unsafe_contract_or_drops_below_floor() {
+    assert_eq!(
+        automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            10_000,
+            9_800,
+            5_500,
+            9_800,
+        ),
+        9_700
+    );
+    assert_eq!(
+        automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            5_500,
+            5_500,
+            5_500,
+            5_500,
+        ),
+        5_500
+    );
+}
+
+#[test]
+fn automatic_heater_warmup_requests_a_guarded_ceiling_without_slow_stepping() {
     assert_eq!(
         automatic_heater_request_mv_for_phase(
             HeaterControlPhase::Warmup,
@@ -14707,7 +14760,7 @@ fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
             5_500,
             21_000,
         ),
-        21_000,
+        20_900,
     );
     assert_eq!(
         automatic_heater_request_mv_for_phase(

@@ -439,10 +439,21 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
     let ceiling_mv = ceiling_mv.max(floor_mv).min(HEATER_ADJUSTABLE_MAX_MV);
     let desired_mv = desired_mv.clamp(floor_mv, ceiling_mv);
     if phase == HeaterControlPhase::Warmup {
-        // PPS warm-up is the full-conduction measurement path. Request the
-        // calibrated ceiling directly; stepping between adjacent voltages
-        // would create needless contract churn and blank the heater.
-        desired_mv
+        // The safe ceiling is quantized in 100mV units. Keep one quantum
+        // below it so a boundary crossing from RTD noise does not repeatedly
+        // make the already-confirmed contract unsafe. This is voltage
+        // headroom, not a PWM ramp or permission to exceed the live ceiling.
+        const CEILING_HEADROOM_MV: u16 = 100;
+        let working_ceiling_mv = ceiling_mv.saturating_sub(CEILING_HEADROOM_MV).max(floor_mv);
+        let desired_mv = desired_mv.min(working_ceiling_mv);
+        if (floor_mv..=ceiling_mv).contains(&current_mv)
+            && current_mv >= desired_mv
+            && current_mv.saturating_sub(desired_mv) <= CEILING_HEADROOM_MV
+        {
+            current_mv
+        } else {
+            desired_mv
+        }
     } else if current_mv <= ceiling_mv && desired_mv < current_mv {
         // Once automatic heating has a safe confirmed PPS contract, lower
         // power belongs in PWM. Dropping the contract for every Approach/Hold
