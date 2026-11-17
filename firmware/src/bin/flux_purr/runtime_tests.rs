@@ -13293,6 +13293,28 @@ fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
 }
 
 #[test]
+fn calibrated_long_delay_plant_handoff_handles_sparse_measurements() {
+    // Projection read from the device used by HTTP run 528fcd41, exercised
+    // with a matching ideal plant and representative constant power levels.
+    // This isolates delay and sampling, not the complete hardware trace or
+    // the factory profile's subsequent candidate-search lifecycle.
+    for max_power_mw in [28_000.0, 35_000.0, 65_000.0] {
+        assert_trajectory_plant_handoff_with_measurement_interval(
+            ThermalProfileBank::Pps3a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 211.08168,
+                radiation_mw_per_k4: 0.0,
+                thermal_capacity_mj_per_c: 30_753.62,
+                transport_delay_ms: 4_500,
+            },
+            max_power_mw,
+            60,
+            500,
+        );
+    }
+}
+
+#[test]
 fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() {
     for (bank, model, max_power_mw) in [
         (
@@ -13494,6 +13516,22 @@ fn assert_trajectory_plant_handoff(
     max_power_mw: f32,
     target: i16,
 ) {
+    assert_trajectory_plant_handoff_with_measurement_interval(
+        bank,
+        model,
+        max_power_mw,
+        target,
+        50,
+    );
+}
+
+fn assert_trajectory_plant_handoff_with_measurement_interval(
+    bank: ThermalProfileBank,
+    model: flux_purr_firmware::memory::ThermalPlantProjection,
+    max_power_mw: f32,
+    target: i16,
+    measurement_interval_ms: u64,
+) {
     let kind = ProductionThermalController::Profile(bank);
     let mut controller = HeaterController::new();
     let mut profile = production_test_profile(1_000);
@@ -13519,18 +13557,20 @@ fn assert_trajectory_plant_handoff(
     let mut entered_hold = false;
     let mut approach_at = 0;
     let mut handoff_ms = 0;
-    let mut peak = input.measured_temp_c;
+    let mut plate_temp_c = input.measured_temp_c;
+    let mut peak = plate_temp_c;
     for now_ms in (0_u64..=100_000).step_by(50) {
         let source_at = now_ms.saturating_sub(u64::from(model.transport_delay_ms));
         while delayed.len() > 1 && delayed[1].0 <= source_at {
             delayed.pop_front();
         }
-        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
-            model,
-            input.measured_temp_c,
-            30.0,
-        );
-        input.measured_temp_c += (delayed[0].1 - loss) / model.thermal_capacity_mj_per_c * 0.05;
+        let loss =
+            flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(model, plate_temp_c, 30.0);
+        plate_temp_c += (delayed[0].1 - loss) / model.thermal_capacity_mj_per_c * 0.05;
+        input.measurement_accepted = now_ms % measurement_interval_ms == 0;
+        if input.measurement_accepted {
+            input.measured_temp_c = plate_temp_c;
+        }
         input.now_ms = now_ms;
         let output = controller
             .update_production_at(kind, input, Some(profile))
@@ -13559,7 +13599,7 @@ fn assert_trajectory_plant_handoff(
             applied = power;
         }
         controller.applied_heat.observe(now_ms, power);
-        peak = peak.max(input.measured_temp_c);
+        peak = peak.max(plate_temp_c);
     }
     assert!(
         entered_hold,

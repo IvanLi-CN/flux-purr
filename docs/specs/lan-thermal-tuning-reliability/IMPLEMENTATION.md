@@ -35,6 +35,8 @@
 
 - 本地 Web 经 devd `5b317a23` 的 LAN HTTP 运行 `web-pps3a-528fcd41-105f-4a5a-a719-193f2457c4ae` 持续超过 22 分钟，页面记录 sequence 0–4655 共 4,656 个连续事件。一次超时提示后自动读取恢复，恢复后 retry count 为 0，没有形成事件缺口；这不能证明所有超时已消除。事件 4074 / 1,200,105ms 为 `target_budget_exhausted_during_cooldown`，60°C 未通过便推进到 220°C，因此完整调优仍不通过。通过同一 Web 的停止按钮结束为 `canceled / armed=false`，trace complete=true、gap=false，digest `30f27806fdc6c9786a1c7969853432f7a1fb00a53ddc20e1b904debdb897bc7b`，未确认保存。随后真实设备 HTTP status 返回 200，heaterEnabled=false、heaterOutputPercent=0、network.state=connected。必须继续针对这份完整轨迹诊断候选搜索，不得把 HTTP 可持续读取当作调优通过。
 
+- `calibrated_long_delay_plant_handoff_handles_sparse_measurements` 将该设备读到的 4,500ms 延迟、211.08168mW/°C 对流系数与 30,753.619mJ/°C 热容用于匹配的理想闭环模型，分别检验 28W、35W、65W 恒定可用功率与 500ms 有效采样间隔。在由模型计算的刹车起点下，控制器可在原有 10s 接近门槛内进入 Hold，峰值不越过原有 3°C 上限。该测试不回放真机的电压变化、采样噪声和候选搜索，也不证明工厂起点或整轮调优通过；它不能替代失败轨迹的可复现诊断。
+
 ## Implementation Coverage
 
 - `REQ-LTR-001`: `web/src/features/control-plane-demo/lan-client.ts` 已能依据稳定 `deviceId` 合并 LAN 目标并更新地址；`storeLanDeviceSession` 按身份键保存并兼容旧地址记录；`resumeLanDeviceSession` 在匿名 health 身份匹配后复用凭据并迁移 locator，身份不符不发送 bearer。
