@@ -2144,6 +2144,63 @@ pub enum UsbFrame {
     },
 }
 
+impl UsbFrame {
+    /// Identify client mutations forbidden while firmware tuning owns the
+    /// runtime. Both LAN and USB dispatch consume this same decoded frame.
+    /// Unknown request operations default to denied; reads and safety stop
+    /// are the only exceptions, independent of which client owns a lease.
+    pub fn tuning_blocked_write_id(&self) -> Option<&String<REQUEST_ID_MAX_LEN>> {
+        match self {
+            Self::Request { request_id, op } => (!matches!(
+                op,
+                UsbRequestOp::GetIdentity
+                    | UsbRequestOp::GetInstallStatus
+                    | UsbRequestOp::GetNetwork
+                    | UsbRequestOp::GetStatus
+                    | UsbRequestOp::GetThermalStatus
+                    | UsbRequestOp::GetLanPairingCode
+                    | UsbRequestOp::GetCalibration
+                    | UsbRequestOp::GetCalibrationJob
+                    | UsbRequestOp::GetHeaterCurve
+                    | UsbRequestOp::GetThermalTuning
+                    | UsbRequestOp::GetFlashPreparation
+            ))
+            .then_some(request_id),
+            Self::ThermalTuning {
+                request_id,
+                command,
+            } => (!matches!(
+                command.op,
+                ThermalTuningCommandOp::Read | ThermalTuningCommandOp::Cancel
+            ))
+            .then_some(request_id),
+            Self::EepromMaintenance {
+                request_id,
+                command,
+            } => (command.op != EepromMaintenanceOp::Read).then_some(request_id),
+            Self::WifiConfig { request_id, .. }
+            | Self::RuntimeConfig { request_id, .. }
+            | Self::CalibrationConfig { request_id, .. }
+            | Self::CalibrationJob { request_id, .. }
+            | Self::HeaterCurveConfig { request_id, .. }
+            | Self::HeaterCurveSave { request_id } => Some(request_id),
+            #[cfg(feature = "buzzer-test")]
+            Self::BuzzerTest {
+                request_id,
+                command,
+            } => (command.op != BuzzerTestOp::Status).then_some(request_id),
+            Self::ThermalPlantRun { .. }
+            | Self::Hello { .. }
+            | Self::Response { .. }
+            | Self::Status { .. }
+            | Self::Log { .. }
+            | Self::Error { .. } => None,
+            #[cfg(feature = "buzzer-test")]
+            Self::BuzzerTestResponse { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UsbFrameWire {
@@ -5207,6 +5264,58 @@ mod tests {
             serde_json::from_str::<ThermalPlantRunAttemptWire>(&encoded).unwrap(),
             attempt
         );
+    }
+
+    #[test]
+    fn active_tuning_write_policy_is_shared_by_decoded_usb_and_lan_frames() {
+        let writes = [
+            r#"{"type":"runtime_config","requestId":"other-client","targetTempC":140}"#,
+            r#"{"type":"wifi_config","requestId":"other-client","op":"clear"}"#,
+            r#"{"type":"request","requestId":"other-client","op":"reset_persistence"}"#,
+            r#"{"type":"request","requestId":"other-client","op":"prepare_flash"}"#,
+            r#"{"type":"heater_curve_save","requestId":"other-client"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"start","runId":"another-run","powerClass":"pps3a"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"seal"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"confirm_save"}"#,
+            r#"{"type":"eeprom_maintenance","requestId":"other-client","op":"erase"}"#,
+        ];
+        for wire in writes {
+            let frame = parse_usb_frame(wire).unwrap();
+            assert_eq!(
+                frame.tuning_blocked_write_id().map(|id| id.as_str()),
+                Some("other-client"),
+                "{wire}"
+            );
+        }
+        let reads_and_stop = [
+            r#"{"type":"request","requestId":"reader","op":"get_identity"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_status"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_calibration"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_thermal_tuning"}"#,
+            r#"{"type":"thermal_tuning","requestId":"reader","op":"read"}"#,
+            r#"{"type":"thermal_tuning","requestId":"reader","op":"cancel"}"#,
+            r#"{"type":"eeprom_maintenance","requestId":"reader","op":"read","offset":0,"length":8}"#,
+        ];
+        for wire in reads_and_stop {
+            assert!(
+                parse_usb_frame(wire)
+                    .unwrap()
+                    .tuning_blocked_write_id()
+                    .is_none(),
+                "{wire}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "buzzer-test")]
+    fn active_tuning_allows_buzzer_status_but_not_buzzer_mutations() {
+        for (op, blocked) in [("status", false), ("stop", true), ("trigger", true)] {
+            let wire =
+                format!(r#"{{"type":"buzzer_test","requestId":"buzzer-client","op":"{op}"}}"#);
+            let frame = parse_usb_frame(&wire).unwrap();
+            assert_eq!(frame.tuning_blocked_write_id().is_some(), blocked);
+        }
     }
 
     #[test]

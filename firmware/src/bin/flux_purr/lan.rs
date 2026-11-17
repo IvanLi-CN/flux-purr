@@ -148,7 +148,21 @@ pub(crate) async fn dispatch_control_frame(
     line: &str,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
-    match parse_usb_frame(line) {
+    let parsed = parse_usb_frame(line);
+    if context.thermal_tuning.armed
+        && let Ok(frame) = &parsed
+        && let Some(request_id) = frame.tuning_blocked_write_id()
+    {
+        return (
+            false,
+            usb_error_response(
+                request_id.clone(),
+                "thermal_tuning_active",
+                "Firmware tuning is active; only reads and safety stop are allowed.",
+            ),
+        );
+    }
+    match parsed {
         Ok(UsbFrame::Request { request_id, op }) => {
             process_request_frame(context, request_id, op, active_profile).await
         }

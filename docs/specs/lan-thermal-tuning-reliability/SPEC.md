@@ -54,8 +54,9 @@
 ### REQ-LTR-005 Read and write authorization boundary
 
 - `GET /api/v1/thermal-tuning` MUST require a valid bearer but MUST NOT require an active control lease, create a lease, renew a lease, or change device control state.
-- `POST /api/v1/thermal-tuning` MUST require a valid bearer and an active control lease, and MUST preserve the existing revision and safety checks for mutations.
-- The same boundary MUST hold for the corresponding `devd` and Web Serial adapters: read operations are read-only, while tuning commands that change device state remain lease-protected.
+- `POST /api/v1/thermal-tuning` MUST require a valid bearer. Start, seal, and confirm-save MUST require an active control lease and preserve the existing revision and safety checks for mutations.
+- Authenticated `cancel` MUST be an idempotent safety-stop exception: it MUST NOT acquire or require a mutation lease or optimistic revision, and MUST NOT depend on a preliminary status read. Repeated stop MUST preserve an already disarmed terminal result and its trace.
+- The same boundary MUST hold for the corresponding `devd` and Web Serial adapters: reads are read-only, safety stop remains available without write ownership, and all other tuning mutations remain lease-protected.
 - covers: `VER-LTR-009`, `VER-LTR-010`
 
 ### REQ-LTR-006 Typed endpoint error mapping

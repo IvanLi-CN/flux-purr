@@ -29,12 +29,14 @@
 - devd 活动会话和调优请求绑定页面选中的具体 bridge 目标，不得在显示 LAN 时借用同设备 USB 目标的租约。调优 GET 在 Web、devd USB 和 devd LAN 间透传 `run_id` 与完整宽度 `after_sequence`，包括零值；缺少游标会重复返回旧页、无法确认已收事件，最终耗尽设备事件缓冲并使运行失败。
 - HTTP socket 回收必须结束连接两端后再放回监听池。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id>`，不携带凭据、不跟随重定向，身份不符立即停止。
 - devd 对同一规范化 HTTP origin 的已认证请求共享两个在途槽，其余请求公平等待，等待超过 3 秒返回可重试的 `503 server_retryable`。这是请求调度预算，不限制客户端数量或取得控制权；不同 origin 使用独立预算。写入前用于读取 revision 的 status 响应必须完整收取，再发送写入，避免丢弃正文占用设备连接。八个并发 HTTP 读取的回归测试在限流前超过两个在途请求，限流后通过。
-- `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份完整工厂缺省 profile；无上传候选时使用匹配基线并保留独立安全门禁。
+- `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份控制器起点 profile；无上传候选时可以解析匹配起点，并保留独立安全门禁。输出模型、热模型初值、安全边界与工厂数据来源的完整性审计尚未完成，不能将控制器 profile 等同于完整工厂基线验收。
 - `REQ-LTR-013`: 启动时设备候选优先、缺省时工厂基线兜底；候选仍保持 RAM 预览并按功率档位保存。
 - `REQ-LTR-014`: 调优停止在固件 HTTP 网关、排队命令执行、devd LAN bridge 与 direct LAN Web 中作为已认证安全例外执行，不获取 mutation lease、不读取 optimistic revision；重复停止保持已停机状态和原有终态证据。start、seal、confirm-save 和其它写入继续受原有租约与 revision 保护；单运行和保存 owner proof 仍需后续跨层收口。
+- 活动运行在固件共同 USB/LAN 命令分发处拒绝客户端写入并返回 `thermal_tuning_active`；只读和调优安全停止仍允许。判定覆盖运行配置、Wi-Fi、标定、持久化、加热曲线、其它调优写入和蜂鸣器写入；蜂鸣器状态读取仍允许。devd 将该 USB 协议错误保留为 HTTP 409，避免误报为通信网关故障。Web 全局禁写提示与置灰、匹配镜像的跨客户端实测仍待完成。
 
 ## Verification / Rollout
 
+- 活动运行写入策略的 USB wire 矩阵和蜂鸣器只读例外测试通过；devd 响应/错误两类帧的回归测试在修复前观察到 502，修复后均为 409。固件 host 677 项库测试和 607 项运行时测试通过，devd 全量检查、Rust structural check、host 与 Xtensa 严格 Clippy 通过。该源码保护尚未烧录，不作为当前正在运行的镜像证据。
 - 当前工作树的完整功能 Xtensa release 可编译；host 固件测试分别为 672 项与 604 项通过。目标专属分支的构造字段与 defmt 参数类型必须通过显式 `--target xtensa-esp32s3-none-elf` 构建检查，host 构建不提供此覆盖。
 - 完整功能 Xtensa release 与无网络检查产物均通过栈门禁。完整功能镜像的嵌套 PD 中断余量为 98,460B（下限 65,536B），USB 控制链余量为 67,020B、LAN 控制链余量为 51,004B（下限均为 32,768B）。EEPROM 读取域记录以堆分配数组传递，写入域记录按需逐份构造，避免大枚举数组的栈副本；域选择、写入顺序、readback 和提交标记语义保持不变。
 - Rust structural check（含 14 项 checker fixtures）、host firmware Clippy 与 Xtensa Clippy 已通过。Web 相关单测 61 项、Biome 全量检查、typecheck 和 production build，以及 devd 测试已通过；这些是源码和构建证据，不替代当前设备镜像的 HTTP 完整调优验收。Web 读取 effect 显式依赖读取状态，操作组使用具名 fieldset 并重置浏览器默认边框、间距和最小宽度。

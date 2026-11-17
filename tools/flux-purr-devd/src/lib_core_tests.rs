@@ -768,6 +768,21 @@ fn serial_refresh_removes_stale_native_devices_and_leases() {
 }
 
 #[test]
+fn active_tuning_usb_rejection_is_a_control_conflict_not_a_gateway_failure() {
+    for kind in ["response", "error"] {
+        let frame = serde_json::json!({
+            "type": kind, "requestId": "second-client", "ok": false,
+            "error": { "code": "thermal_tuning_active", "message": "Only reads and safety stop are allowed.", "retryable": false }
+        });
+        let frame: UsbResponseWire = serde_json::from_value(frame).unwrap();
+        let error = decode_usb_response_frame(frame, "second-client").unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "thermal_tuning_active");
+        assert!(!error.error.retryable);
+    }
+}
+
+#[test]
 fn serial_refresh_preserves_native_error_diagnostics() {
     let mut state = DevdState::default();
     let mut existing = DeviceRecord::mock("serial-known", DeviceTransport::NativeSerial);
