@@ -20701,8 +20701,11 @@ fn automatic_boundary_caps_previous_requests_across_warmup() {
         assert!(candidate.boundary_applied);
         let expected_mv = match temp_c {
             100.0 => 17_000,
-            105.0 => 17_000,
-            108.0 => 18_400,
+            // The 18.4 V observation is conservatively capped by the later
+            // 17.5 V point. That existing 17.5 V working request retains the
+            // same bounded dip allowance; the 18.4 V peak is never requested.
+            105.0 => 17_500,
+            108.0 => 17_500,
             110.0 => 17_500,
             _ => unreachable!(),
         };

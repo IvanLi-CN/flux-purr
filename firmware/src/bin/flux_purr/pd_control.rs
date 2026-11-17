@@ -1490,9 +1490,11 @@ impl ManualPpsState {
                         projected_rtd_temperature_c(memory_config, raw)
                             .map(|temp| round_to_i16(temp * 100.0))
                     };
-                    if let Some(point) = boundary.safe_point(query, &mut project_temperature) {
+                    if let Some(ceiling_mv) =
+                        boundary.safe_request_mv(query, &mut project_temperature)
+                    {
                         selected_current_ma = current_ma;
-                        Some(point.tracking_request_mv)
+                        Some(ceiling_mv)
                     } else {
                         boundary.safe_request_mv_or_cold_start(query, &mut project_temperature)
                     }

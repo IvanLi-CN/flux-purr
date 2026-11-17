@@ -5,7 +5,7 @@ use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, Supp
 fn reserved_observed_contract_does_not_pause_at_a_live_rtd_bucket_edge() {
     // Minimized from HTTP run 3977adc5: the 13.6 V working contract was
     // blanked when its 13.7 V observation disappeared across an RTD edge.
-    let config = observed_bucket_edge_config();
+    let config = observed_boundary_config(&[(1_049, 13_000), (1_065, 13_700), (1_309, 21_000)]);
     let edge_c = projected_rtd_temperature_c(&config, 1_065).unwrap();
     flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
     let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
@@ -76,7 +76,79 @@ fn reserved_observed_contract_does_not_pause_at_a_live_rtd_bucket_edge() {
     ));
 }
 
-fn observed_bucket_edge_config() -> MemoryConfig {
+#[test]
+fn rising_temperature_does_not_cross_a_later_lower_observed_ceiling() {
+    // The same HTTP calibration contains 16.1 V at RTD 1134 mV followed
+    // by 15.9 V at 1145 mV. A safe warm-up envelope must anticipate the
+    // lower observation without promoting any unobserved higher voltage.
+    let points = [
+        (1_049, 13_000),
+        (1_134, 16_100),
+        (1_145, 15_900),
+        (1_309, 21_000),
+    ];
+    let config = observed_boundary_config(&points);
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(3_300, 21_000, 3_000)]);
+    let mut current_mv = 12_900;
+    let edge_c = projected_rtd_temperature_c(&config, 1_134).unwrap();
+    for (previous_mv, expected_mv) in [(None, 13_000), (Some(15_800), 15_900)] {
+        let candidate = manual
+            .automatic_heater_pps_candidate_with_rtd(
+                edge_c - 1.0,
+                None,
+                &config,
+                previous_mv,
+                Some(1_133),
+            )
+            .unwrap();
+        assert_eq!(candidate.allowed_mv, expected_mv);
+    }
+    for (rtd_mv, measured_ceiling_mv) in points {
+        let temp_c = projected_rtd_temperature_c(&config, rtd_mv).unwrap();
+        let candidate = manual
+            .automatic_heater_pps_candidate_with_rtd(
+                temp_c,
+                None,
+                &config,
+                Some(current_mv),
+                Some(rtd_mv),
+            )
+            .unwrap();
+        assert!(candidate.boundary_applied);
+        assert!(candidate.allowed_mv <= measured_ceiling_mv);
+        let active = ConfirmedActiveContract::from_private_contract(
+            source
+                .select_exact_contract(PdContractRequest::automatic_pps(current_mv, 3_000).unwrap())
+                .unwrap(),
+            source,
+        );
+        assert!(
+            !automatic_pps_reconciliation_requires_pause(active, candidate.allowed_mv),
+            "RTD={rtd_mv}: active={current_mv}, ceiling={}",
+            candidate.allowed_mv
+        );
+        current_mv = automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            current_mv,
+            candidate.allowed_mv,
+            candidate.min_mv,
+            candidate.allowed_mv,
+        );
+    }
+    assert_eq!(
+        config.heater_supply_boundary.unwrap().points[1].tracking_request_mv,
+        16_100
+    );
+}
+
+fn observed_boundary_config(points: &[(u16, u16)]) -> MemoryConfig {
     let mut boundary = SupplyBoundary {
         adc: BoundaryAdcMetadata {
             divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
@@ -88,13 +160,10 @@ fn observed_bucket_edge_config() -> MemoryConfig {
         source_max_ma: 3_000,
         advertised_min_mv: 3_300,
         advertised_max_mv: 21_000,
-        point_count: 3,
+        point_count: points.len() as u8,
         ..Default::default()
     };
-    for (slot, (rtd_mv, request_mv)) in [(1_049, 13_000), (1_065, 13_700), (1_309, 21_000)]
-        .into_iter()
-        .enumerate()
-    {
+    for (slot, (rtd_mv, request_mv)) in points.iter().copied().enumerate() {
         boundary.points[slot] = BoundaryPoint {
             elapsed_ms: (slot as u32 + 1) * 50,
             rtd_code: 2_000,

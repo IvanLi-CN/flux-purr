@@ -333,10 +333,10 @@ impl SupplyBoundary {
                     // request identifies the same point as the unreserved
                     // calibration request; requiring exact equality loses
                     // the existing bounded RTD-dip protection in production.
-                    request_mv == point.tracking_request_mv
+                    let ceiling_mv = self.tracking_request_ceiling(point);
+                    request_mv == ceiling_mv
                         || request_mv
-                            == point
-                                .tracking_request_mv
+                            == ceiling_mv
                                 .saturating_sub(crate::adapters::pd::PD_PPS_VOLTAGE_STEP_MV)
                 })
                 && (0..=i32::from(MAX_CONFIRMED_REQUEST_HANDOFF_GAP_CENTI_C))
@@ -371,7 +371,27 @@ impl SupplyBoundary {
         project_temperature: impl FnMut(u16) -> Option<i16>,
     ) -> Option<u16> {
         self.safe_point(query, project_temperature)
-            .map(|point| point.tracking_request_mv)
+            .map(|point| self.tracking_request_ceiling(point))
+    }
+
+    /// A later warmer observation may record a lower safe voltage. Cap the
+    /// current observed point conservatively so warming never first requests
+    /// a voltage that must be withdrawn at that later edge. Raw observations
+    /// remain unchanged for readback and the relative VIN response guard.
+    fn tracking_request_ceiling(&self, point: BoundaryPoint) -> u16 {
+        if !point.tracking_only {
+            return point.tracking_request_mv;
+        }
+        self.points[..usize::from(self.point_count)]
+            .iter()
+            .filter(|later| {
+                later.tracking_only
+                    && later.request_current_ma == point.request_current_ma
+                    && later.rtd_mv >= point.rtd_mv
+            })
+            .map(|later| later.tracking_request_mv)
+            .min()
+            .unwrap_or(point.tracking_request_mv)
     }
 
     /// Keep a valid boundary fail-closed before its first observed temperature.
@@ -426,7 +446,10 @@ impl SupplyBoundary {
         project_temperature: impl FnMut(u16) -> Option<i16>,
     ) -> Option<u16> {
         self.safe_point_or_cold_start(query, project_temperature)
-            .map(|point| point.tracking_request_mv.max(query.source_min_mv))
+            .map(|point| {
+                self.tracking_request_ceiling(point)
+                    .max(query.source_min_mv)
+            })
     }
 
     /// Compare raw ADC response with a retained tracking observation. This is
