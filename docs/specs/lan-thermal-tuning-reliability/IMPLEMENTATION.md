@@ -39,6 +39,8 @@
 
 ## 纯延迟制动闭环回归
 
+- 候选 `d5461c273eb6f514c1b9b5245ba295e8488d6e33` 的完整功能镜像为2,084,624 / 2,097,152B，ELF SHA-256 `841ebdd4c1b7b0cffd5bd256db64789edc39f581032d165f839842b047aa2317`；`just firmware-image-check`、启动栈检查、1,291项固件测试、host/Xtensa严格Clippy与Rust风格检查通过。授权端口烧录终态为complete，跳过EEPROM备份，健康状态未知；HTTP身份读回`0.30.10-dev.d5461c2`。原有本地Web页面经devd LAN点击开始，运行`web-pps3a-f9aebc40-e2c0-406e-b575-3aa068774e92`完成三次60°C候选试验，后二者进入物理Hold，但均未取得原时限内完整稳定窗口。约361秒后调优读取连续超时，浏览器已持久化前缀0–1232；手动重试补到1238，设备最终以`failed / armed=false`停热，trace.lastSequence=1489、gap=true、complete=false，digest `c06545b3000fbbbdb4bebcde28df9974fedafeb70289fc56a37116e3be13b8f3`。真实HTTP状态随后为heaterEnabled=false、heaterOutputPercent=0、mode=idle，无确认保存。该运行仍失败，不证明HTTP长期可靠、60°C资格或整轮调优通过。
+
 - `factory_candidate_search_qualifies_a_calibrated_long_delay_plant` 将生产控制器与固件调优域状态机闭环连接，以该设备的4,500ms纯延迟投影、28W/35W/65W恒定功率和60°C单目标验证无文件候选搜索；28W另施加每250ms交替的±0.75°C已接纳测温扰动。保留旧斜率制动时该扰动场景连续十次试验耗尽接近时限，未接受目标；改为既有供热历史预测后完成scout及独立确认。测试保持原时限、真实全输出预热、物理Hold入口及3°C热指标，并断言不确认保存。冷却损失乘三是主动风扇场景假设，不是设备拟合结果；测温扰动不经过真实ADC/PPS守卫，不能冒充原始轨迹回放、跨目标或HTTP实机验收。±1°C扰动的探索仍未完成搜索资格，当前实机完整八目标调优仍未通过。
 - `delayed_forecast_retains_heat_from_a_stronger_previous_pps_contract` 验证60W历史供热在未来能力降至20W后仍按原热量预测：原实现将预测63°C错误压成约61°C，修正后保留63°C；该测试只证明在途能量不被降档抹除，不提高未来请求上限或放宽保护。
 
