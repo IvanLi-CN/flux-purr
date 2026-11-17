@@ -4,12 +4,19 @@
 
 ## Current Status
 
-- Implementation: 固件缺省基线与 Web/devd 调优启动路径已覆盖；LAN 身份存储和端点错误已有实现；完整 owner proof、跨客户端门禁和浏览器验收仍待收口。
+- Implementation: 无文件调优启动、LAN 身份存储、端点错误、owner proof 和固件活动运行写保护已有实现；两份完整工厂基线、Web 全局禁写、adapter parity 和完整调优验收仍待收口。现有控制参数种子不能当作完整工厂基线。
 - 电源状态语义已明确：空闲时固定 5V/1A 属于正常安全状态；只有调优运行意图存在时才触发 PPS 协商。PPS 未确认前固件不加热、不采样，Web 应显示电源合同等待或失败原因，不得显示设备连接失败。
 - 显式开始调优会建立待恢复的加热意图；实际输出仍须等待已确认的 PPS 合同，并继续通过传感器、过温、commissioning 和持久化安全门禁。调优进入 warmup 后，只有这些门禁全部满足才会驱动加热器。
 - Web 固定 5V 提示说明这是正常空闲供电，启动后固件自动协商 PPS；未确认 PPS 只能说明暂时不加热，不应解释为无法发起调优。
 - Lifecycle: active
 - Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
+
+## 工厂基线覆盖审查
+
+- `thermal_tuning::factory_default_profile` 从 `ThermalControlProfileConfig::default()` 填入八个目标点，仅返回控制参数，没有返回输出曲线、热模型或按来源组件组成的完整基线。现有无文件启动测试只证明控制参数种子存在，不能证明“设备完全没有标定数据时可用”。
+- `lan::thermal_tuning_start_command` 仍通过 `thermal_model_heater_allowed` 检查设备已有参数；域层在缺少模型时返回 `thermal_model_unavailable`。尚不能按计划宣告完整工厂模型回退或 `thermal_parameters_unavailable` 契约已实现。
+- `firmware/testdata/thermal-plant-final-hil-replay.json` 含已完成标定记录和原始追踪，当前 replay 测试验证其可拟合；`thermal_response.rs` 另有 220°C 关断响应的 HIL 样本。这些是候选数值来源，不能仅凭测试 fixture 身份宣布它们覆盖两档工厂发布所需的硬件适用性、来源追溯和安全边界验证。
+- 两份完整基线、组件覆盖优先级、完整 profile digest 和无标定冷启动验收仍未完成；不得用单机已有标定时的启动成功替代这些验收。
 
 ## HTTP 接入诊断与定向验收
 
