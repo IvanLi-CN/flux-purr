@@ -2,6 +2,30 @@ use super::*;
 use flux_purr_firmware::thermal_tuning as tuning;
 
 #[test]
+fn tuning_candidate_brake_reaches_the_production_controller_unchanged() {
+    for power_class in [
+        tuning::ThermalTuningPowerClass::Pps3a,
+        tuning::ThermalTuningPowerClass::Pps5a,
+    ] {
+        for brake_centi_c in [60, 70, 100, 150] {
+            let mut candidate = tuning::factory_default_profile(power_class);
+            let point = candidate.points.iter_mut().flatten().last().unwrap();
+            point.brake_distance_centi_c = brake_centi_c;
+            let target_c = point.target_temp_c;
+            // This is the preview/persisted-profile conversion used by the
+            // production controller, not the tuning search's own data model.
+            let profile = ThermalControlProfile::from_saved_config(&candidate).unwrap();
+            let target = profile.control_target(target_c);
+            assert_eq!(
+                target.brake_distance_c,
+                f32::from(brake_centi_c) / 100.0,
+                "{power_class:?} candidate brake was silently changed"
+            );
+        }
+    }
+}
+
+#[test]
 fn factory_candidate_search_qualifies_a_calibrated_long_delay_plant() {
     for (max_power_mw, noise_c) in [
         (28_000.0, 0.0),

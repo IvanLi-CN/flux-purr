@@ -218,7 +218,10 @@ impl ThermalControlProfilePoint {
         };
         Self {
             target_temp_c: self.target_temp_c,
-            brake_distance_centi_c: self.brake_distance_centi_c.clamp(100, 5_000),
+            brake_distance_centi_c: self.brake_distance_centi_c.clamp(
+                flux_purr_firmware::memory::THERMAL_CONTROL_PROFILE_BRAKE_DISTANCE_MIN_CENTI_C,
+                5_000,
+            ),
             warmup_power_permille: self.warmup_power_permille.min(1_000),
             warmup_reenter_centi_c: sanitize_inherited(self.warmup_reenter_centi_c, 5_000),
             approach_power_permille: self.approach_power_permille.min(1_000),
