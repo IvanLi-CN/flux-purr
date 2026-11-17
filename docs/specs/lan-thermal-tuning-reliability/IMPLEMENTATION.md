@@ -36,10 +36,15 @@
 
 ## Verification / Rollout
 
-- Web 发起者证明保管、同页刷新恢复、不同页面隔离、替换运行失效、终态清理和仅保存命令注入证明已有 9 项测试；相关 Web Serial、transport 和调优工作区共 63 项测试通过，typecheck 与 production build 通过。真实设备尚未烧录保存证明协议，不能以该设备的旧响应证明完整保存流程已通过。
+- 后台读取期间的启动按钮错误禁用已在真实页面复现：设备已识别且空闲时，2 秒内 81 次观察有 28 次禁用；移除该读取态门禁后，同一页面 81 次观察均可启动。首次身份读取、调优活动和命令执行的门禁保留；命令开始前已发出的读取响应不能覆盖命令后的状态。
+- 显式选中具体 LAN bridge 时，路由恢复与 live devd lease 必须保持相同 targetId。缺少 LAN 租约期间不能切回同身份的 USB 路由，否则界面显示 LAN、写请求却没有对应租约。回归测试在修复前返回错误 fallback，修复后通过；全量 387 项 Web 测试与 typecheck 通过。
+- 完整功能镜像 `62bed0c071a1d167`（ELF SHA-256 `bfa5016fc686f64f4013fee942cb88cb92ad09933480e8d2b42ee6af67f11896`）通过 `just firmware-image-check`：2,085,152 / 2,097,152B；LAN 栈余量 50,820B、嵌套 PD 中断余量 98,420B。经 repo CLI 在主人授权端口烧录完成，跳过 EEPROM 备份且健康状态未知；启动后 USB 与 LAN 身份均读回该 build。
+- Web 通过 USB 辅助认证获得同设备 LAN 连接；在当前唯一页面选择 LAN 后，无文件启动运行 `web-pps3a-ab66b5b3-ccb8-4a1c-86ca-f5249174ee1b`。HTTP POST 为 200 且仅启动响应含 owner proof；后续 GET 为 200、不含证明，事件游标连续到 sequence 50。协议短测后通过 Web 停止，设备读回 `canceled / armed=false / saveConfirmed=false`，sequence 0–53 完整、无 gap；页面证明已清除，IndexedDB 运行记录不含 ownerProof。此证据只覆盖启动、读取、证明隔离与停止，不是整轮调优通过。
+- 同镜像此前短测运行 `web-pps3a-4364736c-29c3-48b5-b136-b49d8b751432` 出现 `device_trace_gap` 并自动停止；后续捕获 HTTP 顺序的短测未复现。该瞬态缺口原因仍未确认，不以一次短测通过宣称已解决。
+- Web 发起者证明保管、同页刷新恢复、不同页面隔离、替换运行失效、终态清理和仅保存命令注入证明已有 9 项测试；相关 Web Serial、transport 和调优工作区共 63 项测试通过，typecheck 与 production build 通过。真实设备已烧录保存证明协议，完整保存流程仍需匹配镜像的单独验收。
 - 固件 `014d8eb210bfc3f2` 的 Web 经 devd LAN HTTP 运行 `web-pps3a-e9e7fce2-0ab9-48eb-90e0-f9be67e6ef11` 在约 1744.4 秒后终止，连续收取 sequence 0–6271 共 6272 条事件；终态为 `failed / armed=false / review=complete / trace.complete=true / gap=false`，未保存 EEPROM。60°C 试验未通过，220°C 在预热全输出下于约 108°C 触发 `trial stage timeout / warmup_timeout_without_safe_warmer_retry`，其余目标以 `interval_pruned_without_accepted_bounds` 跳过。这证明该轮 HTTP 事件收取完整，不证明调优成功，也不能排除其它运行中的间歇传输故障；控制阶段时间预算与实际热响应仍需排查。
-- 保存证明回归测试在修复前以公开候选信息成功保存而失败；修复后，缺少证明的保存被拒绝且候选状态不变，合法发起者仍取得包含 bank revision/hash 的回执。680 项固件库测试、607 项运行时测试、devd 全量测试、Rust structural check、host/Xtensa 严格 Clippy 通过。证明的 wire 往返、Debug/递归日志脱敏、不可重绑和停止/失败/重新运行后的失效均有测试覆盖；该协议尚未烧录，不能作为 Web 保存功能验收。
-- 活动运行写入策略的 USB wire 矩阵和蜂鸣器只读例外测试通过；devd 响应/错误两类帧的回归测试在修复前观察到 502，修复后均为 409。固件 host 677 项库测试和 607 项运行时测试通过，devd 全量检查、Rust structural check、host 与 Xtensa 严格 Clippy 通过。该源码保护尚未烧录，不作为当前正在运行的镜像证据。
+- 保存证明回归测试在修复前以公开候选信息成功保存而失败；修复后，缺少证明的保存被拒绝且候选状态不变，合法发起者仍取得包含 bank revision/hash 的回执。680 项固件库测试、607 项运行时测试、devd 全量测试、Rust structural check、host/Xtensa 严格 Clippy 通过。证明的 wire 往返、Debug/递归日志脱敏、不可重绑和停止/失败/重新运行后的失效均有测试覆盖；该协议已进入 `62bed0c071a1d167` 镜像，启动响应保密与停止后的失效已有 Web HTTP 证据；真实确认保存仍未验收。
+- 活动运行写入策略的 USB wire 矩阵和蜂鸣器只读例外测试通过；devd 响应/错误两类帧的回归测试在修复前观察到 502，修复后均为 409。固件 host 677 项库测试和 607 项运行时测试通过，devd 全量检查、Rust structural check、host 与 Xtensa 严格 Clippy 通过。该源码保护已进入 `62bed0c071a1d167` 镜像；匹配镜像的跨客户端写入拒绝仍待实测。
 - 当前工作树的完整功能 Xtensa release 可编译；host 固件测试分别为 672 项与 604 项通过。目标专属分支的构造字段与 defmt 参数类型必须通过显式 `--target xtensa-esp32s3-none-elf` 构建检查，host 构建不提供此覆盖。
 - 完整功能 Xtensa release 与无网络检查产物均通过栈门禁。完整功能镜像的嵌套 PD 中断余量为 98,460B（下限 65,536B），USB 控制链余量为 67,020B、LAN 控制链余量为 51,004B（下限均为 32,768B）。EEPROM 读取域记录以堆分配数组传递，写入域记录按需逐份构造，避免大枚举数组的栈副本；域选择、写入顺序、readback 和提交标记语义保持不变。
 - Rust structural check（含 14 项 checker fixtures）、host firmware Clippy 与 Xtensa Clippy 已通过。Web 相关单测 61 项、Biome 全量检查、typecheck 和 production build，以及 devd 测试已通过；这些是源码和构建证据，不替代当前设备镜像的 HTTP 完整调优验收。Web 读取 effect 显式依赖读取状态，操作组使用具名 fieldset 并重置浏览器默认边框、间距和最小宽度。

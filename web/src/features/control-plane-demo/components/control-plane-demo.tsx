@@ -459,6 +459,17 @@ function isHealthyRouteConnection(connection: DeviceConnectionOption) {
   )
 }
 
+export function shouldFallbackRouteConnection(
+  connection: DeviceConnectionOption,
+  explicitTargetId?: string
+) {
+  return (
+    connection.kind !== 'web-serial' &&
+    connection.target.id !== explicitTargetId &&
+    !isHealthyRouteConnection(connection)
+  )
+}
+
 export function deviceChoiceMatchesRouteId(
   choice: { identityId: string; connections: Array<{ target: { id: string } }> },
   routeId: string
@@ -1191,8 +1202,12 @@ export function ControlPlaneDemo({
     .sort((left, right) => resumeConnectionPriority(left) - resumeConnectionPriority(right))[0]
   const routeDeviceConnection =
     preferredRouteDeviceConnection &&
-    preferredRouteDeviceConnection.kind !== 'web-serial' &&
-    !isHealthyRouteConnection(preferredRouteDeviceConnection) &&
+    shouldFallbackRouteConnection(
+      preferredRouteDeviceConnection,
+      routeDeviceChoice
+        ? requestedConnectionByIdentity[routeDeviceChoice.identityId]?.targetId
+        : undefined
+    ) &&
     healthyRouteFallback
       ? healthyRouteFallback
       : preferredRouteDeviceConnection
@@ -3902,6 +3917,19 @@ export function ControlPlaneDemo({
                 : device
             )
           )
+        }
+        const connection = routeDeviceChoices
+          .flatMap((choice) => choice.connections)
+          .find((candidate) => candidate.target.id === deviceId)
+        if (nextDevice && connection) {
+          // Keep route recovery and the live lease reader on the same
+          // concrete channel shown by the picker. Otherwise the route effect
+          // can restore USB while the visible explicit selection stays LAN.
+          setRequestedConnectionByIdentity((current) => ({
+            ...current,
+            [deviceIdentityId(nextDevice)]: { kind: connection.kind, targetId: deviceId },
+          }))
+          setRouteFallbackKind(undefined)
         }
         explicitSelectedDeviceIdRef.current = deviceId
         setSelectedDeviceId(deviceId)

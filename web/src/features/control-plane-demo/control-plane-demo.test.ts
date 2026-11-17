@@ -13,6 +13,7 @@ import {
   normalizeSettingsWorkspaceTab,
   preferredLiveTransportForRoute,
   shouldEnableAutomaticLiveDevdDiscovery,
+  shouldFallbackRouteConnection,
   shouldRecoverWebSerialControl,
   shouldShowDeviceControlBlockFeedback,
   vinAutoCalibrationActionDisabled,
@@ -22,6 +23,23 @@ import { liveControlPlaneScenario } from './live-scenario'
 import { controlPlaneScenario } from './mock-data'
 
 describe('settings route normalization', () => {
+  it('keeps an explicitly selected LAN route while its own lease is being acquired', () => {
+    const selected = {
+      key: 'bridge:devd-lan-device',
+      kind: 'bridge' as const,
+      label: 'LAN',
+      detail: '',
+      target: {
+        ...controlPlaneScenario.devices[0],
+        id: 'devd-lan-device',
+        leaseState: 'none' as const,
+        connectionAvailable: true,
+      },
+    }
+    expect(shouldFallbackRouteConnection(selected, selected.target.id)).toBe(false)
+    expect(shouldFallbackRouteConnection(selected)).toBe(true)
+    expect(shouldFallbackRouteConnection(selected, 'another-target')).toBe(true)
+  })
   it('returns a WiFi deep link without capability to the presets tab', () => {
     const device = controlPlaneScenario.devices.find((candidate) => candidate.id === 'fp-demo-03')
     if (!device) throw new Error('Expected fixture without WiFi capabilities.')

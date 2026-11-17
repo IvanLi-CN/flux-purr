@@ -157,6 +157,7 @@ export function FirmwareTuningWorkspace({
   const canceledGapRun = useRef<string | null>(null)
   const mountedRef = useRef(true)
   const readInFlightRef = useRef(false)
+  const commandEpochRef = useRef(0)
   const status = recording?.status
   const armed = status?.armed === true
   // Firmware keeps the terminal disposition at `running` in its idle wire
@@ -258,12 +259,13 @@ export function FirmwareTuningWorkspace({
     const timer = window.setTimeout(
       async () => {
         readInFlightRef.current = true
+        const commandEpoch = commandEpochRef.current
         setReadState('reading')
         try {
           const command = nextTuningReadCommand(recording, identityVerified)
           const confirmedSequence = command?.afterSequence ?? null
           const next = await readStatus(command ?? undefined)
-          if (mountedRef.current) {
+          if (mountedRef.current && commandEpoch === commandEpochRef.current) {
             await recordStatus(next, confirmedSequence)
             setIdentityVerified(true)
             setError(null)
@@ -271,7 +273,7 @@ export function FirmwareTuningWorkspace({
             setReadState('ready')
           }
         } catch (failure) {
-          if (mountedRef.current) {
+          if (mountedRef.current && commandEpoch === commandEpochRef.current) {
             setError(messageOf(failure))
             // Keep the last snapshot and cursor, but never silently reset the
             // retry budget for an active run. Manual retry starts a new round.
@@ -284,6 +286,9 @@ export function FirmwareTuningWorkspace({
           }
         } finally {
           readInFlightRef.current = false
+          if (mountedRef.current && commandEpoch !== commandEpochRef.current) {
+            setReadState((current) => (current === 'reading' ? 'idle' : current))
+          }
         }
       },
       // The firmware emits five sample records per second and returns at
@@ -322,11 +327,15 @@ export function FirmwareTuningWorkspace({
     // Stopping is the authenticated safety exception: read/journal recovery
     // must never prevent a user from stopping the last observed active run.
     if (command.op !== 'cancel' && (!journalReady || !identityVerified)) return
+    // A read already in flight belongs to the state before this command.
+    // Its late response must not replace a newly started or stopped run.
+    commandEpochRef.current += 1
     setPending(true)
     setError(null)
     try {
       const next = await tuningOwnerSession.command(deviceId, command, sendCommand)
       await recordStatus(next)
+      setReadState('ready')
     } catch (failure) {
       setError(messageOf(failure))
     } finally {
@@ -442,7 +451,6 @@ export function FirmwareTuningWorkspace({
               !supported ||
               !journalReady ||
               !identityVerified ||
-              readState === 'reading' ||
               !powerClass ||
               armed ||
               terminal === 'candidate_ready' ||
