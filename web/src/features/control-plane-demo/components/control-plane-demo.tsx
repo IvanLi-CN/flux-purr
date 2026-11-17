@@ -3134,6 +3134,14 @@ export function ControlPlaneDemo({
       if (lanDeviceBaseUrl) {
         const session = loadLanDeviceSession(lanDeviceBaseUrl)
         if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        if (command.op === 'cancel') {
+          return authorizedLanRequest<ThermalTuningStatus>(
+            session,
+            'thermal-tuning',
+            'POST',
+            command
+          )
+        }
         const acquireLease = async () => {
           const lease = await lanRuntime.createLease(session)
           setLanLeasesByDevice((current) => ({ ...current, [visibleDeviceId]: lease }))
@@ -3166,9 +3174,13 @@ export function ControlPlaneDemo({
           )
         }
       }
-      if (visibleDeviceTransport === 'devd' && effectiveDevdLeaseId && effectiveDevdBaseUrl) {
+      if (
+        visibleDeviceTransport === 'devd' &&
+        effectiveDevdBaseUrl &&
+        (effectiveDevdLeaseId || command.op === 'cancel')
+      ) {
         return controlClient.configureThermalTuning(effectiveDevdBaseUrl, effectiveDevdDeviceId, {
-          leaseId: effectiveDevdLeaseId,
+          leaseId: effectiveDevdLeaseId ?? '',
           ...command,
         })
       }

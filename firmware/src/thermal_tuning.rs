@@ -3452,7 +3452,9 @@ impl ThermalTuningRuntime {
             && !self.sealed
             && self.terminal_disposition != ThermalTuningTerminalDisposition::CandidateReady
         {
-            return Err(ThermalTuningError::NotRunning);
+            // Safety-stop retries and a second client's stop are successful
+            // once disarmed. Preserve the existing terminal result and trace.
+            return Ok(());
         }
         self.armed = false;
         self.sealed = false;

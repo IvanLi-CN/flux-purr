@@ -336,6 +336,17 @@ pub(crate) async fn lan_bridge_write<T: DeserializeOwned>(
     method: Method,
     body: Option<Value>,
 ) -> Result<T, HttpError> {
+    if lan::is_tuning_safety_stop(&method, path, body.as_ref()) {
+        let value = lan::authorized_json(device, method, path, None, body)
+            .await
+            .map_err(lan_bridge_error)?;
+        return serde_json::from_value(value).map_err(|_| {
+            HttpError::bad_request(
+                "lan_bridge_invalid_response",
+                "LAN device returned an invalid control response.",
+            )
+        });
+    }
     let lease: LanBridgeLease = serde_json::from_value(
         lan::authorized_json(device, Method::POST, "leases", None, None)
             .await

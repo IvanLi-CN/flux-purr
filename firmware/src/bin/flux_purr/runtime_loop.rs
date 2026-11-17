@@ -1078,6 +1078,11 @@ fn runtime_execute_lan_command(
             command.method,
             HttpMethod::Post | HttpMethod::Put | HttpMethod::Delete
         );
+        let safety_stop = flux_purr_firmware::net_http::is_tuning_safety_stop(
+            command.method,
+            command.endpoint,
+            &command.body,
+        );
         let lease_active = flux_purr_firmware::net::command_lease_is_active(&command).await;
         if is_mutation && !lease_active {
             return runtime_reject_lan_command(
@@ -1088,6 +1093,7 @@ fn runtime_execute_lan_command(
             );
         }
         if is_mutation
+            && !safety_stop
             && flux_purr_firmware::net_http::validate_control_revision(
                 command.expected_revision,
                 flux_purr_firmware::net::current_control_revision(),

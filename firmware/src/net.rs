@@ -470,6 +470,9 @@ pub async fn command_lease_is_active(command: &ControlMailboxCommand) -> bool {
     if command.origin != CommandOrigin::Lan {
         return true;
     }
+    if crate::net_http::is_tuning_safety_stop(command.method, command.endpoint, &command.body) {
+        return true;
+    }
     let Some(lease_id) = command.lease_id else {
         return !matches!(
             command.method,

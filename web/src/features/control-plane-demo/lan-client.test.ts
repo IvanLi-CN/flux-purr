@@ -28,6 +28,30 @@ import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('LAN browser client', () => {
+  it('sends an authenticated safety stop without a revision preflight or write lease', async () => {
+    const session = { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ armed: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    await authorizedLanRequest(
+      session,
+      'thermal-tuning',
+      'POST',
+      { op: 'cancel' },
+      undefined,
+      fetcher
+    )
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    const [url, init] = fetcher.mock.calls[0] ?? []
+    expect(url).toBe('http://192.168.1.10/api/v1/thermal-tuning')
+    expect(init?.headers).toMatchObject({ Authorization: `Bearer ${session.token}` })
+    expect(init?.headers).not.toHaveProperty('X-Flux-Purr-Revision')
+    expect(init?.headers).not.toHaveProperty('X-Flux-Purr-Lease')
+  })
+
   it('reads the same device resource after a rejected stale write', () => {
     expect(directLanStaleReadPath('runtime')).toBe('status')
     expect(directLanStaleReadPath('calibration')).toBe('calibration')

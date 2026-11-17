@@ -875,7 +875,9 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
   fetcher: typeof fetch = fetch,
   query?: Record<string, string | number | undefined>
 ) {
-  const isWrite = method !== 'GET'
+  const safetyStop =
+    method === 'POST' && path.replace(/^\//, '') === 'thermal-tuning' && body?.op === 'cancel'
+  const isWrite = method !== 'GET' && !safetyStop
   const headers: Record<string, string> = {
     ...bearerHeaders(session),
     ...(leaseId ? { 'X-Flux-Purr-Lease': leaseId } : {}),

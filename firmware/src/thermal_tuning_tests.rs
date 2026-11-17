@@ -5795,6 +5795,22 @@ fn unsealed_ready_candidate_can_be_canceled() {
 }
 
 #[test]
+fn safety_stop_is_idempotent_without_rewriting_terminal_evidence() {
+    let mut runtime = ThermalTuningRuntime::new();
+    assert_eq!(runtime.cancel("idle_stop"), Ok(()));
+    assert_eq!(runtime.phase, ThermalTuningPhase::Idle);
+    let mut runtime = started_single_target_runtime();
+    runtime.cancel("first_stop").unwrap();
+    let last_sequence = runtime.last_sequence;
+    runtime.cancel("repeated_stop").unwrap();
+    assert_eq!(runtime.last_sequence, last_sequence);
+    assert_eq!(
+        runtime.terminal_disposition,
+        ThermalTuningTerminalDisposition::Canceled
+    );
+}
+
+#[test]
 fn unsafe_sample_disarms_runtime() {
     let mut runtime = ThermalTuningRuntime::new();
     runtime

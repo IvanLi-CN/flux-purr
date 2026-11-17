@@ -603,7 +603,8 @@ impl NetHttpState {
         if endpoint == LanEndpoint::Lease {
             return HttpGate::respond(self.lease_route(now_ms, request));
         }
-        let lease_id = if is_write(request.method) {
+        let safety_stop = is_tuning_safety_stop(request.method, endpoint, request.body);
+        let lease_id = if is_write(request.method) && !safety_stop {
             match self.require_lease(now_ms, request.lease_id) {
                 Ok(id) => Some(id),
                 Err(_) => {
@@ -616,7 +617,10 @@ impl NetHttpState {
         } else {
             None
         };
-        if is_control_write(request.method, endpoint) && request.expected_revision.is_none() {
+        if is_control_write(request.method, endpoint)
+            && !safety_stop
+            && request.expected_revision.is_none()
+        {
             return HttpGate::respond(HttpResponse::new(
                 428,
                 r#"{"error":{"code":"revision_required","message":"A current control revision is required for writes."}}"#,
@@ -849,6 +853,23 @@ fn is_write(method: HttpMethod) -> bool {
 
 fn is_control_write(method: HttpMethod, endpoint: LanEndpoint) -> bool {
     is_write(method) && endpoint != LanEndpoint::Lease && endpoint != LanEndpoint::PairingClaim
+}
+
+/// Only an authenticated, unambiguous tuning cancel may bypass mutation
+/// ownership and optimistic revision checks. The full decoder still validates
+/// the command before execution; no other operation gains this exception.
+pub fn is_tuning_safety_stop(method: HttpMethod, endpoint: LanEndpoint, body: &str) -> bool {
+    #[derive(Deserialize)]
+    struct Action<'a> {
+        op: &'a str,
+    }
+    if method != HttpMethod::Post || endpoint != LanEndpoint::ThermalTuning {
+        return false;
+    }
+    let Ok((action, used)) = serde_json_core::from_slice::<Action<'_>>(body.as_bytes()) else {
+        return false;
+    };
+    action.op == "cancel" && body[used..].trim().is_empty()
 }
 
 fn access_error_response(error: LanAccessError) -> HttpResponse {
@@ -1290,6 +1311,71 @@ mod tests {
             response.allow_origin.as_deref(),
             Some("https://flux-purr.ivanli.cc")
         );
+    }
+
+    #[test]
+    fn authenticated_tuning_stop_does_not_require_a_write_lease_or_revision() {
+        let mut state = NetHttpState::new(Some([9; crate::lan::LAN_TOKEN_BYTES]));
+        let mut mailbox = TestMailbox::default();
+        let response = state.handle(
+            0,
+            HttpRequest {
+                authorization: Some(
+                    "Bearer 0909090909090909090909090909090909090909090909090909090909090909",
+                ),
+                body: r#"{"op":"cancel","runId":"active-run"}"#,
+                ..req(HttpMethod::Post, "/api/v1/thermal-tuning")
+            },
+            &mut mailbox,
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(mailbox.calls, 1);
+        assert_eq!(mailbox.last_command.unwrap().lease_id, None);
+    }
+
+    #[test]
+    fn tuning_stop_exception_does_not_allow_unauthenticated_or_other_writes() {
+        let bearer = "Bearer 0909090909090909090909090909090909090909090909090909090909090909";
+        let mut state = NetHttpState::new(Some([9; crate::lan::LAN_TOKEN_BYTES]));
+        let mut mailbox = TestMailbox::default();
+        let unauthorized = state.handle(
+            0,
+            HttpRequest {
+                body: r#"{"op":"cancel"}"#,
+                ..req(HttpMethod::Post, "/api/v1/thermal-tuning")
+            },
+            &mut mailbox,
+        );
+        assert_eq!(unauthorized.status, 401);
+        for body in [
+            r#"{"op":"start"}"#,
+            r#"{"op":"seal"}"#,
+            r#"{"op":"confirm_save"}"#,
+            r#"{"op":"cancel","op":"start"}"#,
+            r#"{"op":"cancel"}{}"#,
+        ] {
+            let response = state.handle(
+                0,
+                HttpRequest {
+                    authorization: Some(bearer),
+                    body,
+                    ..req(HttpMethod::Post, "/api/v1/thermal-tuning")
+                },
+                &mut mailbox,
+            );
+            assert_eq!(response.status, 409, "{body}");
+        }
+        assert!(!is_tuning_safety_stop(
+            HttpMethod::Put,
+            LanEndpoint::ThermalTuning,
+            r#"{"op":"cancel"}"#
+        ));
+        assert!(!is_tuning_safety_stop(
+            HttpMethod::Post,
+            LanEndpoint::Runtime,
+            r#"{"op":"cancel"}"#
+        ));
+        assert_eq!(mailbox.calls, 0);
     }
 
     #[test]

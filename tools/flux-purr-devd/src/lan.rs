@@ -307,6 +307,19 @@ pub async fn authorized_json(
     authorized_json_with_client(device, method, path, lease_id, body, http_client()).await
 }
 
+pub(crate) fn is_tuning_safety_stop(
+    method: &reqwest::Method,
+    path: &str,
+    body: Option<&Value>,
+) -> bool {
+    method == reqwest::Method::POST
+        && path.trim_matches('/') == "thermal-tuning"
+        && body
+            .and_then(|value| value.get("op"))
+            .and_then(Value::as_str)
+            == Some("cancel")
+}
+
 async fn authorized_json_with_client(
     device: &LanDeviceConfig,
     method: reqwest::Method,
@@ -333,7 +346,9 @@ async fn authorized_json_with_client(
         base_url,
         path.trim_start_matches('/')
     );
-    let is_control_write = method != reqwest::Method::GET && path.trim_matches('/') != "leases";
+    let is_control_write = method != reqwest::Method::GET
+        && path.trim_matches('/') != "leases"
+        && !is_tuning_safety_stop(&method, path, body.as_ref());
     let revision = if is_control_write {
         let response = client
             .get(format!("{base_url}/api/{LAN_API_VERSION}/status"))
@@ -591,7 +606,11 @@ fn is_device_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, response::Redirect, routing::get};
+    use axum::{
+        Router,
+        response::Redirect,
+        routing::{get, post},
+    };
     use mdns_sd_discovery::TxtRecord;
     use tokio::net::TcpListener;
 
@@ -858,6 +877,51 @@ mod tests {
             devices[0].pairing_token.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
+    }
+
+    #[tokio::test]
+    async fn tuning_stop_reaches_device_without_revision_or_lease_preflight() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/api/v1/thermal-tuning",
+            post(
+                |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| async move {
+                    assert_eq!(
+                        headers.get("authorization").unwrap(),
+                        format!("Bearer {}", "a".repeat(64)).as_str()
+                    );
+                    assert!(!headers.contains_key("X-Flux-Purr-Revision"));
+                    assert!(!headers.contains_key("X-Flux-Purr-Lease"));
+                    assert_eq!(body["op"], "cancel");
+                    axum::Json(json!({"armed": false}))
+                },
+            ),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let device = LanDeviceConfig {
+            id: "lan-001122334455".into(),
+            base_url: format!("http://flux-purr-001122334455.local:{}", address.port()),
+            hostname: None,
+            last_ipv4: None,
+            pairing_token: Some("a".repeat(64)),
+        };
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("flux-purr-001122334455.local", address)
+            .build()
+            .unwrap();
+        let result = authorized_json_with_client(
+            &device,
+            reqwest::Method::POST,
+            "thermal-tuning",
+            None,
+            Some(json!({"op": "cancel"})),
+            client,
+        )
+        .await;
+        server.abort();
+        assert_eq!(result.unwrap()["armed"], false);
     }
 
     #[tokio::test]
