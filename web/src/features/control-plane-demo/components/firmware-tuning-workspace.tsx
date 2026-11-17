@@ -148,6 +148,7 @@ export function FirmwareTuningWorkspace({
   const [candidate, setCandidate] = useState<ImportedCandidate | null>(null)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [commandError, setCommandError] = useState<string | null>(null)
   const [pollAttempt, setPollAttempt] = useState(0)
   const [copiedIdentifier, setCopiedIdentifier] = useState<'candidate' | 'hash' | null>(null)
   const [readState, setReadState] = useState<
@@ -179,6 +180,7 @@ export function FirmwareTuningWorkspace({
     setRecording(null)
     setJournalReady(false)
     setIdentityVerified(false)
+    setCommandError(null)
     setReadState(supported ? 'idle' : 'unsupported')
     void loadThermalTuningRecording(deviceId)
       .then((restored) => {
@@ -336,13 +338,13 @@ export function FirmwareTuningWorkspace({
     // Its late response must not replace a newly started or stopped run.
     commandEpochRef.current += 1
     setPending(true)
-    setError(null)
+    setCommandError(null)
     try {
       const next = await tuningOwnerSession.command(deviceId, command, sendCommand)
       await recordStatus(next)
       setReadState('ready')
     } catch (failure) {
-      setError(messageOf(failure))
+      setCommandError(messageOf(failure, 'write'))
     } finally {
       setPending(false)
     }
@@ -548,6 +550,11 @@ export function FirmwareTuningWorkspace({
         </p>
       ) : null}
       {error && readState !== 'failed' ? <p className="firmware-tuning__warning">{error}</p> : null}
+      {commandError ? (
+        <p className="firmware-tuning__warning" role="alert">
+          {commandError}
+        </p>
+      ) : null}
 
       {parameterSnapshot?.control ? (
         <section className="firmware-tuning__parameters" aria-label="当前热控参数">
@@ -899,8 +906,12 @@ export function visibleTerminalDisposition(
   return status?.armed || status?.runId ? status.terminalDisposition : undefined
 }
 
-function messageOf(error: unknown) {
+export function messageOf(error: unknown, operation: 'read' | 'write' = 'read') {
   if (error instanceof ControlPlaneClientError) {
+    if (error.code === 'devd_lease_unavailable') return error.message
+    if (error.code === 'lease_busy' || error.code === 'lease_conflict') {
+      return '设备写入租约暂被占用；设备仍已连接，请在租约释放后重试操作。'
+    }
     if (
       error.category === 'thermal_tuning_unsupported' ||
       error.code === 'thermal_tuning_unsupported'
@@ -911,7 +922,9 @@ function messageOf(error: unknown) {
       return '设备拒绝了当前配对凭据，请重新配对。'
     }
     if (error.category === 'transport_unavailable' || error.code === 'lan_transport_unavailable') {
-      return '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
+      return operation === 'write'
+        ? '设备已连接，但固件热控调优操作未完成，请核对运行状态后重试。'
+        : '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
     }
   }
   return error instanceof Error ? error.message : '设备操作失败。'

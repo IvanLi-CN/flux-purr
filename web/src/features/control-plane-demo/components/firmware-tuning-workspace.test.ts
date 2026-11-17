@@ -1,9 +1,11 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
+import { ControlPlaneClientError } from '../transport-client'
 import {
   compactIdentifier,
   FirmwareTuningWorkspace,
+  messageOf,
   resolveTuningPowerClass,
   shouldPollTuningRead,
   validateCandidate,
@@ -11,6 +13,32 @@ import {
 } from './firmware-tuning-workspace'
 
 describe('firmware tuning workspace', () => {
+  it('preserves write lease failures and distinguishes failed writes from reads', () => {
+    const lease = new ControlPlaneClientError(
+      '设备控制租约正在恢复，请稍后再执行固件热控调优。',
+      'devd_lease_unavailable',
+      true,
+      undefined,
+      { category: 'transport_unavailable', operation: 'thermal_tuning_write' }
+    )
+    expect(messageOf(lease, 'write')).toBe(lease.message)
+    const transport = new ControlPlaneClientError(
+      'HTTP request failed',
+      'lan_transport_unavailable',
+      true,
+      undefined,
+      { category: 'transport_unavailable' }
+    )
+    expect(messageOf(transport, 'write')).toContain('操作未完成')
+    expect(messageOf(transport, 'write')).not.toContain('读取')
+    expect(messageOf(transport)).toContain('读取暂时失败')
+    expect(
+      messageOf(
+        new ControlPlaneClientError('Another LAN client owns the lease.', 'lease_busy', false),
+        'write'
+      )
+    ).toContain('设备写入租约暂被占用')
+  })
   it('keeps full machine identifiers available while compacting the default row', () => {
     const value = 'sha256:d0c6ccbd8efc209d8febcf9dfeff4f3ba1cfa2702e3711840ebec9ec'
     expect(compactIdentifier(value)).toBe('sha256:d0c6c…0ebec9ec')

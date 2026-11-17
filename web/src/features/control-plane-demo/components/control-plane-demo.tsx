@@ -4030,6 +4030,8 @@ export function ControlPlaneDemo({
         nextLabel: device.alias,
       },
       () => {
+        explicitSelectedDeviceIdRef.current = device.id
+        setSelectedDeviceId(device.id)
         if (navigation) {
           return navigation.navigate({
             kind: 'device',
@@ -4037,7 +4039,6 @@ export function ControlPlaneDemo({
             view: 'dashboard',
           })
         }
-        setSelectedDeviceId(device.id)
         return setConsoleView('dashboard')
       }
     )

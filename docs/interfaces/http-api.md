@@ -834,6 +834,8 @@ confirm_save 必须同时提交 `ownerProof`、`runId`、`candidateId`、`candid
 
 运行活动期间，USB 与 LAN 共用设备端禁写判定；其它客户端仍可读取或停止，写入返回 `thermal_tuning_active`。devd 将该错误保留为 HTTP 409，不能报告成连接或网关故障。devd 的 ownership lease 只授权客户端到 daemon 的链路，不替代固件 mutation lease 或保存 owner proof。
 
+桥接连接完成后，Web 顶部连接目标、路由选择与 devd ownership lease 必须指向同一具体通道。调优写入失败应独立保留，不得被后台只读成功清除；租约恢复、租约占用与传输失败应分别解释，不能把未发出的启动操作显示为调优读取失败。
+
 ### `calibration_config`
 
 ```json
