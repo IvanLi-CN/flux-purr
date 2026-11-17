@@ -1345,7 +1345,7 @@ impl ManualPpsState {
 
     pub(crate) fn thermal_plant_source_limits(&self) -> Option<(u16, u16, u16)> {
         let range = self.thermal_plant_pps_range()?;
-        let scan_current_ma = 3_000;
+        let scan_current_ma = encode_automatic_pps_current_ma(range.max_current_ma);
         // The FUSB302B path clamps every exposed/requested PPS contract to
         // its 5.5 V floor. Keep the persisted boundary keyed to that same
         // effective range even when the source advertises a lower raw APDO
@@ -1456,18 +1456,13 @@ impl ManualPpsState {
     ) -> Option<AutomaticHeaterPpsCandidate> {
         let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()?;
         let current_ma = encode_automatic_pps_current_ma(budget_ma.min(apdo.max_ma));
-        // Boundary records are keyed to the product's encoded automatic
-        // current budget. The raw APDO may advertise 5 A even when this
-        // product intentionally caps automatic heating at 3 A; comparing the
-        // raw advertisement with a 3 A calibration would discard the valid
-        // whole-device boundary and fall back to the theoretical model.
-        if current_ma != MAX_AUTOMATIC_HEATER_CONTRACT_MA {
+        // Negotiate the actual APDO budget; a compatible older observation may
+        // supply only its conservative voltage proof, never a new current limit.
+        if current_ma < MIN_HEATER_CONTRACT_MA {
             return None;
         }
-        let boundary_source_max_ma = current_ma;
         let (boundary_source_min_mv, boundary_source_max_mv) =
             self.automatic_boundary_source_limits(apdo);
-        let mut selected_current_ma = current_ma;
         let observed_limit_mv =
             memory_config
                 .heater_supply_boundary
@@ -1477,13 +1472,13 @@ impl ManualPpsState {
                         temperature_centi_c: round_to_i16(temp_c * 100.0),
                         current_rtd_mv: lookup.current_rtd_mv,
                         current_request_mv: lookup.current_request_mv,
-                        current_ma,
+                        current_ma: current_ma.min(boundary.source_max_ma),
                         wifi_started,
                         source_min_mv: apdo.min_mv,
                         source_max_mv: apdo.max_mv,
                         operational_source_min_mv: boundary_source_min_mv,
                         operational_source_max_mv: boundary_source_max_mv,
-                        source_max_ma: boundary_source_max_ma,
+                        source_max_ma: current_ma.min(boundary.source_max_ma),
                         source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
                     };
                     let mut project_temperature = |raw| {
@@ -1493,13 +1488,11 @@ impl ManualPpsState {
                     if let Some(ceiling_mv) =
                         boundary.safe_request_mv(query, &mut project_temperature)
                     {
-                        selected_current_ma = current_ma;
                         Some(ceiling_mv)
                     } else {
                         boundary.safe_request_mv_or_cold_start(query, &mut project_temperature)
                     }
                 });
-        let current_ma = selected_current_ma;
         automatic_heater_pps_candidate_with_limit(
             ch224q::PpsApdo {
                 max_ma: current_ma,
@@ -1732,13 +1725,14 @@ impl ManualPpsState {
                     // contract against the colder point's VIN ratio can turn
                     // ADC quantization into a false safety recovery.
                     current_request_mv: Some(contract_mv),
-                    current_ma: contract_ma,
+                    current_ma: contract_ma.min(boundary.source_max_ma),
                     wifi_started,
                     source_min_mv: apdo.min_mv,
                     source_max_mv: apdo.max_mv,
                     operational_source_min_mv: source_min_mv,
                     operational_source_max_mv: source_max_mv,
-                    source_max_ma: apdo.max_ma.min(MAX_AUTOMATIC_HEATER_CONTRACT_MA),
+                    source_max_ma: encode_automatic_pps_current_ma(apdo.max_ma)
+                        .min(boundary.source_max_ma),
                     source_power_limit_mw: self.thermal_plant_source_power_limit_mw(),
                 },
                 |raw| {
@@ -2088,7 +2082,8 @@ impl HeaterPowerBackend {
         active
             .filter(|contract| {
                 contract.mode == PdContractRequestMode::Pps
-                    && contract.operating_current_ma == MAX_AUTOMATIC_HEATER_CONTRACT_MA
+                    && (MIN_HEATER_CONTRACT_MA..=MAX_AUTOMATIC_HEATER_CONTRACT_MA)
+                        .contains(&contract.operating_current_ma)
             })
             .map_or(self.pd_request_mv(), |contract| contract.voltage_mv)
     }
@@ -2535,7 +2530,13 @@ pub(crate) fn thermal_plant_heat_response(
         samples[index] = ResponseSample {
             at_ms: sample.elapsed_ticks * HEATER_CONTROL_INTERVAL_MS as u32,
             temperature_c,
-            power_mw: transient_sample_power_mw(*sample, temperature_c, None, memory_config)?,
+            power_mw: transient_sample_power_mw(
+                *sample,
+                temperature_c,
+                None,
+                memory_config,
+                memory_config.heater_supply_boundary.as_ref()?.source_max_ma,
+            )?,
             accepted: true,
         };
     }

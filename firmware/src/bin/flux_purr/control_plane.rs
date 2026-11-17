@@ -949,7 +949,7 @@ pub(crate) fn start_thermal_plant_calibration_job(
     workspace: &mut CalibrationThermalPlantWorkspace,
     kind: CalibrationJobKind,
 ) -> Result<(), ManualPpsError> {
-    let (source_min_mv, source_max_mv, _advertised_current_ma) = manual_pps
+    let (source_min_mv, source_max_mv, source_current_ma) = manual_pps
         .thermal_plant_source_limits()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let source_power_limit_mw = manual_pps.thermal_plant_source_power_limit_mw();
@@ -958,7 +958,6 @@ pub(crate) fn start_thermal_plant_calibration_job(
         .thermal_plant_pps_range()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let source_max_mv = source_max_mv.min(21_000) / 100 * 100;
-    let source_current_ma = 3_000;
     let wifi_started = flux_purr_firmware::heater_supply::wifi_hardware_started()
         .ok_or(ManualPpsError::ThermalPlantSourceUnsupported)?;
     let supply_scan = flux_purr_firmware::heater_supply::scan::SupplyScan::new_rapid(
@@ -1361,6 +1360,7 @@ pub(crate) fn transient_sample_power_mw(
     _temp_c: f32,
     _preview_heater_curve: Option<&HeaterCurveConfig>,
     _memory_config: &MemoryConfig,
+    source_current_ma: u16,
 ) -> Option<f32> {
     if sample.duty_percent == 0
         || flux_purr_firmware::memory::thermal_plant_sample_is_cooling(sample)
@@ -1370,7 +1370,12 @@ pub(crate) fn transient_sample_power_mw(
     let voltage_v = f32::from(thermal_plant_heater_voltage_mv(
         flux_purr_firmware::memory::thermal_plant_sample_voltage_125mv(sample),
     )) / 1_000.0;
-    (voltage_v > 0.0).then_some(voltage_v * 3_000.0 * f32::from(sample.duty_percent) / 100.0)
+    if !(MIN_HEATER_CONTRACT_MA..=MAX_HEATER_CONTRACT_MA).contains(&source_current_ma) {
+        return None;
+    }
+    (voltage_v > 0.0).then_some(
+        voltage_v * f32::from(source_current_ma) * f32::from(sample.duty_percent) / 100.0,
+    )
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1655,6 +1660,7 @@ pub(crate) fn prepare_transient_fit(
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
     ambient_raw_rtd_adc_mv: u16,
+    source_current_ma: u16,
 ) -> Option<TransientFitData> {
     let count = usize::from(sample_count);
     if count < 24 {
@@ -1667,8 +1673,13 @@ pub(crate) fn prepare_transient_fit(
     let mut stable_rows = [false; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES];
     for (index, sample) in samples[..count].iter().enumerate() {
         let temperature_c = projected_rtd_temperature_c(memory_config, sample.raw_rtd_adc_mv)?;
-        let power_mw =
-            transient_sample_power_mw(*sample, temperature_c, preview_heater_curve, memory_config)?;
+        let power_mw = transient_sample_power_mw(
+            *sample,
+            temperature_c,
+            preview_heater_curve,
+            memory_config,
+            source_current_ma,
+        )?;
         if !temperature_c.is_finite() || !power_mw.is_finite() || power_mw < 0.0 {
             return None;
         }
@@ -2108,6 +2119,7 @@ pub(crate) fn fit_thermal_plant_transient(
     sample_count: u8,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
+    source_current_ma: u16,
 ) -> Option<(ThermalPlantTransientTransaction, f32)> {
     let data = prepare_transient_fit(
         samples,
@@ -2115,6 +2127,7 @@ pub(crate) fn fit_thermal_plant_transient(
         preview_heater_curve,
         memory_config,
         ambient_raw_rtd_adc_mv,
+        source_current_ma,
     )?;
     let (projection, residual) = best_transient_projection(&data)?;
     let transaction = ThermalPlantTransientTransaction {
@@ -2136,6 +2149,7 @@ pub(crate) fn fit_thermal_plant_transient_without_radiation(
     sample_count: u8,
     preview_heater_curve: Option<&HeaterCurveConfig>,
     memory_config: &MemoryConfig,
+    source_current_ma: u16,
 ) -> Option<(ThermalPlantTransientTransaction, f32)> {
     let data = prepare_transient_fit(
         samples,
@@ -2143,6 +2157,7 @@ pub(crate) fn fit_thermal_plant_transient_without_radiation(
         preview_heater_curve,
         memory_config,
         ambient_raw_rtd_adc_mv,
+        source_current_ma,
     )?;
     let (projection, residual) = best_transient_projection_without_radiation(&data)?;
     let transaction = ThermalPlantTransientTransaction {
@@ -2168,6 +2183,11 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
         memory_config.thermal_plant_transient_active = None;
         return false;
     }
+    let source_current_ma = memory_config
+        .heater_supply_boundary
+        .as_ref()
+        .unwrap()
+        .source_max_ma;
     let Some(previous) = memory_config.thermal_plant_transient_active else {
         return false;
     };
@@ -2179,6 +2199,7 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
         previous.sample_count,
         None,
         memory_config,
+        source_current_ma,
     )
     .or_else(|| {
         fit_thermal_plant_transient(
@@ -2188,6 +2209,7 @@ pub(crate) fn rebuild_transient_thermal_plant_for_current_inputs(
             previous.sample_count,
             None,
             memory_config,
+            source_current_ma,
         )
     })
     .map(|(transaction, _)| transaction);
@@ -2893,6 +2915,7 @@ pub(crate) fn complete_thermal_plant_calibration(
         job.sample_count,
         None,
         memory_config,
+        boundary.source_max_ma,
     )
     .or_else(|| {
         fit_thermal_plant_transient(
@@ -2902,6 +2925,7 @@ pub(crate) fn complete_thermal_plant_calibration(
             job.sample_count,
             None,
             memory_config,
+            boundary.source_max_ma,
         )
     });
     let Some((mut transaction, _residual)) = fitted else {

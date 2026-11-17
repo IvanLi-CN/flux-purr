@@ -137,6 +137,8 @@
 
 ## Remaining Gaps
 
+- 固件 `3390ecd4` 的 Web HTTP 运行 `web-pps3a-9cc7d46b-ca12-4548-a987-6ceaed30772d` 连续收取 sequence 0–3223 共 3,224 条事件，60°C 通过独立 60 秒保持确认；220°C 预热重试在 21V 可用上限下保持 20.9V，关断后约 0.4 秒恢复预热，未出现旧运行三次降至 12.5V 的缓存重置。请求全输出期间未记录实际归零。933.832 秒因主人要求核查协商限制而经 Web HTTP 取消，未保存，不能作为完整调优通过。源码仍以 `MAX_AUTOMATIC_HEATER_CONTRACT_MA=3000` 限制自动加热，并在工作上限减去一个 100mV 单位；电源实报最高 21V/3.25A。主人明确要求普通模式不得施加模拟 21V/3A 的限制，只有显式模拟模式可以限制；该要求尚未实现，需同步修正协商、标定 provenance、运行门禁与相关文档，不能只修改常量后跳过边界校验。
+
 - USB 辅助认证保留设备公布的 mDNS 名称，优先对 USB 网络快照中的私有 IPv4 执行匿名 health 身份核验，再以 bearer 读取 HTTP identity，匹配 USB deviceId 后才保存 locator。真机测量中 `.local` 的 health/status 请求分别耗时约 5.05/5.14 秒，IP 请求约 0.04/0.17 秒；原 GET 6 秒预算可成功，POST 3 秒预算则超时，导致页面可读温度却无法开始。认证后经 Web HTTP 发起 `web-pps3a-9cc7d46b-ca12-4548-a987-6ceaed30772d` 已进入运行，完整调优结果仍待核验。匿名身份核验测试覆盖匹配、错设备和不发送 Authorization；devd 测试 584 项通过、4 项忽略，严格 Clippy 通过。
 
 - 固件 `1b09a174` 的完整功能镜像为 2,085,296 / 2,097,152B，ELF SHA-256 为 `fac873a463f9e3be37349468a27b6f6446508b714d72cfb153625cb964fef402`；授权烧录完成，HTTP identity 读回 `0.30.10-dev.1b09a17`。烧录按授权跳过 EEPROM 备份，未生成归档且健康状态未知。本地唯一 Web 页面经 devd LAN HTTP 发起 `web-pps3a-3263afdf-6cf1-4e63-96a5-9b63469544c7`，818.154 秒连续收取 sequence 0–2873 共 2,874 条事件。60°C trial 4 通过 scout，但独立 hold_confirm 未通过；trial 6 冷却期间 PD 服务以 available=true、discovering、无 fault/contract/ticket 状态触发 `pd_contract_lost`，整轮失败、heater off、未保存。随后 HTTP status 显示 PPS 12V/3A 已恢复，最后协议故障为 `pd_fusb_pending_request_timeout`，设备未重启。该结果证明这一轮 HTTP 追踪完整，不证明调优通过或请求超时原因已解决。
@@ -161,3 +163,9 @@
 
 - `./SPEC.md`
 - `./HISTORY.md`
+
+### 实际 APDO 能力与端点合同
+
+正常自动协商和产品 rapid 标定使用所选 APDO 的实际编码电流（最高硬件 5A），不从 `65w/pps3a` 参数库标签施加 3A 或 60W/65W 上限。源端点已被当前安全边界覆盖时不再减去 100mV；较低温区边界保留量化裕量。边界格式 7 与扫描电流绑定，原始格式 6 的 3A 记录兼容读取；高能力合同仅可保守使用旧记录已证明的电压，不重写 provenance。瞬态拟合、轨迹重建和关热响应显式使用配对扫描电流。决策及兼容边界见 ADR 0028。
+
+主机回归 1,308 项通过，覆盖 3A/3.25A/5A 电流、20V/21V 端点合同、rapid 扫描终止与紧凑记录往返。严格主机 Clippy、Xtensa Clippy、Rust 风格检查与完整产品构建通过；离线镜像 2,090,832/2,097,152 字节。该结果只证明源码和离线产物，实际烧录及 Web HTTP 读回证据独立记录。ADC topic 的视觉文档检查存在预先已有的两个 `Visual Evidence` 节，不能据此宣称该文档门禁通过；本行为修复未修改其视觉证据。

@@ -117,7 +117,7 @@ fn warmup_observed_voltage_steps_keep_the_confirmed_gate() {
     // production large-step blanking guard (diagnostic flags=4).
     let source = SourceCapabilities::from_pdos(&[pps_source_capability(3_300, 21_000, 3_000)]);
     for (mut current_mv, ceiling_mv) in [(12_900, 13_700), (14_400, 15_300), (17_800, 18_700)] {
-        let target_mv = automatic_heater_working_ceiling_mv(5_500, ceiling_mv);
+        let target_mv = automatic_heater_working_ceiling_mv(5_500, ceiling_mv, 21_000);
         while current_mv < target_mv {
             let next_mv = automatic_heater_request_mv_for_phase(
                 HeaterControlPhase::Warmup,
@@ -125,6 +125,7 @@ fn warmup_observed_voltage_steps_keep_the_confirmed_gate() {
                 ceiling_mv,
                 5_500,
                 ceiling_mv,
+                21_000,
             );
             let active = ConfirmedActiveContract::from_private_contract(
                 source
@@ -190,6 +191,7 @@ fn reserved_observed_contract_does_not_pause_at_a_live_rtd_bucket_edge() {
                 candidate.allowed_mv,
                 candidate.min_mv,
                 candidate.allowed_mv,
+                21_000
             ),
             13_600
         );
@@ -290,6 +292,7 @@ fn rising_temperature_does_not_cross_a_later_lower_observed_ceiling() {
             candidate.allowed_mv,
             candidate.min_mv,
             candidate.allowed_mv,
+            21_000,
         );
     }
     assert_eq!(

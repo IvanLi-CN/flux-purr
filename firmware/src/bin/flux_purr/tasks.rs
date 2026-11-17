@@ -744,8 +744,8 @@ pub(crate) fn manual_pps_contract_request(
     let voltage = manual.target_mv?;
     let current = manual.target_ma?;
     // Every supply-scan request belongs to the bounded calibration workflow,
-    // including the 3 A full-conduction sweep. Keeping the calibration marker
-    // on the 3 A requests lets the PD path recognize same-APDO voltage steps
+    // including the source-current full-conduction sweep. Keeping the calibration marker
+    // on the full-current requests lets the PD path recognize same-APDO voltage steps
     // as continuous and avoids inserting a zero-duty frame for each step.
     let request = if supply_scan {
         PdContractRequest::calibration_pps(voltage, current)
@@ -1798,7 +1798,7 @@ fn pps_request_mv_for_context<PWM>(
         source_request_ceiling_mv
     } else if context.normal_auto {
         if context.control_phase == HeaterControlPhase::Warmup && context.requested_power_mw > 0 {
-            // Warmup must use the measured 3 A boundary as the actual PPS
+            // Warmup must use the measured source-current boundary as the actual PPS
             // target. Back-solving V from V*I power and then applying PWM
             // leaves the source below its current envelope, which defeats
             // the calibration's purpose and obscures HIL current evidence.
@@ -1830,6 +1830,10 @@ fn pps_request_mv_for_context<PWM>(
             source_request_ceiling_mv,
         )
     };
+    let source_max_mv = match *context.backend {
+        HeaterPowerBackend::PpsMos { pps_max_mv, .. } => pps_max_mv.min(HEATER_ADJUSTABLE_MAX_MV),
+        HeaterPowerBackend::FixedPdPwmFallback { .. } => source_request_ceiling_mv,
+    };
     let automatic_request_mv = if context.normal_auto && !manual_pps_active {
         automatic_heater_request_mv_for_phase(
             context.control_phase,
@@ -1837,6 +1841,7 @@ fn pps_request_mv_for_context<PWM>(
             automatic_request_mv,
             control_floor_mv,
             source_request_ceiling_mv,
+            source_max_mv,
         )
     } else {
         automatic_request_mv
@@ -1861,7 +1866,11 @@ fn pps_request_mv_for_context<PWM>(
                 current_request_mv,
                 control_floor_mv,
                 safe_max_mv: if context.normal_auto {
-                    automatic_heater_working_ceiling_mv(control_floor_mv, source_request_ceiling_mv)
+                    automatic_heater_working_ceiling_mv(
+                        control_floor_mv,
+                        source_request_ceiling_mv,
+                        source_max_mv,
+                    )
                 } else {
                     source_request_ceiling_mv
                 },
@@ -2066,7 +2075,8 @@ fn automatic_pps_request_is_safe<PWM>(
         return false;
     };
     request.mode() == PdContractRequestMode::Pps
-        && request.operating_current_ma() == MAX_AUTOMATIC_HEATER_CONTRACT_MA
+        && (MIN_HEATER_CONTRACT_MA..=MAX_AUTOMATIC_HEATER_CONTRACT_MA)
+            .contains(&request.operating_current_ma())
         && (candidate.min_mv..=candidate.allowed_mv).contains(&request.voltage_mv())
 }
 

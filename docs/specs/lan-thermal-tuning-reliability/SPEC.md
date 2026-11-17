@@ -106,7 +106,7 @@
 
 ### REQ-LTR-012 Factory baseline and thermal-parameter start gate
 
-- Firmware MUST embed exactly two complete factory default thermal control baselines: `pps3a` for PPS 3A / 65W and `pps5a` for PPS 5A / 100W.
+- Firmware MUST embed exactly two complete factory default thermal control baselines: `pps3a` and `pps5a` as independently stored controller parameter banks. These names do not impose a 3A/60W/65W negotiation cap; normal negotiation and calibration use the actual source capability under ADR 0028.
 - Each factory baseline MUST include the output curve or equivalent output model, thermal plant initial values, controller parameters, and safety voltage, current, and temperature limits.
 - Firmware MUST select a baseline only after the power class is confirmed. An unknown power class MUST prevent tuning start and heater output; firmware MUST NOT guess or silently fall back to another power class.
 - A tuning run MUST resolve either valid device calibration data or the selected factory baseline before enabling heater output. If neither source is available, the operation MUST fail with `thermal_parameters_unavailable` and keep heater output disabled.

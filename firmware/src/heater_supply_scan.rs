@@ -26,9 +26,9 @@ const COLD_PROBE_LOAD_MS: u32 = 200;
 // such step as a source current boundary unless the relative sag guard also
 // fails. This keeps a cold, low-power load from being locked at the PPS floor.
 const RAPID_MIN_BOUNDARY_SPAN_MV: u16 = 500;
-// Start measured 3 A coverage before the lower-current warm-up boundary can
+// Start measured full-current coverage before the lower-current warm-up boundary can
 // become a thermal dead end. Subsequent probes are spaced by ten degrees.
-const THREE_AMP_COVERAGE_START_CENTI_C: i16 = 6_000;
+const FULL_CURRENT_COVERAGE_START_CENTI_C: i16 = 6_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanPhase {
@@ -155,7 +155,7 @@ impl SupplyScan {
         Self::new_with_mode(boundary, ScanMode::Detailed)
     }
 
-    /// Build the product calibration scanner. It uses one actual 3 A PPS
+    /// Build the product calibration scanner. It uses the selected APDO's actual PPS
     /// contract and keeps the voltage/temperature scan bounded enough for the
     /// user-facing calibration budget. The detailed multi-current scanner is
     /// retained by `new` for host-side regression coverage.
@@ -167,21 +167,26 @@ impl SupplyScan {
         if boundary.source_min_mv < 5_500
             || boundary.source_min_mv >= boundary.source_max_mv
             || boundary.source_max_mv > 21_000
-            || boundary.source_max_ma < 3_000
+            || !(3_000..=5_000).contains(&boundary.source_max_ma)
+            || !boundary.source_max_ma.is_multiple_of(50)
+            // The retained detailed scanner has 100 mA equilibrium records up to 3 A.
+            // Product calibration uses Rapid and supports the full APDO current.
+            || (mode == ScanMode::Detailed && boundary.source_max_ma != 3_000)
         {
             return None;
         }
-        // A fresh scan uses the APDO at 3 A, including its 21 V endpoint.
+        // A fresh scan uses the APDO current, including its 21 V endpoint.
         boundary.source_power_limit_mw = 0;
         boundary.point_count = 0;
         boundary.cutoff_reached = false;
         boundary.points.fill(BoundaryPoint::default());
-        // Prove the 3 A contract at the highest power-safe voltage first.
+        // Prove the source contract at the highest safe voltage first.
         // Starting at the PPS floor can leave the board in a low-voltage
         // current loop before the scan has established a usable contract.
+        let source_current_ma = boundary.source_max_ma;
         Some(Self {
             request_mv: boundary.source_max_mv,
-            request_ma: 3_000,
+            request_ma: source_current_ma,
             boundary,
             phase: ScanPhase::Baseline,
             failure: None,
@@ -200,7 +205,7 @@ impl SupplyScan {
             normal_probe: false,
             normal_probe_started_ms: 0,
             last_normal_probe_temperature_centi_c: None,
-            return_current_ma: 3_000,
+            return_current_ma: source_current_ma,
             return_request_mv: boundary.source_min_mv,
             normal_bins: [None; 40],
             now_ms: 0,
@@ -335,15 +340,15 @@ impl SupplyScan {
             && input.now_ms.saturating_sub(self.normal_probe_started_ms) >= NORMAL_PROBE_TIMEOUT_MS
         {
             // A changing thermal load can keep the electrical response in the
-            // ambiguous branch indefinitely. Do not keep a 3 A/full-power
+            // ambiguous branch indefinitely. Do not keep a source-current/full-power
             // probe loaded while waiting for convergence; the last tracking
             // point is already retained and the lower-current recovery path
             // is the safe next observation.
             self.finish_normal_probe(input);
         } else if input.now_ms.saturating_sub(self.stage_started_ms) > STAGE_TIMEOUT_MS {
             self.handle_stage_timeout(input);
-        } else if input.temperature_centi_c >= THREE_AMP_COVERAGE_START_CENTI_C
-            && self.request_ma < 3_000
+        } else if input.temperature_centi_c >= FULL_CURRENT_COVERAGE_START_CENTI_C
+            && self.request_ma < self.boundary.source_max_ma
             && !self.normal_probe
             && matches!(self.phase, ScanPhase::Sweep | ScanPhase::TemperatureSettle)
             && self
@@ -355,10 +360,10 @@ impl SupplyScan {
         {
             // Lower-current stages describe the thermal response, but the
             // automatic safety boundary must also cover the hot end at the
-            // actual 3 A contract. Move to that contract before the cutoff
+            // actual full-current contract. Move to that contract before the cutoff
             // can terminate the lower-current stage. An equilibrium phase is
             // allowed to finish and retain its stage before this probe.
-            self.begin_three_amp_probe(input);
+            self.begin_full_current_probe(input);
         } else if !input.confirmed {
             // Negotiation time is not a settled electrical observation.
             self.changed_at_ms = input.now_ms;
@@ -453,8 +458,8 @@ impl SupplyScan {
     }
 
     fn preflight(&mut self, input: ScanInput) {
-        // The high-voltage 3 A contract is established with the heater off;
-        // full-conduction load validation happens in the bounded 3 A probes.
+        // The high-voltage full-current contract is established with the heater off;
+        // full-conduction load validation happens in the bounded full-current probes.
         // Keep the scaled floor guard so an unloaded source collapse still
         // fails closed before the first heated stage.
         if input.vin_mv < self.preflight_min_vin_mv() {
@@ -469,12 +474,12 @@ impl SupplyScan {
                 self.fail(ScanFailure::SupplyUnstable);
                 return;
             }
-            // The 3 A preflight proves that this APDO can carry the product's
+            // The full-current preflight proves that this APDO can carry the product's
             // automatic-heater contract. Lower-current equilibrium stages are
             // thermal-model evidence only; automatic limits continue to use
-            // the separate 3 A tracking observations.
+            // the separate full-current tracking observations.
             self.request_ma = if self.is_rapid() {
-                3_000
+                self.boundary.source_max_ma
             } else {
                 MIN_HEATED_CURRENT_MA
             };
@@ -490,7 +495,7 @@ impl SupplyScan {
             self.stage_started_ms = input.now_ms;
             self.change(input, self.boundary.source_min_mv, self.request_ma);
         } else {
-            // Hold the confirmed 3 A floor for one more settled sample before
+            // Hold the confirmed full-current floor for one more settled sample before
             // beginning the 2.0 A minimum heated thermal-model stage.
             self.previous = Some(input);
             self.changed_at_ms = input.now_ms;
@@ -499,7 +504,8 @@ impl SupplyScan {
 
     fn terminal_probe_target(&self) -> Option<(u16, u16)> {
         let target_mv = self.boundary.advertised_max_mv.min(21_000) / 100 * 100;
-        (target_mv > self.boundary.source_max_mv).then_some((target_mv, 3_000))
+        (target_mv > self.boundary.source_max_mv)
+            .then_some((target_mv, self.boundary.source_max_ma))
     }
 
     fn begin_terminal_probe(&mut self, input: ScanInput) -> bool {
@@ -531,23 +537,27 @@ impl SupplyScan {
             // A full-conduction flag alone is not evidence that the terminal
             // PPS request is tracking. The source may already be in CC while
             // the protocol still reports 100% conduction. Return to the last
-            // power-safe 3 A ceiling and keep the scan alive instead of
+            // power-safe full-current ceiling and keep the scan alive instead of
             // persisting a false terminal observation.
             self.terminal_probe_confirmations = 0;
             self.phase = ScanPhase::SourceBoundaryRecovery;
             self.previous = None;
             self.return_request_mv = self.boundary.source_max_mv;
-            self.return_current_ma = 3_000;
+            self.return_current_ma = self.boundary.source_max_ma;
             self.rapid_tracking_confirmations = 0;
             self.rapid_probe_since_boundary = true;
             self.last_rapid_probe_temperature_centi_c = Some(input.temperature_centi_c);
-            self.change(input, self.boundary.source_max_mv, 3_000);
+            self.change(
+                input,
+                self.boundary.source_max_mv,
+                self.boundary.source_max_ma,
+            );
             return;
         }
         self.terminal_probe_confirmations = self.terminal_probe_confirmations.saturating_add(1);
         if self.terminal_probe_confirmations >= 2 {
             let mut point = self.point(input);
-            // A terminal observation uses the same 3 A contract as the scan.
+            // A terminal observation uses the same full-current contract as the scan.
             point.flat_request_mv = 0;
             point.tracking_only = true;
             if !self.boundary.retain(point) {
@@ -571,7 +581,7 @@ impl SupplyScan {
             .min(u32::from(u16::MAX)) as u16
     }
 
-    fn begin_three_amp_probe(&mut self, input: ScanInput) {
+    fn begin_full_current_probe(&mut self, input: ScanInput) {
         if self
             .last_normal_probe_temperature_centi_c
             .is_some_and(|previous| {
@@ -581,7 +591,7 @@ impl SupplyScan {
         {
             // Do not stack another full-conduction probe on the same thermal
             // band. Advance the lower-current sweep and let the next ten-
-            // degree observation establish another bounded 3 A point.
+            // degree observation establish another bounded full-current point.
             self.normal_probe = false;
             self.phase = ScanPhase::Sweep;
             self.previous = None;
@@ -619,12 +629,12 @@ impl SupplyScan {
         self.ambiguous_count = 0;
         self.flat_request_mv = 0;
         self.stage_started_ms = input.now_ms;
-        // Start the full-conduction 3 A probe at the last lower-current
+        // Start the full-conduction full-current probe at the last lower-current
         // voltage that was already tracking. Sweep upward from there so the
-        // source CC knee is observed instead of forcing an unsafe 20 V/3 A
+        // source CC knee is observed instead of forcing an unsafe 20 V/full-current
         // load before the boundary is known.
         self.normal_probe_started_ms = input.now_ms;
-        self.change(input, self.return_request_mv, 3_000);
+        self.change(input, self.return_request_mv, self.boundary.source_max_ma);
     }
 
     fn sweep(&mut self, input: ScanInput) {
@@ -646,7 +656,7 @@ impl SupplyScan {
         };
         // The rapid product scan must not treat the first sample at the
         // advertised ceiling as proof that the source can sustain the load.
-        // A 3 A source may briefly report the requested voltage before its
+        // A full-current source may briefly report the requested voltage before its
         // current loop pulls VBUS down. Defer that ceiling sample to the
         // warm-up phase, where two consecutive tracking observations are
         // required and a sag immediately returns to the last safe point.
@@ -813,7 +823,7 @@ impl SupplyScan {
             return;
         };
         if self.normal_probe {
-            // A flat or ambiguous response is the 3 A boundary observation.
+            // A flat or ambiguous response is the full-current boundary observation.
             // Stop loading immediately and recover the lower-current stage;
             // holding an untracked request would add unnecessary load.
             self.finish_normal_probe(input);
@@ -888,13 +898,13 @@ impl SupplyScan {
                 // source ceiling is reached. Waiting for the minimum retained
                 // coverage temperature would leave the cold-to-midrange
                 // lookup on a stale low voltage and let load current fall
-                // well below the 3 A contract as the plate warms.
+                // well below the full-current contract as the plate warms.
                 self.begin_rapid_voltage_reprobe(input);
             } else if input.temperature_centi_c >= RAPID_MIN_COVERAGE_CENTI_C
                 && self.request_mv >= self.boundary.source_max_mv
                 && rapid_hot_hold_ready
             {
-                // The APDO endpoint is observed at the same 3 A current.
+                // The APDO endpoint is observed at the same full-current current.
                 self.begin_terminal_probe_or_complete(input);
             } else if !self.rapid_boundary_reached
                 && self.request_mv < self.boundary.source_max_mv
@@ -927,7 +937,7 @@ impl SupplyScan {
             self.phase = ScanPhase::Complete;
             return;
         }
-        // Preserve the last confirmed 3 A point as the comparison baseline,
+        // Preserve the last confirmed full-current point as the comparison baseline,
         // then advance by one PPS step. A later CC response can therefore
         // return to this exact request without lowering the measured envelope.
         self.phase = ScanPhase::Sweep;
@@ -945,11 +955,11 @@ impl SupplyScan {
         // for a fresh thermal rise before trying the next 100 mV step.
         self.last_rapid_probe_temperature_centi_c = Some(input.temperature_centi_c);
         self.rapid_probe_since_boundary = true;
-        self.change(input, next_request_mv, 3_000);
+        self.change(input, next_request_mv, self.boundary.source_max_ma);
     }
 
     fn handle_stage_timeout(&mut self, input: ScanInput) {
-        if self.request_ma >= 3_000 {
+        if self.request_ma >= self.boundary.source_max_ma {
             self.fail(ScanFailure::StageTimeout);
             return;
         }
@@ -959,7 +969,7 @@ impl SupplyScan {
         // restarted by continued warming, so the phase must not turn this
         // recoverable stage timeout into a calibration-wide failure. Skip it
         // without retaining a fabricated boundary point and continue the
-        // bounded 100 mA sweep. The 3 A stage remains a hard timeout because
+        // bounded 100 mA sweep. The full-current stage remains a hard timeout because
         // it is the required warm-up coverage path.
         self.phase = ScanPhase::Sweep;
         self.previous = None;
@@ -985,10 +995,10 @@ impl SupplyScan {
             // The stable point uses raw data captured at the safe voltage.
             self.last_tracking = Some(self.point(input));
             self.retain_tracking();
-            if self.request_ma == 3_000 {
-                self.finish_three_amp_equilibrium(input);
+            if self.request_ma == self.boundary.source_max_ma {
+                self.finish_full_current_equilibrium(input);
             } else {
-                self.begin_three_amp_probe(input);
+                self.begin_full_current_probe(input);
             }
         } else if self.previous.is_some_and(|previous| {
             i32::from(input.temperature_centi_c) - i32::from(previous.temperature_centi_c) > 100
@@ -1006,7 +1016,7 @@ impl SupplyScan {
         }
     }
 
-    fn finish_three_amp_equilibrium(&mut self, input: ScanInput) {
+    fn finish_full_current_equilibrium(&mut self, input: ScanInput) {
         let scan_ceiling_reached = self.last_tracking.is_some_and(|point| {
             point.tracking_request_mv.saturating_add(100) >= self.boundary.source_max_mv
         });
@@ -1015,7 +1025,7 @@ impl SupplyScan {
             return;
         }
 
-        // A low-temperature 3 A equilibrium is only a safe pause while the
+        // A low-temperature full-current equilibrium is only a safe pause while the
         // plate resistance is still rising. Keep the same bounded stage alive
         // and resume the voltage sweep one 100 mV step above the last proven
         // tracking point; the source response continues to enforce the
@@ -1040,7 +1050,7 @@ impl SupplyScan {
         self.stage_started_ms = input.now_ms;
         // Change current at the observed boundary voltage while the heater is
         // already off. Only then step the unloaded contract down toward the
-        // prior safe voltage; never request a 20 V/3 A loaded dwell.
+        // prior safe voltage; never request a 20 V/full-current loaded dwell.
         self.change(input, self.request_mv, self.return_current_ma);
     }
 
@@ -1135,9 +1145,9 @@ impl SupplyScan {
         self.flat_count = 0;
         self.ambiguous_count = 0;
         self.flat_request_mv = self.request_mv;
-        // Rapid 3 A recovery keeps the same current envelope while requesting
+        // Rapid full-current recovery keeps the same current envelope while requesting
         // the last confirmed safe voltage. The next phase waits for a settled
-        // contract before resuming the 3 A warm-up. Detailed scans retain the
+        // contract before resuming the full-current warm-up. Detailed scans retain the
         // unload-before-recovery behavior through the zero-percent condition.
         self.change(input, self.return_request_mv, self.return_current_ma);
     }
@@ -1165,7 +1175,7 @@ impl SupplyScan {
     }
 
     fn retain_normal_tracking(&mut self, input: ScanInput) {
-        if self.request_ma != 3_000 {
+        if self.request_ma != self.boundary.source_max_ma {
             return;
         }
         let (width, last_bin) = if self.is_rapid() {
@@ -1301,7 +1311,13 @@ mod tests {
     }
 
     #[test]
-    fn rapid_scan_uses_only_three_amp_and_finishes_after_coverage() {
+    fn rapid_scan_uses_the_actual_apdo_current_and_finishes_after_coverage() {
+        for current_ma in [3_000, 3_250, 5_000] {
+            assert_rapid_scan_current(current_ma);
+        }
+    }
+
+    fn assert_rapid_scan_current(current_ma: u16) {
         let boundary = SupplyBoundary {
             adc: BoundaryAdcMetadata {
                 divider_supply_mv: 3_328,
@@ -1309,7 +1325,7 @@ mod tests {
             },
             source_min_mv: 5_500,
             source_max_mv: 12_000,
-            source_max_ma: 3_000,
+            source_max_ma: current_ma,
             advertised_min_mv: 5_500,
             advertised_max_mv: 12_000,
             ..SupplyBoundary::default()
@@ -1317,26 +1333,47 @@ mod tests {
         let mut scan = SupplyScan::new_rapid(boundary).expect("valid rapid scan boundary");
         for now_ms in (0..180_000).step_by(50) {
             let output = scan.output();
-            assert!(output.request_ma == 3_000 || scan.phase == ScanPhase::Baseline);
+            assert!(output.request_ma == current_ma || scan.phase == ScanPhase::Baseline);
             scan.update(rapid_input(
                 now_ms,
                 output,
                 3_000 + ((now_ms / 50) as i16 * 5),
             ));
             assert_ne!(scan.phase, ScanPhase::Failed);
-            if scan.phase == ScanPhase::Complete {
-                assert!(scan.boundary.is_valid());
-                assert!(scan.boundary.point_count > 0);
-                assert!(
-                    scan.boundary.points[..usize::from(scan.boundary.point_count)]
-                        .iter()
-                        .all(|point| point.request_current_ma == 3_000)
-                );
-                assert!(!scan.output().heater_enabled);
-                return;
+            if scan.phase != ScanPhase::Complete {
+                continue;
             }
+            assert!(scan.boundary.is_valid());
+            assert!(scan.boundary.point_count > 0);
+            assert!(
+                scan.boundary.points[..usize::from(scan.boundary.point_count)]
+                    .iter()
+                    .all(|point| point.request_current_ma == current_ma)
+            );
+            assert!(!scan.output().heater_enabled);
+            let mut encoded = [0_u8; crate::heater_supply::BOUNDARY_MAX_BYTES];
+            let len = scan
+                .boundary
+                .encode(&mut encoded)
+                .expect("full-current tracking records must encode");
+            assert_eq!(SupplyBoundary::decode(&encoded[..len]), Some(scan.boundary));
+            break;
         }
-        panic!("rapid scan did not terminate within its bounded warm-up");
+        assert_eq!(scan.phase, ScanPhase::Complete, "rapid scan must terminate");
+    }
+
+    #[test]
+    fn detailed_scan_rejects_unrepresentable_equilibrium_current_stages() {
+        let boundary = SupplyBoundary {
+            source_min_mv: 5_500,
+            source_max_mv: 21_000,
+            advertised_min_mv: 5_500,
+            advertised_max_mv: 21_000,
+            source_max_ma: 3_250,
+            ..SupplyBoundary::default()
+        };
+        assert!(SupplyScan::new(boundary).is_none());
+        assert!(SupplyScan::new_rapid(boundary).is_some());
     }
 
     #[test]

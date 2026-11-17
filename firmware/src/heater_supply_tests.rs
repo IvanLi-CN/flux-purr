@@ -196,11 +196,21 @@ fn assert_tracking_request_survives_a_narrow_temperature_dip(
 }
 
 #[test]
-fn persisted_five_amp_source_key_is_rejected() {
+fn boundary_supports_actual_source_budgets_without_relabeling_legacy_records() {
     let mut value = boundary();
-    value.source_max_ma = 5_000;
-
-    assert!(!value.is_valid());
+    for current_ma in [3_000, 3_250, 5_000] {
+        value.source_max_ma = current_ma;
+        let mut encoded = [0; BOUNDARY_MAX_BYTES];
+        let len = value
+            .encode(&mut encoded)
+            .expect("current budget fits the header");
+        assert_eq!(SupplyBoundary::decode(&encoded[..len]), Some(value));
+        encoded[0] = 6;
+        assert_eq!(
+            SupplyBoundary::decode(&encoded[..len]).is_some(),
+            current_ma == 3_000
+        );
+    }
 }
 
 #[test]

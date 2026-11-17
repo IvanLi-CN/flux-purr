@@ -4,6 +4,8 @@
 
 Accepted
 
+电流封顶与边界电流来源以 [ADR 0028](0028-source-capability-driven-heater-negotiation.md) 为准；下文的固定 3A 条款仅保留原始决策背景。
+
 ## Decision
 
 This decision supersedes the calibration and auxiliary-load clauses of [the automatic-heater boundary decision](0018-automatic-heater-voltage-current-boundary.md) and the resistance/measurement/raw-observation projection clauses of ADR 0001; the unaffected contract-ordering and snapshot lifecycle rules remain applicable. The product timing and scan-entry rules are further constrained by [the five-minute thermal plant calibration decision](0020-five-minute-thermal-plant-calibration.md).

@@ -22,14 +22,14 @@ pub fn publish_wifi_hardware_state(started: Option<bool>) {
 
 pub const MAX_BOUNDARY_POINTS: usize = 41;
 pub(crate) const MIN_HEATED_CURRENT_MA: u16 = 2_000;
-// Version 6 deliberately invalidates the prior boundary schema. Old
-// calibration is absent rather than silently reused by automatic heating.
-pub const BOUNDARY_FORMAT_VERSION: u8 = 6;
+// Version 7 binds tracking code 31 to the encoded source current in the header.
+// Version 6 remains readable only for its original 3 A provenance.
+pub const BOUNDARY_FORMAT_VERSION: u8 = 7;
 pub const BOUNDARY_POINT_BYTES: usize = 11;
 pub const BOUNDARY_HEADER_BYTES: usize = 26;
 pub const BOUNDARY_MAX_BYTES: usize =
     BOUNDARY_HEADER_BYTES + MAX_BOUNDARY_POINTS * BOUNDARY_POINT_BYTES;
-/// Automatic heating may only use a persisted boundary after the 3 A scan has
+/// Automatic heating may only use a persisted boundary after the full-current scan has
 /// produced powered observations through the minimum warm-up coverage.
 pub(crate) const MIN_BOUNDARY_COVERAGE_CENTI_C: i16 = 10_000;
 // The compact 10 C scan bins are stored using rounded ADC temperatures. A
@@ -53,7 +53,7 @@ const MAX_TERMINAL_PRE_HANDOFF_GAP_CENTI_C: i16 = 1_200;
 // eligible while the one-step request is being confirmed.
 const TERMINAL_HANDOFF_REQUEST_STEP_MV: u16 = 500;
 const TERMINAL_TRACKING_CURRENT_CODE: u16 = 30;
-const THREE_AMP_TRACKING_CURRENT_CODE: u16 = 31;
+const SOURCE_TRACKING_CURRENT_CODE: u16 = 31;
 
 fn terminal_tracking_current_ma(source_power_limit_mw: u32, request_mv: u16) -> Option<u16> {
     if source_power_limit_mw == 0 || request_mv == 0 {
@@ -168,7 +168,8 @@ impl SupplyBoundary {
             && self.advertised_min_mv > 0
             && self.advertised_min_mv <= self.source_min_mv
             && self.advertised_max_mv >= self.source_max_mv
-            && self.source_max_ma == 3_000
+            && (3_000..=5_000).contains(&self.source_max_ma)
+            && self.source_max_ma.is_multiple_of(50)
             && (self.source_power_limit_mw == 0
                 || ((16_500..=105_000).contains(&self.source_power_limit_mw)
                     && self.source_power_limit_mw.is_multiple_of(10)))
@@ -182,9 +183,10 @@ impl SupplyBoundary {
                             self.source_power_limit_mw,
                             point.tracking_request_mv,
                         ) == Some(point.request_current_ma);
-                    let regular_current = (MIN_HEATED_CURRENT_MA..=3_000)
-                        .contains(&point.request_current_ma)
-                        && point.request_current_ma.is_multiple_of(100);
+                    let regular_current = (point.tracking_only
+                        && point.request_current_ma == self.source_max_ma)
+                        || ((MIN_HEATED_CURRENT_MA..=3_000).contains(&point.request_current_ma)
+                            && point.request_current_ma.is_multiple_of(100));
                     let point_voltage_valid = terminal_tracking
                         || (regular_current
                             && (self.source_min_mv..=self.source_max_mv)
@@ -203,7 +205,7 @@ impl SupplyBoundary {
                         && point.elapsed_ms / 50 < (1 << 19)
                         && point.elapsed_ms.is_multiple_of(50)
                         && (!point.tracking_only
-                            || point.request_current_ma == 3_000
+                            || point.request_current_ma == self.source_max_ma
                             || terminal_tracking)
                 })
     }
@@ -246,7 +248,7 @@ impl SupplyBoundary {
         // stored point even though the ADC has already reached that point.
         // A warmer observation is never promoted early because the live RTD
         // code must reach the stored code before its higher voltage is used.
-        let current_class = if query.current_ma < 3_000 {
+        let current_class = if query.current_ma < self.source_max_ma {
             self.points[..usize::from(self.point_count)]
                 .iter()
                 .filter(|point| {
@@ -262,8 +264,8 @@ impl SupplyBoundary {
             .iter()
             .copied()
             .filter(|point| {
-                if query.current_ma >= 3_000 {
-                    point.tracking_only && point.request_current_ma == 3_000
+                if query.current_ma >= self.source_max_ma {
+                    point.tracking_only && point.request_current_ma == self.source_max_ma
                 } else {
                     (!point.tracking_only && Some(point.request_current_ma) == current_class)
                         || (point.tracking_only
@@ -399,7 +401,7 @@ impl SupplyBoundary {
     ) -> Option<BoundaryPoint> {
         let request_mv = query.current_request_mv?;
         let power_mw = u32::from(request_mv) * u32::from(query.current_ma) / 1_000;
-        if query.current_ma != 3_000
+        if query.current_ma != self.source_max_ma
             || request_mv <= ceiling_mv
             || (query.source_power_limit_mw != 0 && power_mw > query.source_power_limit_mw)
         {
@@ -470,10 +472,10 @@ impl SupplyBoundary {
         }
         let current_class = self.points[..usize::from(self.point_count)]
             .iter()
-            .filter(|point| point.request_current_ma == 3_000 && point.tracking_only)
+            .filter(|point| point.request_current_ma == self.source_max_ma && point.tracking_only)
             .map(|point| point.request_current_ma)
             .max()?;
-        if query.current_ma >= 3_000 && current_class < 3_000 {
+        if query.current_ma >= self.source_max_ma && current_class < self.source_max_ma {
             return None;
         }
         let (coldest_temperature, coldest_point) = self.points[..usize::from(self.point_count)]
@@ -562,7 +564,9 @@ impl SupplyBoundary {
             let bytes = &mut out[start..start + BOUNDARY_POINT_BYTES];
             let current = match (point.tracking_only, point.request_current_ma) {
                 (false, request_current_ma) => (request_current_ma - 1_000) / 100,
-                (true, 3_000) => THREE_AMP_TRACKING_CURRENT_CODE,
+                (true, current_ma) if current_ma == self.source_max_ma => {
+                    SOURCE_TRACKING_CURRENT_CODE
+                }
                 (true, _) => TERMINAL_TRACKING_CURRENT_CODE,
             };
             let packed = u128::from(point.elapsed_ms / 50)
@@ -580,7 +584,7 @@ impl SupplyBoundary {
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < BOUNDARY_HEADER_BYTES
-            || bytes[0] != BOUNDARY_FORMAT_VERSION
+            || !matches!(bytes[0], 6 | BOUNDARY_FORMAT_VERSION)
             || bytes[1] > 1
             || bytes[5] > 1
             || bytes[2] as usize > MAX_BOUNDARY_POINTS
@@ -609,6 +613,9 @@ impl SupplyBoundary {
             point_count: bytes[2],
             ..Self::default()
         };
+        if bytes[0] == 6 && result.source_max_ma != 3_000 {
+            return None;
+        }
         for (index, point) in result.points[..usize::from(result.point_count)]
             .iter_mut()
             .enumerate()
@@ -621,7 +628,7 @@ impl SupplyBoundary {
             let current = ((packed >> 83) & 31) as u16;
             if current > 20
                 && current != TERMINAL_TRACKING_CURRENT_CODE
-                && current != THREE_AMP_TRACKING_CURRENT_CODE
+                && current != SOURCE_TRACKING_CURRENT_CODE
             {
                 return None;
             }
@@ -634,15 +641,15 @@ impl SupplyBoundary {
                 vin_mv: ((packed >> 55) & 0xfff) as u16,
                 tracking_request_mv,
                 flat_request_mv: ((packed >> 75) & 0xff) as u16 * 100,
-                request_current_ma: if current == THREE_AMP_TRACKING_CURRENT_CODE {
-                    3_000
+                request_current_ma: if current == SOURCE_TRACKING_CURRENT_CODE {
+                    result.source_max_ma
                 } else if current == TERMINAL_TRACKING_CURRENT_CODE {
                     terminal_tracking_current_ma(result.source_power_limit_mw, tracking_request_mv)?
                 } else {
                     1_000 + current * 100
                 },
                 tracking_only: current == TERMINAL_TRACKING_CURRENT_CODE
-                    || current == THREE_AMP_TRACKING_CURRENT_CODE,
+                    || current == SOURCE_TRACKING_CURRENT_CODE,
             };
         }
         result.is_valid().then_some(result)

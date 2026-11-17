@@ -1,14 +1,13 @@
 #[allow(unused_imports)]
 use super::*;
 
-/// Normal automatic heating is calibrated and bounded against the product's
-/// 3 A operating envelope. Manual PPS, calibration, and debug paths keep the
-/// broader adapter limit from `MAX_HEATER_CONTRACT_MA`.
+/// Automatic negotiation uses the selected PDO/APDO up to the hardware limit.
+/// Profile bank names do not impose a separate source-current ceiling.
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const MAX_AUTOMATIC_HEATER_CONTRACT_MA: u16 = 3_000;
+pub(crate) const MAX_AUTOMATIC_HEATER_CONTRACT_MA: u16 = MAX_HEATER_CONTRACT_MA;
 #[cfg(test)]
 pub(crate) const AUTOMATIC_TERMINAL_VOLTAGE_MV: u16 = 21_000;
-#[cfg(any(target_arch = "xtensa", test))]
+#[cfg(test)]
 pub(crate) const AUTOMATIC_TERMINAL_CURRENT_MA: u16 = 3_000;
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -65,16 +64,16 @@ pub(crate) fn automatic_heater_controller_current_ma(
     if !observation.status.pd_active
         || !(contract_min_mv..=contract_max_mv).contains(&contract_mv)
         || (observation.current_ma < MIN_HEATER_CONTRACT_MA
-            && !(candidate_current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
+            && !(candidate_current_ma >= MIN_HEATER_CONTRACT_MA
                 && observation.contract.current_ma >= candidate_current_ma))
     {
         return 0;
     }
-    if candidate_current_ma == AUTOMATIC_TERMINAL_CURRENT_MA
+    if candidate_current_ma >= MIN_HEATER_CONTRACT_MA
         && observation.contract.current_ma >= candidate_current_ma
     {
         // Gate blanking can make load current zero while the confirmed
-        // 3 A contract still grants the controller its input budget.
+        // source contract still grants the controller its input budget.
         return candidate_current_ma;
     }
     candidate_current_ma.min(observation.current_ma)
@@ -137,9 +136,8 @@ pub(crate) fn automatic_heater_pps_candidate_with_limit(
     let min_mv = apdo.min_mv.max(request_min_mv);
     let max_mv = apdo.max_mv.min(request_max_mv).min(hardware_max_mv);
     let current_ma = encode_automatic_pps_current_ma(apdo.max_ma);
-    let terminal_current =
-        observed_limit_mv.is_some() && current_ma == AUTOMATIC_TERMINAL_CURRENT_MA;
-    if min_mv > max_mv || (current_ma < MIN_HEATER_CONTRACT_MA && !terminal_current) {
+    let terminal_current = observed_limit_mv.is_some();
+    if min_mv > max_mv || current_ma < MIN_HEATER_CONTRACT_MA {
         return None;
     }
     let heater_budget_ma = current_ma;
@@ -319,13 +317,13 @@ pub(crate) fn automatic_heater_fixed_request_with_boundary(
                 temperature_centi_c,
                 current_rtd_mv,
                 current_request_mv: Some(voltage_mv),
-                current_ma: request_ma,
+                current_ma: request_ma.min(boundary.source_max_ma),
                 wifi_started,
                 source_min_mv: boundary.advertised_min_mv,
                 source_max_mv: boundary.advertised_max_mv,
                 operational_source_min_mv: boundary.source_min_mv,
                 operational_source_max_mv: boundary.source_max_mv,
-                source_max_ma: boundary.source_max_ma,
+                source_max_ma: request_ma.min(boundary.source_max_ma),
                 source_power_limit_mw: boundary.source_power_limit_mw,
             };
             let mut project_temperature = |raw| {
@@ -337,7 +335,7 @@ pub(crate) fn automatic_heater_fixed_request_with_boundary(
             else {
                 return false;
             };
-            request_ma <= boundary.source_max_ma && voltage_mv <= safe_voltage_mv
+            voltage_mv <= safe_voltage_mv
         },
     )
 }
@@ -428,7 +426,14 @@ pub(crate) fn automatic_heater_step_request_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) fn automatic_heater_working_ceiling_mv(floor_mv: u16, ceiling_mv: u16) -> u16 {
+pub(crate) fn automatic_heater_working_ceiling_mv(
+    floor_mv: u16,
+    ceiling_mv: u16,
+    source_max_mv: u16,
+) -> u16 {
+    if ceiling_mv >= source_max_mv {
+        return ceiling_mv.max(floor_mv);
+    }
     ceiling_mv
         .saturating_sub(flux_purr_firmware::adapters::pd::PD_PPS_VOLTAGE_STEP_MV)
         .max(floor_mv)
@@ -441,11 +446,13 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
     desired_mv: u16,
     floor_mv: u16,
     ceiling_mv: u16,
+    source_max_mv: u16,
 ) -> u16 {
     let floor_mv = floor_mv.min(HEATER_ADJUSTABLE_MAX_MV);
     let ceiling_mv = automatic_heater_working_ceiling_mv(
         floor_mv,
         ceiling_mv.max(floor_mv).min(HEATER_ADJUSTABLE_MAX_MV),
+        source_max_mv,
     );
     let desired_mv = desired_mv.clamp(floor_mv, ceiling_mv);
     if phase == HeaterControlPhase::Warmup {
