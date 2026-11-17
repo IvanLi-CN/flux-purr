@@ -14727,6 +14727,30 @@ fn warmup_quantized_ceiling_noise_does_not_blank_the_confirmed_gate() {
 }
 
 #[test]
+fn automatic_pps_never_spends_its_quantized_ceiling_headroom() {
+    // HTTP run 1a8acc31: a 10.0V working request was retained at a 10.0V
+    // ceiling, then became unsafe when the ceiling fell to 9.9V. Replaying
+    // the peak and return must actively restore the reserved quantum.
+    for phase in [
+        HeaterControlPhase::Warmup,
+        HeaterControlPhase::Approach,
+        HeaterControlPhase::Hold,
+    ] {
+        let mut current_mv = 9_800;
+        for ceiling_mv in [9_900, 10_000, 10_100, 10_000, 9_900] {
+            let next = automatic_heater_request_mv_for_phase(
+                phase, current_mv, ceiling_mv, 5_500, ceiling_mv,
+            );
+            assert!(
+                next <= ceiling_mv - 100,
+                "{phase:?}: {current_mv} -> {next} at {ceiling_mv}"
+            );
+            current_mv = next;
+        }
+    }
+}
+
+#[test]
 fn warmup_reconciliation_keeps_a_safe_contract_ahead_of_the_backend_cache() {
     let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
     let active = ConfirmedActiveContract::from_private_contract(
@@ -14814,7 +14838,7 @@ fn automatic_heater_warmup_requests_a_guarded_ceiling_without_slow_stepping() {
             5_500,
             21_000,
         ),
-        21_000,
+        20_900,
     );
 }
 

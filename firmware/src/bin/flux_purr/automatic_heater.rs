@@ -428,6 +428,13 @@ pub(crate) fn automatic_heater_step_request_mv(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_working_ceiling_mv(floor_mv: u16, ceiling_mv: u16) -> u16 {
+    ceiling_mv
+        .saturating_sub(flux_purr_firmware::adapters::pd::PD_PPS_VOLTAGE_STEP_MV)
+        .max(floor_mv)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn automatic_heater_request_mv_for_phase(
     phase: HeaterControlPhase,
     current_mv: u16,
@@ -436,29 +443,21 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
     ceiling_mv: u16,
 ) -> u16 {
     let floor_mv = floor_mv.min(HEATER_ADJUSTABLE_MAX_MV);
-    let ceiling_mv = ceiling_mv.max(floor_mv).min(HEATER_ADJUSTABLE_MAX_MV);
+    let ceiling_mv = automatic_heater_working_ceiling_mv(
+        floor_mv,
+        ceiling_mv.max(floor_mv).min(HEATER_ADJUSTABLE_MAX_MV),
+    );
     let desired_mv = desired_mv.clamp(floor_mv, ceiling_mv);
     if phase == HeaterControlPhase::Warmup {
-        // The safe ceiling is quantized in 100mV units. Keep one quantum
-        // below it so a boundary crossing from RTD noise does not repeatedly
-        // make the already-confirmed contract unsafe. This is voltage
-        // headroom, not a PWM ramp or permission to exceed the live ceiling.
-        const CEILING_HEADROOM_MV: u16 = flux_purr_firmware::adapters::pd::PD_PPS_VOLTAGE_STEP_MV;
-        let working_ceiling_mv = ceiling_mv.saturating_sub(CEILING_HEADROOM_MV).max(floor_mv);
-        let desired_mv = desired_mv.min(working_ceiling_mv);
-        if (floor_mv..=ceiling_mv).contains(&current_mv)
-            && current_mv >= desired_mv
-            && current_mv.saturating_sub(desired_mv) <= CEILING_HEADROOM_MV
-        {
-            current_mv
-        } else {
-            desired_mv
-        }
-    } else if current_mv <= ceiling_mv && desired_mv < current_mv {
+        // Restore the reserved quantum even if the old contract is still
+        // safe. Retaining it at the hard ceiling spends the margin and makes
+        // the next downward quantization force an avoidable output pause.
+        desired_mv
+    } else if desired_mv < current_mv {
         // Once automatic heating has a safe confirmed PPS contract, lower
         // power belongs in PWM. Dropping the contract for every Approach/Hold
         // trim creates a needless settle window and can interrupt heating.
-        current_mv
+        current_mv.clamp(floor_mv, ceiling_mv)
     } else {
         automatic_heater_step_request_mv(current_mv, desired_mv, floor_mv, ceiling_mv)
     }

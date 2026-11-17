@@ -1860,7 +1860,11 @@ fn pps_request_mv_for_context<PWM>(
                 filtered_slope_c_per_s: context.filtered_slope_c_per_s,
                 current_request_mv,
                 control_floor_mv,
-                safe_max_mv: source_request_ceiling_mv,
+                safe_max_mv: if context.normal_auto {
+                    automatic_heater_working_ceiling_mv(control_floor_mv, source_request_ceiling_mv)
+                } else {
+                    source_request_ceiling_mv
+                },
                 now_ms: context.now_ms,
             },
             context.initial_profile_approach,

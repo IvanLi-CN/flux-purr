@@ -17,14 +17,14 @@
 - `REQ-LTR-002`: `lan-pairing-panel.tsx` 已有已保存凭据恢复和 401 重新配对入口；需要确保调优读取失败不会删除凭据或打开配对面板。
 - `REQ-LTR-003`: `control-plane-demo.tsx` 已把调优读取放入独立回调；`FirmwareTuningWorkspace` 使用自己的读取状态、快照和重试预算；真机已观察到顶部温度持续更新而调优读取停止，完整 fixture 矩阵仍需验收。
 - `REQ-LTR-004`: `firmware/src/net_http.rs` 已注册 `/api/v1/thermal-tuning` GET/POST；`firmware/src/control_plane.rs` 在 `web_serial` 或 `net_http` 条件下声明 `thermal_tuning`；Web 和 devd 将调优路由的 404 归一化为 `thermal_tuning_unsupported`。
-- `REQ-LTR-005`: LAN client 已有无租约 GET 回归测试，调优 POST 仍沿用 lease；固件网关已按 HTTP method 区分只读和写入租约。
+- `REQ-LTR-005`: LAN client 已有无租约 GET 回归测试，调优 start/seal/confirm-save POST 沿用 lease，已认证 cancel 除外；固件网关区分只读、普通写入和安全停止。
 - `REQ-LTR-006`: `lan-client.ts` 与 `transport-client.ts` 已携带 operation、endpoint、HTTP status 和 category，区分 401、调优 404、5xx、无效 JSON 与传输异常；devd 的传输消息仍可能直接显示底层英文，需要端点级中文提示。
 - `REQ-LTR-007`: `firmware-tuning-workspace.tsx` 的空闲和活动运行共用有限读取预算；连续三次可重试失败后保留最后快照与游标，停止轮询并提供手动重试动作。活动运行不得自动清零失败计数。对最后观察到的活动运行，安全停止不依赖读取重新确认或本地日志就绪；其他写入仍受原有门禁保护。
 - `REQ-LTR-008`: 当前错误显示复用通用 `messageOf`，需要加入调优操作、响应类别和安全动作的中文消息目录。
 - `REQ-LTR-009`: 全局日志已有设备事件面板，但调优读取尝试尚未统一记录 endpoint、结果类别和 retry count；敏感字段必须继续保持 redaction。
 - `REQ-LTR-010`: Web Serial、devd 和 direct LAN 已有独立 adapter；需要使用同一 tuning domain state 和 fixture matrix 验证 transport parity。
 - 调优使用生产 `AutomaticThermal` 电源请求。高优先级 PD 服务为同一已确认 APDO、同一合同电流内的健康 PPS 电压步进保留 heater permit，避免低优先级控制周期恢复输出前被异步强制关断；能力刷新、合同范围/电流变化、拒绝、超时和低压互锁仍关断。预热实际全输出资格不放宽，零输出帧继续使该试验不合格。
-- 预热 PPS 工作点保留一个 100mV 上限量化档位的余量；仍安全的已确认合同允许在这个余量内保持，避免 RTD 量化边界抖动导致后端反复主动降压、等待稳定和零输出。真正越界的合同仍立即关断并迁入安全范围，物理全输出资格保持不变。准备阶段使用相同工作点范围；确认合同位于实时上限下方一个 100mV 档位内时即可进入预热，不要求精确等于上限。
+- 自动 PPS 的预热、接近、保持与供电准备工作点持续保留一个 100mV 上限量化档位的余量；合同保持分支与 Hold governor 使用同一工作上限，不能消耗该余量而重新贴住硬安全上限。健康的小步调压保持输出，真正越界的合同仍立即关断并迁入安全范围，物理全输出资格保持不变。确认合同位于实时上限下方一个 100mV 档位内时即可进入预热，不要求精确等于上限。
 - 已确认的 PPS 合同可能领先后端缓存的请求值；重同步是否关断须依据实时安全电压上限，不能把低于当前合同的目标请求值当成安全上限。模式变化和实际越界仍关断；同一安全范围内的重同步保持物理输出。
 - devd 活动会话和调优请求绑定页面选中的具体 bridge 目标，不得在显示 LAN 时借用同设备 USB 目标的租约。调优 GET 在 Web、devd USB 和 devd LAN 间透传 `run_id` 与完整宽度 `after_sequence`，包括零值；缺少游标会重复返回旧页、无法确认已收事件，最终耗尽设备事件缓冲并使运行失败。
 - HTTP socket 回收必须结束连接两端后再放回监听池。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id>`，不携带凭据、不跟随重定向，身份不符立即停止。
@@ -54,6 +54,9 @@
 - 调优采样在请求非零而实际输出为零时保留 `output_paused` 原因，包括 PWM 关断来源、PD permit、供电响应锁存、settle 窗口以及最后一次 PPS 停热分支和缓存/目标电压。该诊断不修改输出授权、安全门禁或试验资格；`p`、`l`、`s` 依次为 PD 许可、供电锁存和等待窗口状态，`active`、`cap` 保存停热决策时的合同电压与上限；`flags` 的低三位依次代表安全恢复、合同纠正和范围/大步长切换；最后一次停热上下文不等同于当前故障归因，须结合时间与状态核验。
 
 - 固件 `2661678676f9162265fa8cab70621148c8d0c54b` 的 Web HTTP 运行 `web-pps3a-3802e0d8-9b3a-4912-adf9-427481b456bb` 在 42.816 秒记录 `output_paused:command permit=1 latch=0 settle=1 flags=2 cached=10700 next=10800`，证明归零来自 PPS 合同纠正分支而非 PD 许可撤销。Web 停止未在 15 秒内确认；通过同一授权设备的 USB/devd 安全停止接口返回 `armed=false`、`canceled`。该轮未完成，不能用于验收通过。
+
+- 固件 `b813e06b2d89c5a3` 的完整功能镜像经 `just firmware-image-check` 确认为 `2,082,096B / 2,097,152B`，通过栈门禁并烧录至主人授权的精确端口；ELF SHA-256 为 `610184f97d3c42204f6a0de6889204dc281c8dc951e6ed9d2bf6e84e8fe73212`。本地 Web 页面通过 devd LAN bridge 连续两次发送空 lease 的 HTTP `cancel`，均返回 200、`armed=false`、`phase=idle`，旧凭据仍有效。该结果只验证幂等停止，不是完整调优通过证据。烧录按授权跳过 EEPROM 备份，未生成备份归档，EEPROM 健康状态未知。
+- HTTP 运行 `web-pps3a-1a8acc31-2c5f-4f39-a57e-e6abebf8ea41` 在 7.443 秒捕获合同 10.0V / 上限 9.9V 导致的输出归零；47.059 秒与 48.309 秒也出现合同纠正停热。436.108 秒时仍处于 220°C 预热、实测 108.86°C，后由页面停止并确认已取消，未完成整轮。工作余量回归测试重放上限上升后回落的序列，修复前明确失败于 `Warmup: 10000 -> 10000 at 10000`；必须取得持续保留余量修复的匹配镜像真机证据。
 
 ## Remaining Gaps
 
