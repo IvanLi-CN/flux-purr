@@ -5573,14 +5573,37 @@ fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
                 candidate_profile: Some(profile),
             })
             .unwrap();
+        let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([7; 32]);
+        assert!(runtime.bind_owner_proof(&owner));
         runtime.record_preview_applied().unwrap();
         runtime.sealed = true;
         runtime.armed = false;
         runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
         let delivered = runtime.events_after(None).next_sequence;
         runtime.events_after(delivered);
+        let mut observer = runtime.clone();
+        assert!(
+            observer
+                .confirm_save(ThermalTuningSaveConfirmation {
+                    owner_proof: None,
+                    run_id: "run-save",
+                    candidate_id: "candidate-save",
+                    candidate_hash: candidate_hash.as_str(),
+                    power_class,
+                    readback_verified: true,
+                    bank_revision: 17,
+                    bank_hash: candidate_hash.clone(),
+                })
+                .is_err(),
+            "A reader must not save with public identity alone"
+        );
+        assert_eq!(
+            observer, runtime,
+            "Rejected save must not damage the candidate"
+        );
         let receipt = runtime
             .confirm_save(ThermalTuningSaveConfirmation {
+                owner_proof: Some(&owner),
                 run_id: "run-save",
                 candidate_id: "candidate-save",
                 candidate_hash: candidate_hash.as_str(),
@@ -5599,6 +5622,40 @@ fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
             ThermalTuningTerminalDisposition::Passed
         );
     }
+}
+
+#[test]
+fn tuning_owner_proof_cannot_be_replaced_or_reused_after_stop_failure_or_restart() {
+    let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([1; 32]);
+    let other = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([2; 32]);
+    let mut runtime = started_single_target_runtime();
+    assert!(runtime.bind_owner_proof(&owner));
+    assert!(!runtime.bind_owner_proof(&other));
+    assert_eq!(runtime.validate_save_owner(Some(&owner)), Ok(()));
+    assert_eq!(
+        runtime.validate_save_owner(Some(&other)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    let mut failed = runtime.clone();
+    failed.fail("test_safety_failure");
+    assert_eq!(
+        failed.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    runtime.cancel("another_client_stop").unwrap();
+    assert_eq!(
+        runtime.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    runtime.reset_for_run();
+    assert_eq!(
+        runtime.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    assert_eq!(
+        ThermalTuningRuntime::new().validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
 }
 
 #[test]
@@ -5732,6 +5789,7 @@ fn seal_cannot_promote_an_unfinished_trial() {
     );
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: None,
             run_id: "run-5a",
             candidate_id: "candidate-5a",
             candidate_hash: "hash-5a",
@@ -5984,12 +6042,15 @@ fn closed_confirmation_trial(events: &[ThermalTuningEvent]) -> Option<ThermalTun
 }
 
 fn assert_single_target_save_gates(runtime: &mut ThermalTuningRuntime) {
+    let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([9; 32]);
+    assert!(runtime.owner_verifier.bind(&owner));
     let digest_before_ack = runtime.trace().digest;
     runtime.events_after(runtime.trace().last_sequence);
     assert_eq!(runtime.trace().digest, digest_before_ack);
     assert!(!runtime.trace().gap);
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: Some(&owner),
             run_id: "run-hold",
             candidate_id: "candidate-hold",
             candidate_hash: "hash-hold",
@@ -6019,6 +6080,7 @@ fn assert_single_target_save_gates(runtime: &mut ThermalTuningRuntime) {
     runtime.events_after(seal_page.next_sequence);
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: Some(&owner),
             run_id: "run-hold",
             candidate_id: "candidate-hold",
             candidate_hash: "hash-hold",

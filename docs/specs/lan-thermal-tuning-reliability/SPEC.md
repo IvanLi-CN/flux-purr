@@ -122,6 +122,7 @@
 - While a tuning run is active, all clients MAY read device and tuning state, but all tuning writes and unrelated control writes MUST be rejected by the device and rendered disabled by the Web UI.
 - Any authenticated client MAY request an idempotent stop for the active tuning run.
 - Only the client that started the active tuning run MAY confirm and persist its candidate.
+- Start MUST return an opaque owner proof only to its caller. Confirm-save MUST validate that proof before any persistent write; public status, trace, candidate identity and diagnostic logs MUST NOT disclose it. Stop, failure, a new run and successful save MUST invalidate the previous proof.
 - The Web UI MUST show a page-level global notice while the run is active and explain which writes are disabled and that stopping remains available.
 
 ## Verification

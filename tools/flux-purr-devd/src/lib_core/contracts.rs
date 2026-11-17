@@ -318,6 +318,8 @@ pub struct ThermalTuningRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_class: Option<ThermalTuningPowerClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets_c: Option<Vec<i16>>,
@@ -428,6 +430,8 @@ pub struct ThermalTuningStatus {
     pub run_id: Option<String>,
     pub candidate_id: Option<String>,
     pub candidate_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof>,
     pub targets_c: Vec<i16>,
     pub target_index: usize,
     pub armed: bool,
@@ -1100,6 +1104,8 @@ pub(crate) struct UsbThermalTuningWire<'a> {
     pub(crate) candidate_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) candidate_hash: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) owner_proof: Option<&'a flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) power_class: Option<ThermalTuningPowerClass>,
     #[serde(skip_serializing_if = "Option::is_none")]

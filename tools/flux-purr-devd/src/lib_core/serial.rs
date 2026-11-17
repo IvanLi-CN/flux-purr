@@ -564,6 +564,7 @@ pub(crate) async fn serial_thermal_tuning(
         run_id: payload.run_id.as_deref(),
         candidate_id: payload.candidate_id.as_deref(),
         candidate_hash: payload.candidate_hash.as_deref(),
+        owner_proof: payload.owner_proof.as_ref(),
         power_class: payload.power_class,
         targets_c: payload.targets_c.as_ref(),
         after_sequence: payload.after_sequence,

@@ -508,6 +508,43 @@ fn transport_events_redact_lan_pairing_codes() {
 }
 
 #[test]
+fn tuning_owner_proof_is_forwarded_but_never_logged() {
+    let proof =
+        flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([3; 32]);
+    let payload: ThermalTuningRequest = serde_json::from_value(json!({
+        "leaseId": "lease", "op": "confirm_save", "ownerProof": proof
+    }))
+    .unwrap();
+    let wire = UsbThermalTuningWire {
+        frame_type: "thermal_tuning",
+        request_id: "save",
+        op: payload.op,
+        run_id: None,
+        candidate_id: None,
+        candidate_hash: None,
+        owner_proof: payload.owner_proof.as_ref(),
+        power_class: None,
+        targets_c: None,
+        after_sequence: None,
+        candidate_profile: None,
+    };
+    let json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(json["ownerProof"], serde_json::to_value(&proof).unwrap());
+    assert!(!format!("{wire:?}").contains("03030303"));
+    let redacted = redact_transport_frame(json.clone());
+    assert_eq!(redacted["ownerProof"], "<redacted>");
+    assert_eq!(
+        redact_transport_frame(json!({"nested":{"owner_proof":proof}}))["nested"]["owner_proof"],
+        "<redacted>"
+    );
+    assert!(
+        !serde_json::to_string(&redacted)
+            .unwrap()
+            .contains("03030303")
+    );
+}
+
+#[test]
 fn lan_pairing_code_requires_a_consistent_active_state() {
     assert!(
         validate_lan_pairing_code(LanPairingCode {

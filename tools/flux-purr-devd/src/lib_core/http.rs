@@ -966,6 +966,7 @@ pub(crate) async fn device_thermal_tuning(
             run_id: query.run_id,
             candidate_id: None,
             candidate_hash: None,
+            owner_proof: None,
             power_class: None,
             targets_c: None,
             after_sequence: query.after_sequence,

@@ -1260,6 +1260,8 @@ pub struct ThermalTuningCommand {
     pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     pub power_class: Option<ThermalTuningPowerClass>,
     pub targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
     pub after_sequence: Option<u32>,
@@ -1296,6 +1298,8 @@ pub struct ThermalTuningStatusWire {
     pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     pub targets_c: Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>,
     pub target_index: usize,
     pub armed: bool,
@@ -2264,6 +2268,8 @@ struct UsbFrameWire {
     candidate_id: Option<Box<String<REQUEST_ID_MAX_LEN>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_hash: Option<Box<String<THERMAL_TUNING_HASH_MAX_LEN>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     #[serde(skip_serializing_if = "Option::is_none")]
     power_class: Option<ThermalTuningPowerClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2438,6 +2444,8 @@ struct UsbThermalTuningInboundWire {
     run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     power_class: Option<ThermalTuningPowerClass>,
     targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
     after_sequence: Option<u32>,
@@ -2641,6 +2649,7 @@ fn usb_frame_from_thermal_tuning(value: UsbFrameWire) -> Result<UsbFrame, UsbFra
             run_id: value.run_id.map(|value| *value),
             candidate_id: value.candidate_id.map(|value| *value),
             candidate_hash: value.candidate_hash.map(|value| *value),
+            owner_proof: value.owner_proof,
             power_class: value.power_class,
             targets_c: value.targets_c.map(|value| *value),
             after_sequence: value.after_sequence,
@@ -2774,6 +2783,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             run_id: None,
             candidate_id: None,
             candidate_hash: None,
+            owner_proof: None,
             power_class: None,
             targets_c: None,
             after_sequence: None,
@@ -2917,6 +2927,7 @@ impl UsbFrameWire {
         self.run_id = command.run_id.clone().map(Box::new);
         self.candidate_id = command.candidate_id.clone().map(Box::new);
         self.candidate_hash = command.candidate_hash.clone().map(Box::new);
+        self.owner_proof = command.owner_proof.clone();
         self.power_class = command.power_class;
         self.targets_c = command.targets_c.clone().map(Box::new);
         self.after_sequence = command.after_sequence;
@@ -3419,6 +3430,7 @@ fn parse_usb_thermal_tuning(line: &str) -> Result<UsbFrame, UsbFrameError> {
             run_id: frame.run_id,
             candidate_id: frame.candidate_id,
             candidate_hash: frame.candidate_hash,
+            owner_proof: frame.owner_proof,
             power_class: frame.power_class,
             targets_c: frame.targets_c,
             after_sequence: frame.after_sequence,
@@ -5361,6 +5373,24 @@ mod tests {
                 .0,
             bounds
         );
+    }
+
+    #[test]
+    fn tuning_save_owner_proof_round_trips_without_debug_disclosure() {
+        let proof = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([0xa5; 32]);
+        let wire = format!(
+            r#"{{"type":"thermal_tuning","requestId":"save","op":"confirm_save","ownerProof":{}}}"#,
+            serde_json::to_string(&proof).unwrap()
+        );
+        let frame = parse_usb_frame(&wire).unwrap();
+        let UsbFrame::ThermalTuning { command, .. } = &frame else {
+            panic!("wrong frame")
+        };
+        assert_eq!(command.owner_proof.as_ref(), Some(&proof));
+        assert!(!format!("{frame:?}").contains("a5a5a5a5"));
+        let mut bytes = [0u8; USB_LINE_MAX_LEN];
+        let encoded = write_usb_frame(&frame, &mut bytes).unwrap();
+        assert_eq!(parse_usb_frame(encoded).unwrap(), frame);
     }
 
     #[cfg(feature = "buzzer-test")]

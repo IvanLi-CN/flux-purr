@@ -17,6 +17,7 @@ use crate::thermal_tuning_limits::{
 use crate::thermal_tuning_measurement::{
     QualificationContinuity, QualificationMeasurement, QualificationObservation,
 };
+use crate::thermal_tuning_owner::{TuningOwnerProof, TuningOwnerVerifier};
 use crate::thermal_tuning_strategy::{
     CurveClass, TuneEvidence, bounded_failure_alternative, braking_boundary_damping_candidate,
     limited_hold_outputs, observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
@@ -113,6 +114,7 @@ pub struct ThermalTuningStart<'a> {
 }
 
 pub struct ThermalTuningSaveConfirmation<'a> {
+    pub owner_proof: Option<&'a TuningOwnerProof>,
     pub run_id: &'a str,
     pub candidate_id: &'a str,
     pub candidate_hash: &'a str,
@@ -420,6 +422,7 @@ struct TrialStopReasonInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalTuningError {
+    OwnerProofMismatch,
     InvalidPowerClass,
     InvalidTargets,
     AlreadyRunning,
@@ -496,6 +499,7 @@ impl FailureBracketAxis {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalTuningRuntime {
+    owner_verifier: TuningOwnerVerifier,
     pub phase: ThermalTuningPhase,
     pub terminal_disposition: ThermalTuningTerminalDisposition,
     pub review_disposition: ThermalTuningReviewDisposition,
@@ -610,6 +614,7 @@ impl Default for ThermalTuningRuntime {
 
 impl ThermalTuningRuntime {
     const EMPTY: Self = Self {
+        owner_verifier: TuningOwnerVerifier::empty(),
         phase: ThermalTuningPhase::Idle,
         terminal_disposition: ThermalTuningTerminalDisposition::Running,
         review_disposition: ThermalTuningReviewDisposition::Pending,
@@ -3419,6 +3424,7 @@ impl ThermalTuningRuntime {
         self.armed = false;
         self.review_disposition = ThermalTuningReviewDisposition::Complete;
         if self.failed_target_mask != 0 {
+            self.owner_verifier = TuningOwnerVerifier::empty();
             self.phase = ThermalTuningPhase::Failed;
             self.terminal_disposition = ThermalTuningTerminalDisposition::Failed;
         } else {
@@ -3448,6 +3454,7 @@ impl ThermalTuningRuntime {
     }
 
     pub fn cancel(&mut self, reason: &str) -> Result<(), ThermalTuningError> {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         if !self.armed
             && !self.sealed
             && self.terminal_disposition != ThermalTuningTerminalDisposition::CandidateReady
@@ -3476,6 +3483,7 @@ impl ThermalTuningRuntime {
         confirmation: ThermalTuningSaveConfirmation<'_>,
     ) -> Result<ThermalTuningSaveReceipt, ThermalTuningError> {
         let ThermalTuningSaveConfirmation {
+            owner_proof,
             run_id,
             candidate_id,
             candidate_hash,
@@ -3484,6 +3492,10 @@ impl ThermalTuningRuntime {
             bank_revision,
             bank_hash,
         } = confirmation;
+        if !self.sealed {
+            return Err(ThermalTuningError::NotSealed);
+        }
+        self.validate_save_owner(owner_proof)?;
         self.validate_save_identity(run_id, candidate_id, candidate_hash, power_class)?;
         if !readback_verified || bank_hash.as_str() != candidate_hash {
             self.fail("candidate_readback_not_verified");
@@ -3491,6 +3503,7 @@ impl ThermalTuningRuntime {
             return Err(ThermalTuningError::IdentityMismatch);
         }
         self.save_confirmed = true;
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.phase = ThermalTuningPhase::Completed;
         self.terminal_disposition = ThermalTuningTerminalDisposition::Passed;
         self.push_event(ThermalTuningEventKind::Decision, None, None, None, None);
@@ -3507,6 +3520,29 @@ impl ThermalTuningRuntime {
         };
         self.save_receipt = Some(receipt.clone());
         Ok(receipt)
+    }
+
+    /// Bound only by the trusted start handler, with fresh MCU randomness.
+    pub fn bind_owner_proof(&mut self, proof: &TuningOwnerProof) -> bool {
+        self.armed && self.owner_verifier.bind(proof)
+    }
+
+    /// Call before attempting any EEPROM mutation, not just after readback.
+    pub fn validate_save_owner(
+        &self,
+        proof: Option<&TuningOwnerProof>,
+    ) -> Result<(), ThermalTuningError> {
+        if !matches!(
+            self.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+                | ThermalTuningTerminalDisposition::Canceled
+                | ThermalTuningTerminalDisposition::Passed
+        ) && self.owner_verifier.verifies(proof)
+        {
+            Ok(())
+        } else {
+            Err(ThermalTuningError::OwnerProofMismatch)
+        }
     }
 
     pub fn validate_save_identity(
@@ -3670,6 +3706,7 @@ impl ThermalTuningRuntime {
     }
 
     pub fn fail(&mut self, reason: &str) {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.armed = false;
         self.sealed = false;
         self.phase = ThermalTuningPhase::Failed;
@@ -3702,6 +3739,7 @@ impl ThermalTuningRuntime {
     }
 
     fn reset_for_run(&mut self) {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.phase = ThermalTuningPhase::Idle;
         self.terminal_disposition = ThermalTuningTerminalDisposition::Running;
         self.review_disposition = ThermalTuningReviewDisposition::Pending;
@@ -3899,6 +3937,7 @@ impl ThermalTuningRuntime {
         }
         self.last_sequence = Some(sequence);
         if self.events.push(event).is_err() {
+            self.owner_verifier = TuningOwnerVerifier::empty();
             self.trace_gap = true;
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
             self.armed = false;
