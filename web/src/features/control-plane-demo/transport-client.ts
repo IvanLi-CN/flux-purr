@@ -44,6 +44,7 @@ export class ControlPlaneClientError extends Error {
   readonly operation?: string
   readonly endpoint?: string
   readonly status?: number
+  readonly protocolCode?: string
 
   constructor(
     message: string,
@@ -55,6 +56,7 @@ export class ControlPlaneClientError extends Error {
       operation?: string
       endpoint?: string
       status?: number
+      protocolCode?: string
     }
   ) {
     super(message)
@@ -66,6 +68,37 @@ export class ControlPlaneClientError extends Error {
     this.operation = metadata?.operation
     this.endpoint = metadata?.endpoint
     this.status = metadata?.status
+    this.protocolCode = metadata?.protocolCode
+  }
+}
+
+export function classifyHttpFailure(
+  status: number,
+  endpoint: string,
+  protocolCode?: string,
+  retryHint?: boolean
+) {
+  const tuningEndpoint = /\/thermal-tuning(?:[/?]|$)/.test(endpoint)
+  const unsupported =
+    status !== 401 &&
+    tuningEndpoint &&
+    (status === 404 || protocolCode === 'thermal_tuning_unsupported')
+  const category: ControlPlaneClientError['category'] =
+    status === 401
+      ? 'unauthorized'
+      : unsupported
+        ? 'thermal_tuning_unsupported'
+        : status >= 500
+          ? 'server_retryable'
+          : undefined
+  return {
+    category,
+    code:
+      status === 401 ? 'unauthorized' : unsupported ? 'thermal_tuning_unsupported' : protocolCode,
+    protocolCode,
+    // Authentication and capability failures require a user/firmware change;
+    // an upstream retry hint cannot make polling them useful.
+    retryable: status === 401 || unsupported ? false : (retryHint ?? status >= 500),
   }
 }
 
@@ -1013,21 +1046,24 @@ async function requestJsonResponse<T>(
 
   if (!response.ok) {
     const envelope = payload as ApiErrorEnvelope | null
-    const code = envelope?.error?.code ?? `http_${response.status}`
-    const category =
-      response.status === 401
-        ? 'unauthorized'
-        : response.status === 404 && endpoint.includes('thermal-tuning')
-          ? 'thermal_tuning_unsupported'
-          : response.status >= 500
-            ? 'server_retryable'
-            : undefined
+    const failure = classifyHttpFailure(
+      response.status,
+      endpoint,
+      envelope?.error?.code,
+      envelope?.error?.retryable
+    )
     throw new ControlPlaneClientError(
       envelope?.error?.message ?? `Request failed with ${response.status}`,
-      code,
-      envelope?.error?.retryable ?? response.status >= 500,
+      failure.code ?? `http_${response.status}`,
+      failure.retryable,
       envelope?.error?.details,
-      { category, operation, endpoint, status: response.status }
+      {
+        category: failure.category,
+        protocolCode: failure.protocolCode,
+        operation,
+        endpoint,
+        status: response.status,
+      }
     )
   }
 

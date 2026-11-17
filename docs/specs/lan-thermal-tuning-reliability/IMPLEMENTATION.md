@@ -21,6 +21,7 @@
 
 ## 完整读取期限与失败展示
 
+- direct LAN 与 devd HTTP 共用错误分类：调优路由的 404 和稳定 `thermal_tuning_unsupported` 协议码统一为不可重试的 unsupported；401 优先归一化为不可重试的 unauthorized，不能被响应体的重试提示或不一致协议码覆盖。`protocolCode` 独立保留设备原始码，操作、端点和 HTTP status 保留；5xx 沿用服务端重试提示或默认可重试。两种 adapter 的十项矩阵覆盖此前的分类差异；全量 Web 416 项单测与类型检查通过。该矩阵不替代 Web Serial、daemon 内部 USB/LAN 或真实硬件全路径验收。
 - 调优 GET 的期限覆盖连接、响应头和完整 JSON 正文。direct LAN 为 5 秒；Web → devd 为 12 秒，覆盖 daemon 的 3 秒排队和 6 秒设备读取预算。期限到达时取消请求并结束等待，即使 fetch adapter 忽略 AbortSignal 也会向页面返回可重试的 `transport_unavailable`；每次读取只发送一次请求，重试仍由页面的有限预算控制。成功、失败和超时均释放计时器；写入不适用读取期限，不自动重放。
 - direct LAN 和 devd 成功 HTTP 响应的无效 JSON、null、标量和数组均返回不可重试的 `response_invalid`，保留操作、路径与 HTTP status。调优页不显示加热曲线标定模块的后台读取指示；调优错误显示在自身工作区。读取失败时不叠加正常 Fixed idle 供电说明。
 - 响应头和正文停滞的四条 adapter 回归在修复前均未结束等待；devd 无效 JSON 回归错误地成功返回 null，成功 JSON 非对象的回归另复现五项失败。修复后 Web 406 项单元测试通过，期限回归同时检查没有请求重放、没有遗留计时器。54 项页面/组件交互测试、Web 类型检查与构建通过。端点超时控制不能证明设备网络连接恢复或完整调优通过。

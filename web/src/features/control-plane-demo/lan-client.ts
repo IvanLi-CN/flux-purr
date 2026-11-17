@@ -1,6 +1,6 @@
 import type { ControlPlaneStatus, Identity, NetworkSummary } from './contracts'
 import { withReadDeadline } from './read-deadline'
-import { ControlPlaneClientError } from './transport-client'
+import { ControlPlaneClientError, classifyHttpFailure } from './transport-client'
 import type { DeviceTarget } from './types'
 
 const LAN_STORAGE_PREFIX = 'flux-purr:lan-device:'
@@ -1077,26 +1077,29 @@ async function responseError(response: Response, baseUrl: string, path = '', ope
     error?: { code?: string; message?: string; retryable?: boolean }
   } | null
   if (response.status === 401) invalidateLanDeviceAuthorization(baseUrl)
-  const thermalUnsupported = path.includes('thermal-tuning') && response.status === 404
-  const category = thermalUnsupported
-    ? 'thermal_tuning_unsupported'
-    : response.status === 401
-      ? 'unauthorized'
-      : response.status >= 500
-        ? 'server_retryable'
-        : undefined
+  const failure = classifyHttpFailure(
+    response.status,
+    path,
+    payload?.error?.code,
+    payload?.error?.retryable
+  )
+  const thermalUnsupported = failure.category === 'thermal_tuning_unsupported'
   return new ControlPlaneClientError(
     thermalUnsupported
       ? '当前固件未提供热控调优接口。'
       : response.status === 401
         ? '设备拒绝了当前配对凭据，请重新配对。'
         : (payload?.error?.message ?? `设备请求失败 (${response.status})`),
-    thermalUnsupported
-      ? 'thermal_tuning_unsupported'
-      : (payload?.error?.code ?? 'lan_request_failed'),
-    thermalUnsupported ? false : (payload?.error?.retryable ?? response.status >= 500),
+    failure.code ?? 'lan_request_failed',
+    failure.retryable,
     payload?.error,
-    { category, operation, endpoint: path, status: response.status }
+    {
+      category: failure.category,
+      protocolCode: failure.protocolCode,
+      operation,
+      endpoint: path,
+      status: response.status,
+    }
   )
 }
 
