@@ -19,10 +19,10 @@ pub const HTTP_API_VERSION: &str = "v1";
 pub const HTTP_SERVICE_TYPE: &str = "_http._tcp.local";
 pub const HTTP_SERVICE_PORT: u16 = 80;
 pub const HTTP_SERVICE_TXT: [&str; 3] = ["api=v1", "path=/api/v1", "pairing=frontpanel"];
-/// The TCP listener owns one socket per concurrent in-flight connection.
-/// Snapshot-backed reads do not allocate a mutation workspace. Two reader
-/// slots keep a status/event stream independent from the lease heartbeat while
-/// the single mutation workspace serializes writes.
+/// Each fixed worker owns a socket and independently listens for connections.
+/// Snapshot-backed reads do not allocate a full request workspace. Two reader
+/// slots keep status/event traffic independent from a control request, while
+/// the control mailbox serializes mutations.
 pub const fn http_socket_slot_count(active_request_budget: usize) -> usize {
     active_request_budget.saturating_add(2)
 }

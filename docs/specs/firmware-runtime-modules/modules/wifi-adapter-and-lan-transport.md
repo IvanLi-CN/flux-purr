@@ -59,6 +59,6 @@ IPv4 facts, not merely from the presence of a saved SSID.
 ## Source References
 
 - `firmware/src/net.rs`: `spawn`, `wifi_task_inner`, `network_task`,
-  `http_listener_task`, `mdns_task`
+  `http_connection_task`, `mdns_task`
 - `firmware/src/lan.rs`
 - `firmware/src/mdns.rs`

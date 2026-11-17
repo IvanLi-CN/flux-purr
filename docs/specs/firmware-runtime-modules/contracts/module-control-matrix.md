@@ -197,7 +197,7 @@ task remain independent owners of their own service or physical boundary.
 ### Wi-Fi Adapter and LAN Transport
 
 - Source: `firmware/src/net.rs` (`spawn`, `wifi_task_inner`,
-  `network_task`, `http_listener_task`, `mdns_task`) and
+  `network_task`, `http_connection_task`, `mdns_task`) and
   `firmware/src/{lan.rs,mdns.rs}`.
 - Responsibility: own the ESP Wi-Fi station, Embassy network stack, bounded
   HTTP sockets/workspaces, and mDNS/DNS-SD advertisement.

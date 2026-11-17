@@ -11,6 +11,11 @@
 - Lifecycle: active
 - Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
 
+## HTTP 接入诊断与定向验收
+
+- 镜像 `d037989c` 的并发公开 health 回归使用 `just lan-http-read-check http://192.168.31.207 d0cf1308a148 30 3`，30 次请求中 10 次成功、20 次连接拒绝；五组三并发探针均只有一个成功，单并发五次全部成功。故障位于单 acceptor 的 TCP 接入窗口，不能归因于配对或调优 capability。该路径依赖 Embassy 网络调度和设备 TCP 栈，host 路由单测不能替代匹配镜像的相同并发探针。
+- Web 经 devd LAN HTTP 启动 `web-pps3a-3b40a1bb-99f4-41f5-a8fe-29775e331893` 返回 200，设备进入调优。临时诊断确认租约申请、写入和释放均返回 200，历史 `lease_busy` 未复现，原因仍未确定；诊断日志代码已移除。活动期间，另一已认证 HTTP 客户端持有自己的有效租约并提交保持原目标温度的 runtime 写入，返回 `409 thermal_tuning_active`，随后租约释放成功。Web 主动停止后，设备为 `canceled / armed=false`，sequence 0–1792 完整、无 gap；这是协议定向验收，不是整轮调优通过。
+
 ## Implementation Coverage
 
 - `REQ-LTR-001`: `web/src/features/control-plane-demo/lan-client.ts` 已能依据稳定 `deviceId` 合并 LAN 目标并更新地址；`storeLanDeviceSession` 按身份键保存并兼容旧地址记录；`resumeLanDeviceSession` 在匿名 health 身份匹配后复用凭据并迁移 locator，身份不符不发送 bearer。
@@ -28,7 +33,7 @@
 - 已确认的 PPS 合同可能领先后端缓存的请求值；重同步是否关断须依据实时安全电压上限，不能把低于当前合同的目标请求值当成安全上限。模式变化和实际越界仍关断；同一安全范围内的重同步保持物理输出。
 - devd 活动会话和调优请求绑定页面选中的具体 bridge 目标，不得在显示 LAN 时借用同设备 USB 目标的租约。调优 GET 在 Web、devd USB 和 devd LAN 间透传 `run_id` 与完整宽度 `after_sequence`，包括零值；缺少游标会重复返回旧页、无法确认已收事件，最终耗尽设备事件缓冲并使运行失败。
 - 固件事件确认保持单调且幂等：较新请求已确认并回收事件后，较旧请求重复已确认游标不会制造全局追踪缺口；未交付事件的未来确认仍被拒绝。Web 只因自身的记录失败或缺口自动停止本页发起的运行，观察者仍可手动安全停止。
-- HTTP socket 回收必须结束连接两端后再放回监听池。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id>`，不携带凭据、不跟随重定向，身份不符立即停止。
+- HTTP socket 由三个固定 worker 独立监听、处理和复用；不得只由单个 acceptor 接入后再移交，否则同一网络轮询中的并发 SYN 会在其他缓冲空闲时仍被拒绝。回收必须结束连接两端后再重新监听。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id> [requests] [concurrency]`，不携带凭据、不跟随重定向，身份不符立即停止。
 - devd 对同一规范化 HTTP origin 的已认证请求共享两个在途槽，其余请求公平等待，等待超过 3 秒返回可重试的 `503 server_retryable`。这是请求调度预算，不限制客户端数量或取得控制权；不同 origin 使用独立预算。写入前用于读取 revision 的 status 响应必须完整收取，再发送写入，避免丢弃正文占用设备连接。八个并发 HTTP 读取的回归测试在限流前超过两个在途请求，限流后通过。
 - `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份控制器起点 profile；无上传候选时可以解析匹配起点，并保留独立安全门禁。输出模型、热模型初值、安全边界与工厂数据来源的完整性审计尚未完成，不能将控制器 profile 等同于完整工厂基线验收。
 - `REQ-LTR-013`: 启动时设备候选优先、缺省时工厂基线兜底；候选仍保持 RAM 预览并按功率档位保存。
@@ -38,8 +43,8 @@
 ## Verification / Rollout
 
 - 镜像 `d037989c`（ELF SHA-256 `928f9f8dc4fd961dcc12029135909ece53b4cfc8e8e9c223a8c8738627fd8956`）通过 `just firmware-image-check`：2,085,168 / 2,097,152B；LAN 栈余量 50,820B、嵌套 PD 中断余量 98,420B。经授权端口烧录完成，公开 health 读回 `0.30.10-dev.d037989`；跳过 EEPROM 备份且健康状态未知。Web 重连后首次启动未发出 HTTP POST：旧的显式 LAN 选择与后台 USB 租约不一致，写入错误随后被只读成功清除。桥接连接完成回调已同步具体目标，写入错误与读取错误独立保留；同页复测确认 USB 重连显示 USB，再选择 LAN 时状态轮询也转为 LAN。
-- 选中 LAN 后的启动已真正发出 HTTP POST，但固件返回 `409 lease_busy`，超过声明的租约 TTL 后重试仍相同；设备保持 `idle / armed=false`。页面后台 GET 持续 200，写入错误仍保留。此证据尚不能确定占用者或续租来源；旧游标的真机重放与整轮调优未通过，不以编译和短测替代。
-- 延迟读取者回归测试在修复前因旧游标将追踪误标为 gap 而失败；修复后通过，未来游标拒绝路径保留。681 项固件库测试、607 项运行时测试、严格 host/Xtensa Clippy、387 项 Web 测试、typecheck、Biome 和生产构建通过。匹配镜像的旧游标重放仍待真机验证；该回归不能单独证明此前短测缺口的原因。
+- 选中 LAN 后的启动已真正发出 HTTP POST，但固件返回 `409 lease_busy`，超过声明的租约 TTL 后重试仍相同；设备保持 `idle / armed=false`。页面后台 GET 持续 200，写入错误仍保留。此证据尚不能确定占用者或续租来源；当时旧游标的真机重放与整轮调优尚未通过，不以编译和短测替代。
+- 延迟读取者回归测试在修复前因旧游标将追踪误标为 gap 而失败；修复后通过，未来游标拒绝路径保留。681 项固件库测试、607 项运行时测试、严格 host/Xtensa Clippy、387 项 Web 测试、typecheck、Biome 和生产构建通过。匹配镜像的旧游标重放已通过：Web 收到 sequence 236 后，另一客户端请求 after_sequence=0 返回 200 且 trace.gap=false，运行继续。该回归不能单独证明此前短测缺口的原因。
 - 后台读取期间的启动按钮错误禁用已在真实页面复现：设备已识别且空闲时，2 秒内 81 次观察有 28 次禁用；移除该读取态门禁后，同一页面 81 次观察均可启动。首次身份读取、调优活动和命令执行的门禁保留；命令开始前已发出的读取响应不能覆盖命令后的状态。
 - 显式选中具体 LAN bridge 时，路由恢复与 live devd lease 必须保持相同 targetId。缺少 LAN 租约期间不能切回同身份的 USB 路由，否则界面显示 LAN、写请求却没有对应租约。回归测试在修复前返回错误 fallback，修复后通过；全量 387 项 Web 测试与 typecheck 通过。
 - 完整功能镜像 `62bed0c071a1d167`（ELF SHA-256 `bfa5016fc686f64f4013fee942cb88cb92ad09933480e8d2b42ee6af67f11896`）通过 `just firmware-image-check`：2,085,152 / 2,097,152B；LAN 栈余量 50,820B、嵌套 PD 中断余量 98,420B。经 repo CLI 在主人授权端口烧录完成，跳过 EEPROM 备份且健康状态未知；启动后 USB 与 LAN 身份均读回该 build。

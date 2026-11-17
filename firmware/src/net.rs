@@ -55,15 +55,14 @@ use static_cell::StaticCell;
 
 // Three sockets at 1 KiB per direction keep the event stream, status
 // snapshots, and one short-lived probe independent while preserving the
-// existing static-memory budget. Only the mutation workspace remains
-// serialized below.
+// existing static-memory budget. The control mailbox serializes mutations.
 const HTTP_TCP_BUFFER_LEN: usize = 1024;
 const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
 const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
 // One mutation-capable request plus two independent readers cover the browser
 // event/status path and lease heartbeat without allowing concurrent
-// writes. Identity and network use the published snapshot path and never
-// consume the mutation workspace.
+// writes in the control executor. Identity and network use the published
+// snapshot path and never consume a full request workspace.
 const HTTP_ACTIVE_REQUEST_BUDGET: usize = 1;
 const HTTP_SOCKET_COUNT: usize = http_socket_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
 // Keep two full request workspaces available so a long-poll/event response
@@ -118,8 +117,6 @@ static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_SOCKET_COUNT> =
-    Channel::new();
 static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_WORKSPACE_COUNT> =
     Channel::new();
 
@@ -613,7 +610,9 @@ where
     ];
     for mut socket in sockets {
         socket.set_timeout(Some(Duration::from_secs(5)));
-        HTTP_SOCKETS.send(HttpSocket(socket)).await;
+        spawner
+            .spawn(http_connection_task(stack, HttpSocket(socket)))
+            .map_err(|_| LanStartupError::HttpTaskCapacity)?;
     }
     HTTP_WORKSPACES
         .send(HttpWorkspaceSlot {
@@ -627,9 +626,6 @@ where
             response_slot: 1,
         })
         .await;
-    spawner
-        .spawn(http_listener_task(stack, *spawner))
-        .map_err(|_| LanStartupError::HttpTaskCapacity)?;
     spawner
         .spawn(mdns_task(stack, names))
         .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
@@ -1127,29 +1123,34 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
     })
 }
 
-#[embassy_executor::task]
-async fn http_listener_task(stack: Stack<'static>, spawner: Spawner) {
+// Each socket is listening before a connection arrives. A single acceptor that
+// hands established sockets to workers leaves only one socket in LISTEN: two
+// SYNs processed in the same network poll then reject the second connection,
+// even when the other workers and buffers are idle.
+#[embassy_executor::task(pool_size = 3)]
+async fn http_connection_task(stack: Stack<'static>, socket: HttpSocket) {
+    let mut socket = socket.0;
     loop {
         stack.wait_config_up().await;
-        let HttpSocket(mut socket) = HTTP_SOCKETS.receive().await;
         if socket.accept(HTTP_SERVICE_PORT).await.is_err() {
-            HTTP_SOCKETS.send(HttpSocket(socket)).await;
+            socket.abort();
+            let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
             Timer::after(Duration::from_millis(200)).await;
             continue;
         }
-        let _ = spawner.spawn(http_connection_task(HttpSocket(socket)));
+        handle_http_socket(&mut socket).await;
+        // Complete the reset before reusing this socket. No dynamic task spawn
+        // or pool hand-off can lose a slot during connection teardown.
+        socket.abort();
+        let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
     }
 }
 
-#[embassy_executor::task(pool_size = 3)]
-async fn http_connection_task(socket: HttpSocket) {
-    let mut socket = socket.0;
+async fn handle_http_socket(socket: &mut TcpSocket<'_>) {
     let mut header = [0u8; HTTP_LIGHT_REQUEST_BUFFER_LEN];
-    let header_len = read_http_header(&mut socket, &mut header)
-        .await
-        .unwrap_or(0);
+    let header_len = read_http_header(socket, &mut header).await.unwrap_or(0);
     let light_handled = if header_len > 0 {
-        handle_light_http_connection(&mut socket, &header[..header_len])
+        handle_light_http_connection(socket, &header[..header_len])
             .await
             .unwrap_or(true)
     } else {
@@ -1161,7 +1162,7 @@ async fn http_connection_task(socket: HttpSocket) {
             response_slot,
         } = HTTP_WORKSPACES.receive().await;
         let _ = handle_http_connection(
-            &mut socket,
+            socket,
             &mut workspace.request,
             &mut workspace.response,
             &mut workspace.command,
@@ -1177,14 +1178,6 @@ async fn http_connection_task(socket: HttpSocket) {
             })
             .await;
     }
-    // Response writers flush the complete Content-Length body before returning.
-    // Reset both halves without waiting for a peer's half-close: even a bounded
-    // FIN wait occupies one of just three slots and can starve the listener
-    // during normal concurrent polling. A FIN_WAIT_2 socket also cannot be
-    // accepted again. Flush the reset before returning the closed socket.
-    socket.abort();
-    let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
-    HTTP_SOCKETS.send(HttpSocket(socket)).await;
 }
 
 async fn read_http_header(
