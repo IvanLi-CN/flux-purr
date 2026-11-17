@@ -236,3 +236,16 @@
 ### 有限寿命的净供热不足预测
 
 `high_temperature_search_handles_an_observed_extra_cooling_load` 在相同220°C闭环加入18W额外散热扰动。18W是可重复的合成反例输入，不是该设备或风扇的标定值；真实输入、模型参数和源能力均不改写。旧预测将已观测的负能量差额在短期前视内自行衰减，十二轮候选全部耗尽稳定期限。负差额只在原有两倍传热延迟的观测与预测总窗口内保留，超时立即失效；正差额的余热衰减与所有测温/重置边界保持。修正后该闭环通过，`observed_projection_deficit_cannot_outlive_its_measurement_horizon` 验证未来预测和盲区不能刷新有效期；完整固件测试为1,317项通过、无忽略。匹配新镜像的真机复测仍未完成，不把该合成反例作为当前硬件故障的完整因果证明。
+
+
+### 阶段交接修复的 Web HTTP 实机结果
+
+完整产品固件 `ef2bc832` 经授权精确端口烧录完成，HTTP health 确认 `0.30.10-dev.ef2bc83`；镜像为2,090,464/2,097,152字节，ELF SHA-256为`4cf34121e3f910f3b342b7d0543e1246d366e07cb93a3255862a7bde1596d1c4`。空间8的同一本地Web页面经devd LAN HTTP发起`web-pps3a-81c46d57-2590-4f9c-a437-a6ed5391db77`，没有导入候选，风扇配置保持Low。连续sequence 0–4836共4,837条事件覆盖1,409,922ms；60°C短时筛选及独立保持通过，220°C仍未通过稳定时限，目标预算耗尽后整轮失败。全部预热采样实际输出为1000‰，最高确认合同21V/3.25A。trial 4已进入Hold，但温度从219.82°C回落至218.10°C，随后判定超时；进入Hold不能作为稳定资格通过的证据。
+
+终态HTTP GET为200、`phase=failed / armed=false / trace.complete=true / trace.gap=false / saveConfirmed=false`，digest为`632fa9505ef3f306b09a92e319c1caaa9123047e8a6b1e2c3b30f024cd86a89b`。独立HTTP status确认加热关闭、逻辑/物理输出为零、风扇配置Low，热模型事务仍为`1470196405`。未确认保存，没有替换旧bank。该实机模型的`heatResponse=null`，因此确实使用projection兼容路径；理想闭环通过不代表实机高温稳定问题已解决。
+
+### 净供热不足预测修复的烧录及启动检查
+
+完整产品固件`711b5672`镜像为2,090,560/2,097,152字节，ELF SHA-256为`7f81cdc3e4119d304a95eea218af37de3f0a3b23d2d935cbde460f296e8fd227`；`just firmware-image-check`和栈门禁通过。首次CLI烧录返回授权USB目标身份检查失败，没有切换端口；只读系统元数据确认原精确路径、VID/PID及串号仍匹配`d0cf1308a148`后，一次保留身份守卫的重试返回`flash completed`，HTTP health确认`0.30.10-dev.711b567`。烧录按授权跳过EEPROM备份，未生成归档，健康状态未知。
+
+Web页面通过已保存凭据重新连接同一LAN设备并启动`web-pps3a-62760a1f-2122-4413-9828-9b5dda53b981`，设备以`pps_contract_unavailable`拒绝，sequence 0即失败。HTTP status连续显示`pdState=negotiating / pdContractKind=none / pdContractCurrentMa=0 / pdDegradedReason=pd_fusb_source_caps_requested`，PPS能力为空，VIN约4.9V，加热及输出均关闭，Low配置仍保留。界面12V数值在无合同事实时不能证明已确认12V。此结果只证明启动门禁保持关闭，不能验证净供热不足修复的实际加热效果，也不能据此判断电源缺少PPS能力；PD重启恢复与匹配镜像的完整Web HTTP调优验收仍未完成。
