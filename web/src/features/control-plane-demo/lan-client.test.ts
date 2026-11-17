@@ -613,15 +613,10 @@ describe('LAN browser client', () => {
       controlRevision: 7,
     }
 
-    await authorizedLanRequest(
-      session,
-      'thermal-tuning',
-      'GET',
-      undefined,
-      undefined,
-      fetcher,
-      { run_id: 'run-1', after_sequence: 42 }
-    )
+    await authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher, {
+      run_id: 'run-1',
+      after_sequence: 42,
+    })
 
     expect(String(fetcher.mock.calls[0]?.[0])).toBe(
       'http://192.168.1.10/api/v1/thermal-tuning?run_id=run-1&after_sequence=42'

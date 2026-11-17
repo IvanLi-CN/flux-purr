@@ -1846,9 +1846,7 @@ export function ControlPlaneDemo({
       // map as the source of truth so a stale `active` marker cannot suppress
       // reacquisition and make write commands fall through to a misleading
       // "unsupported" error.
-      leaseId: isDirectLanDevice(selectedDevice)
-        ? lanLease?.leaseId
-        : selectedDevice.leaseId,
+      leaseId: isDirectLanDevice(selectedDevice) ? lanLease?.leaseId : selectedDevice.leaseId,
       leaseState: isDirectLanDevice(selectedDevice)
         ? lanLease
           ? 'active'
@@ -3077,7 +3075,9 @@ export function ControlPlaneDemo({
     readWebSerialThermalPlantRun,
   ])
   const readFirmwareTuning = useCallback(
-    async (cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>): Promise<ThermalTuningStatus> => {
+    async (
+      cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>
+    ): Promise<ThermalTuningStatus> => {
       if (visibleDeviceIsDirectWebSerial) {
         return webSerial.thermalTuning({ op: 'read', ...cursor })
       }
@@ -3113,7 +3113,8 @@ export function ControlPlaneDemo({
         )
       }
       throw new Error('当前设备连接不支持固件调优。')
-    }, [
+    },
+    [
       controlClient,
       effectiveDevdBaseUrl,
       lanDeviceBaseUrl,
@@ -3121,7 +3122,6 @@ export function ControlPlaneDemo({
       effectiveDevdLeaseId,
       visibleDeviceIsDirectWebSerial,
       visibleDeviceTransport,
-      fetch,
       webSerial,
     ]
   )
@@ -4023,7 +4023,11 @@ export function ControlPlaneDemo({
         if (!resumed) throw new Error('保存的 LAN 凭据与当前设备身份不匹配。')
         const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
         const lease = await lanRuntime.createLease(resumed.session)
-        const leasedTarget: DeviceTarget = { ...target, leaseId: lease.leaseId, leaseState: 'active' }
+        const leasedTarget: DeviceTarget = {
+          ...target,
+          leaseId: lease.leaseId,
+          leaseState: 'active',
+        }
         const identityId = deviceIdentityId(leasedTarget)
         setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
         setLanLeasesByDevice((current) => ({ ...current, [leasedTarget.id]: lease }))
@@ -4067,11 +4071,7 @@ export function ControlPlaneDemo({
       }
       if (!leaseId) throw new Error('设备控制租约尚未建立。')
 
-      const identity = await controlClient.identifyDevdDevice(
-        bridgeDevdBaseUrl,
-        device.id,
-        leaseId
-      )
+      const identity = await controlClient.identifyDevdDevice(bridgeDevdBaseUrl, device.id, leaseId)
       const identityValidation = validateBridgeDeviceIdentity(identity)
       if (!identityValidation.ok) {
         throw new Error('无法读取设备身份，请重试 USB 桥接。')

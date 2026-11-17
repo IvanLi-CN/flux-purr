@@ -2,8 +2,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import {
-  FirmwareTuningWorkspace,
   compactIdentifier,
+  FirmwareTuningWorkspace,
   resolveTuningPowerClass,
   shouldPollTuningRead,
   validateCandidate,

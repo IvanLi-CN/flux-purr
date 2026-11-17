@@ -1,4 +1,13 @@
-import { Clipboard, Copy, Download, LoaderCircle, Save, ShieldAlert, Square, Upload } from 'lucide-react'
+import {
+  Clipboard,
+  Copy,
+  Download,
+  LoaderCircle,
+  Save,
+  ShieldAlert,
+  Square,
+  Upload,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -122,7 +131,9 @@ export function FirmwareTuningWorkspace({
     bank?: string
     control?: ThermalControlRuntime
   }
-  readStatus: (cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>) => Promise<ThermalTuningStatus>
+  readStatus: (
+    cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>
+  ) => Promise<ThermalTuningStatus>
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
   const [recording, setRecording] = useState<ThermalTuningRecording | null>(null)
@@ -260,25 +271,14 @@ export function FirmwareTuningWorkspace({
         } catch (failure) {
           if (mountedRef.current) {
             setError(messageOf(failure))
-            const retryable =
-              !(failure instanceof ControlPlaneClientError) || failure.retryable
-            if (armed && retryable && pollAttempt >= 2) {
-              // An active run must keep draining the bounded device event
-              // ring. After three failed reads, retry from the existing
-              // cursor. The firmware acknowledges and removes events as it
-              // serves them, so clearing the browser recording here would
-              // make the next page start at a non-zero sequence and create a
-              // false missing_event_sequence gap.
-              setPollAttempt(0)
-              setReadState('idle')
-            } else {
-              setReadState('failed')
-              setPollAttempt((attempt) =>
-                failure instanceof ControlPlaneClientError && !failure.retryable
-                  ? 3
-                  : Math.min(3, attempt + 1)
-              )
-            }
+            // Keep the last snapshot and cursor, but never silently reset the
+            // retry budget for an active run. Manual retry starts a new round.
+            setReadState('failed')
+            setPollAttempt((attempt) =>
+              failure instanceof ControlPlaneClientError && !failure.retryable
+                ? 3
+                : Math.min(3, attempt + 1)
+            )
           }
         } finally {
           readInFlightRef.current = false
@@ -301,9 +301,9 @@ export function FirmwareTuningWorkspace({
     pending,
     pollAttempt,
     readStatus,
+    readState,
     recordStatus,
     recording,
-    sendCommand,
     supported,
   ])
 
@@ -342,7 +342,10 @@ export function FirmwareTuningWorkspace({
     try {
       await navigator.clipboard.writeText(value)
       setCopiedIdentifier(kind)
-      window.setTimeout(() => setCopiedIdentifier((current) => (current === kind ? null : current)), 1600)
+      window.setTimeout(
+        () => setCopiedIdentifier((current) => (current === kind ? null : current)),
+        1600
+      )
     } catch {
       setCopiedIdentifier(null)
     }
@@ -427,7 +430,7 @@ export function FirmwareTuningWorkspace({
       </header>
 
       <div className="firmware-tuning__toolbar">
-        <div className="firmware-tuning__primary-actions" aria-label="调优操作">
+        <fieldset className="firmware-tuning__primary-actions" aria-label="调优操作">
           <Button
             type="button"
             disabled={
@@ -476,7 +479,7 @@ export function FirmwareTuningWorkspace({
           >
             <Download aria-hidden="true" /> 导出报告
           </Button>
-        </div>
+        </fieldset>
         <details className="firmware-tuning__advanced">
           <summary>高级选项：导入候选</summary>
           <div className="firmware-tuning__advanced-content">
@@ -585,10 +588,7 @@ export function FirmwareTuningWorkspace({
           label="审查"
           value={reviewDispositionLabel(status?.reviewDisposition, Boolean(recording?.runId))}
         />
-        <Fact
-          label="追踪"
-          value={trackingLabel(recording)}
-        />
+        <Fact label="追踪" value={trackingLabel(recording)} />
       </div>
 
       <div className="firmware-tuning__detail">
@@ -713,9 +713,7 @@ function IdentifierValue({
             <TooltipTrigger asChild>
               <span className="firmware-tuning__identifier-summary">{summary}</span>
             </TooltipTrigger>
-            <TooltipContent className="firmware-tuning__identifier-tooltip">
-              {value}
-            </TooltipContent>
+            <TooltipContent className="firmware-tuning__identifier-tooltip">{value}</TooltipContent>
           </Tooltip>
         ) : (
           <span className="firmware-tuning__identifier-summary firmware-tuning__identifier-empty">
