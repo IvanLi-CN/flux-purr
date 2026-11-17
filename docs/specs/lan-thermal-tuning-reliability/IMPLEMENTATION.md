@@ -220,3 +220,15 @@
 最后两个候选使用 0.7°C 和 0.6°C 刹车距离；0.6°C 候选在 219.40°C 进入接近阶段，初始请求 50 permille、实际 40 permille，5,063ms 后回落至 217.25°C，仍未交接保持。候选配置 floor 410 permille，模型解析 floor 为 50 permille；原始时间上限为 5 秒，未触发有限延长。该轨迹将后续排查收敛到模型/接近阶段交接、功率量化及时间门槛之间的关系，尚不构成修改安全或资格阈值的依据。[选取的真实事件与终态](assets/http-low-pps-power-basis.json)保留试验参数、判定、接近样本与 HTTP 终态。
 
 最终 HTTP GET 返回 200、`phase=failed / armed=false / trace.complete=true / trace.gap=false / saveConfirmed=false`；独立 HTTP status 确认加热关闭、逻辑/物理输出均为零、运行不活动、`heatingFanGuardMode=low`，热模型事务仍为 `1470196405`。结束后的风扇 High 属于既有 `post_heat` 降温策略，不表示加热防过热配置被恢复为 High。未导入候选、未确认保存、未覆盖旧 bank。整轮成功与 PR Ready 门禁保持未完成。
+
+### PPS 整百分比请求的往返量化
+
+实际事件中的 50 permille 请求、40 permille 输出可由正式换算链确定性复现：21V/3.25A 满量程为 68,250mW，5% 请求编码为整数 3,412mW，再向下取整恢复占空比会得到 4%。PPS 输出恢复为最近的整百分比执行档位，保留零输出、无效合同零输出、100% 上限和 soft-start 上限；固定 PD 分配不变。回归对 3A/3.25A/5A 和多个理论电阻遍历 0–100% 全部请求，修复前明确得到 4 而非 5。该修复未烧录，不把前一轮实机轨迹绑定到它，也不认定量化偏差已解释高温稳定失败。
+
+### 高温失败的软件复现入口
+
+`thermal_tuning_plant_tests.rs` 的 `factory_candidate_search_qualifies_the_recorded_high_temperature_projection` 使用现有设备 projection、68,250mW 上限和 220°C 目标，通过生产控制器与调优运行时闭环复现稳定时间超限。场景采用理想的纯延迟热传递、50ms 步进和模型自身的被动散热，并非完整硬件仿真；它没有覆盖整机供电边界、风扇动态、ADC 拒收或完整热响应曲线，因此只证明该软件场景存在失败，不能替代实机验收或证明两者完整因果相同。
+
+`projection_only_hold_supplies_its_modelled_passive_loss` 进一步隔离有效 projection、缺少完整响应曲线时的 Hold 路径：220°C、静态模型散热约 44.5W、现有输入历史补足该散热，但生产输出仍为 profile 的 18%，没有采用约 65% 的模型平衡值。尝试将模型到达功率作为 Hold 前馈没有使高温闭环通过，并影响既有积分抗饱和回归；该实验实现已撤回，未烧录。
+
+这两条诊断测试带明确 `ignore` 原因，显式运行仍应失败，不计入 passed acceptance；全量测试的绿色摘要不能据此关闭高温门禁。可分别运行 `cargo test --locked --manifest-path firmware/Cargo.toml --bin flux-purr factory_candidate_search_qualifies_the_recorded_high_temperature_projection -- --ignored` 和 `cargo test --locked --manifest-path firmware/Cargo.toml --bin flux-purr projection_only_hold_supplies_its_modelled_passive_loss -- --ignored`。普通全量固件测试为 1,312 passed、2 ignored；两条已知失败、真实 Web HTTP 整轮失败、完整工厂基线数据及 current-head 交付证据仍是未完成项。

@@ -491,8 +491,12 @@ pub(crate) fn automatic_heater_pps_pwm_percent_for_power(
     if full_power_mw == 0 {
         return 0;
     }
-    let duty = (u64::from(requested_power_mw).saturating_mul(100) / u64::from(full_power_mw))
-        .min(100) as u8;
+    // The controller already quantized its request to whole percent, then
+    // encoded it as integer mW. Round to the nearest actuator step so that
+    // truncating that intermediate value cannot turn e.g. 5% into 4%.
+    let full_power_mw = u64::from(full_power_mw);
+    let duty =
+        ((u64::from(requested_power_mw) * 100 + full_power_mw / 2) / full_power_mw).min(100) as u8;
     apply_warmup_soft_start(duty, warmup_soft_start_percent)
 }
 

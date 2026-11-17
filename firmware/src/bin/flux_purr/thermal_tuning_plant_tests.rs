@@ -9,7 +9,7 @@ fn confirmed_safe_pps_full_scale_uses_the_controller_power_basis() {
     for current_ma in [3_250, 3_000, 5_000] {
         for resistance_ohms in [5.674_f32, 3.2, 7.5] {
             let full_power = automatic_heater_power_budget_mw(21_000, resistance_ohms, current_ma);
-            for requested_percent in [100_u8, 50, 5, 0] {
+            for requested_percent in 0..=100_u8 {
                 let requested_mw = full_power * u32::from(requested_percent) / 100;
                 let actual = automatic_heater_pps_pwm_percent_for_power(
                     requested_mw,
@@ -18,9 +18,9 @@ fn confirmed_safe_pps_full_scale_uses_the_controller_power_basis() {
                     current_ma,
                     100,
                 );
-                assert!(
-                    actual.abs_diff(requested_percent) <= 1,
-                    "controller requested {requested_percent}% but applied {actual}% at {current_ma}mA / {resistance_ohms}ohm"
+                assert_eq!(
+                    actual, requested_percent,
+                    "controller request must survive the integer-mW round trip at {current_ma}mA / {resistance_ohms}ohm"
                 );
             }
         }
@@ -135,6 +135,75 @@ fn factory_candidate_search_handles_a_colder_environment_than_calibration() {
     assert!(!replay.tuning.save_confirmed);
 }
 
+#[test]
+#[ignore = "Known 220C stabilization failure; run explicitly while diagnosing PR164"]
+fn factory_candidate_search_qualifies_the_recorded_high_temperature_projection() {
+    let mut replay = PlantReplay::with_target(68_250.0, 220);
+    replay.plate_c = 199.9;
+    replay.input.measured_temp_c = replay.plate_c;
+    replay.input.ambient_temp_c = 25.5;
+    replay.actual_ambient_c = 25.5;
+    replay.input.model = flux_purr_firmware::memory::ThermalPlantProjection {
+        convection_mw_per_c: 228.28497,
+        radiation_mw_per_k4: 0.0,
+        thermal_capacity_mj_per_c: 29_687.969,
+        transport_delay_ms: 3_100,
+    };
+    for now_ms in (0..=tuning::THERMAL_TUNING_TARGET_BUDGET_MS + 180_000).step_by(50) {
+        replay.step(now_ms);
+        if !replay.tuning.armed {
+            break;
+        }
+    }
+    assert_eq!(
+        replay.tuning.accepted_target_mask, 1,
+        "terminal={:?}, trials={}, decisions={:?}",
+        replay.tuning.terminal_disposition, replay.tuning.trial_index, replay.decisions
+    );
+    assert_eq!(replay.tuning.failed_target_mask, 0);
+    assert!(!replay.tuning.armed);
+}
+
+#[test]
+#[ignore = "Known projection-only Hold feedforward gap; not a passed acceptance check"]
+fn projection_only_hold_supplies_its_modelled_passive_loss() {
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps3a);
+    let mut profile = production_test_profile(1_000);
+    profile.points[0].as_mut().unwrap().target_temp_c = 220;
+    profile.points[0].as_mut().unwrap().hold_power_permille = 180;
+    let mut input = production_test_input(220.0);
+    input.target_temp_c = 220;
+    input.max_power_mw = 68_250.0;
+    input.model.convection_mw_per_c = 228.28497;
+    input.model.thermal_capacity_mj_per_c = 29_687.969;
+    input.model.transport_delay_ms = 3_100;
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(kind);
+    controller.phase = HeaterControlPhase::Hold;
+    controller.heater_was_enabled = true;
+    controller.last_target_temp_c = 220;
+    controller.filtered_temp_c = Some(220.0);
+    controller.previous_measured_temp_c = Some(220.0);
+    controller.phase_ticks = u16::MAX;
+    let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+        input.model,
+        220.0,
+        input.ambient_temp_c,
+    );
+    controller
+        .applied_heat
+        .configure(input.model.transport_delay_ms);
+    controller.applied_heat.observe(0, loss);
+    controller.applied_heat.observe(input.now_ms, loss);
+    let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+    assert!(!disarmed);
+    assert_eq!(output.phase, HeaterControlPhase::Hold);
+    assert!(
+        (60..=70).contains(&output.duty_percent),
+        "valid projection requires about 65% to offset loss, got {output:?}"
+    );
+}
+
 struct PlantReplay {
     tuning: tuning::ThermalTuningRuntime,
     controller: HeaterController,
@@ -150,6 +219,10 @@ struct PlantReplay {
 
 impl PlantReplay {
     fn new(max_power_mw: f32) -> Self {
+        Self::with_target(max_power_mw, 60)
+    }
+
+    fn with_target(max_power_mw: f32, target_c: i16) -> Self {
         let mut tuning = tuning::ThermalTuningRuntime::new();
         tuning
             .start(tuning::ThermalTuningStart {
@@ -157,7 +230,7 @@ impl PlantReplay {
                 candidate_id: "plant-replay".try_into().unwrap(),
                 candidate_hash: "unused-factory-hash".try_into().unwrap(),
                 power_class: tuning::ThermalTuningPowerClass::Pps3a,
-                targets: &[60],
+                targets: &[target_c],
                 pps_ready: true,
                 thermal_model_available: true,
                 calibration_conflict: false,
@@ -165,6 +238,7 @@ impl PlantReplay {
             })
             .unwrap();
         let mut input = production_test_input(34.9);
+        input.target_temp_c = target_c;
         input.ambient_temp_c = 30.0;
         input.max_power_mw = max_power_mw;
         input.model = flux_purr_firmware::memory::ThermalPlantProjection {
@@ -257,7 +331,7 @@ impl PlantReplay {
             .record_live_sample(tuning::ThermalTuningSample {
                 sequence: 0,
                 elapsed_ms: now_ms,
-                target_c: 60,
+                target_c: self.input.target_temp_c,
                 trial_index: self.tuning.trial_index,
                 candidate_id: self.tuning.candidate_id.clone().unwrap(),
                 candidate_hash: self.tuning.candidate_hash.clone().unwrap(),
@@ -286,7 +360,11 @@ impl PlantReplay {
                 continue;
             };
             if decision.disposition == "passed" {
-                assert!(self.peak_c <= 63.0, "qualified trial peak={}", self.peak_c);
+                assert!(
+                    self.peak_c <= f32::from(self.input.target_temp_c) + 3.0,
+                    "qualified trial peak={}",
+                    self.peak_c
+                );
                 assert!(decision.warmup_full);
                 assert!(decision.approach_to_hold);
                 assert!(
