@@ -312,6 +312,14 @@ The thermal-model result surface retains the coefficient metrics and run trace w
 
 ![Thermal plant run short-height layout](./assets/thermal-plant-run-short-height-1440x850.png)
 
+### 完整温区供电观测
+
+Storybook `ObservedSixteenPoints` 与 `NarrowChart` 展示供电观测审查界面。供电散点来自去身份化的 16 条已读取观测；温度轨迹与失败上下文为可控场景，不作为真机热性能证明。窄屏场景使用 393 × 852 原生预览视口，图下详情保持单行。
+
+![桌面：完整温区拟合曲线、全部供电观测及失败上下文](assets/full-range-desktop.png)
+
+![窄屏：理论温度—申请电压散点与完整拟合曲线](assets/full-range-narrow-chart.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 高精度绝对温度仍受 RTD 传感器、分压阻值、ADC 噪声和热耦合影响；当前模型只校准 ADC-domain linear error。
@@ -326,11 +334,3 @@ The thermal-model result surface retains the coefficient metrics and run trace w
 供电观测以 RTD 理论温度—申请电压散点与拟合图和完整采样表呈现。每条温度由原始 RTD、该份数据的 dividerSupplyMv、2490Ω 和 PT1000 理论关系换算，不应用用户校准、不借用邻近轨迹温度；元数据无效则显示不可换算。图中全部点可选中查看温度、电压、合同限流、RTD 和时间；合同电流用形状及文字区分。原始点不直接连线；拟合按合同电流分别计算，在完整显示温区求值，包含实测范围之外的函数值。采样表显示全部记录和理论温度，并与选中点关联；明确区分失败尝试与已保存结果。
 
 图表 MUST 使用小尺寸散点，并按合同电流独立拟合至多三次最小二乘多项式。温度先缩放以保证数值稳定；每组至少需要三个不同温度点，否则只显示散点。图表横轴为申请电压、纵轴为 RTD 理论温度；电压轴默认 5.5–28 V，温度轴默认 25–220°C；观测或拟合超出默认范围时扩展到对应极值。图下选中观测详情与横轴名称合并为一行，详情靠左、轴名靠右；窄屏详情可横向滚动，轴名固定可见。拟合电流与电压 RMS 残差放在图表悬停说明中，并明确拟合仅供审查。拟合函数 MUST 在完整显示温区求值，默认覆盖 25–220°C，超出默认范围的温度观测使求值区间同步扩展。拟合线不替代原始观测或固件供电边界。供电图和温度轨迹 MUST 共用 SVG 比例、坐标留白、字体、线宽及主题色，图例位于图内顶部，图下详情保持单行。
-
-## Visual Evidence
-
-Storybook `ObservedSixteenPoints` 与 `NarrowChart` 展示供电观测审查界面。供电散点来自去身份化的 16 条已读取观测；温度轨迹与失败上下文为可控场景，不作为真机热性能证明。窄屏场景使用 393 × 852 原生预览视口，图下详情保持单行。
-
-![桌面：完整温区拟合曲线、全部供电观测及失败上下文](assets/full-range-desktop.png)
-
-![窄屏：理论温度—申请电压散点与完整拟合曲线](assets/full-range-narrow-chart.png)
