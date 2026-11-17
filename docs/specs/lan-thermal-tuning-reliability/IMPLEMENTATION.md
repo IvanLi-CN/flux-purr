@@ -229,6 +229,6 @@
 
 `thermal_tuning_plant_tests.rs` 的 `factory_candidate_search_qualifies_the_recorded_high_temperature_projection` 使用现有设备 projection、68,250mW 上限和 220°C 目标，通过生产控制器与调优运行时闭环复现稳定时间超限。场景采用理想的纯延迟热传递、50ms 步进和模型自身的被动散热，并非完整硬件仿真；它没有覆盖整机供电边界、风扇动态、ADC 拒收或完整热响应曲线，因此只证明该软件场景存在失败，不能替代实机验收或证明两者完整因果相同。
 
-`projection_only_hold_supplies_its_modelled_passive_loss` 进一步隔离有效 projection、缺少完整响应曲线时的 Hold 路径：220°C、静态模型散热约 44.5W、现有输入历史补足该散热，但生产输出仍为 profile 的 18%，没有采用约 65% 的模型平衡值。尝试将模型到达功率作为 Hold 前馈没有使高温闭环通过，并影响既有积分抗饱和回归；该实验实现已撤回，未烧录。
+`projection_only_hold_supplies_its_modelled_passive_loss` 隔离有效 projection、缺少完整响应曲线时的 Hold 路径：220°C、静态模型散热约44.5W、历史供热补足该散热时，profile-only旧输出为18%，没有提供约65%的平衡功率。Warmup退出后的轨迹参考同时将预测到达升温率重置为零。单独恢复参考速度可进入Hold，但旧入口混合及低基准功率仍导致后续欠温；加入被动散热前馈并取消该projection路径的重复入口混合后，闭环满足原有时限、固定Hold入口和热指标。完整响应路径、初始50‰请求及安全保护保持原样。
 
-这两条诊断测试带明确 `ignore` 原因，显式运行仍应失败，不计入 passed acceptance；全量测试的绿色摘要不能据此关闭高温门禁。可分别运行 `cargo test --locked --manifest-path firmware/Cargo.toml --bin flux-purr factory_candidate_search_qualifies_the_recorded_high_temperature_projection -- --ignored` 和 `cargo test --locked --manifest-path firmware/Cargo.toml --bin flux-purr projection_only_hold_supplies_its_modelled_passive_loss -- --ignored`。普通全量固件测试为 1,312 passed、2 ignored；两条已知失败、真实 Web HTTP 整轮失败、完整工厂基线数据及 current-head 交付证据仍是未完成项。
+两条诊断测试均为正常运行的回归，不再忽略。220°C资格位为全局目标集合的第7位，断言使用`1 << 7`，不能沿用60°C的第0位。用旧控制器运行相同测试，两者均失败；抗积分饱和用例在有物理余量的10W场景中仍能验证执行器反馈禁止积分及恢复积分，旧控制器亦通过；额外覆盖被动散热已经大于源功率时不得积累正积分。理想闭环并非完整实机回放，匹配固件的Web HTTP整轮复测、完整工厂基线数据及current-head交付证据仍是独立未完成门禁。

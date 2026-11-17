@@ -1153,6 +1153,7 @@ impl HeaterController {
             && self.phase == HeaterControlPhase::Approach;
         let hold_model_requests = if self.phase == HeaterControlPhase::Hold {
             self.full_response_hold_requests()
+                .or_else(|| self.projection_hold_requests(&frame))
         } else {
             None
         };
@@ -1437,10 +1438,13 @@ impl HeaterController {
             plant,
         );
         if entered_approach || self.approach_trajectory.is_none() {
-            self.approach_trajectory = Some(TemperatureTrajectory::new(
-                input.now_ms,
-                predicted.temperature_c,
-            ));
+            let mut trajectory = TemperatureTrajectory::new(input.now_ms, predicted.temperature_c);
+            if entered_approach && self.heat_response.is_none() {
+                // Preserve the calibrated projection's arriving heat at the
+                // phase boundary; resetting its velocity invents a cold start.
+                trajectory.reference.rise_c_per_s = predicted.rise_c_per_s;
+            }
+            self.approach_trajectory = Some(trajectory);
             self.approach_last_request_permille =
                 Some(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
@@ -1595,7 +1599,10 @@ impl HeaterController {
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-        if (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
+        // The projection already bounds arriving energy. A second entry ramp
+        // would withhold the passive-loss power and create a delayed cold dip.
+        if (model_request.is_none() || self.heat_response.is_some())
+            && (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
             && self.phase_ticks < frame.hold_blend_cycles
         {
             let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
@@ -1616,17 +1623,9 @@ impl HeaterController {
         duty_percent: u8,
         model_ceiling: Option<u8>,
     ) -> u8 {
-        let Some(input) = self
-            .natural_cooling_input
-            .filter(|_| self.model_approach_available())
-        else {
+        if !self.model_approach_available() {
             return duty_percent;
-        };
-        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
-            model: input.model,
-            ambient_c: input.ambient_temp_c,
-            max_power_mw: input.max_power_mw,
-        };
+        }
         if self.heat_response.is_some() {
             let limit = model_ceiling.unwrap_or(0);
             if duty_percent > limit {
@@ -1634,6 +1633,39 @@ impl HeaterController {
             }
             return duty_percent.min(limit);
         }
+        let limit_percent = model_ceiling
+            .or_else(|| self.projection_hold_arrival_percent(frame))
+            .unwrap_or(0);
+        if duty_percent > limit_percent {
+            self.hold_integral_c = 0.0;
+        }
+        duty_percent.min(limit_percent)
+    }
+
+    /// The projection supplies passive-loss feedforward even when no complete
+    /// response curve is available. PI trims that baseline; delayed applied
+    /// heat independently caps it before it reaches the actuator.
+    fn projection_hold_requests(&self, frame: &ThermalControlFrame) -> Option<(u8, u8)> {
+        let ceiling = self.projection_hold_arrival_percent(frame)?;
+        let input = self.natural_cooling_input?;
+        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
+            input.model,
+            f32::from(input.target_temp_c),
+            input.ambient_temp_c,
+        );
+        let request = (loss / input.max_power_mw * 100.0).clamp(0.0, 100.0) as u8;
+        Some((request, ceiling))
+    }
+
+    fn projection_hold_arrival_percent(&self, frame: &ThermalControlFrame) -> Option<u8> {
+        let input = self
+            .natural_cooling_input
+            .filter(|_| self.model_approach_available())?;
+        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+            model: input.model,
+            ambient_c: input.ambient_temp_c,
+            max_power_mw: input.max_power_mw,
+        };
         let predicted = self.applied_heat.forecast_from_measurement(
             input.now_ms,
             self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
@@ -1653,11 +1685,7 @@ impl HeaterController {
         // Apply after the entry blend so it cannot restore delayed heat into
         // an already high future temperature. Floor conversion never rounds
         // the bounded physical request above the calculated energy limit.
-        let limit_percent = (arrival_power_mw / input.max_power_mw * 100.0) as u8;
-        if duty_percent > limit_percent {
-            self.hold_integral_c = 0.0;
-        }
-        duty_percent.min(limit_percent)
+        Some((arrival_power_mw / input.max_power_mw * 100.0) as u8)
     }
 
     fn hold_requested_permille(&mut self, frame: &ThermalControlFrame, base_permille: f32) -> f32 {

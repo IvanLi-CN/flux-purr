@@ -136,7 +136,6 @@ fn factory_candidate_search_handles_a_colder_environment_than_calibration() {
 }
 
 #[test]
-#[ignore = "Known 220C stabilization failure; run explicitly while diagnosing PR164"]
 fn factory_candidate_search_qualifies_the_recorded_high_temperature_projection() {
     let mut replay = PlantReplay::with_target(68_250.0, 220);
     replay.plate_c = 199.9;
@@ -156,16 +155,18 @@ fn factory_candidate_search_qualifies_the_recorded_high_temperature_projection()
         }
     }
     assert_eq!(
-        replay.tuning.accepted_target_mask, 1,
+        replay.tuning.accepted_target_mask,
+        1 << 7,
         "terminal={:?}, trials={}, decisions={:?}",
-        replay.tuning.terminal_disposition, replay.tuning.trial_index, replay.decisions
+        replay.tuning.terminal_disposition,
+        replay.tuning.trial_index,
+        replay.decisions
     );
     assert_eq!(replay.tuning.failed_target_mask, 0);
     assert!(!replay.tuning.armed);
 }
 
 #[test]
-#[ignore = "Known projection-only Hold feedforward gap; not a passed acceptance check"]
 fn projection_only_hold_supplies_its_modelled_passive_loss() {
     let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps3a);
     let mut profile = production_test_profile(1_000);

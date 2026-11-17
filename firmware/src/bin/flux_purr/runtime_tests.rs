@@ -12554,7 +12554,9 @@ fn hold_actuator_feedback_prevents_positive_integral_windup() {
     controller.phase = HeaterControlPhase::Hold;
     controller.reseed_measurement(59.8);
     let mut input = production_test_input(59.8);
-    input.max_power_mw = 1_000.0;
+    // Leave physical headroom so this isolates actuator feedback rather
+    // than a model whose passive loss already exceeds full output.
+    input.max_power_mw = 10_000.0;
     input.allow_integral = false;
     for now_ms in (0..=1_000).step_by(50) {
         input.now_ms = now_ms;
@@ -12568,6 +12570,26 @@ fn hold_actuator_feedback_prevents_positive_integral_windup() {
     controller.natural_cooling_input = Some(input);
     controller.update_at(60, 59.8, true, Some(profile), 1_050);
     assert!(controller.hold_integral_c > 0.0);
+}
+
+#[test]
+fn projection_hold_does_not_integrate_when_passive_loss_exceeds_source_power() {
+    let profile = production_test_profile(300);
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 60;
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.phase_ticks = u16::MAX;
+    controller.reseed_measurement(59.8);
+    let mut input = production_test_input(59.8);
+    input.max_power_mw = 1_000.0;
+    for now_ms in (0..=1_000).step_by(50) {
+        input.now_ms = now_ms;
+        controller.natural_cooling_input = Some(input);
+        let output = controller.update_at(60, 59.8, true, Some(profile), now_ms);
+        assert_eq!(output.duty_percent, 100);
+        assert_eq!(controller.hold_integral_c, 0.0);
+    }
 }
 
 #[test]
