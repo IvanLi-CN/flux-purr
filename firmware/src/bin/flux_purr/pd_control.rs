@@ -1722,7 +1722,7 @@ impl ManualPpsState {
             if !(min_mv..=max_mv).contains(&contract_mv) || contract_ma > apdo.max_ma {
                 return None;
             }
-            boundary.safe_point_or_cold_start(
+            boundary.safe_response_point_or_cold_start(
                 flux_purr_firmware::heater_supply::BoundaryQuery {
                     temperature_centi_c: round_to_i16(temp_c * 100.0),
                     current_rtd_mv: response.current_rtd_mv,

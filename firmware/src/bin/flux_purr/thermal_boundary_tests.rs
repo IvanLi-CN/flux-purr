@@ -2,6 +2,43 @@ use super::*;
 use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
 
 #[test]
+fn vin_response_uses_the_retained_intermediate_contract_boundary() {
+    // HTTP 702a8056 retained an admitted intermediate contract but the VIN
+    // guard selected the colder raw observation and rejected its voltage.
+    let config = observed_boundary_config(&[(1_049, 13_000), (1_065, 13_700), (1_309, 21_000)]);
+    let edge_c = projected_rtd_temperature_c(&config, 1_065).unwrap();
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    let healthy_adc_mv = (u32::from(vin_adc_mv_for_input_mv(13_400)) * 95 / 100) as u16;
+    for (temp_c, adc_mv, expected) in [
+        (edge_c - 1.0, healthy_adc_mv, true),
+        (edge_c - 1.0, 0, false),
+        (edge_c - 4.0, healthy_adc_mv, false),
+    ] {
+        assert_eq!(
+            manual.automatic_voltage_response_matches_with_rtd(
+                &config,
+                temp_c,
+                13_400,
+                3_000,
+                adc_mv,
+                AutomaticVoltageResponseContext {
+                    confirmed_range: None,
+                    current_rtd_mv: Some(1_064),
+                },
+            ),
+            expected,
+            "temperature {temp_c}, VIN ADC {adc_mv}"
+        );
+    }
+}
+
+#[test]
 fn confirmed_intermediate_warmup_step_survives_a_narrow_rtd_dip() {
     // HTTP run 3da26d45: the confirmed 13.4 V bounded step fell back to
     // a 13.0 V ceiling at the 13.7 V observation's RTD edge (flags=2).

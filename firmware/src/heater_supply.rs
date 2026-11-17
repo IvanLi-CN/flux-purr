@@ -367,39 +367,58 @@ impl SupplyBoundary {
     ) -> Option<u16> {
         let selected = self.safe_point(query, &mut project_temperature)?;
         let ceiling_mv = self.tracking_request_ceiling(selected);
-        Some(self.retain_intermediate_request_mv(query, ceiling_mv, project_temperature))
+        let retained = self.retained_intermediate_point(query, ceiling_mv, project_temperature);
+        Some(if retained.is_some() {
+            query.current_request_mv.unwrap_or(ceiling_mv)
+        } else {
+            ceiling_mv
+        })
     }
 
-    fn retain_intermediate_request_mv(
+    /// Select the raw observation that authorizes an already admitted voltage
+    /// for response validation, without promoting the request ceiling.
+    pub fn safe_response_point_or_cold_start(
+        &self,
+        query: BoundaryQuery,
+        mut project_temperature: impl FnMut(u16) -> Option<i16>,
+    ) -> Option<BoundaryPoint> {
+        let selected = self.safe_point_or_cold_start(query, &mut project_temperature)?;
+        self.retained_intermediate_point(
+            query,
+            self.tracking_request_ceiling(selected),
+            project_temperature,
+        )
+        .or(Some(selected))
+    }
+
+    fn retained_intermediate_point(
         &self,
         query: BoundaryQuery,
         ceiling_mv: u16,
         mut project_temperature: impl FnMut(u16) -> Option<i16>,
-    ) -> u16 {
-        let Some(request_mv) = query.current_request_mv else {
-            return ceiling_mv;
-        };
+    ) -> Option<BoundaryPoint> {
+        let request_mv = query.current_request_mv?;
         let power_mw = u32::from(request_mv) * u32::from(query.current_ma) / 1_000;
         if query.current_ma != 3_000
             || request_mv <= ceiling_mv
             || (query.source_power_limit_mw != 0 && power_mw > query.source_power_limit_mw)
         {
-            return ceiling_mv;
+            return None;
         }
         // Preserve only the already admitted intermediate voltage. Never
         // promote to the warmer observation's higher ceiling before its edge.
-        let retained = self.points[..usize::from(self.point_count)]
+        self.points[..usize::from(self.point_count)]
             .iter()
+            .copied()
             .filter(|point| point.tracking_only && point.request_current_ma == query.current_ma)
-            .any(|point| {
+            .find(|point| {
                 let Some(temperature) = project_temperature(point.rtd_mv) else {
                     return false;
                 };
                 let gap = i32::from(temperature) - i32::from(query.temperature_centi_c);
                 (0..=i32::from(MAX_CONFIRMED_REQUEST_HANDOFF_GAP_CENTI_C)).contains(&gap)
                     && request_mv <= self.tracking_request_ceiling(*point)
-            });
-        if retained { request_mv } else { ceiling_mv }
+            })
     }
 
     /// A later warmer observation may record a lower safe voltage. Cap the
