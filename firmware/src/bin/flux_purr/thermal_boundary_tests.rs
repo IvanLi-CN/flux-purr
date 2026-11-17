@@ -2,6 +2,47 @@ use super::*;
 use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
 
 #[test]
+fn warmup_observed_voltage_steps_keep_the_confirmed_gate() {
+    // HTTP run 69fe6e16: 12.9 -> 13.6 V and 14.4 -> 15.2 V were safe
+    // boundary increases, but the unbounded Warmup request tripped the
+    // production large-step blanking guard (diagnostic flags=4).
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(3_300, 21_000, 3_000)]);
+    for (mut current_mv, ceiling_mv) in [(12_900, 13_700), (14_400, 15_300), (17_800, 18_700)] {
+        let target_mv = automatic_heater_working_ceiling_mv(5_500, ceiling_mv);
+        while current_mv < target_mv {
+            let next_mv = automatic_heater_request_mv_for_phase(
+                HeaterControlPhase::Warmup,
+                current_mv,
+                ceiling_mv,
+                5_500,
+                ceiling_mv,
+            );
+            let active = ConfirmedActiveContract::from_private_contract(
+                source
+                    .select_exact_contract(
+                        PdContractRequest::automatic_pps(current_mv, 3_000).unwrap(),
+                    )
+                    .unwrap(),
+                source,
+            );
+            assert!(
+                !automatic_pps_transition_should_blank_heater(
+                    false,
+                    automatic_pps_reconciliation_requires_pause(active, ceiling_mv),
+                    should_blank_heater_for_pps_range_change(
+                        current_mv, next_mv, false, 5_500, 21_000
+                    ),
+                ),
+                "safe Warmup step {current_mv} -> {next_mv} must preserve conduction"
+            );
+            assert!(next_mv > current_mv);
+            assert!(next_mv <= target_mv);
+            current_mv = next_mv;
+        }
+    }
+}
+
+#[test]
 fn reserved_observed_contract_does_not_pause_at_a_live_rtd_bucket_edge() {
     // Minimized from HTTP run 3977adc5: the 13.6 V working contract was
     // blanked when its 13.7 V observation disappeared across an RTD edge.

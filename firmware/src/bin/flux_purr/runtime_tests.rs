@@ -14845,7 +14845,7 @@ fn warmup_ceiling_headroom_never_retains_an_unsafe_contract_or_drops_below_floor
 }
 
 #[test]
-fn automatic_heater_warmup_requests_a_guarded_ceiling_without_slow_stepping() {
+fn automatic_heater_warmup_uses_bounded_steps_and_a_guarded_ceiling() {
     assert_eq!(
         automatic_heater_request_mv_for_phase(
             HeaterControlPhase::Warmup,
@@ -14874,7 +14874,7 @@ fn automatic_heater_warmup_requests_a_guarded_ceiling_without_slow_stepping() {
             5_500,
             21_000,
         ),
-        19_700,
+        20_000,
     );
     assert_eq!(
         automatic_heater_request_mv_for_phase(

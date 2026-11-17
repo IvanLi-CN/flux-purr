@@ -452,7 +452,10 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
         // Restore the reserved quantum even if the old contract is still
         // safe. Retaining it at the hard ceiling spends the margin and makes
         // the next downward quantization force an avoidable output pause.
-        desired_mv
+        // Observed boundary steps can exceed the backend's 500 mV continuous
+        // handoff limit. Use that same bounded step so a healthy increase
+        // keeps the last confirmed contract conducting while it is replaced.
+        automatic_heater_step_request_mv(current_mv, desired_mv, floor_mv, ceiling_mv)
     } else if desired_mv < current_mv {
         // Once automatic heating has a safe confirmed PPS contract, lower
         // power belongs in PWM. Dropping the contract for every Approach/Hold
