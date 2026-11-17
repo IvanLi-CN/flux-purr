@@ -2210,6 +2210,39 @@ where
 }
 
 #[cfg(target_arch = "xtensa")]
+fn record_pps_output_pause<PWM>(
+    context: &HeaterPowerOutputContext<'_, PWM>,
+    transition: &PpsVoltageTransition,
+    current_request_mv: u16,
+    source_request_ceiling_mv: u16,
+    pps_min_mv: u16,
+    pps_max_mv: u16,
+) {
+    // Preserve the branch and cached/desired voltage that armed
+    // the heater-off window; no admission or protection rule is changed.
+    if transition.blank_heater {
+        let flags = u32::from(transition.safety_recovery_required)
+            | (u32::from(automatic_pps_reconciliation_requires_pause(
+                context.pd_port.snapshot().active,
+                source_request_ceiling_mv,
+            )) << 1)
+            | (u32::from(should_blank_heater_for_pps_range_change(
+                current_request_mv,
+                transition.request_mv,
+                transition.mode_changed,
+                pps_min_mv,
+                pps_max_mv,
+            )) << 2);
+        PPS_OUTPUT_PAUSE_CONTEXT.store(
+            flags
+                | (u32::from(current_request_mv / 100) << 8)
+                | (u32::from(transition.request_mv / 100) << 16),
+            Ordering::Release,
+        );
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 pub(crate) async fn apply_pps_voltage_request<PWM>(
     context: &mut HeaterPowerOutputContext<'_, PWM>,
     manual_pps_active: bool,
@@ -2298,6 +2331,14 @@ where
         gate_duty_percent,
         blank_heater,
     };
+    record_pps_output_pause(
+        context,
+        &transition,
+        current_request_mv,
+        source_request_ceiling_mv,
+        pps_min_mv,
+        pps_max_mv,
+    );
     if pps_transition_should_clear_pwm(&transition) {
         apply_heater_duty(context.heater_pwm, 0, context.last_physical_duty_percent);
     }

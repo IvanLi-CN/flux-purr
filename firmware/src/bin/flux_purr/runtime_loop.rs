@@ -3613,6 +3613,21 @@ fn runtime_tuning_safe_ceiling_mv(state: &RuntimeLoopState, fallback_mv: u16) ->
 }
 
 #[cfg(target_arch = "xtensa")]
+fn tuning_phase_for_control(
+    phase: HeaterControlPhase,
+) -> flux_purr_firmware::thermal_tuning::ThermalTuningPhase {
+    match phase {
+        HeaterControlPhase::Warmup => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+        }
+        HeaterControlPhase::Approach => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Approach
+        }
+        HeaterControlPhase::Hold => flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Hold,
+    }
+}
+
+#[cfg(target_arch = "xtensa")]
 fn runtime_record_thermal_tuning_sample(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
@@ -3691,15 +3706,7 @@ fn runtime_record_thermal_tuning_sample(
         .candidate_hash
         .clone()
         .unwrap_or_default();
-    let phase = match pid_snapshot.phase {
-        HeaterControlPhase::Warmup => {
-            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
-        }
-        HeaterControlPhase::Approach => {
-            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Approach
-        }
-        HeaterControlPhase::Hold => flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Hold,
-    };
+    let phase = tuning_phase_for_control(pid_snapshot.phase);
     let sample = flux_purr_firmware::thermal_tuning::ThermalTuningSample {
         sequence: state.thermal_tuning.events.len() as u32 + 1,
         elapsed_ms,
@@ -3725,7 +3732,71 @@ fn runtime_record_thermal_tuning_sample(
         phase,
         fan: Some(tuning_fan_sample(state.fan_command)),
     };
-    runtime_commit_tuning_sample(state, sample, temperature.cooldown_admission_ready)
+    runtime_commit_tuning_sample_with_output_diagnostic(
+        state,
+        sample,
+        temperature.cooldown_admission_ready,
+        elapsed_ms,
+    )
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_commit_tuning_sample_with_output_diagnostic(
+    state: &mut RuntimeLoopState,
+    sample: flux_purr_firmware::thermal_tuning::ThermalTuningSample,
+    cooldown_admission_ready: bool,
+    elapsed_ms: u64,
+) -> bool {
+    // Annotate only a newly recorded zero-output sample. No
+    // safety admission or trial qualification is changed by this probe.
+    let diagnostic = if sample.heater_requested_output_permille > 0
+        && sample.heater_output_permille == 0
+    {
+        let mut reason = flux_purr_firmware::thermal_tuning::TuningReason::new();
+        let settle = match state.heater_power_backend {
+            HeaterPowerBackend::PpsMos {
+                settle_until_ms, ..
+            } => settle_until_ms.is_some_and(|until| elapsed_ms < until),
+            _ => false,
+        };
+        let pause = PPS_OUTPUT_PAUSE_CONTEXT.load(Ordering::Acquire);
+        let cause = match HEATER_OUTPUT_ZERO_CAUSE.load(Ordering::Acquire) {
+            1 => "permit_denied",
+            2 => "commanded_off",
+            3 => "permit_revoked",
+            _ => "unknown",
+        };
+        let _ = write!(
+            reason,
+            "heater_output_paused: {} permit={} latch={} settling={} safety={} reconcile={} range={} cached_mv={} desired_mv={}",
+            cause,
+            heater_permit_is_active(Instant::now().as_millis()) as u8,
+            state.automatic_supply_response_latched as u8,
+            settle as u8,
+            pause & 1,
+            (pause >> 1) & 1,
+            (pause >> 2) & 1,
+            ((pause >> 8) & 255) * 100,
+            ((pause >> 16) & 255) * 100,
+        );
+        Some(reason)
+    } else {
+        None
+    };
+    let previous_sequence = state
+        .thermal_tuning
+        .events
+        .last()
+        .map(|event| event.sequence);
+    let result = runtime_commit_tuning_sample(state, sample, cooldown_admission_ready);
+    if let Some(reason) = diagnostic
+        && let Some(event) = state.thermal_tuning.events.iter_mut().rev().find(|event| {
+            event.sample.is_some() && previous_sequence.is_none_or(|before| event.sequence > before)
+        })
+    {
+        event.reason = Some(reason);
+    }
+    result
 }
 
 #[cfg(target_arch = "xtensa")]
