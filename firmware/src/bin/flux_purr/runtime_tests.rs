@@ -21261,3 +21261,13 @@ fn full_range_scan_completion_at_169c_keeps_heating_without_rescan() {
 
 #[path = "thermal_plant_publication_tests.rs"]
 mod thermal_plant_publication_tests;
+
+#[test]
+fn tuning_output_pause_diagnostic_keeps_both_voltages_within_wire_limit() {
+    let pause = 7 | (255 << 8) | (255 << 16);
+    for cause in 0..=3 {
+        let reason = tuning_output_pause_reason(cause, true, true, true, pause);
+        assert!(reason.contains("flags=7 cached=25500 next=25500"));
+        assert!(reason.len() <= flux_purr_firmware::thermal_tuning::THERMAL_TUNING_REASON_MAX_LEN);
+    }
+}

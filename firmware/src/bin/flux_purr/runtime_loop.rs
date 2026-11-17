@@ -3740,6 +3740,37 @@ fn runtime_record_thermal_tuning_sample(
     )
 }
 
+#[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn tuning_output_pause_reason(
+    cause: u8,
+    permit: bool,
+    latch: bool,
+    settling: bool,
+    pause: u32,
+) -> flux_purr_firmware::thermal_tuning::TuningReason {
+    use core::fmt::Write as _;
+
+    let cause = match cause {
+        1 => "denied",
+        2 => "command",
+        3 => "revoked",
+        _ => "unknown",
+    };
+    let mut reason = flux_purr_firmware::thermal_tuning::TuningReason::new();
+    let _ = write!(
+        reason,
+        "output_paused:{} permit={} latch={} settle={} flags={} cached={} next={}",
+        cause,
+        u8::from(permit),
+        u8::from(latch),
+        u8::from(settling),
+        pause & 7,
+        ((pause >> 8) & 255) * 100,
+        ((pause >> 16) & 255) * 100,
+    );
+    reason
+}
+
 #[cfg(target_arch = "xtensa")]
 fn runtime_commit_tuning_sample_with_output_diagnostic(
     state: &mut RuntimeLoopState,
@@ -3749,40 +3780,25 @@ fn runtime_commit_tuning_sample_with_output_diagnostic(
 ) -> bool {
     // Annotate only a newly recorded zero-output sample. No
     // safety admission or trial qualification is changed by this probe.
-    let diagnostic = if sample.heater_requested_output_permille > 0
-        && sample.heater_output_permille == 0
-    {
-        let mut reason = flux_purr_firmware::thermal_tuning::TuningReason::new();
-        let settle = match state.heater_power_backend {
-            HeaterPowerBackend::PpsMos {
-                settle_until_ms, ..
-            } => settle_until_ms.is_some_and(|until| elapsed_ms < until),
-            _ => false,
+    let diagnostic =
+        if sample.heater_requested_output_permille > 0 && sample.heater_output_permille == 0 {
+            let settle = match state.heater_power_backend {
+                HeaterPowerBackend::PpsMos {
+                    settle_until_ms, ..
+                } => settle_until_ms.is_some_and(|until| elapsed_ms < until),
+                _ => false,
+            };
+            let reason = tuning_output_pause_reason(
+                HEATER_OUTPUT_ZERO_CAUSE.load(Ordering::Acquire),
+                heater_permit_is_active(Instant::now().as_millis()),
+                state.automatic_supply_response_latched,
+                settle,
+                PPS_OUTPUT_PAUSE_CONTEXT.load(Ordering::Acquire),
+            );
+            Some(reason)
+        } else {
+            None
         };
-        let pause = PPS_OUTPUT_PAUSE_CONTEXT.load(Ordering::Acquire);
-        let cause = match HEATER_OUTPUT_ZERO_CAUSE.load(Ordering::Acquire) {
-            1 => "permit_denied",
-            2 => "commanded_off",
-            3 => "permit_revoked",
-            _ => "unknown",
-        };
-        let _ = write!(
-            reason,
-            "heater_output_paused: {} permit={} latch={} settling={} safety={} reconcile={} range={} cached_mv={} desired_mv={}",
-            cause,
-            heater_permit_is_active(Instant::now().as_millis()) as u8,
-            state.automatic_supply_response_latched as u8,
-            settle as u8,
-            pause & 1,
-            (pause >> 1) & 1,
-            (pause >> 2) & 1,
-            ((pause >> 8) & 255) * 100,
-            ((pause >> 16) & 255) * 100,
-        );
-        Some(reason)
-    } else {
-        None
-    };
     let previous_sequence = state
         .thermal_tuning
         .events
