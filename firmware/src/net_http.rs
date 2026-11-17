@@ -140,6 +140,9 @@ pub struct ControlMailboxCommand {
     /// separate from the legacy thermal-plant cursor and keeps the full
     /// monotonic sequence width on LAN.
     pub after_sequence: Option<u32>,
+    /// Thermal-tuning run identity paired with an event cursor. LAN clients
+    /// must echo both values so a stale cursor cannot acknowledge another run.
+    pub run_id: Option<heapless::String<{ crate::control_plane::REQUEST_ID_MAX_LEN }>>,
     pub body: Box<str>,
 }
 
@@ -214,6 +217,7 @@ pub struct HttpRequest<'a> {
     pub expected_revision: Option<u32>,
     pub after_sample: Option<u8>,
     pub after_sequence: Option<u32>,
+    pub run_id: Option<&'a str>,
     pub request_private_network: bool,
     pub body: &'a str,
     /// Entropy produced by the hardware RNG. It is never emitted in responses.
@@ -260,7 +264,7 @@ pub enum HttpReadGate {
 pub enum HttpGate {
     Respond(Box<HttpResponse>),
     Dispatch {
-        command: ControlMailboxCommand,
+        command: Box<ControlMailboxCommand>,
         allow_origin: Option<String<128>>,
     },
 }
@@ -406,7 +410,7 @@ impl NetHttpState {
             HttpGate::Dispatch {
                 command,
                 allow_origin,
-            } => match mailbox.submit(command) {
+            } => match mailbox.submit(*command) {
                 Ok(body) => {
                     let mut response = HttpResponse::json(200, body);
                     response.allow_origin = allow_origin;
@@ -619,7 +623,7 @@ impl NetHttpState {
             ));
         }
         HttpGate::Dispatch {
-            command: ControlMailboxCommand {
+            command: Box::new(ControlMailboxCommand {
                 request_id: 0,
                 response_slot: 0,
                 origin: CommandOrigin::Lan,
@@ -629,8 +633,13 @@ impl NetHttpState {
                 expected_revision: request.expected_revision,
                 after_sample: request.after_sample,
                 after_sequence: request.after_sequence,
+                run_id: request.run_id.map(|value| {
+                    let mut run_id = heapless::String::new();
+                    let _ = run_id.push_str(value);
+                    run_id
+                }),
                 body: Box::from(request.body),
-            },
+            }),
             allow_origin: None,
         }
     }
@@ -967,6 +976,7 @@ mod tests {
             expected_revision: None,
             after_sample: None,
             after_sequence: None,
+            run_id: None,
             request_private_network: false,
             body: "",
             entropy: [7; crate::lan::LAN_TOKEN_BYTES],

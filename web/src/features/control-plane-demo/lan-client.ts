@@ -70,8 +70,14 @@ export type LanProbeMode = 'concurrent' | 'serial'
 
 export type DirectLanStaleResource = 'runtime' | 'calibration' | 'heater-curve'
 
-export function isDirectLanDevice(device: Pick<DeviceTarget, 'baseUrl' | 'transport'>) {
-  return device.transport === 'wifi' && device.baseUrl.startsWith('http://')
+export function isDirectLanDevice(
+  device: Pick<DeviceTarget, 'baseUrl' | 'transport' | 'bridgeTransport'>
+) {
+  return (
+    device.baseUrl.startsWith('http://') &&
+    (device.transport === 'wifi' ||
+      (device.transport === 'devd' && device.bridgeTransport === 'wifi'))
+  )
 }
 
 /**
@@ -145,6 +151,9 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     manualPpsError: status.manualPpsError ?? null,
     faultAttentionPending: status.faultAttentionPending ?? false,
     heaterLockReason: status.heaterLockReason ?? null,
+    thermalProfileMode: status.thermalProfileMode,
+    thermalProfileResolvedBank: status.thermalProfileResolvedBank,
+    thermalControl: status.thermalControl,
     calibration: status.calibration,
     heaterEnabled: status.heaterEnabled,
     heaterOutputPercent: status.heaterOutputPercent,
@@ -805,11 +814,22 @@ async function probeLanDeviceRequests(
     lanRequest<T>(fetcher, session.baseUrl, path, { headers }, rememberRevision)
   if (concurrent) {
     // Firmware exposes two HTTP workers. Start only the two independent reads
-    // together, then free a worker before asking the device for runtime status.
-    const [identity, network] = await Promise.all([
+    // together, then free both workers before asking the device for runtime
+    // status. Promise.all() rejects as soon as one request fails, which can
+    // start the serial fallback while the sibling request is still occupying
+    // a firmware HTTP worker. Wait for both outcomes before retrying.
+    const results = await Promise.allSettled([
       request<Identity>('/api/v1/identity'),
       request<NetworkSummary>('/api/v1/network'),
     ])
+    if (results[0].status === 'rejected') {
+      throw results[0].reason
+    }
+    if (results[1].status === 'rejected') {
+      throw results[1].reason
+    }
+    const identity = results[0].value
+    const network = results[1].value
     const status = await request<ControlPlaneStatus>('/api/v1/status')
     return { identity, network, status }
   }
@@ -852,7 +872,8 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
   method = 'GET',
   body?: Record<string, unknown>,
   leaseId?: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  query?: Record<string, string | number | undefined>
 ) {
   const isWrite = method !== 'GET'
   const headers: Record<string, string> = {
@@ -862,10 +883,16 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
   if (isWrite) {
     headers['X-Flux-Purr-Revision'] = String(await refreshLanControlRevision(session, fetcher))
   }
+  const queryString = query
+    ? Object.entries(query)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&')
+    : ''
   return lanRequest<T>(
     fetcher,
     session.baseUrl,
-    `/api/v1/${path.replace(/^\//, '')}`,
+    `/api/v1/${path.replace(/^\//, '')}${queryString ? `?${queryString}` : ''}`,
     {
       method,
       headers,
@@ -945,10 +972,26 @@ async function lanRequest<T = Record<string, unknown>>(
     headers,
     targetAddressSpace: 'private',
   } satisfies PrivateNetworkRequestInit
+  const readTimeoutMs = operation === 'thermal_tuning_read' ? 5_000 : undefined
+  const timeoutController = readTimeoutMs == null ? null : new AbortController()
+  const timeoutId =
+    timeoutController == null
+      ? undefined
+      : globalThis.setTimeout(() => timeoutController.abort(), readTimeoutMs)
+  if (timeoutController) request.signal = timeoutController.signal
   let response: Response
   try {
     response = await fetcher(`${baseUrl}${path}`, request as RequestInit)
   } catch (error) {
+    if (timeoutController?.signal.aborted) {
+      throw new ControlPlaneClientError(
+        '设备已连接，但固件热控调优读取超时，请稍后重试。',
+        'lan_transport_unavailable',
+        true,
+        undefined,
+        { category: 'transport_unavailable', operation, endpoint: path }
+      )
+    }
     if (error instanceof TypeError) {
       throw new ControlPlaneClientError(
         operation === 'thermal_tuning_read'
@@ -961,6 +1004,8 @@ async function lanRequest<T = Record<string, unknown>>(
       )
     }
     throw error
+  } finally {
+    if (timeoutId != null) globalThis.clearTimeout(timeoutId)
   }
   if (!response.ok) throw await responseError(response, baseUrl, path, operation)
   const revision = Number(response.headers.get('X-Flux-Purr-Revision'))

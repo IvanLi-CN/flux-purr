@@ -134,8 +134,12 @@ pub(crate) fn production_thermal_controller(
                 // request is not a thermal-output eligibility threshold.
                 && active.voltage_mv > FUSB302B_PPS_MIN_MV
                 && active.operating_current_ma >= required_ma
+                // Validate the APDO that is actually carrying the confirmed
+                // contract. Requiring the source to advertise a 20 V endpoint
+                // here incorrectly disarms tuning when a valid source only
+                // exposes a lower-voltage PPS range.
+                && manual_pps.has_matching_pps_apdo(active.voltage_mv, required_ma)
         })
-        && manual_pps.has_matching_pps_apdo(20_000, required_ma)
     {
         ProductionThermalController::Profile(bank)
     } else {

@@ -2609,6 +2609,33 @@ fn live_sample_pages_remain_contiguous_beyond_event_capacity() {
     );
 }
 
+#[test]
+fn pages_with_candidate_trial_records_are_bounded_for_usb_jsonl() {
+    let mut runtime = started_single_target_runtime();
+    runtime.push_candidate_trial_event(0);
+    runtime.push_event(
+        ThermalTuningEventKind::PhaseTransition,
+        Some(60),
+        Some(0),
+        None,
+        Some("after candidate trial"),
+    );
+    let mut cursor = None;
+    let trial_page = loop {
+        let page = runtime.events_after(cursor);
+        if page.events.iter().any(|event| event.trial.is_some()) {
+            break page;
+        }
+        cursor = page.next_sequence;
+        assert!(cursor.is_some());
+    };
+    assert!(trial_page.events.len() <= 1);
+    assert_eq!(
+        trial_page.next_sequence,
+        trial_page.events.last().map(|event| event.sequence)
+    );
+}
+
 fn record_current_trial_sample(
     runtime: &mut ThermalTuningRuntime,
     elapsed_ms: u64,

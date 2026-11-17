@@ -1069,6 +1069,7 @@ export function ControlPlaneDemo({
     Record<string, NetworkSummary>
   >({})
   const [lanLeasesByDevice, setLanLeasesByDevice] = useState<Record<string, LanLease>>({})
+  const lanLeaseInFlightRef = useRef(new Set<string>())
   const pendingDeviceModeRef = useRef(allowDemoControls)
   const actionClockRef = useRef(LOG_FEED_START_SECONDS + 60)
   const targetTempCommitTimersRef = useRef<Record<string, number>>({})
@@ -1139,12 +1140,41 @@ export function ControlPlaneDemo({
     [allowDemoControls, deviceOptions]
   )
   const routedConsoleState = navigation?.state
-  const routeDeviceChoice =
-    routedConsoleState?.kind === 'device'
-      ? routeDeviceChoices.find((choice) =>
-          deviceChoiceMatchesRouteId(choice, routedConsoleState.deviceId)
-        )
-      : undefined
+  const routeDeviceChoice = useMemo(() => {
+    if (routedConsoleState?.kind !== 'device') {
+      return undefined
+    }
+    const choice = routeDeviceChoices.find((candidate) =>
+      deviceChoiceMatchesRouteId(candidate, routedConsoleState.deviceId)
+    )
+    if (!choice) {
+      return undefined
+    }
+
+    // The direct-LAN lease is kept separately from the persisted/pending
+    // target so acquiring a fresh lease does not mutate the discovery record.
+    // Feed that runtime fact into route selection immediately; otherwise the
+    // page can remain on "连接恢复" even though the authenticated LAN session
+    // and its lease are already healthy.
+    return {
+      ...choice,
+      connections: choice.connections.map((connection): DeviceConnectionOption => {
+        if (
+          connection.kind !== 'wifi' ||
+          !activeLanLeaseIdentityIds.has(deviceIdentityId(connection.target))
+        ) {
+          return connection
+        }
+        return {
+          ...connection,
+          target: {
+            ...connection.target,
+            leaseState: 'active' as const,
+          },
+        }
+      }),
+    }
+  }, [activeLanLeaseIdentityIds, routeDeviceChoices, routedConsoleState])
   const preferredRouteDeviceConnection = routeDeviceChoice
     ? preferredDeviceConnection(
         routeDeviceChoice,
@@ -1329,7 +1359,10 @@ export function ControlPlaneDemo({
               setRouteResumeFailed(true)
               setFeedback({
                 title: '目标设备暂不可用',
-                detail: '无法恢复已保存的 LAN 设备连接，请重试或选择其他目标。',
+                detail:
+                  error instanceof ControlPlaneClientError
+                    ? error.message
+                    : '无法恢复已保存的 LAN 设备连接，请重试或选择其他目标。',
                 tone: 'warning',
               })
             }
@@ -1808,11 +1841,20 @@ export function ControlPlaneDemo({
       wifiFailureCode: effectiveNetwork
         ? effectiveNetwork.failureCode
         : selectedDevice.wifiFailureCode,
-      leaseId: lanLease?.leaseId ?? selectedDevice.leaseId,
+      // A persisted/pending LAN target may still carry the last known lease
+      // state after the lease heartbeat released it. Treat the runtime lease
+      // map as the source of truth so a stale `active` marker cannot suppress
+      // reacquisition and make write commands fall through to a misleading
+      // "unsupported" error.
+      leaseId: isDirectLanDevice(selectedDevice)
+        ? lanLease?.leaseId
+        : selectedDevice.leaseId,
       leaseState: isDirectLanDevice(selectedDevice)
         ? lanLease
           ? 'active'
-          : selectedDevice.leaseState
+          : selectedDevice.leaseState === 'conflict' || selectedDevice.leaseState === 'expired'
+            ? selectedDevice.leaseState
+            : 'none'
         : selectedDevice.leaseState,
     }
   }, [
@@ -1920,8 +1962,18 @@ export function ControlPlaneDemo({
       return
     }
     const { alias, baseUrl, deviceId } = lanLeaseRequest
+    // React StrictMode and route recovery can re-run this effect while the
+    // first lease request is still in flight. The firmware HTTP server has a
+    // single control worker, so concurrent POST /leases calls can make one
+    // request fail with a transport error and leave the UI without a lease.
+    // Coalesce requests per target until the first one settles.
+    if (lanLeaseInFlightRef.current.has(deviceId)) {
+      return
+    }
+    lanLeaseInFlightRef.current.add(deviceId)
     const session = loadLanDeviceSession(baseUrl)
     if (!session) {
+      lanLeaseInFlightRef.current.delete(deviceId)
       setPendingDevices((current) =>
         current.map((device) =>
           device.id === deviceId
@@ -1935,14 +1987,9 @@ export function ControlPlaneDemo({
       )
       return
     }
-    let retired = false
     void lanRuntime
       .createLease(session)
       .then((created) => {
-        if (retired) {
-          void lanRuntime.releaseLease(session, created.leaseId).catch(() => undefined)
-          return
-        }
         setLanLeasesByDevice((current) => ({
           ...current,
           [deviceId]: created,
@@ -1958,7 +2005,6 @@ export function ControlPlaneDemo({
         )
       })
       .catch((error: unknown) => {
-        if (retired) return
         setPendingDevices((current) =>
           current.map((device) =>
             device.id === deviceId
@@ -1974,9 +2020,10 @@ export function ControlPlaneDemo({
           )
         )
       })
-    return () => {
-      retired = true
-    }
+      .finally(() => {
+        lanLeaseInFlightRef.current.delete(deviceId)
+      })
+    return undefined
   }, [lanLeaseRequest, lanRuntime])
 
   useEffect(() => {
@@ -2351,6 +2398,9 @@ export function ControlPlaneDemo({
   const routeFallbackConnectionLabel = routeFallbackConnection?.label
   const routeHasKnownBridgeTransportIssue =
     routeDeviceConnection?.kind === 'bridge' && Boolean(routeDeviceConnection.target.transportIssue)
+  const routeHasDirectLanConnection = Boolean(
+    routeDeviceChoice?.connections.some((connection) => connection.kind === 'wifi')
+  )
   const routeAllowsIndependentFirmwareMaintenance =
     navigation?.state.kind === 'device' && navigation.state.view === 'update'
 
@@ -2669,6 +2719,12 @@ export function ControlPlaneDemo({
   const visibleDeviceLeaseId = visibleDevice.leaseId
   const visibleDeviceNetworkState = visibleDevice.networkState
   const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
+  const thermalTuningPowerReady =
+    visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'pps'
+  const thermalTuningPowerBlockedReason =
+    visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'fixed'
+      ? '当前电源合同为固定 5V，不是 PPS，固件会保持加热关闭。'
+      : '当前尚未建立有效 PPS 电源合同，无法安全启动固件热控调优。'
   const liveDevdTargetForVisibleDevice = useMemo(
     () =>
       [...activeScenario.devices]
@@ -2860,7 +2916,11 @@ export function ControlPlaneDemo({
   ])
   const readWebSerialThermalPlantRun = webSerial.getThermalPlantRun
   useEffect(() => {
-    if (activeView !== 'calibration' || visibleDeviceTransport === 'mock') {
+    if (
+      activeView !== 'calibration' ||
+      visibleCalibrationWorkspaceTab !== 'heater_curve' ||
+      visibleDeviceTransport === 'mock'
+    ) {
       return
     }
     if (thermalPlantRunUnsupported) {
@@ -3007,6 +3067,7 @@ export function ControlPlaneDemo({
     effectiveDevdLeaseId,
     lanDeviceBaseUrl,
     thermalPlantRunUnsupported,
+    visibleCalibrationWorkspaceTab,
     visibleDeviceId,
     visibleDeviceIsDirectWebSerial,
     visibleDeviceLeaseId,
@@ -3015,57 +3076,92 @@ export function ControlPlaneDemo({
     visibleRuntimeCalibration.job.status,
     readWebSerialThermalPlantRun,
   ])
-  const readFirmwareTuning = useCallback(async (): Promise<ThermalTuningStatus> => {
-    if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning({ op: 'read' })
-    // LAN status reads are read-only on the device and do not require the
-    // mutation lease.  Keep the lease requirement for POST commands below;
-    // otherwise a healthy LAN device can be reported as "unsupported" while
-    // runtime/status reads continue to work.
-    if (lanDeviceBaseUrl) {
-      const session = loadLanDeviceSession(lanDeviceBaseUrl)
-      if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
-      return authorizedLanRequest<ThermalTuningStatus>(session, 'thermal-tuning', 'GET')
-    }
-    if (visibleDeviceTransport === 'devd' && effectiveDevdBaseUrl) {
-      return controlClient.getThermalTuning(
-        effectiveDevdBaseUrl,
-        effectiveDevdDeviceId,
-        effectiveDevdLeaseId
-      )
-    }
-    if (visibleDeviceTransport === 'devd') {
-      throw new ControlPlaneClientError(
-        '设备控制租约正在恢复，固件热控调优读取会自动重试。',
-        'devd_lease_unavailable',
-        true,
-        undefined,
-        { category: 'transport_unavailable', operation: 'thermal_tuning_read' }
-      )
-    }
-    throw new Error('当前设备连接不支持固件调优。')
-  }, [
-    controlClient,
-    effectiveDevdBaseUrl,
-    lanDeviceBaseUrl,
-    effectiveDevdDeviceId,
-    effectiveDevdLeaseId,
-    visibleDeviceIsDirectWebSerial,
-    visibleDeviceTransport,
-    webSerial,
-  ])
-  const commandFirmwareTuning = useCallback(
-    async (command: Omit<ThermalTuningCommand, 'leaseId'>): Promise<ThermalTuningStatus> => {
-      if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning(command)
-      if (lanDeviceBaseUrl && visibleDeviceLeaseId) {
+  const readFirmwareTuning = useCallback(
+    async (cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>): Promise<ThermalTuningStatus> => {
+      if (visibleDeviceIsDirectWebSerial) {
+        return webSerial.thermalTuning({ op: 'read', ...cursor })
+      }
+      // LAN status reads are read-only on the device and do not require the
+      // mutation lease. Keep the lease requirement for POST commands below.
+      if (lanDeviceBaseUrl) {
         const session = loadLanDeviceSession(lanDeviceBaseUrl)
         if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
         return authorizedLanRequest<ThermalTuningStatus>(
           session,
           'thermal-tuning',
-          'POST',
-          command,
-          visibleDeviceLeaseId
+          'GET',
+          undefined,
+          undefined,
+          fetch,
+          { run_id: cursor?.runId, after_sequence: cursor?.afterSequence }
         )
+      }
+      if (visibleDeviceTransport === 'devd' && effectiveDevdBaseUrl) {
+        return controlClient.getThermalTuning(
+          effectiveDevdBaseUrl,
+          effectiveDevdDeviceId,
+          effectiveDevdLeaseId
+        )
+      }
+      if (visibleDeviceTransport === 'devd') {
+        throw new ControlPlaneClientError(
+          '设备控制租约正在恢复，固件热控调优读取会自动重试。',
+          'devd_lease_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation: 'thermal_tuning_read' }
+        )
+      }
+      throw new Error('当前设备连接不支持固件调优。')
+    }, [
+      controlClient,
+      effectiveDevdBaseUrl,
+      lanDeviceBaseUrl,
+      effectiveDevdDeviceId,
+      effectiveDevdLeaseId,
+      visibleDeviceIsDirectWebSerial,
+      visibleDeviceTransport,
+      fetch,
+      webSerial,
+    ]
+  )
+  const commandFirmwareTuning = useCallback(
+    async (command: Omit<ThermalTuningCommand, 'leaseId'>): Promise<ThermalTuningStatus> => {
+      if (visibleDeviceIsDirectWebSerial) return webSerial.thermalTuning(command)
+      if (lanDeviceBaseUrl) {
+        const session = loadLanDeviceSession(lanDeviceBaseUrl)
+        if (!session) throw new Error('本机未保存该设备的配对凭据，请重新配对。')
+        const acquireLease = async () => {
+          const lease = await lanRuntime.createLease(session)
+          setLanLeasesByDevice((current) => ({ ...current, [visibleDeviceId]: lease }))
+          return lease.leaseId
+        }
+        let leaseId = visibleDeviceLeaseId ?? (await acquireLease())
+        try {
+          return await authorizedLanRequest<ThermalTuningStatus>(
+            session,
+            'thermal-tuning',
+            'POST',
+            command,
+            leaseId
+          )
+        } catch (error) {
+          // A browser tab can remain open beyond the device's short lease
+          // TTL. Reads remain valid, but the first tuning write must recover
+          // the lease instead of silently leaving the old run on screen.
+          const leaseExpired =
+            error instanceof ControlPlaneClientError &&
+            (error.code === 'lease_expired' || error.code === 'lease_required')
+          if (!leaseExpired) throw error
+          leaseId = await acquireLease()
+          return authorizedLanRequest<ThermalTuningStatus>(
+            session,
+            'thermal-tuning',
+            'POST',
+            command,
+            leaseId
+          )
+        }
       }
       if (visibleDeviceTransport === 'devd' && effectiveDevdLeaseId && effectiveDevdBaseUrl) {
         return controlClient.configureThermalTuning(effectiveDevdBaseUrl, effectiveDevdDeviceId, {
@@ -3091,8 +3187,10 @@ export function ControlPlaneDemo({
       effectiveDevdDeviceId,
       effectiveDevdLeaseId,
       visibleDeviceIsDirectWebSerial,
+      visibleDeviceId,
       visibleDeviceLeaseId,
       visibleDeviceTransport,
+      lanRuntime,
       webSerial,
     ]
   )
@@ -3709,6 +3807,16 @@ export function ControlPlaneDemo({
             }))
             setRouteFallbackKind(undefined)
           }
+          // An explicit connection choice is a fresh recovery attempt. Do
+          // not let the previous automatic-resume failure keep the route
+          // trapped on the recovery screen after the new target is healthy.
+          setFailedLanResumeIdentityIds((current) => {
+            if (!current.has(identityId)) return current
+            const next = new Set(current)
+            next.delete(identityId)
+            return next
+          })
+          setRouteResumeFailed(false)
           setSelectedDeviceId(nextDevice.id)
           explicitSelectedDeviceIdRef.current = nextDevice.id
           setSelectedAddDeviceKind(defaultAddDeviceKind)
@@ -3895,6 +4003,55 @@ export function ControlPlaneDemo({
 
   const handleRecoveryDeviceSelect = async (deviceId: string) => {
     const device = deviceOptions.find((candidate) => candidate.id === deviceId)
+    if (device && isDirectLanDevice(device)) {
+      const session = loadLanDeviceSession(device.baseUrl)
+      if (!session) {
+        setFeedback({
+          title: 'LAN 配对凭据缺失',
+          detail: '本机没有该设备的已保存凭据，请重新配对后再连接。',
+          tone: 'warning',
+        })
+        return
+      }
+      try {
+        const health = await lanRuntime.getPublicInfo(session.baseUrl)
+        const resumed = await resumeLanDeviceSession(
+          session.baseUrl,
+          health,
+          lanRuntime.probeDevice
+        )
+        if (!resumed) throw new Error('保存的 LAN 凭据与当前设备身份不匹配。')
+        const target = lanProbeToDeviceTarget(resumed.session, resumed.probe)
+        const lease = await lanRuntime.createLease(resumed.session)
+        const leasedTarget: DeviceTarget = { ...target, leaseId: lease.leaseId, leaseState: 'active' }
+        const identityId = deviceIdentityId(leasedTarget)
+        setPendingDevices((current) => upsertLanDeviceTarget(current, leasedTarget))
+        setLanLeasesByDevice((current) => ({ ...current, [leasedTarget.id]: lease }))
+        setRequestedConnectionByIdentity((current) => ({
+          ...current,
+          [identityId]: { kind: 'wifi', targetId: leasedTarget.id },
+        }))
+        setFailedLanResumeIdentityIds((current) => {
+          if (!current.has(identityId)) return current
+          const next = new Set(current)
+          next.delete(identityId)
+          return next
+        })
+        setRouteResumeFailed(false)
+        setSelectedDeviceId(leasedTarget.id)
+        explicitSelectedDeviceIdRef.current = leasedTarget.id
+        if (navigation) {
+          await navigation.navigate({ kind: 'device', deviceId: identityId, view: 'dashboard' })
+        }
+      } catch (error) {
+        setFeedback({
+          title: 'LAN 连接失败',
+          detail: error instanceof Error ? error.message : '无法恢复已保存的 LAN 设备连接。',
+          tone: 'warning',
+        })
+      }
+      return
+    }
     if (!device || device.transport !== 'devd' || !bridgeDevdBaseUrl) {
       handleDeviceChange(deviceId)
       return
@@ -4971,8 +5128,9 @@ export function ControlPlaneDemo({
     !routeHasInvalidLanCredential &&
     !routeAllowsIndependentFirmwareMaintenance &&
     (!routeDeviceChoice ||
-      routeHasFailedLanResume ||
-      (routeResumeFailed && !routeHasKnownBridgeTransportIssue))
+      (!routeHasDirectLanConnection &&
+        ((routeHasFailedLanResume && routeConnectionKind !== 'wifi') ||
+          (routeResumeFailed && !routeHasKnownBridgeTransportIssue))))
   ) {
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {
@@ -5136,7 +5294,16 @@ export function ControlPlaneDemo({
                 firmwareTuningWorkspace={
                   <FirmwareTuningWorkspace
                     key={visibleDevice.id}
-                    supported={visibleDevice.capabilities.includes('thermal_tuning')}
+                    // A persisted LAN session may be rendered before its
+                    // identity probe has repopulated capabilities. The
+                    // read-only endpoint itself is the authoritative support
+                    // check; a 404 is mapped to the unsupported state.
+                    supported={
+                      visibleDevice.capabilities.includes('thermal_tuning') ||
+                      isDirectLanDevice(visibleDevice)
+                    }
+                    powerReady={thermalTuningPowerReady}
+                    powerBlockedReason={thermalTuningPowerBlockedReason}
                     deviceId={visibleDevice.id}
                     transport={visibleDeviceTransport}
                     parameterSnapshot={{
@@ -5820,6 +5987,9 @@ function applyLanStatus(device: DeviceTarget, status: ControlPlaneStatus): Devic
     manualPpsError: status.manualPpsError ?? null,
     faultAttentionPending: status.faultAttentionPending ?? false,
     heaterLockReason: status.heaterLockReason ?? null,
+    thermalProfileMode: status.thermalProfileMode,
+    thermalProfileResolvedBank: status.thermalProfileResolvedBank,
+    thermalControl: status.thermalControl,
     calibration: status.calibration,
     heaterEnabled: status.heaterEnabled,
     heaterOutputPercent: status.heaterOutputPercent,

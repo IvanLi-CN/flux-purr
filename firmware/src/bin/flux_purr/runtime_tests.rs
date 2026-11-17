@@ -2383,6 +2383,7 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
         current_request_mv: 21_000,
         settle_until_ms: Some(10_000),
         next_request_at_ms: 10_000,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: true,
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: false,
@@ -4569,6 +4570,7 @@ fn runtime_status_reports_backend_request_when_manual_pps_is_disabled() {
                 current_request_mv: 12_000,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
                 terminal_fixed_pd_disarmed: false,
@@ -4631,6 +4633,7 @@ fn manual_pps_config_validates_capability_and_updates_status_payload() {
                 current_request_mv: 12_000,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
                 terminal_fixed_pd_disarmed: false,
@@ -12629,6 +12632,30 @@ fn production_controller_requires_the_selected_bank_current() {
 }
 
 #[test]
+fn production_controller_accepts_a_confirmed_lower_voltage_pps_apdo() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_000, 11_000, 3_000)]);
+    let request = PdContractRequest::pps(10_000, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let power = PowerState {
+        protocol: PowerProtocol::Ready,
+        available: true,
+        requested: None,
+        active: Some(active),
+        source_capabilities: source.view(),
+        failure: None,
+    };
+    let manual = ManualPpsState::from_capabilities(adjustable_capabilities_from_view(
+        power.source_capabilities,
+    ));
+
+    assert_eq!(
+        production_thermal_controller(power, ThermalProfileMode::W65, &manual),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a)
+    );
+}
+
+#[test]
 fn five_amp_model_approach_responds_to_damping_without_a_power_plateau() {
     let mut outputs = [0; 2];
     for (index, damping) in [1_000, 4_000].into_iter().enumerate() {
@@ -15264,6 +15291,7 @@ fn automatic_pps_start_preserves_heater_intent_from_fixed_standby() {
         current_request_mv: 5_500,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
@@ -15405,6 +15433,7 @@ fn heater_backend_uses_pps_mos_only_when_pps_covers_20v() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15478,6 +15507,7 @@ fn heater_backend_uses_the_20v_apdo_current_not_another_range() {
             current_request_mv: 20_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15512,6 +15542,7 @@ fn heater_backend_limits_to_pps_when_avs_is_unavailable() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15553,6 +15584,7 @@ fn heater_backend_clamps_avs_to_advertised_capability() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15594,6 +15626,7 @@ fn heater_backend_ignores_avs_without_advertised_range() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15628,6 +15661,7 @@ fn heater_backend_clamps_low_end_to_advertised_pps_minimum() {
             current_request_mv: 15_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -17565,6 +17599,7 @@ fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         current_request_mv: 24_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
@@ -17630,6 +17665,7 @@ fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
         current_request_mv: 20_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: true,
@@ -17678,6 +17714,7 @@ fn complete_idle_clears_failed_pps_adapter_only_with_observed_capability() {
                 terminal_fixed_pd_disarmed: true,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 ..
             } if capability_max_ma == 3_000
         ));
@@ -17697,6 +17734,7 @@ fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
         current_request_mv: 20_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: true,
@@ -18986,6 +19024,20 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
         TuningPdWaitDecision::Fail("pd_contract_lost")
     );
 
+    let transient = PowerState {
+        failure: Some(PowerFailure::TransportFault),
+        ..pending
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(transient, Some(100), 129, Some(100), false),
+        TuningPdWaitDecision::Wait,
+        "a transient observation gap during an admitted PPS request must be retried"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(transient, Some(100), 30_101, Some(100), false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+
     let (ready, _) = production_power_fixture(5_000);
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, Some(100), false),
@@ -18999,6 +19051,14 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, None, false),
         TuningPdWaitDecision::Ready
+    );
+
+    let (mut standby, _) = production_power_fixture(3_000);
+    standby.active.as_mut().unwrap().voltage_mv = FUSB302B_PPS_MIN_MV;
+    assert_eq!(
+        tuning_pd_wait_decision(standby, Some(100), 129, None, false),
+        TuningPdWaitDecision::Wait,
+        "the standby PPS floor is a recovery state, not a working tuning contract"
     );
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, None, true),
@@ -19635,6 +19695,7 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
         current_request_mv: 20_000,
         settle_until_ms: Some(100),
         next_request_at_ms: 100,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: true,
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: true,
@@ -19654,6 +19715,7 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             ..

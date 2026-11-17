@@ -250,7 +250,32 @@ pub(crate) fn tuning_pd_wait_decision(
     ticket_started_ms: Option<u64>,
     request_failed: bool,
 ) -> TuningPdWaitDecision {
-    if power_state.failure.is_some() {
+    const AUTOMATIC_PPS_RECOVERY_WAIT_MS: u64 = 30_000;
+    if let Some(failure) = power_state.failure {
+        // A FUSB302B request can briefly withdraw its observation while the
+        // previous PPS contract is being renegotiated. The control loop has
+        // already forced the heater off in that window; keep the tuning run
+        // alive until the admitted ticket confirms or reaches its deadline.
+        if (ticket_started_ms.is_some()
+            || matches!(
+                power_state.protocol,
+                PowerProtocol::Discovering | PowerProtocol::Fault
+            ))
+            && matches!(
+                failure,
+                PowerFailure::TransportFault | PowerFailure::CapabilityInvalidated
+            )
+        {
+            if ticket_started_ms
+                .or(wait_started_ms)
+                .is_some_and(|started| {
+                    now_ms.saturating_sub(started) > AUTOMATIC_PPS_RECOVERY_WAIT_MS
+                })
+            {
+                return TuningPdWaitDecision::Fail("pd_request_timeout");
+            }
+            return TuningPdWaitDecision::Wait;
+        }
         return TuningPdWaitDecision::Fail("pd_contract_lost");
     }
     if request_failed {
@@ -258,7 +283,24 @@ pub(crate) fn tuning_pd_wait_decision(
     }
     if power_state.protocol == PowerProtocol::Ready
         && power_state.active.is_some_and(|active| {
-            active.mode == PdContractRequestMode::Pps && active.operating_current_ma >= 3_000
+            active.mode == PdContractRequestMode::Pps
+                && active.operating_current_ma >= 3_000
+                && active.voltage_mv <= FUSB302B_PPS_MIN_MV
+        })
+    {
+        return if wait_started_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) > AUTOMATIC_PPS_RECOVERY_WAIT_MS)
+        {
+            TuningPdWaitDecision::Fail("pd_request_timeout")
+        } else {
+            TuningPdWaitDecision::Wait
+        };
+    }
+    if power_state.protocol == PowerProtocol::Ready
+        && power_state.active.is_some_and(|active| {
+            active.mode == PdContractRequestMode::Pps
+                && active.operating_current_ma >= 3_000
+                && active.voltage_mv > FUSB302B_PPS_MIN_MV
         })
         && ticket_started_ms.is_none()
     {
@@ -326,7 +368,7 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
     }
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
-        state.ui_state.heater_enabled,
+        state.ui_state.heater_enabled || state.thermal_tuning.armed,
         state.manual_pps_state.enabled,
         thermal_model_heater_allowed(
             &state.memory_config,
@@ -349,9 +391,19 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
             || calibration_capability_refresh_pending
             || calibration_pps_transition_pending,
     );
+    runtime_apply_tuning_power_decision(state, elapsed_ms, tuning_power_decision);
+
+    needs_redraw
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_apply_tuning_power_decision(
+    state: &mut RuntimeLoopState,
+    elapsed_ms: u64,
+    tuning_power_decision: Option<TuningPdWaitDecision>,
+) {
     match tuning_power_decision {
         Some(TuningPdWaitDecision::Ready) if state.tuning_pd_wait_started_ms.is_some() => {
-            state.tuning_pd_wait_started_ms = None;
             let profile_ready = production_thermal_controller(
                 state.power_state,
                 state.memory_config.thermal_profile_mode,
@@ -359,8 +411,18 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
             )
             .is_profile();
             if !profile_ready {
-                runtime_fail_tuning_pd(state, "pps_source_class_lost", "ready", elapsed_ms);
-                state.thermal_control_profile_preview = None;
+                // Capability refresh can briefly clear the resolved source
+                // class while the already-confirmed PPS contract remains
+                // valid. Keep the heater paused and give the PD task the same
+                // bounded recovery window as other transient PPS faults.
+                const PROFILE_RECOVERY_WAIT_MS: u64 = 30_000;
+                let wait_started = state.tuning_pd_wait_started_ms.get_or_insert(elapsed_ms);
+                if elapsed_ms.saturating_sub(*wait_started) > PROFILE_RECOVERY_WAIT_MS {
+                    runtime_fail_tuning_pd(state, "pps_source_class_lost", "ready", elapsed_ms);
+                    state.thermal_control_profile_preview = None;
+                    state.tuning_pd_wait_started_ms = None;
+                    state.tuning_heater_rearm_pending = false;
+                }
             } else if state.tuning_heater_rearm_pending
                 && state.pd_contract_ready
                 && state.current_rtd_fault.is_none()
@@ -370,8 +432,12 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
                 && state.calibration_runtime_state.mode == CalibrationMode::Off
             {
                 state.ui_state.heater_enabled = true;
+                state.tuning_heater_rearm_pending = false;
             }
-            state.tuning_heater_rearm_pending = false;
+            if profile_ready {
+                state.tuning_pd_wait_started_ms = None;
+                state.tuning_heater_rearm_pending = false;
+            }
         }
         Some(TuningPdWaitDecision::Fail(reason)) => {
             runtime_fail_tuning_pd(state, reason, "power", elapsed_ms);
@@ -389,8 +455,6 @@ pub(crate) fn runtime_apply_pd_snapshot(state: &mut RuntimeLoopState, elapsed_ms
         }
         _ => {}
     }
-
-    needs_redraw
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
@@ -1076,7 +1140,7 @@ pub(crate) async fn runtime_reconcile_network_state(
 
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
-        state.ui_state.heater_enabled,
+        state.ui_state.heater_enabled || state.thermal_tuning.armed,
         state.manual_pps_state.enabled,
         thermal_model_heater_allowed(
             &state.memory_config,
@@ -1770,6 +1834,13 @@ pub(crate) fn runtime_refresh_source_capabilities(state: &mut RuntimeLoopState) 
         .pd_port
         .capabilities()
         .or_else(|| adjustable_capabilities_from_view(state.power_state.source_capabilities));
+    if capabilities.is_none() && state.thermal_tuning.armed {
+        // A capability snapshot can be absent for a few control cycles while
+        // FUSB302B renegotiates. Keep the last known PPS backend and APDO
+        // intent during an active tuning run so the recovery request can be
+        // issued; the bounded tuning wait still fails closed if it times out.
+        return false;
+    }
     if capabilities.is_none() && calibration_fusb_capability_refresh_pending(state) {
         return false;
     }
@@ -1983,7 +2054,7 @@ pub(crate) async fn runtime_reconcile_heater_arming(
     );
     let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
         state.heater_power_backend,
-        state.ui_state.heater_enabled,
+        state.ui_state.heater_enabled || state.thermal_tuning.armed,
         state.manual_pps_state.enabled,
         model_allowed,
     );
@@ -2356,6 +2427,26 @@ fn runtime_production_pid_snapshot(
         state.heater_controller.heat_response = thermal_plant_heat_response(&state.memory_config);
         state.heater_controller.heat_response_identity = Some(response_identity);
     }
+    if state.thermal_tuning.armed && !kind.is_profile() {
+        // The first control cycle can observe the old fixed-PD backend before
+        // the automatic PPS request has installed its wait ticket. Treat that
+        // transition exactly like the other bounded PPS recovery windows:
+        // keep the heater paused, then fail only if the source never becomes
+        // a usable profile within the recovery deadline.
+        const PROFILE_RECOVERY_WAIT_MS: u64 = 30_000;
+        let wait_started = state.tuning_pd_wait_started_ms.get_or_insert(elapsed_ms);
+        if elapsed_ms.saturating_sub(*wait_started) > PROFILE_RECOVERY_WAIT_MS {
+            state.thermal_tuning.fail("pps_source_class_lost");
+            state.tuning_pd_wait_started_ms = None;
+            state.ui_state.heater_enabled = false;
+        }
+        return pause_tuning_profile_controller(
+            &mut state.heater_controller,
+            state.ui_state.target_temp_c,
+            state.latest_temp_c,
+            elapsed_ms,
+        );
+    }
     if state.tuning_pd_wait_started_ms.is_some()
         || (state.ui_state.heater_enabled
             && !kind.is_profile()
@@ -2376,11 +2467,6 @@ fn runtime_production_pid_snapshot(
             state.latest_temp_c,
             elapsed_ms,
         );
-    }
-    if state.thermal_tuning.armed && state.tuning_pd_wait_started_ms.is_none() && !kind.is_profile()
-    {
-        state.thermal_tuning.fail("pps_source_class_lost");
-        state.ui_state.heater_enabled = false;
     }
     let profile = if kind.is_profile() {
         active_thermal_control_profile(
@@ -2507,8 +2593,6 @@ pub(crate) async fn runtime_apply_heater_output(context: RuntimeHeaterOutputCont
         supply_scan: thermal_plant_calibration_running,
         automatic_supply_response_latched: &mut state.automatic_supply_response_latched,
         tuning_power_stage: (state.thermal_tuning.armed
-            && state.thermal_tuning.phase
-                == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
             && state.current_rtd_fault.is_none()
             && !state.ui_state.persistence_locked())
             || power_negotiation_stage,
@@ -2556,16 +2640,18 @@ fn runtime_record_heater_output_cycle(state: &mut RuntimeLoopState, control_star
 
 #[cfg(target_arch = "xtensa")]
 fn runtime_automatic_power_negotiation(state: &RuntimeLoopState) -> (bool, bool) {
-    let automatic_pps_start_allowed = automatic_pps_transition_can_preserve_heater_intent(
-        state.heater_power_backend,
-        state.ui_state.heater_enabled,
-        state.manual_pps_state.enabled,
-        thermal_model_heater_allowed(
-            &state.memory_config,
-            state.calibration_runtime_state,
-            state.manual_pps_state,
-        ),
+    let thermal_model_allowed = thermal_model_heater_allowed(
+        &state.memory_config,
+        state.calibration_runtime_state,
+        state.manual_pps_state,
     );
+    let automatic_pps_start_allowed = (state.thermal_tuning.armed || state.ui_state.heater_enabled)
+        && !state.manual_pps_state.enabled
+        && thermal_model_allowed
+        && matches!(
+            state.heater_power_backend,
+            HeaterPowerBackend::PpsMos { .. }
+        );
     let allow_pending_pps_progress = automatic_pps_progress_allowed(
         state.power_state,
         state.pending_automatic_power_request.is_some(),
@@ -3552,10 +3638,7 @@ fn runtime_record_thermal_tuning_sample(
         || !observation.status.pd_active
         || observation.contract_voltage_mv.is_none()
     {
-        // A fixed 5 V contract can report enough instantaneous current to
-        // look like a 3 A run. Never reinterpret it as PPS evidence: tuning
-        // samples must come from a confirmed PPS contract with a known
-        // voltage, otherwise the request/ceiling pair is meaningless.
+        // Only a confirmed PPS contract is valid tuning evidence.
         runtime_fail_tuning_pd(state, "pd_contract_lost", "sample", elapsed_ms);
         state.ui_state.heater_enabled = false;
         return true;
@@ -3570,25 +3653,6 @@ fn runtime_record_thermal_tuning_sample(
         state.ui_state.heater_enabled = false;
         return true;
     }
-    let candidate_id = state
-        .thermal_tuning
-        .candidate_id
-        .clone()
-        .unwrap_or_default();
-    let candidate_hash = state
-        .thermal_tuning
-        .candidate_hash
-        .clone()
-        .unwrap_or_default();
-    let phase = match pid_snapshot.phase {
-        HeaterControlPhase::Warmup => {
-            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
-        }
-        HeaterControlPhase::Approach => {
-            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Approach
-        }
-        HeaterControlPhase::Hold => flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Hold,
-    };
     let HeaterPowerBackend::PpsMos {
         adjustable_max_mv, ..
     } = state.heater_power_backend
@@ -3617,6 +3681,25 @@ fn runtime_record_thermal_tuning_sample(
     if u32::from(requested_mv) > pps_power_ceiling_mv {
         return false;
     }
+    let candidate_id = state
+        .thermal_tuning
+        .candidate_id
+        .clone()
+        .unwrap_or_default();
+    let candidate_hash = state
+        .thermal_tuning
+        .candidate_hash
+        .clone()
+        .unwrap_or_default();
+    let phase = match pid_snapshot.phase {
+        HeaterControlPhase::Warmup => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+        }
+        HeaterControlPhase::Approach => {
+            flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Approach
+        }
+        HeaterControlPhase::Hold => flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Hold,
+    };
     let sample = flux_purr_firmware::thermal_tuning::ThermalTuningSample {
         sequence: state.thermal_tuning.events.len() as u32 + 1,
         elapsed_ms,
@@ -3642,24 +3725,7 @@ fn runtime_record_thermal_tuning_sample(
         phase,
         fan: Some(tuning_fan_sample(state.fan_command)),
     };
-    let phase_before = state.thermal_tuning.phase;
-    if state
-        .thermal_tuning
-        .record_live_sample_with_cooldown_admission(sample, temperature.cooldown_admission_ready)
-        .is_err()
-    {
-        state.ui_state.heater_enabled = false;
-        return true;
-    }
-    if phase_before == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
-        && state.thermal_tuning.phase
-            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
-    {
-        state.ui_state.heater_enabled = true;
-    }
-    !state.thermal_tuning.armed
-        || state.thermal_tuning.phase
-            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+    runtime_commit_tuning_sample(state, sample, temperature.cooldown_admission_ready)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -3839,4 +3905,30 @@ pub fn host_main() {
     println!(
         "flux-purr now runs the interactive frontpanel runtime; build with --target xtensa-esp32s3-none-elf --features esp32s3,web_serial,net_http"
     );
+}
+
+#[cfg(target_arch = "xtensa")]
+fn runtime_commit_tuning_sample(
+    state: &mut RuntimeLoopState,
+    sample: flux_purr_firmware::thermal_tuning::ThermalTuningSample,
+    cooldown_admission_ready: bool,
+) -> bool {
+    let phase_before = state.thermal_tuning.phase;
+    if state
+        .thermal_tuning
+        .record_live_sample_with_cooldown_admission(sample, cooldown_admission_ready)
+        .is_err()
+    {
+        state.ui_state.heater_enabled = false;
+        return true;
+    }
+    if phase_before == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
+        && state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Warmup
+    {
+        state.ui_state.heater_enabled = true;
+    }
+    !state.thermal_tuning.armed
+        || state.thermal_tuning.phase
+            == flux_purr_firmware::thermal_tuning::ThermalTuningPhase::Cooldown
 }

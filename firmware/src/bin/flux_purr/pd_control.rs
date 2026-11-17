@@ -273,6 +273,7 @@ pub(crate) enum HeaterPowerBackend {
         current_request_mv: u16,
         settle_until_ms: Option<u64>,
         next_request_at_ms: u64,
+        pps_request_failure_count: u8,
         current_limit_fixed_pwm_active: bool,
         current_limit_fixed_request_confirmed: bool,
         // A terminal thermal-calibration transition has requested fixed PD. Keep
@@ -1744,20 +1745,26 @@ impl ManualPpsState {
                 },
             )
         });
-        point.is_some_and(|point| {
-            // Cold-start fallback authorizes only the coldest measured
-            // tracking request. A stale contract above that point must be
-            // blanked and renegotiated before physical output resumes.
-            contract_mv <= point.tracking_request_mv
-                && (flux_purr_firmware::heater_supply::SupplyBoundary::voltage_response_matches(
-                    point,
-                    contract_mv,
-                    vin_raw_adc_mv,
-                ) || automatic_voltage_response_meets_absolute_floor(
-                    contract_mv,
-                    vin_raw_adc_mv,
-                ))
-        })
+        point.map_or_else(
+            || {
+                boundary.is_valid()
+                    && automatic_voltage_response_meets_absolute_floor(contract_mv, vin_raw_adc_mv)
+            },
+            |point| {
+                // Cold-start fallback authorizes only the coldest measured
+                // tracking request. A stale contract above that point must be
+                // blanked and renegotiated before physical output resumes.
+                contract_mv <= point.tracking_request_mv
+                    && (flux_purr_firmware::heater_supply::SupplyBoundary::voltage_response_matches(
+                        point,
+                        contract_mv,
+                        vin_raw_adc_mv,
+                    ) || automatic_voltage_response_meets_absolute_floor(
+                        contract_mv,
+                        vin_raw_adc_mv,
+                    ))
+            },
+        )
     }
 
     pub(crate) fn thermal_plant_pps_range(&self) -> Option<PpsAdjustmentRange> {

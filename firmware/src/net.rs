@@ -19,8 +19,7 @@ use crate::{
         CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
         HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
         LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
-        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
-        identity_from_device_names,
+        format_http_response_headers, http_socket_slot_count, identity_from_device_names,
     },
     wifi_state::{
         SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
@@ -54,9 +53,10 @@ pub type SharedI2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 use serde::Serialize;
 use static_cell::StaticCell;
 
-// Three sockets at 1 KiB per direction use less static RAM than the previous
-// two-socket 2 KiB layout while still covering the largest HTTP header and
-// streaming larger bodies through the shared request workspace.
+// Three sockets at 1 KiB per direction keep the event stream, status
+// snapshots, and one short-lived probe independent while preserving the
+// existing static-memory budget. Only the mutation workspace remains
+// serialized below.
 const HTTP_TCP_BUFFER_LEN: usize = 1024;
 const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
 const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
@@ -66,7 +66,10 @@ const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
 // consume the mutation workspace.
 const HTTP_ACTIVE_REQUEST_BUDGET: usize = 1;
 const HTTP_SOCKET_COUNT: usize = http_socket_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
-const HTTP_WORKSPACE_COUNT: usize = http_workspace_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
+// Keep two full request workspaces available so a long-poll/event response
+// cannot block a lease acquisition or tuning command behind the single
+// mutation mailbox. The control executor still serializes state mutation.
+const HTTP_WORKSPACE_COUNT: usize = 2;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
@@ -108,6 +111,7 @@ static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
 // The mutation-capable HTTP worker owns its full request workspace outside the
 // executor arena. Lightweight readers are served from published snapshots.
 static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
+static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
 static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
@@ -157,6 +161,7 @@ struct ParsedHttpHeader {
     expected_revision: Option<u32>,
     after_sample: Option<u8>,
     after_sequence: Option<u32>,
+    run_id: Option<String<128>>,
     private_network: bool,
     content_length: usize,
 }
@@ -172,6 +177,7 @@ impl ParsedHttpHeader {
             expected_revision: self.expected_revision,
             after_sample: self.after_sample,
             after_sequence: self.after_sequence,
+            run_id: self.run_id.as_ref().map(String::as_str),
             request_private_network: self.private_network,
             body,
             entropy: random_entropy(),
@@ -610,6 +616,12 @@ where
         .send(HttpWorkspaceSlot {
             workspace: HTTP_WORKSPACE_0.init_with(HttpWorkspace::new),
             response_slot: 0,
+        })
+        .await;
+    HTTP_WORKSPACES
+        .send(HttpWorkspaceSlot {
+            workspace: HTTP_WORKSPACE_1.init_with(HttpWorkspace::new),
+            response_slot: 1,
         })
         .await;
     spawner
@@ -1195,6 +1207,7 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
         expected_revision: None,
         after_sample: None,
         after_sequence: None,
+        run_id: None,
         private_network: false,
         content_length: 0,
     };
@@ -1228,6 +1241,15 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
                 .then(|| value.parse().ok())
                 .flatten()
         })
+    });
+    parsed.run_id = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key != "run_id" && key != "runId" {
+            return None;
+        }
+        let mut run_id = String::new();
+        run_id.push_str(value).ok()?;
+        Some(run_id)
     });
     for line in lines {
         let Some((key, value)) = line.trim_end_matches('\r').split_once(':') else {
@@ -1501,7 +1523,7 @@ fn stage_http_gate(
             let is_sse = command.endpoint == crate::lan::LanEndpoint::Events
                 && command.method == HttpMethod::Get;
             response_slot.allow_origin = allow_origin;
-            *command_slot = Some(command);
+            *command_slot = Some(*command);
             Some((request_id, is_sse))
         }
     }

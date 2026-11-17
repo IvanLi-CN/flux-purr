@@ -1876,6 +1876,10 @@ pub(crate) fn lan_command_to_control_line(
                 write!(line, r#", "afterSequence":{}"#, after_sequence)
                     .map_err(|_| "LAN request is too large")?;
             }
+            if let Some(run_id) = command.run_id.as_deref() {
+                write!(line, r#", "runId":"{}""#, run_id)
+                    .map_err(|_| "LAN request is too large")?;
+            }
             line.push('}').map_err(|_| "LAN request is too large")?;
             return Ok(Box::new(line));
         }

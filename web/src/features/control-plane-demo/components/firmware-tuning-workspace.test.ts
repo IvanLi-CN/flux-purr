@@ -5,6 +5,7 @@ import {
   FirmwareTuningWorkspace,
   compactIdentifier,
   resolveTuningPowerClass,
+  shouldPollTuningRead,
   validateCandidate,
   visibleTerminalDisposition,
 } from './firmware-tuning-workspace'
@@ -50,6 +51,21 @@ describe('firmware tuning workspace', () => {
     expect(html).toContain('固件热控调优')
     expect(html).toContain('开始调优')
     expect(html).toContain('导出报告')
+  })
+
+  it('does not start a second event read while the previous read is in flight', () => {
+    const base = {
+      supported: true,
+      journalReady: true,
+      pending: false,
+      reading: false,
+      gap: false,
+      complete: false,
+      identityVerified: true,
+      failedAttempts: 0,
+    }
+    expect(shouldPollTuningRead(base)).toBe(true)
+    expect(shouldPollTuningRead({ ...base, reading: true })).toBe(false)
   })
 
   it('checks the canonical device profile hash and rejects mock candidates', async () => {

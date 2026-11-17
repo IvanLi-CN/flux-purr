@@ -38,6 +38,10 @@ pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // shared LAN 6 KiB body envelope while letting USB hosts drain the live stream
 // faster than the runtime produces samples at its 200 ms cadence.
 pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 6;
+// Candidate-trial events carry the full profile snapshot and timing evidence.
+// Keep a page containing one of these large records below the LAN response
+// envelope; subsequent reads continue with the returned sequence cursor.
+const THERMAL_TUNING_EVENT_PAGE_WITH_TRIAL_SIZE: usize = 1;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_SCOUT_HOLD_MS: u64 = 12_000;
 // Leave control-cycle scheduling margin below the required 333ms sample span.
@@ -3618,9 +3622,20 @@ impl ThermalTuningRuntime {
             }
         }
         page.events.clear();
+        let page_limit = if self
+            .events
+            .iter()
+            .filter(|event| after_sequence.is_none_or(|after| event.sequence > after))
+            .take(THERMAL_TUNING_EVENT_PAGE_SIZE)
+            .any(|event| event.trial.is_some())
+        {
+            THERMAL_TUNING_EVENT_PAGE_WITH_TRIAL_SIZE
+        } else {
+            THERMAL_TUNING_EVENT_PAGE_SIZE
+        };
         for event in self.events.iter() {
             if after_sequence.is_none_or(|after| event.sequence > after)
-                && page.events.push(event.clone()).is_err()
+                && (page.events.len() >= page_limit || page.events.push(event.clone()).is_err())
             {
                 break;
             }

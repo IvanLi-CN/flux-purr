@@ -66,6 +66,36 @@ const POINT_FIELDS = [
 ] as const
 type DeviceCommand = Omit<ThermalTuningCommand, 'leaseId'>
 
+export function shouldPollTuningRead({
+  supported,
+  journalReady,
+  pending,
+  reading,
+  gap,
+  complete,
+  identityVerified,
+  failedAttempts,
+}: {
+  supported: boolean
+  journalReady: boolean
+  pending: boolean
+  reading: boolean
+  gap: boolean
+  complete: boolean
+  identityVerified: boolean
+  failedAttempts: number
+}) {
+  return (
+    supported &&
+    journalReady &&
+    !pending &&
+    !reading &&
+    !gap &&
+    !(complete && identityVerified) &&
+    failedAttempts < 3
+  )
+}
+
 interface ImportedCandidate {
   hash: string
   profile: Record<string, unknown>
@@ -74,6 +104,8 @@ interface ImportedCandidate {
 
 export function FirmwareTuningWorkspace({
   supported,
+  powerReady = true,
+  powerBlockedReason,
   deviceId,
   transport,
   parameterSnapshot,
@@ -81,6 +113,8 @@ export function FirmwareTuningWorkspace({
   sendCommand,
 }: {
   supported: boolean
+  powerReady?: boolean
+  powerBlockedReason?: string
   deviceId: string
   transport: string
   parameterSnapshot?: {
@@ -88,7 +122,7 @@ export function FirmwareTuningWorkspace({
     bank?: string
     control?: ThermalControlRuntime
   }
-  readStatus: () => Promise<ThermalTuningStatus>
+  readStatus: (cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>) => Promise<ThermalTuningStatus>
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
   const [recording, setRecording] = useState<ThermalTuningRecording | null>(null)
@@ -109,6 +143,8 @@ export function FirmwareTuningWorkspace({
   >(supported ? 'idle' : 'unsupported')
   const fileInput = useRef<HTMLInputElement>(null)
   const canceledGapRun = useRef<string | null>(null)
+  const mountedRef = useRef(true)
+  const readInFlightRef = useRef(false)
   const status = recording?.status
   const armed = status?.armed === true
   // Firmware keeps the terminal disposition at `running` in its idle wire
@@ -116,6 +152,13 @@ export function FirmwareTuningWorkspace({
   // or carries a run identity; otherwise the workbench must show standby.
   const terminal = visibleTerminalDisposition(status)
   const powerClass = resolveTuningPowerClass(parameterSnapshot?.bank, status?.powerClass)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -127,8 +170,12 @@ export function FirmwareTuningWorkspace({
     void loadThermalTuningRecording(deviceId)
       .then((restored) => {
         if (cancelled) return
-        recordingRef.current = restored
-        setRecording(restored)
+        // A persisted trace gap belongs to the previous run. Reusing its
+        // cursor would keep every new read blocked forever; the next status
+        // request must establish a fresh cursor for the current device run.
+        const reusable = restored?.gap ? null : restored
+        recordingRef.current = reusable
+        setRecording(reusable)
         setJournalReady(true)
       })
       .catch((failure) => {
@@ -158,17 +205,23 @@ export function FirmwareTuningWorkspace({
       // and turn a healthy run into device_trace_gap.
       recordingRef.current = updated
       setRecording(updated)
-      try {
-        if (updated.runId) await persistThermalTuningRecording(deviceId, updated)
-      } catch (failure) {
-        if (updated.status.armed && updated.runId) {
-          try {
-            await sendCommand({ op: 'cancel', runId: updated.runId })
-          } catch {
-            // The original persistence failure still blocks event acknowledgement.
+      // A later successful status page proves the endpoint is reachable again;
+      // clear a stale transport warning left by an earlier bounded retry.
+      setError(null)
+      if (updated.runId) {
+        // Device acknowledgement is on the hot path; IndexedDB is a journal,
+        // not a prerequisite for issuing the next read. A blocked or slow
+        // browser transaction must never stall the bounded firmware event ring.
+        void persistThermalTuningRecording(deviceId, updated).catch(async (failure) => {
+          setError(messageOf(failure))
+          if (updated.status.armed && updated.runId) {
+            try {
+              await sendCommand({ op: 'cancel', runId: updated.runId })
+            } catch {
+              // Preserve the original persistence error in the UI.
+            }
           }
-        }
-        throw failure
+        })
       }
     },
     [deviceId, sendCommand]
@@ -176,23 +229,28 @@ export function FirmwareTuningWorkspace({
 
   useEffect(() => {
     if (
-      !supported ||
-      !journalReady ||
-      pending ||
-      recording?.gap ||
-      (recording?.complete && identityVerified) ||
-      (readState === 'failed' && pollAttempt >= 3)
+      !shouldPollTuningRead({
+        supported,
+        journalReady,
+        pending,
+        reading: readState === 'reading',
+        gap: recording?.gap === true,
+        complete: recording?.complete === true,
+        identityVerified,
+        failedAttempts: pollAttempt,
+      })
     )
       return
-    let cancelled = false
+    if (readInFlightRef.current) return
     const timer = window.setTimeout(
       async () => {
+        readInFlightRef.current = true
         setReadState('reading')
         try {
           const command = nextTuningReadCommand(recording, identityVerified)
           const confirmedSequence = command?.afterSequence ?? null
-          const next = command ? await sendCommand(command) : await readStatus()
-          if (!cancelled) {
+          const next = await readStatus(command ?? undefined)
+          if (mountedRef.current) {
             await recordStatus(next, confirmedSequence)
             setIdentityVerified(true)
             setError(null)
@@ -200,21 +258,40 @@ export function FirmwareTuningWorkspace({
             setReadState('ready')
           }
         } catch (failure) {
-          if (!cancelled) {
+          if (mountedRef.current) {
             setError(messageOf(failure))
-            setReadState('failed')
-            setPollAttempt((attempt) =>
-              failure instanceof ControlPlaneClientError && !failure.retryable
-                ? 3
-                : Math.min(3, attempt + 1)
-            )
+            const retryable =
+              !(failure instanceof ControlPlaneClientError) || failure.retryable
+            if (armed && retryable && pollAttempt >= 2) {
+              // An active run must keep draining the bounded device event
+              // ring. After three failed reads, retry from the existing
+              // cursor. The firmware acknowledges and removes events as it
+              // serves them, so clearing the browser recording here would
+              // make the next page start at a non-zero sequence and create a
+              // false missing_event_sequence gap.
+              setPollAttempt(0)
+              setReadState('idle')
+            } else {
+              setReadState('failed')
+              setPollAttempt((attempt) =>
+                failure instanceof ControlPlaneClientError && !failure.retryable
+                  ? 3
+                  : Math.min(3, attempt + 1)
+              )
+            }
           }
+        } finally {
+          readInFlightRef.current = false
         }
       },
-      Math.min(2_000, (armed ? 75 : 500) + pollAttempt * 150)
+      // The firmware emits five sample records per second and returns at
+      // most six records per page. While armed, poll often enough to keep
+      // the bounded device ring below its capacity without overlapping
+      // requests; the 300ms floor is far above the old 75ms starvation
+      // threshold that could compete with the control/PD tasks.
+      Math.min(2_000, (armed ? 300 : 500) + pollAttempt * 150)
     )
     return () => {
-      cancelled = true
       window.clearTimeout(timer)
     }
   }, [
@@ -223,7 +300,6 @@ export function FirmwareTuningWorkspace({
     journalReady,
     pending,
     pollAttempt,
-    readState,
     readStatus,
     recordStatus,
     recording,
@@ -358,6 +434,7 @@ export function FirmwareTuningWorkspace({
               !supported ||
               !journalReady ||
               !identityVerified ||
+              readState === 'reading' ||
               !powerClass ||
               armed ||
               terminal === 'candidate_ready' ||
@@ -436,6 +513,12 @@ export function FirmwareTuningWorkspace({
       {supported && !powerClass ? (
         <p className="firmware-tuning__warning">
           <ShieldAlert aria-hidden="true" /> 当前设备尚未解析出 PPS 功率档位，无法安全启动调优。
+        </p>
+      ) : null}
+      {supported && powerClass && !powerReady ? (
+        <p className="firmware-tuning__warning">
+          <ShieldAlert aria-hidden="true" />{' '}
+          {powerBlockedReason ?? '当前电源合同尚未切换到 PPS；开始调优后固件会先完成安全协商。'}
         </p>
       ) : null}
       {recording?.gap ? (
