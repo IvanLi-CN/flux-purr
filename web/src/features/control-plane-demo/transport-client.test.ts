@@ -11,6 +11,7 @@ import {
   redactWifiConfigFrame,
   selectLatestDevdTransportIssueEvent,
 } from './transport-client'
+import { resolveWifiSettingsAccess } from './wifi-settings-access'
 
 function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), {
@@ -105,7 +106,11 @@ describe('control-plane transport client', () => {
       body: JSON.stringify({ cidr: '192.168.31.0/24' }),
     })
   })
-  it('maps devd records into demo device targets', () => {
+  it.each([
+    null,
+    'ipv4_timed_out',
+    'association_rejected',
+  ] as const)('keeps a connected USB target writable with WiFi failure %s', (failureCode) => {
     const record: DevdDeviceRecord = {
       id: 'mock-fp-lab-01',
       displayName: 'Bench Alpha',
@@ -221,8 +226,28 @@ describe('control-plane transport client', () => {
       },
     }
 
+    record.identity.capabilities.push('wifi_state_v2')
+    if (failureCode) {
+      record.network = {
+        ...record.network,
+        state: 'error',
+        failureCode,
+        lastError: 'Timed out waiting for IPv4 configuration.',
+      }
+      record.status.network = record.network
+    }
     const target = devdRecordToDeviceTarget(record)
 
+    expect(target.transportIssue).toBeUndefined()
+    expect(target.connectionAvailable).toBe(true)
+    expect(target.wifiFailureCode).toBe(failureCode)
+    expect(
+      resolveWifiSettingsAccess({
+        ...target,
+        leaseId: 'usb-owner',
+        leaseState: 'active',
+      })
+    ).toEqual({ mode: 'read-write' })
     expect(target.transport).toBe('devd')
     expect(target.uptime).toBe('01:01:01')
     expect(target.capabilities).toContain('wifi_config')

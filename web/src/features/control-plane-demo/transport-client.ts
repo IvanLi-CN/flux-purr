@@ -550,7 +550,13 @@ function devdTransportIssue(record: DevdDeviceRecord) {
     return undefined
   }
 
-  const lastError = normalizeDevdTransportIssue(record.network.lastError)
+  // Older daemon records store serial failures in network.lastError too.
+  // A successful USB connection and typed WiFi failures are not serial faults:
+  // keep USB configuration available so the station can be recovered.
+  const lastError =
+    record.connection !== 'connected' && !record.network.failureCode
+      ? normalizeDevdTransportIssue(record.network.lastError)
+      : null
   if (lastError) {
     return lastError
   }

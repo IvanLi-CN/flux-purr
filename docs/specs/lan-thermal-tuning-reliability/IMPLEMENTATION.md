@@ -11,6 +11,12 @@
 - Lifecycle: active
 - Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
 
+## USB 与 Wi-Fi 故障隔离
+
+- `devdRecordToDeviceTarget` 只在 USB 本身未连接且没有设备 Wi-Fi failure code 时，兼容读取旧 daemon 放在 `network.lastError` 的串口故障；Wi-Fi 的 DHCP 或认证失败保留在网络状态中，不撤销已验证 USB 通道的配置能力。结构化串口错误事件继续独立显示。
+- 回归覆盖正常网络、`ipv4_timed_out` 和 `association_rejected`：USB 仍已连接，有效 USB 租约下可以配置 Wi-Fi；既有串口超时、占用与缺失端口提示继续通过测试。
+- 本地唯一 Web 页面在设备报告 `ipv4_timed_out` 时曾把 Wi-Fi 输入框错误设为只读；修复后的页面恢复可编辑。通过该页面的 USB 配置处理器原样提交已保存 SSID、保留密码和地址配置后，设备进入 generation 2 / sequence 15，随后报告 Wi-Fi 已连接；使用已有 LAN 凭据连接返回 HTTP 200。这证明配置恢复通路可用，不证明先前 DHCP 超时根因或完整调优已解决。
+
 ## 工厂基线覆盖审查
 
 - `thermal_tuning::factory_default_profile` 从 `ThermalControlProfileConfig::default()` 填入八个目标点，仅返回控制参数，没有返回输出曲线、热模型或按来源组件组成的完整基线。现有无文件启动测试只证明控制参数种子存在，不能证明“设备完全没有标定数据时可用”。
