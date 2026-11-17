@@ -191,3 +191,11 @@
 浏览器保留的 1,458 条调优请求资源计时记录中最大耗时 1,790ms，未复现上一轮 HTTP 停读；这是单轮观察，不是间歇超时根因已解决的证明。最终调优 GET 返回 HTTP 200、`armed=false / phase=failed / trace.complete=true / trace.gap=false / saveConfirmed=false`，状态 GET 返回 `mode=idle / heaterEnabled=false / thermalTuningActive=false`。未确认保存，旧 bank 保留。
 
 标定续跑修复提交 `6543dbc3` 的完整产品离线镜像为 2,090,848/2,097,152 字节，主机及 Xtensa 严格 Clippy、Rust 风格、1,309 项固件测试与栈门禁通过；该离线构建没有中断上述实机运行，也尚未烧录，不将实机证据错误绑定到该新提交。
+
+### Web HTTP 加热风扇对照
+
+在主人明确授权下，通过同一空间 8 的本地 Web HTTP 页面临时将加热风扇策略从 High 改为 Low，发起 `web-pps3a-c71bbf56-7f06-4204-aae9-2d29fc75da75`。固件仍为 `0.30.10-dev.d1d3cdb`，热模型事务仍为 `1470196405`，未导入或保存调优候选，未修改传感器、过温保护或资格阈值。该运行在 1,060,980ms 搜索耗尽并失败，连续保存 sequence 0–3635 共 3,636 条事件；页面显示追踪完整、EEPROM 未保存。60°C scout 和独立保持确认通过；220°C trial 0 预热超时，trial 1–6 均因 `full-speed-to-stable budget exhausted` 被拒绝，其余目标因缺少合格上界而剪枝。
+
+同条件 High 运行最高 195.87°C，Low 运行最高 219.18°C；首个 220°C 预热中，100→170°C 分别耗时 118,031ms 和 65,753ms。两轮所有预热样本的实际加热输出均为 1000 permille，合同电流均为 3,250mA，最高确认电压均为 21,000mV。Low 的接近阶段仍出现约 218.5°C 入段后回落、未及时交接稳定保持的失败。对照证明配置的散热策略明显改变升温轨迹，但降低风扇不足以使整轮调优通过，也不证明电源实际负载功率或控制模型失配的完整因果链。[对照摘要与接近阶段观测](assets/http-fan-guard-comparison.json)保留真实事件的序号、时间、温度、请求/实际输出、合同和风扇命令；这是选取的诊断证据，不是完整资格报告。
+
+测试结束后通过 Web 保存恢复 High，独立认证 HTTP 状态读回 `heatingFanGuardMode=high`、`heaterEnabled=false`、逻辑/物理输出均为 0、`thermalTuningActive=false`，热模型事务及参数保持不变。未确认保存，未将失败候选替换为持久化 bank。调优完整通过和 current-head PR 门禁仍未关闭。
