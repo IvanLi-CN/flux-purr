@@ -92,6 +92,7 @@
 
 - Direct LAN, `devd` LAN bridge, `devd` USB, and Web Serial MUST expose the same tuning domain states and error categories, even when their wire mechanisms differ.
 - A transport adapter MUST not report capability or lease errors that belong to another adapter.
+- USB response backpressure or transport recovery MUST NOT prevent the runtime from draining the LAN control mailbox. Runtime dispatch MUST remain serialized: a newly processed USB command consumes that iteration's command budget, while transmission of a previous reply does not.
 - The public Demo build MUST keep these behaviors mockable without opening LAN, Web Serial, or `devd` connections.
 - covers: `VER-LTR-018`, `VER-LTR-019`
 
@@ -232,6 +233,7 @@
 ### VER-LTR-018 Cross-transport contract fixture
 
 - Method: Replay the same tuning outcome matrix through direct LAN, `devd` LAN, `devd` USB, and Web Serial adapters.
+- Method: Keep a USB reply pending across repeated runtime iterations with a full LAN mailbox; verify that LAN requests drain, and that processing a new USB command defers LAN dispatch until the next iteration.
 - covers: `REQ-LTR-010`
 - Pass condition: Domain states and user-facing categories are equivalent across transports.
 

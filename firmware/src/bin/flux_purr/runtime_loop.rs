@@ -55,18 +55,43 @@ impl RuntimeInputOutcome {
     }
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) struct RuntimeUsbInputOutcome {
     needs_redraw: bool,
     control_command_processed: bool,
     response_pending: bool,
 }
 
-#[cfg(target_arch = "xtensa")]
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) struct RuntimeLanInputOutcome {
     needs_redraw: bool,
     command_processed: bool,
 }
+
+#[cfg(any(target_arch = "xtensa", test))]
+async fn runtime_poll_control_transports<S>(
+    state: &mut S,
+    mut poll_usb: impl core::ops::AsyncFnMut(&mut S) -> RuntimeUsbInputOutcome,
+    mut poll_lan: impl core::ops::AsyncFnMut(&mut S) -> RuntimeLanInputOutcome,
+) -> (RuntimeUsbInputOutcome, RuntimeLanInputOutcome) {
+    let usb = poll_usb(state).await;
+    // A USB reply can remain backpressured indefinitely after its host stops
+    // reading. Only dispatching a new command consumes this iteration's
+    // control budget; draining an old reply must not starve the LAN mailbox.
+    let lan = if usb.control_command_processed {
+        RuntimeLanInputOutcome {
+            needs_redraw: false,
+            command_processed: false,
+        }
+    } else {
+        poll_lan(state).await
+    };
+    (usb, lan)
+}
+
+#[cfg(test)]
+#[path = "runtime_transport_tests.rs"]
+mod transport_tests;
 
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 impl RuntimeLanInputOutcome {
@@ -1015,12 +1040,9 @@ pub(crate) fn runtime_reject_lan_command(
 pub(crate) async fn runtime_process_lan(
     state: &mut RuntimeLoopState,
     elapsed_ms: u64,
-    _control_command_processed: bool,
 ) -> RuntimeLanInputOutcome {
     #[cfg(feature = "net_http")]
-    if !_control_command_processed
-        && let Some(command) = flux_purr_firmware::net::try_receive_command()
-    {
+    if let Some(command) = flux_purr_firmware::net::try_receive_command() {
         return runtime_execute_lan_command(state, elapsed_ms, command).await;
     }
     RuntimeLanInputOutcome {
@@ -1194,11 +1216,20 @@ pub(crate) async fn runtime_process_input(
         raw_state,
         state.ui_state.gesture_capabilities(),
     );
-    let route_before_usb_control = state.ui_state.route;
-    let usb_input = runtime_process_usb_input(state, elapsed_ms).await;
-    let mut needs_redraw = usb_input.needs_redraw;
-    let pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
-        && state.ui_state.route == FrontPanelRoute::WifiInfo;
+    let mut pairing_opened_by_usb = false;
+    let (usb_input, lan_input) = runtime_poll_control_transports(
+        state,
+        async |state| {
+            let route_before_usb_control = state.ui_state.route;
+            let outcome = runtime_process_usb_input(state, elapsed_ms).await;
+            pairing_opened_by_usb = route_before_usb_control != FrontPanelRoute::WifiInfo
+                && state.ui_state.route == FrontPanelRoute::WifiInfo;
+            outcome
+        },
+        async |state| runtime_process_lan(state, elapsed_ms).await,
+    )
+    .await;
+    let mut needs_redraw = usb_input.needs_redraw | lan_input.needs_redraw;
     if pairing_opened_by_usb {
         state.suppress_pairing_input_until_released = true;
     }
@@ -1206,9 +1237,6 @@ pub(crate) async fn runtime_process_input(
         return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
     }
 
-    let lan_input =
-        runtime_process_lan(state, elapsed_ms, usb_input.control_command_processed).await;
-    needs_redraw |= lan_input.needs_redraw;
     if lan_input.command_processed {
         return RuntimeInputOutcome::skip(sample, needs_redraw, pairing_opened_by_usb);
     }

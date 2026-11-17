@@ -26,6 +26,8 @@
 
 ## HTTP 接入诊断与定向验收
 
+- `runtime_poll_control_transports` 将发送旧 USB 响应与执行新控制命令分开计费：旧响应背压、持久化日志积压和 USB 恢复期间仍允许 LAN mailbox 出队；新 USB 命令继续占用当前轮唯一命令预算。调度回归在旧行为下连续八轮未处理四个已排队 LAN 请求，修复后按序完成；另一回归确认新 USB 命令会将 LAN 延后到下一轮。1,293 项固件测试及 host/Xtensa 严格 Clippy 通过。匹配固件的真机 HTTP 和完整调优复测仍是独立门禁，不能仅凭调度测试宣告实际故障已解决。
+
 - 镜像 `d037989c` 的并发公开 health 回归使用 `just lan-http-read-check http://192.168.31.207 d0cf1308a148 30 3`，30 次请求中 10 次成功、20 次连接拒绝；五组三并发探针均只有一个成功，单并发五次全部成功。故障位于单 acceptor 的 TCP 接入窗口，不能归因于配对或调优 capability。该路径依赖 Embassy 网络调度和设备 TCP 栈，host 路由单测不能替代匹配镜像的相同并发探针。
 - Web 经 devd LAN HTTP 启动 `web-pps3a-3b40a1bb-99f4-41f5-a8fe-29775e331893` 返回 200，设备进入调优。临时诊断确认租约申请、写入和释放均返回 200，历史 `lease_busy` 未复现，原因仍未确定；诊断日志代码已移除。活动期间，另一已认证 HTTP 客户端持有自己的有效租约并提交保持原目标温度的 runtime 写入，返回 `409 thermal_tuning_active`，随后租约释放成功。Web 主动停止后，设备为 `canceled / armed=false`，sequence 0–1792 完整、无 gap；这是协议定向验收，不是整轮调优通过。
 
