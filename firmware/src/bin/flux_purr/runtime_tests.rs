@@ -14719,11 +14719,35 @@ fn warmup_quantized_ceiling_noise_does_not_blank_the_confirmed_gate() {
         );
         assert!(next_mv <= ceiling_mv);
         assert!(
-            !automatic_pps_reconciliation_requires_pause(active, next_mv),
+            !automatic_pps_reconciliation_requires_pause(active, ceiling_mv),
             "safe Warmup transition {current_mv} -> {next_mv} under {ceiling_mv} must not blank"
         );
         current_mv = next_mv;
     }
+}
+
+#[test]
+fn warmup_reconciliation_keeps_a_safe_contract_ahead_of_the_backend_cache() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let active = ConfirmedActiveContract::from_private_contract(
+        source
+            .select_exact_contract(PdContractRequest::automatic_pps(10_900, 3_000).unwrap())
+            .unwrap(),
+        source,
+    );
+    let next_mv = automatic_heater_request_mv_for_phase(
+        HeaterControlPhase::Warmup,
+        10_800,
+        10_900,
+        5_500,
+        10_900,
+    );
+    assert_eq!(next_mv, 10_800);
+    assert!(automatic_pps_contract_requires_reconciliation(
+        true, active, next_mv, 3_000
+    ));
+    assert!(!automatic_pps_reconciliation_requires_pause(active, 10_900));
+    assert!(automatic_pps_reconciliation_requires_pause(active, 10_800));
 }
 
 #[test]

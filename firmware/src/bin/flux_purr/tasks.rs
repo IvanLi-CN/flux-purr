@@ -91,10 +91,10 @@ pub(crate) fn automatic_pps_contract_requires_reconciliation(
 #[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn automatic_pps_reconciliation_requires_pause(
     active: Option<ConfirmedActiveContract>,
-    request_mv: u16,
+    safe_ceiling_mv: u16,
 ) -> bool {
     active.is_some_and(|active| {
-        active.mode != PdContractRequestMode::Pps || active.voltage_mv > request_mv
+        active.mode != PdContractRequestMode::Pps || active.voltage_mv > safe_ceiling_mv
     })
 }
 
@@ -2272,7 +2272,13 @@ where
     );
     let blank_heater = automatic_pps_transition_should_blank_heater(
         safety_recovery_required,
-        automatic_pps_reconciliation_requires_pause(context.pd_port.snapshot().active, request_mv),
+        // The active contract may be ahead of the cached backend request after
+        // a healthy confirmation. A lower desired request is not a safety
+        // violation: only the actual live ceiling can invalidate that contract.
+        automatic_pps_reconciliation_requires_pause(
+            context.pd_port.snapshot().active,
+            source_request_ceiling_mv,
+        ),
         should_blank_heater_for_pps_range_change(
             current_request_mv,
             request_mv,
