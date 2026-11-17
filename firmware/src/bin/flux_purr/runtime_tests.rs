@@ -9,6 +9,9 @@ mod tuning_plant;
 #[path = "thermal_boundary_tests.rs"]
 mod thermal_boundary;
 
+#[path = "thermal_tuning_status_tests.rs"]
+mod thermal_tuning_status;
+
 #[test]
 fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
     struct Pwm {
@@ -3063,6 +3066,7 @@ impl UsbControlTx for FakeUsbTx {
 fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
     UsbRuntimeStatusContext {
         elapsed_ms: 0,
+        thermal_tuning_active: false,
         pd_controller: ControllerKind::Ch224q,
         last_pd_observation: None,
         heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
@@ -15216,7 +15220,9 @@ fn assert_live_edge_terminal_requests(
         )
         .expect("the encoded terminal step remains safe while its ticket is confirmed");
     assert_eq!(terminal_step_while_temperature_dips.current_ma, 3_000);
-    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 20_000);
+    // Keep the admitted bounded step, without promoting the not-yet-reached
+    // observation's full 21 V ceiling across this narrow dip.
+    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 20_500);
 
     let terminal_candidate_after_small_settle_blank = manual
         .automatic_heater_pps_for_contract_with_rtd(

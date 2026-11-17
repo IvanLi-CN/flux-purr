@@ -2,6 +2,78 @@ use super::*;
 use flux_purr_firmware::heater_supply::{BoundaryAdcMetadata, BoundaryPoint, SupplyBoundary};
 
 #[test]
+fn confirmed_intermediate_warmup_step_survives_a_narrow_rtd_dip() {
+    // HTTP run 3da26d45: the confirmed 13.4 V bounded step fell back to
+    // a 13.0 V ceiling at the 13.7 V observation's RTD edge (flags=2).
+    let config = observed_boundary_config(&[(1_049, 13_000), (1_065, 13_700), (1_309, 21_000)]);
+    let edge_c = projected_rtd_temperature_c(&config, 1_065).unwrap();
+    flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
+    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
+    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
+        min_mv: 3_300,
+        max_mv: 21_000,
+        max_ma: 3_000,
+    });
+    for previous_mv in [13_200, 13_400] {
+        let candidate = manual
+            .automatic_heater_pps_candidate_with_rtd(
+                edge_c - 1.0,
+                None,
+                &config,
+                Some(previous_mv),
+                Some(1_064),
+            )
+            .unwrap();
+        assert_eq!(
+            candidate.allowed_mv, previous_mv,
+            "retain only admitted step {previous_mv}"
+        );
+    }
+    for (temp_c, previous_mv) in [
+        (edge_c - 1.0, None),
+        (edge_c - 1.0, Some(12_900)),
+        (edge_c - 1.0, Some(13_000)),
+        (edge_c - 1.0, Some(13_800)),
+        (edge_c - 4.0, Some(13_400)),
+    ] {
+        let candidate = manual
+            .automatic_heater_pps_candidate_with_rtd(
+                temp_c,
+                None,
+                &config,
+                previous_mv,
+                Some(1_064),
+            )
+            .unwrap();
+        assert_eq!(candidate.allowed_mv, 13_000, "no early or unsafe promotion");
+    }
+}
+
+#[test]
+fn boundary_lookup_uses_confirmed_pps_before_backend_ticket_consumption() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(3_300, 21_000, 3_000)]);
+    let active = ConfirmedActiveContract::from_private_contract(
+        source
+            .select_exact_contract(PdContractRequest::automatic_pps(13_400, 3_000).unwrap())
+            .unwrap(),
+        source,
+    );
+    let backend = select_heater_power_backend(
+        Some(ch224q::AdjustablePowerCapabilities {
+            pps_covers_20v: true,
+            pps_min_mv: Some(3_300),
+            pps_max_mv: Some(21_000),
+            pps_max_ma: Some(3_000),
+            ..Default::default()
+        }),
+        None,
+    );
+    assert_eq!(backend.boundary_request_mv(None), backend.pd_request_mv());
+    assert_ne!(backend.pd_request_mv(), 13_400);
+    assert_eq!(backend.boundary_request_mv(active), 13_400);
+}
+
+#[test]
 fn warmup_observed_voltage_steps_keep_the_confirmed_gate() {
     // HTTP run 69fe6e16: 12.9 -> 13.6 V and 14.4 -> 15.2 V were safe
     // boundary increases, but the unbounded Warmup request tripped the

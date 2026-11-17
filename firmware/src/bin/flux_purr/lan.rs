@@ -91,6 +91,7 @@ pub(crate) fn control_runtime_status_context(
     );
     UsbRuntimeStatusContext {
         elapsed_ms: context.elapsed_ms,
+        thermal_tuning_active: context.thermal_tuning.armed,
         pd_controller: context.pd_controller,
         last_pd_observation,
         heater_power_backend: *context.heater_power_backend,

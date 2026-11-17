@@ -11,6 +11,12 @@
 - Lifecycle: active
 - Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
 
+## 中间升压与运行活动状态
+
+- Web 经 devd LAN HTTP 发起的 `web-pps3a-3da26d45-eb63-4e51-8d71-3dd1891b6cc6` 使用固件 `5d1b5746`，完整收取 sequence 0–2987 共 2988 条事件。60°C 目标在 690.349 秒通过 60 秒保持确认；220°C 因预热实际输出中断，整轮在 874.669 秒失败且未保存。HTTP 状态读回 heater disabled、实际输出 0、29.81°C、固定 5V，不能把单目标通过当作整轮成功。
+- 事件 1312 的已确认合同为 13.4V，但后端缓存仍为 12.9V，RTD 边缘的安全上限回到 13.0V。中间升压档位不匹配只识别完整工作点的回落保持逻辑。回归同时覆盖中间档位、协议确认领先缓存、未到边缘不得提前升压、超过 3°C 窗口必须回到冷边界；仅保留已准入档位本身，不提前提升到较暖观测的完整上限。真实匹配镜像复测尚待完成。
+- 普通 status 提供 `thermalTuningActive`，USB/LAN 共用运行时 `armed` 来源，devd 透传该字段；旧固件缺少字段时兼容解码为 false。该字段不携带 owner proof，不读取或确认事件游标。Web 全局提示和禁写尚待接入。
+
 ## USB 与 Wi-Fi 故障隔离
 
 - `devdRecordToDeviceTarget` 只在 USB 本身未连接且没有设备 Wi-Fi failure code 时，兼容读取旧 daemon 放在 `network.lastError` 的串口故障；Wi-Fi 的 DHCP 或认证失败保留在网络状态中，不撤销已验证 USB 通道的配置能力。结构化串口错误事件继续独立显示。

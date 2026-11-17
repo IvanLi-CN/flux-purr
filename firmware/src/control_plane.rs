@@ -256,6 +256,8 @@ pub struct ControlPlaneStatus {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub heater_enabled: bool,
+    #[serde(default)]
+    pub thermal_tuning_active: bool,
     pub heater_output_percent: u8,
     #[serde(default)]
     pub heater_physical_output_percent: u8,
@@ -709,6 +711,7 @@ impl ControlPlaneStatus {
                 selected_preset_slot: memory.selected_preset_slot,
                 presets_c: memory.presets_c,
                 heater_enabled: matches!(status.mode, DeviceMode::Sampling),
+                thermal_tuning_active: false,
                 heater_output_percent,
                 heater_physical_output_percent: status.heater_physical_output_percent.min(100),
                 heater_power_backend: string("unknown"),

@@ -2194,7 +2194,11 @@ fn runtime_heater_source_limits(
                 state.latest_temp_c,
                 preview_heater_curve,
                 &state.memory_config,
-                Some(state.heater_power_backend.pd_request_mv()),
+                Some(
+                    state
+                        .heater_power_backend
+                        .boundary_request_mv(state.pd_port.snapshot().active),
+                ),
                 Some(state.latest_rtd_raw_adc_mv),
             )
             .map(|candidate| (candidate.min_mv, candidate.allowed_mv, candidate.current_ma))

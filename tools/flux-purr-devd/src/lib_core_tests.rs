@@ -3,6 +3,19 @@ use std::process::ExitStatus;
 use tempfile::tempdir;
 
 #[test]
+fn ordinary_status_preserves_tuning_activity_and_accepts_legacy_firmware() {
+    let mut status = mock_status(&mock_network());
+    status.thermal_tuning_active = true;
+    let mut wire = serde_json::to_value(&status).unwrap();
+    assert_eq!(wire["thermalTuningActive"], true);
+    let decoded: ControlPlaneStatus = serde_json::from_value(wire.clone()).unwrap();
+    assert!(decoded.thermal_tuning_active);
+    wire.as_object_mut().unwrap().remove("thermalTuningActive");
+    let legacy: ControlPlaneStatus = serde_json::from_value(wire).unwrap();
+    assert!(!legacy.thermal_tuning_active);
+}
+
+#[test]
 fn thermal_tuning_get_preserves_run_bound_zero_and_full_width_cursors_without_a_lease() {
     for after_sequence in [0, u32::MAX] {
         let query = ThermalTuningReadQuery {

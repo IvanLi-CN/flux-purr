@@ -669,6 +669,7 @@ pub(crate) fn mock_status(network: &NetworkSummary) -> ControlPlaneStatus {
             Some(300),
         ]),
         heater_enabled: true,
+        thermal_tuning_active: false,
         heater_output_percent: 22,
         heater_physical_output_percent: 22,
         active_cooling_enabled: true,
@@ -764,6 +765,7 @@ pub(crate) fn native_placeholder_status(network: &NetworkSummary) -> ControlPlan
         selected_preset_slot: None,
         presets_c: None,
         heater_enabled: false,
+        thermal_tuning_active: false,
         heater_output_percent: 0,
         heater_physical_output_percent: 0,
         active_cooling_enabled: true,
@@ -1103,6 +1105,8 @@ pub struct ControlPlaneStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets_c: Option<Vec<Option<i16>>>,
     pub heater_enabled: bool,
+    #[serde(default)]
+    pub thermal_tuning_active: bool,
     pub heater_output_percent: u8,
     #[serde(default)]
     pub heater_physical_output_percent: u8,

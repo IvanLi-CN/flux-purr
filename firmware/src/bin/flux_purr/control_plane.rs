@@ -45,6 +45,7 @@ pub(crate) fn usb_runtime_status_with_calibration(
     populate_status_contract(&mut status, &context, pd_contract_mv, pd_state);
     populate_status_control_and_faults(&mut status, ui_state, &context);
     populate_status_calibration(&mut status, ui_state, memory_config, calibration, &context);
+    status.thermal_tuning_active = context.thermal_tuning_active;
     status
 }
 

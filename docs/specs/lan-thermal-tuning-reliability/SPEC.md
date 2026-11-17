@@ -127,6 +127,7 @@
 - Only the client that started the active tuning run MAY confirm and persist its candidate.
 - Start MUST return an opaque owner proof only to its caller. Confirm-save MUST validate that proof before any persistent write; public status, trace, candidate identity and diagnostic logs MUST NOT disclose it. Stop, failure, a new run and successful save MUST invalidate the previous proof.
 - The Web UI MUST show a page-level global notice while the run is active and explain which writes are disabled and that stopping remains available.
+- Ordinary device status MUST expose `thermalTuningActive` independently of the tuning event stream so every workspace can observe the write interlock without acknowledging another client's events. The flag MUST NOT contain the run's owner proof; legacy status without it is decoded as inactive.
 
 ## Verification
 

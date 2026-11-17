@@ -3158,6 +3158,7 @@ pub(crate) fn sync_frontpanel_runtime_state(
 #[derive(Clone, Copy)]
 pub(crate) struct UsbRuntimeStatusContext {
     pub(crate) elapsed_ms: u64,
+    pub(crate) thermal_tuning_active: bool,
     pub(crate) pd_controller: ControllerKind,
     pub(crate) last_pd_observation: Option<PdStatusObservation>,
     pub(crate) heater_power_backend: HeaterPowerBackend,

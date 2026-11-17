@@ -2081,6 +2081,18 @@ impl HeaterPowerBackend {
         self.pd_request_mv()
     }
 
+    pub(crate) fn boundary_request_mv(self, active: Option<ConfirmedActiveContract>) -> u16 {
+        // A PD ticket can confirm before the output loop consumes it. Use
+        // that confirmed PPS contract for boundary hysteresis rather than
+        // the backend's still-old cached voltage.
+        active
+            .filter(|contract| {
+                contract.mode == PdContractRequestMode::Pps
+                    && contract.operating_current_ma == MAX_AUTOMATIC_HEATER_CONTRACT_MA
+            })
+            .map_or(self.pd_request_mv(), |contract| contract.voltage_mv)
+    }
+
     pub(crate) const fn terminal_fixed_pd_disarmed(self) -> bool {
         match self {
             Self::PpsMos {
