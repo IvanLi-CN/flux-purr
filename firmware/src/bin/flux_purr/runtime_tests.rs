@@ -21435,3 +21435,32 @@ fn transient_power_reference_uses_the_recorded_scan_current_without_a_watt_cap()
     }
     assert!(transient_sample_power_mw(sample, 200.0, None, &MemoryConfig::default(), 0).is_none());
 }
+
+#[test]
+fn thermal_plant_continuation_preserves_the_actual_scan_current() {
+    let memory = MemoryConfig::default();
+    for current_ma in [3_000, 3_250, 5_000] {
+        let manual = thermal_plant_job_manual_pps(20_000, current_ma);
+        let mut boundary = synthetic_supply_boundary();
+        boundary.source_max_ma = current_ma;
+        boundary.points[0].request_current_ma = current_ma;
+        let input = CalibrationJobUpdateInput {
+            now_ms: 140_000,
+            latest_rtd_raw_code: 2_000,
+            latest_vin_raw_code: 2_000,
+            wifi_started: Some(false),
+            pd_conduction_allowed: true,
+            pd_confirmed: true,
+            latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(100.0),
+            latest_vin_raw_adc_mv: 1_500,
+            latest_temp_c: 100.0,
+            latest_vin_mv: 10_000,
+            heater_duty_percent: 100,
+        };
+        assert_eq!(
+            thermal_plant_continuation_request(&boundary, &memory, &manual, input),
+            Some((10_000, current_ma)),
+            "continuing a completed scan must not impose a 3 A fallback"
+        );
+    }
+}
