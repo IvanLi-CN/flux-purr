@@ -169,3 +169,13 @@
 正常自动协商和产品 rapid 标定使用所选 APDO 的实际编码电流（最高硬件 5A），不从 `65w/pps3a` 参数库标签施加 3A 或 60W/65W 上限。源端点已被当前安全边界覆盖时不再减去 100mV；较低温区边界保留量化裕量。边界格式 7 与扫描电流绑定，原始格式 6 的 3A 记录兼容读取；高能力合同仅可保守使用旧记录已证明的电压，不重写 provenance。瞬态拟合、轨迹重建和关热响应显式使用配对扫描电流。决策及兼容边界见 ADR 0028。
 
 主机回归 1,308 项通过，覆盖 3A/3.25A/5A 电流、20V/21V 端点合同、rapid 扫描终止与紧凑记录往返。严格主机 Clippy、Xtensa Clippy、Rust 风格检查与完整产品构建通过；离线镜像 2,090,832/2,097,152 字节。该结果只证明源码和离线产物，实际烧录及 Web HTTP 读回证据独立记录。ADC topic 的视觉文档检查存在预先已有的两个 `Visual Evidence` 节，不能据此宣称该文档门禁通过；本行为修复未修改其视觉证据。
+
+### Web HTTP 实际合同验证（d1d3cdb8）
+
+授权目标 `/dev/cu.usbmodem21141401` 烧录完整功能固件 `0.30.10-dev.d1d3cdb`，app image 2,090,832/2,097,152 字节，USB/LAN 调用链及启动栈检查通过。按 owner 既有授权跳过 EEPROM 备份，没有归档，EEPROM 健康状态未知。HTTP `/health` 读回新固件版本；现有凭据经 USB 辅助认证恢复 LAN，无四位码配对，未访问线上版本。
+
+在 ego 空间 8 的同一个本地 Web 页面选择 `WiFi / LAN · 192.168.31.207`，点击“开始调优”。运行 `web-pps3a-734be031-ccb9-4db1-b2a3-77c8586b4257` 的 60°C scout 和独立 60 秒保持确认通过，分别为事件 159 / 45,576ms 和事件 755 / 218,998ms。220°C Warmup 的事件 1126 / 326,813ms 首次记录已确认 `21,000mV / 3,250mA`，逻辑与物理输出均为 1000 permille；页面显示 21V。合同电流持续为 3,250mA。受控合同证据保存在 [HTTP APDO 合同样本](assets/http-actual-apdo-contract.csv)，这些是设备协议与 VIN 读回，不是独立电源功率测量；68.25W 仅表示合同能力。
+
+整轮未通过：Web 在已持久化事件 1269 / 369,090ms 后经历 HTTP 读取超时，有限重试停止；手动“重试读取”随后返回 `device_trace_gap`，设备最终 `failed`、`armed=false`。恢复的设备事件显示 220°C trial 0 在 399,477ms 因 `trial stage timeout` 进入保持候选不变的暖态重试，400,193ms 开始 trial 1；未确认事件积压达到 ring 容量后触发设备的保守失败。该结果不得归为完整调优通过，也不能归因于仍存在 3A/20.9V 封顶。读取超时的根因尚未证实。诊断中向失败运行发送过一次超出已交付范围的 cursor，设备追加 `event_ack_skipped_unconfirmed`；它发生在已经读到原始 `failed / trace.gap=true` 之后，不是原始失败原因，不纳入电气验收。
+
+终态读回 `heaterEnabled=false`、物理输出 0、`thermalTuningActive=false`；未确认保存，旧持久化 bank 保留。本轮证明实际电流与21V端点协商恢复，不能关闭整轮调优和 PR current-head 收口门禁。
