@@ -6158,6 +6158,30 @@ fn caller_failure_context_overflow_stays_review_incomplete() {
 }
 
 #[test]
+fn delayed_reader_ack_does_not_invalidate_evidence_acknowledged_by_another_reader() {
+    let mut runtime = started_single_target_runtime();
+    for _ in 0..24 {
+        runtime.push_phase_transition_event("reader overlap fixture");
+    }
+    let old_cursor = runtime.events_after(None).next_sequence.unwrap();
+    let newer_cursor = runtime
+        .events_after(Some(old_cursor))
+        .next_sequence
+        .unwrap();
+    runtime.events_after(Some(newer_cursor));
+    let digest_before = runtime.trace().digest;
+
+    let delayed = runtime.events_after(Some(old_cursor));
+    assert!(runtime.armed);
+    assert!(
+        !delayed.trace.gap,
+        "a stale reader cannot revoke already acknowledged evidence"
+    );
+    assert_eq!(runtime.trace().digest, digest_before);
+    assert_eq!(runtime.last_acknowledged_sequence, Some(newer_cursor));
+}
+
+#[test]
 fn event_ack_cannot_skip_undelivered_evidence() {
     let mut runtime = started_single_target_runtime();
     let first_page = runtime.events_after(None);

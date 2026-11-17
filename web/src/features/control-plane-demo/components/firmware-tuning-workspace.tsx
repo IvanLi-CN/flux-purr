@@ -198,7 +198,7 @@ export function FirmwareTuningWorkspace({
           void readStatusRef
             .current()
             .then((current) => {
-              if (current.armed)
+              if (current.armed && tuningOwnerSession.proofFor(deviceId, current.runId))
                 return sendCommandRef.current({ op: 'cancel', runId: current.runId ?? undefined })
             })
             .catch(() => {})
@@ -228,7 +228,11 @@ export function FirmwareTuningWorkspace({
         // browser transaction must never stall the bounded firmware event ring.
         void persistThermalTuningRecording(deviceId, updated).catch(async (failure) => {
           setError(messageOf(failure))
-          if (updated.status.armed && updated.runId) {
+          if (
+            updated.status.armed &&
+            updated.runId &&
+            tuningOwnerSession.proofFor(deviceId, updated.runId)
+          ) {
             try {
               await sendCommand({ op: 'cancel', runId: updated.runId })
             } catch {
@@ -316,12 +320,13 @@ export function FirmwareTuningWorkspace({
 
   useEffect(() => {
     if (!recording?.gap || !recording.status.armed || !recording.runId) return
+    if (!tuningOwnerSession.proofFor(deviceId, recording.runId)) return
     if (canceledGapRun.current === recording.runId) return
     canceledGapRun.current = recording.runId
     void sendCommand({ op: 'cancel', runId: recording.runId })
       .then((next) => recordStatus(next))
       .catch((failure) => setError(messageOf(failure)))
-  }, [recordStatus, recording, sendCommand])
+  }, [deviceId, recordStatus, recording, sendCommand])
 
   const apply = async (command: DeviceCommand) => {
     // Stopping is the authenticated safety exception: read/journal recovery

@@ -828,6 +828,8 @@ The response returns the updated status:
 
 Web 将启动响应中的证明独立保存在发起页面的内存和 sessionStorage，按稳定设备身份与 runId 隔离；同页刷新可恢复，不放入共享 localStorage、运行日志或导出报告。普通读取不能授予保存权限，确认保存按钮还须检查本页持有的证明；停止不依赖该证明。
 
+事件读取的 `after_sequence` 确认在同一运行内单调推进。延迟请求或另一读取者重复已确认的旧游标时，不回退确认位置，也不因对应事件已离开保留缓冲而标记全局追踪缺口；确认未曾交付的未来序号仍使证据无效。页面因本地记录失败或缺口自动停止时，只能停止本页持有 owner proof 的运行；观察者自己的记录缺失不能自动中止其他客户端的运行，已认证用户主动停止仍不要求该证明。
+
 confirm_save 必须同时提交 `ownerProof`、`runId`、`candidateId`、`candidateHash` 和 `powerClass`。固件在任何 EEPROM 写入之前校验发起者证明，再校验候选身份、RAM preview、封存与事件确认边界；保存仍只更新对应功率档位的 bank，并须原子提交及 readback。缺少或不匹配的证明返回 `owner_proof_invalid`，不触发重新配对、不修改持久化 bank，也不改变候选运行。停止、失败、重新启动和成功保存使原证明失效。
 
 运行活动期间，USB 与 LAN 共用设备端禁写判定；其它客户端仍可读取或停止，写入返回 `thermal_tuning_active`。devd 将该错误保留为 HTTP 409，不能报告成连接或网关故障。devd 的 ownership lease 只授权客户端到 daemon 的链路，不替代固件 mutation lease 或保存 owner proof。

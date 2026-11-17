@@ -3641,6 +3641,10 @@ impl ThermalTuningRuntime {
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
         }
         let after_sequence = if invalid_ack { None } else { after_sequence };
+        let already_acknowledged = after_sequence.is_some_and(|after| {
+            self.last_acknowledged_sequence
+                .is_some_and(|previous| after <= previous)
+        });
         if let Some(acknowledged) = after_sequence {
             self.last_acknowledged_sequence = Some(
                 self.last_acknowledged_sequence
@@ -3648,8 +3652,13 @@ impl ThermalTuningRuntime {
             );
         }
         let first = self.events.first().map(|event| event.sequence);
-        if after_sequence
-            .is_some_and(|after| first.is_some_and(|sequence| after.saturating_add(1) < sequence))
+        // A delayed or independent reader can repeat an older confirmed
+        // cursor. It cannot revoke evidence already acknowledged by a newer
+        // request, even when those records have left the retained ring.
+        if !already_acknowledged
+            && after_sequence.is_some_and(|after| {
+                first.is_some_and(|sequence| after.saturating_add(1) < sequence)
+            })
         {
             self.trace_gap = true;
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
