@@ -93,6 +93,10 @@ async fn runtime_poll_control_transports<S>(
 #[path = "runtime_transport_tests.rs"]
 mod transport_tests;
 
+#[cfg(test)]
+#[path = "runtime_pd_recovery_tests.rs"]
+mod pd_recovery_tests;
+
 #[cfg(all(target_arch = "xtensa", feature = "net_http"))]
 impl RuntimeLanInputOutcome {
     fn processed(needs_redraw: bool) -> Self {
@@ -305,6 +309,19 @@ pub(crate) fn tuning_pd_wait_decision(
     }
     if request_failed {
         return TuningPdWaitDecision::Fail("pd_request_failed");
+    }
+    if power_state.available && power_state.protocol == PowerProtocol::Discovering {
+        // The PD service clears its fault while restarting discovery after a
+        // timed-out request. That snapshot has neither an active contract nor
+        // a host ticket, but is still the same bounded recovery, not detach.
+        // Wait never grants a heater permit or creates a qualification sample.
+        return if wait_started_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) > AUTOMATIC_PPS_RECOVERY_WAIT_MS)
+        {
+            TuningPdWaitDecision::Fail("pd_request_timeout")
+        } else {
+            TuningPdWaitDecision::Wait
+        };
     }
     if power_state.protocol == PowerProtocol::Ready
         && power_state.active.is_some_and(|active| {

@@ -110,6 +110,9 @@
 
 ## Remaining Gaps
 
+- 固件 `1b09a174` 的完整功能镜像为 2,085,296 / 2,097,152B，ELF SHA-256 为 `fac873a463f9e3be37349468a27b6f6446508b714d72cfb153625cb964fef402`；授权烧录完成，HTTP identity 读回 `0.30.10-dev.1b09a17`。烧录按授权跳过 EEPROM 备份，未生成归档且健康状态未知。本地唯一 Web 页面经 devd LAN HTTP 发起 `web-pps3a-3263afdf-6cf1-4e63-96a5-9b63469544c7`，818.154 秒连续收取 sequence 0–2873 共 2,874 条事件。60°C trial 4 通过 scout，但独立 hold_confirm 未通过；trial 6 冷却期间 PD 服务以 available=true、discovering、无 fault/contract/ticket 状态触发 `pd_contract_lost`，整轮失败、heater off、未保存。随后 HTTP status 显示 PPS 12V/3A 已恢复，最后协议故障为 `pd_fusb_pending_request_timeout`，设备未重启。该结果证明这一轮 HTTP 追踪完整，不证明调优通过或请求超时原因已解决。
+- 调优恢复状态回归使用生产 `PowerState::from_observation` 构造真实重新发现快照；无故障的 Discovering 与既有可恢复故障使用相同的 30 秒有界等待，等待期间不授予加热许可、不记录资格样本。明确断开、服务不可用和超过恢复期限仍失败；对应镜像的真机完整调优仍待复测。
+
 - 对已实现的身份存储、locator 迁移和 401 恢复取得完整跨 adapter fixture 证据。
 - 完成 capability 与稳定 unsupported 契约的跨 adapter 验收。
 - 完成独立 tuning read state 与顶部连接状态的页面级经验验收。
