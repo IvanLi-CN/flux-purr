@@ -4,6 +4,7 @@
 use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{Duration, Instant},
 };
 
@@ -16,6 +17,24 @@ use sha2::{Digest, Sha256};
 
 pub const LAN_API_VERSION: &str = "v1";
 pub const LAN_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+
+// Leave a TCP slot available for another client or safety-stop request.
+// This schedules requests, not control ownership; every client remains usable.
+fn device_request_budget(origin: &str) -> Arc<tokio::sync::Semaphore> {
+    static BUDGETS: OnceLock<Mutex<BTreeMap<String, Weak<tokio::sync::Semaphore>>>> =
+        OnceLock::new();
+    let mut budgets = BUDGETS
+        .get_or_init(Mutex::default)
+        .lock()
+        .expect("LAN request budgets");
+    budgets.retain(|_, budget| budget.strong_count() > 0);
+    if let Some(budget) = budgets.get(origin).and_then(Weak::upgrade) {
+        return budget;
+    }
+    let budget = Arc::new(tokio::sync::Semaphore::new(2));
+    budgets.insert(origin.to_owned(), Arc::downgrade(&budget));
+    budget
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -149,6 +168,8 @@ pub enum LanClientError {
     Request(#[from] reqwest::Error),
     #[error("LAN discovery failed: {0}")]
     Discovery(String),
+    #[error("LAN request queue is busy; retry shortly")]
+    RequestQueueBusy,
     #[error("CIDR scan must use a private range containing at most 256 hosts")]
     InvalidCidr,
 }
@@ -283,18 +304,35 @@ pub async fn authorized_json(
     lease_id: Option<&str>,
     body: Option<Value>,
 ) -> Result<Value, LanClientError> {
+    authorized_json_with_client(device, method, path, lease_id, body, http_client()).await
+}
+
+async fn authorized_json_with_client(
+    device: &LanDeviceConfig,
+    method: reqwest::Method,
+    path: &str,
+    lease_id: Option<&str>,
+    body: Option<Value>,
+    client: Client,
+) -> Result<Value, LanClientError> {
     let token = device
         .pairing_token
         .as_deref()
         .filter(|token| is_token(token))
         .ok_or(LanClientError::InvalidPairingResponse)?;
     let base_url = normalize_lan_base_url(&device.base_url)?;
+    let _request_slot = tokio::time::timeout(
+        LAN_REQUEST_TIMEOUT,
+        device_request_budget(&base_url).acquire_owned(),
+    )
+    .await
+    .map_err(|_| LanClientError::RequestQueueBusy)?
+    .expect("LAN request budget is never closed");
     let url = format!(
         "{}/api/{LAN_API_VERSION}/{}",
         base_url,
         path.trim_start_matches('/')
     );
-    let client = http_client();
     let is_control_write = method != reqwest::Method::GET && path.trim_matches('/') != "leases";
     let revision = if is_control_write {
         let response = client
@@ -307,7 +345,11 @@ pub async fn authorized_json(
             let payload = response.json::<Value>().await.ok();
             return Err(remote_api_error(status, payload.as_ref()));
         }
-        Some(control_revision(response.headers())?)
+        let revision = control_revision(response.headers())?;
+        // Header-only reads must still drain the body before issuing the write.
+        // Dropping it early leaves the MCU sending a response we no longer read.
+        response.bytes().await?;
+        Some(revision)
     } else {
         None
     };
@@ -553,6 +595,31 @@ mod tests {
     use mdns_sd_discovery::TxtRecord;
     use tokio::net::TcpListener;
 
+    #[derive(Clone, Default)]
+    struct ConcurrentReadProbe {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn delayed_probe_status(
+        axum::extract::State(probe): axum::extract::State<ConcurrentReadProbe>,
+    ) -> axum::Json<Value> {
+        use std::sync::atomic::Ordering;
+        let current = probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+        probe.peak.fetch_max(current, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        probe.active.fetch_sub(1, Ordering::SeqCst);
+        axum::Json(json!({"ok": true}))
+    }
+
+    async fn read_probe_status(
+        device: LanDeviceConfig,
+        client: Client,
+    ) -> Result<Value, LanClientError> {
+        authorized_json_with_client(&device, reqwest::Method::GET, "status", None, None, client)
+            .await
+    }
+
     fn native_service(address: IpAddr, api: &[u8]) -> DiscoveredService {
         DiscoveredService {
             name: "flux-purr-a0f262f20d6c".into(),
@@ -791,6 +858,43 @@ mod tests {
             devices[0].pairing_token.as_deref(),
             Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_reads_respect_the_device_http_request_budget() {
+        use std::sync::atomic::Ordering;
+        let probe = ConcurrentReadProbe::default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route("/api/v1/status", get(delayed_probe_status))
+            .with_state(probe.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let device = LanDeviceConfig {
+            id: "lan-001122334455".into(),
+            base_url: format!("http://flux-purr-001122334455.local:{}", address.port()),
+            hostname: None,
+            last_ipv4: None,
+            pairing_token: Some("a".repeat(64)),
+        };
+        let client = Client::builder()
+            .no_proxy()
+            .resolve("flux-purr-001122334455.local", address)
+            .build()
+            .unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            tasks.spawn(read_probe_status(device.clone(), client.clone()));
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.unwrap().unwrap();
+        }
+        server.abort();
+        assert!(
+            probe.peak.load(Ordering::SeqCst) <= 2,
+            "polling exhausted the device socket budget"
+        );
+        assert_eq!(probe.active.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

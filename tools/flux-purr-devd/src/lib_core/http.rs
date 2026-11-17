@@ -388,6 +388,12 @@ pub(crate) fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, Htt
 
 pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
     match error {
+        lan::LanClientError::RequestQueueBusy => HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_retryable",
+            "设备请求繁忙，请稍后重试。",
+            true,
+        ),
         lan::LanClientError::RemoteApi {
             status,
             code,
