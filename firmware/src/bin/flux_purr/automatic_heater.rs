@@ -474,6 +474,29 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
 }
 
 #[cfg(any(target_arch = "xtensa", test))]
+pub(crate) fn automatic_heater_pps_pwm_percent_for_power(
+    requested_power_mw: u32,
+    resistance_ohms: f32,
+    confirmed_mv: u16,
+    confirmed_current_ma: u16,
+    warmup_soft_start_percent: u8,
+) -> u8 {
+    // The caller first proves this PPS voltage against the whole-device
+    // boundary and VIN response. Use the controller's same estimated-watt
+    // basis for that proven full-conduction point, rather than attenuating
+    // its contract-bounded full scale a second time with theoretical V²/R.
+    // Fixed-PD PWM retains its separate current-limited allocation below.
+    let full_power_mw =
+        automatic_heater_power_budget_mw(confirmed_mv, resistance_ohms, confirmed_current_ma);
+    if full_power_mw == 0 {
+        return 0;
+    }
+    let duty = (u64::from(requested_power_mw).saturating_mul(100) / u64::from(full_power_mw))
+        .min(100) as u8;
+    apply_warmup_soft_start(duty, warmup_soft_start_percent)
+}
+
+#[cfg(any(target_arch = "xtensa", test))]
 pub(crate) fn automatic_heater_pwm_percent_for_power(
     requested_power_mw: u32,
     resistance_ohms: f32,

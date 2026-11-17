@@ -2110,7 +2110,7 @@ fn pending_automatic_pps_duty<PWM>(
             context.warmup_soft_start_percent,
         )
     } else {
-        automatic_heater_pwm_percent_for_power(
+        automatic_heater_pps_pwm_percent_for_power(
             context.requested_power_mw,
             automatic_heater_resistance_ohms(
                 context.current_temp_c,
@@ -2118,6 +2118,7 @@ fn pending_automatic_pps_duty<PWM>(
                 context.memory_config,
             ),
             active.voltage_mv,
+            active.operating_current_ma,
             context.warmup_soft_start_percent,
         )
     }

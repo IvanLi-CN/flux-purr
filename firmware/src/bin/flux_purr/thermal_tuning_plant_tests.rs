@@ -2,6 +2,62 @@ use super::*;
 use flux_purr_firmware::thermal_tuning as tuning;
 
 #[test]
+fn confirmed_safe_pps_full_scale_uses_the_controller_power_basis() {
+    // Reproduce the production chain: controller fraction -> integer-mW
+    // budget -> confirmed PPS gate. The voltage has already passed the
+    // whole-device boundary/response checks at the caller.
+    for current_ma in [3_250, 3_000, 5_000] {
+        for resistance_ohms in [5.674_f32, 3.2, 7.5] {
+            let full_power = automatic_heater_power_budget_mw(21_000, resistance_ohms, current_ma);
+            for requested_percent in [100_u8, 50, 5, 0] {
+                let requested_mw = full_power * u32::from(requested_percent) / 100;
+                let actual = automatic_heater_pps_pwm_percent_for_power(
+                    requested_mw,
+                    resistance_ohms,
+                    21_000,
+                    current_ma,
+                    100,
+                );
+                assert!(
+                    actual.abs_diff(requested_percent) <= 1,
+                    "controller requested {requested_percent}% but applied {actual}% at {current_ma}mA / {resistance_ohms}ohm"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn pps_power_allocation_rejects_missing_facts_and_keeps_output_limits() {
+    for (voltage_mv, current_ma, resistance_ohms) in [
+        (0, 3_250, 5.674),
+        (21_000, 0, 5.674),
+        (21_000, 3_250, 0.0),
+        (21_000, 3_250, f32::NAN),
+    ] {
+        assert_eq!(
+            automatic_heater_pps_pwm_percent_for_power(
+                68_250,
+                resistance_ohms,
+                voltage_mv,
+                current_ma,
+                100,
+            ),
+            0
+        );
+    }
+    assert_eq!(
+        automatic_heater_pps_pwm_percent_for_power(u32::MAX, 5.674, 21_000, 3_250, 42),
+        42
+    );
+    // Fixed PD does not carry the proven-safe PPS full-conduction contract.
+    assert_eq!(
+        automatic_heater_pwm_percent_for_power(68_250, 5.674, 21_000, 100),
+        87
+    );
+}
+
+#[test]
 fn tuning_candidate_brake_reaches_the_production_controller_unchanged() {
     for power_class in [
         tuning::ThermalTuningPowerClass::Pps3a,
