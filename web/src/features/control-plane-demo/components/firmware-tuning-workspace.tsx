@@ -29,6 +29,7 @@ import {
 } from '../thermal-tuning-recorder'
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import { ControlPlaneClientError } from '../transport-client'
+import { tuningOwnerSession } from '../tuning-owner-session'
 import './firmware-tuning-workspace.css'
 
 const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
@@ -209,7 +210,8 @@ export function FirmwareTuningWorkspace({
 
   const recordStatus = useCallback(
     async (next: ThermalTuningStatus, confirmedSequence: number | null = null) => {
-      const updated = recordThermalTuningPage(recordingRef.current, next, confirmedSequence)
+      const publicStatus = tuningOwnerSession.acceptResponse(deviceId, 'read', next)
+      const updated = recordThermalTuningPage(recordingRef.current, publicStatus, confirmedSequence)
       // Acknowledging the device page must not wait for IndexedDB. The
       // firmware keeps a bounded event ring; delaying the next afterSequence
       // request behind a growing journal write can make that ring overflow
@@ -323,7 +325,7 @@ export function FirmwareTuningWorkspace({
     setPending(true)
     setError(null)
     try {
-      const next = await sendCommand(command)
+      const next = await tuningOwnerSession.command(deviceId, command, sendCommand)
       await recordStatus(next)
     } catch (failure) {
       setError(messageOf(failure))
@@ -411,6 +413,7 @@ export function FirmwareTuningWorkspace({
     identityVerified && terminal === 'candidate_ready' && recording?.complete && !status?.sealed
   const canSave =
     identityVerified &&
+    tuningOwnerSession.proofFor(deviceId, status?.runId) != null &&
     terminal === 'candidate_ready' &&
     recording?.complete &&
     status?.sealed &&

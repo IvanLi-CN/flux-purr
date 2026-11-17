@@ -277,6 +277,7 @@ export interface ThermalTuningCommand {
   runId?: string
   candidateId?: string
   candidateHash?: string
+  ownerProof?: string
   powerClass?: ThermalTuningPowerClass
   targetsC?: number[]
   afterSequence?: number
