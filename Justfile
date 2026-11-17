@@ -27,5 +27,5 @@ firmware-image-check elf="firmware/target/xtensa-esp32s3-none-elf/release/flux-p
     @bash scripts/check-firmware-image-size.sh {{ quote(elf) }}
 
 # Check repeated public HTTP reads against one explicitly identified device; no writes or credentials.
-lan-http-read-check base_url device_id:
-    @python3 scripts/check-lan-http-reads.py --base-url {{ quote(base_url) }} --device-id {{ quote(device_id) }}
+lan-http-read-check base_url device_id requests="20":
+    @python3 scripts/check-lan-http-reads.py --base-url {{ quote(base_url) }} --device-id {{ quote(device_id) }} --requests {{ quote(requests) }}

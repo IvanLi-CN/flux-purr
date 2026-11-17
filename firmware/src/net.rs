@@ -1174,13 +1174,11 @@ async fn http_connection_task(socket: HttpSocket) {
             })
             .await;
     }
-    // flush() after close only waits for our FIN to be acknowledged; the
-    // socket can still be in FIN_WAIT_2 until the peer closes its read side.
-    // Returning that socket to accept() produces InvalidState and eventually
-    // leaves the bounded pool without a listener. Flush the complete response
-    // and graceful close first, then reset both halves before reuse.
-    socket.close();
-    let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
+    // Response writers flush the complete Content-Length body before returning.
+    // Reset both halves without waiting for a peer's half-close: even a bounded
+    // FIN wait occupies one of just three slots and can starve the listener
+    // during normal concurrent polling. A FIN_WAIT_2 socket also cannot be
+    // accepted again. Flush the reset before returning the closed socket.
     socket.abort();
     let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
     HTTP_SOCKETS.send(HttpSocket(socket)).await;

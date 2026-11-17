@@ -443,7 +443,7 @@ pub(crate) fn automatic_heater_request_mv_for_phase(
         // below it so a boundary crossing from RTD noise does not repeatedly
         // make the already-confirmed contract unsafe. This is voltage
         // headroom, not a PWM ramp or permission to exceed the live ceiling.
-        const CEILING_HEADROOM_MV: u16 = 100;
+        const CEILING_HEADROOM_MV: u16 = flux_purr_firmware::adapters::pd::PD_PPS_VOLTAGE_STEP_MV;
         let working_ceiling_mv = ceiling_mv.saturating_sub(CEILING_HEADROOM_MV).max(floor_mv);
         let desired_mv = desired_mv.min(working_ceiling_mv);
         if (floor_mv..=ceiling_mv).contains(&current_mv)

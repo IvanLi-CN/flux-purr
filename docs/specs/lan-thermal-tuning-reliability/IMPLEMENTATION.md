@@ -23,9 +23,9 @@
 - `REQ-LTR-009`: 全局日志已有设备事件面板，但调优读取尝试尚未统一记录 endpoint、结果类别和 retry count；敏感字段必须继续保持 redaction。
 - `REQ-LTR-010`: Web Serial、devd 和 direct LAN 已有独立 adapter；需要使用同一 tuning domain state 和 fixture matrix 验证 transport parity。
 - 调优使用生产 `AutomaticThermal` 电源请求。高优先级 PD 服务为同一已确认 APDO、同一合同电流内的健康 PPS 电压步进保留 heater permit，避免低优先级控制周期恢复输出前被异步强制关断；能力刷新、合同范围/电流变化、拒绝、超时和低压互锁仍关断。预热实际全输出资格不放宽，零输出帧继续使该试验不合格。
-- 预热 PPS 工作点保留一个 100mV 上限量化档位的余量；仍安全的已确认合同允许在这个余量内保持，避免 RTD 量化边界抖动导致后端反复主动降压、等待稳定和零输出。真正越界的合同仍立即关断并迁入安全范围，物理全输出资格保持不变。
+- 预热 PPS 工作点保留一个 100mV 上限量化档位的余量；仍安全的已确认合同允许在这个余量内保持，避免 RTD 量化边界抖动导致后端反复主动降压、等待稳定和零输出。真正越界的合同仍立即关断并迁入安全范围，物理全输出资格保持不变。准备阶段使用相同工作点范围；确认合同位于实时上限下方一个 100mV 档位内时即可进入预热，不要求精确等于上限。
 - devd 活动会话和调优请求绑定页面选中的具体 bridge 目标，不得在显示 LAN 时借用同设备 USB 目标的租约。调优 GET 在 Web、devd USB 和 devd LAN 间透传 `run_id` 与完整宽度 `after_sequence`，包括零值；缺少游标会重复返回旧页、无法确认已收事件，最终耗尽设备事件缓冲并使运行失败。
-- HTTP socket 回收必须结束连接两端后再放回监听池。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应发送完成后，以有界等待执行 graceful close 和 abort，避免有限连接池失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id>`，不携带凭据、不跟随重定向，身份不符立即停止。
+- HTTP socket 回收必须结束连接两端后再放回监听池。`close()` 后的 `flush()` 只等待本端 FIN 确认，不能证明对端已关闭；处于 `FIN_WAIT_2` 的 socket 无法重新 `accept()`。响应正文完整发送并获得 TCP 确认后直接 abort 并有界等待 reset 发出，不为对端 half-close 占用有限 socket，避免并发轮询期间失去监听能力。只读回归入口为 `just lan-http-read-check <device-origin> <device-id>`，不携带凭据、不跟随重定向，身份不符立即停止。
 - `REQ-LTR-012`: `thermal_tuning.rs` 已编译进 `pps3a` 与 `pps5a` 两份完整工厂缺省 profile；无上传候选时使用匹配基线并保留独立安全门禁。
 - `REQ-LTR-013`: 启动时设备候选优先、缺省时工厂基线兜底；候选仍保持 RAM 预览并按功率档位保存。
 - `REQ-LTR-014`: devd 调优写请求继续受租约保护，停止请求作为已认证安全例外允许无租约执行；单运行和保存 owner proof 仍需后续跨层收口。

@@ -2160,6 +2160,50 @@ fn record_initial_cooldown(runtime: &mut ThermalTuningRuntime, elapsed_ms: u64) 
 }
 
 #[test]
+fn cooldown_admits_confirmed_working_voltage_with_one_quantum_headroom() {
+    for (voltage_mv, confirmed, expected) in [
+        (9_700, true, ThermalTuningPhase::Warmup),
+        (9_800, true, ThermalTuningPhase::Warmup),
+        (9_600, true, ThermalTuningPhase::Cooldown),
+        (9_900, true, ThermalTuningPhase::Cooldown),
+        (9_700, false, ThermalTuningPhase::Cooldown),
+    ] {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-headroom"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 2_684);
+        cooling.heater_requested_output_permille = 0;
+        cooling.heater_output_permille = 0;
+        cooling.pps_contract.voltage_mv = voltage_mv;
+        cooling.pps_contract.confirmed = confirmed;
+        cooling.pps_power_ceiling_mv = 9_800;
+        cooling.requested_mv = 9_700;
+        let result = runtime.record_sample(cooling);
+        if !confirmed {
+            assert_eq!(result, Err(ThermalTuningError::InvalidTransition));
+            assert!(!runtime.armed);
+            continue;
+        }
+        result.unwrap();
+        assert_eq!(
+            runtime.phase, expected,
+            "contract={voltage_mv}, confirmed={confirmed}"
+        );
+    }
+}
+
+#[test]
 fn cooldown_accepts_idle_request_when_trial_contract_is_confirmed() {
     let mut runtime = ThermalTuningRuntime::new();
     runtime

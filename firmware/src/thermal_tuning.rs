@@ -4,7 +4,9 @@ use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
+use crate::adapters::pd::{
+    FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV, PD_PPS_VOLTAGE_STEP_MV,
+};
 use crate::heater_phase::{HOLD_ENTRY_BELOW_C, hold_entry_ready};
 use crate::memory::{
     ThermalControlProfileConfig, ThermalControlProfilePointConfig, ThermalProfileBank,
@@ -2606,11 +2608,15 @@ impl ThermalTuningRuntime {
         let start_temperature_centi_c = sample.temperature_centi_c;
         let cooled = i32::from(sample.temperature_centi_c)
             <= i32::from(cooldown_threshold_c(expected_target)) * 100;
-        // Cooldown intentionally restores the request to the idle voltage. The
-        // settled contract, rather than the pending request, is the safety
-        // evidence that the next warmup can raise power to the ceiling.
+        // Production Warmup reserves one PPS quantum below the live ceiling.
+        // Admit that confirmed working point too: requiring exact equality
+        // deadlocks a cold, stable board at the intentional headroom voltage.
+        // Neither an unconfirmed nor an above-ceiling contract is acceptable.
+        let confirmed_mv = u32::from(sample.pps_contract.voltage_mv);
         let trial_power_ready = sample.pps_contract.confirmed
-            && u32::from(sample.pps_contract.voltage_mv) == sample.pps_power_ceiling_mv;
+            && confirmed_mv > 0
+            && confirmed_mv <= sample.pps_power_ceiling_mv
+            && sample.pps_power_ceiling_mv - confirmed_mv <= u32::from(PD_PPS_VOLTAGE_STEP_MV);
         let measurement_accepted = sample.has_fresh_measurement();
         self.push_event(
             ThermalTuningEventKind::Sample,
