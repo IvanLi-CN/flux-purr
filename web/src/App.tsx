@@ -582,19 +582,16 @@ function App() {
     [activeScenario.selectedDeviceId, demoSession.events.length, routeState]
   )
 
-  const resetDemo = useCallback(
-    async () => {
-      await enqueueInspectorNavigation(
-        async () => {
-          setCalibrationGuard(null)
-          dispatchDemoSession({ type: 'reset' })
-          return undefined
-        },
-        { priority: true }
-      )
-    },
-    [enqueueInspectorNavigation]
-  )
+  const resetDemo = useCallback(async () => {
+    await enqueueInspectorNavigation(
+      async () => {
+        setCalibrationGuard(null)
+        dispatchDemoSession({ type: 'reset' })
+        return undefined
+      },
+      { priority: true }
+    )
+  }, [enqueueInspectorNavigation])
 
   const navigation = useMemo<ConsoleNavigationAdapter | undefined>(() => {
     if (!routeState) return undefined

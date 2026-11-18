@@ -761,7 +761,10 @@
 }
 
 @media (min-width: 1280px) and (min-height: 860px) {
-  .industrial-calibration-tabs__firmware-scroll > .simplebar-wrapper > .simplebar-mask .simplebar-content {
+  .industrial-calibration-tabs__firmware-scroll
+    > .simplebar-wrapper
+    > .simplebar-mask
+    .simplebar-content {
     height: 100%;
   }
 }

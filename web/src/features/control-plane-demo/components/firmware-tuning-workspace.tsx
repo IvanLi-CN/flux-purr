@@ -632,9 +632,7 @@ export function FirmwareTuningWorkspace({
             <Download aria-hidden="true" /> 导出报告
           </Button>
           {saveFeedback === 'success' ? (
-            <span className="firmware-tuning__save-success" role="status">
-              调优参数已保存到设备
-            </span>
+            <output className="firmware-tuning__save-success">调优参数已保存到设备</output>
           ) : null}
         </fieldset>
         {reviewing && !showingSave && identityVerified && !ownsResult ? (
