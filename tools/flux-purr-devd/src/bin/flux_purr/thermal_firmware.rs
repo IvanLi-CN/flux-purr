@@ -339,8 +339,18 @@ impl FirmwareRun<'_> {
                 None,
             )
             .await?;
-            self.candidate_profile = calibrated_firmware_seed_profile(&runtime, &calibration)?;
-            self.candidate_hash = firmware_candidate_profile_hash(&self.candidate_profile)?;
+            // A device without a completed thermal-plant calibration must use
+            // the firmware's compiled factory baseline. The calibration
+            // endpoint legitimately reports `heatResponse: null` in that
+            // state; treating it as a malformed HeatResponse made the CLI
+            // reject the same no-file flow that Web already supports.
+            let has_calibrated_heat_response = calibration
+                .pointer("/activeResult/heatResponse")
+                .is_some_and(|value| !value.is_null());
+            if has_calibrated_heat_response {
+                self.candidate_profile = calibrated_firmware_seed_profile(&runtime, &calibration)?;
+                self.candidate_hash = firmware_candidate_profile_hash(&self.candidate_profile)?;
+            }
             fs::write(
                 self.input_dir.join("seed-calibration.json"),
                 serde_json::to_vec_pretty(&json!({
@@ -1779,7 +1789,7 @@ fn firmware_start_command(
     candidate_profile: &Value,
     execution_order: &[i16],
 ) -> Value {
-    json!({
+    let mut command = json!({
         "op": "start",
         "runId": run_id,
         "candidateId": candidate_id,
@@ -1791,7 +1801,16 @@ fn firmware_start_command(
             "bank": power_class,
             "profile": candidate_profile
         }
-    })
+    });
+    if candidate_profile.is_null() {
+        let object = command
+            .as_object_mut()
+            .expect("firmware start command object");
+        object.insert("candidateId".into(), Value::Null);
+        object.insert("candidateHash".into(), Value::Null);
+        object.insert("candidateProfile".into(), Value::Null);
+    }
+    command
 }
 
 fn event_stream_caught_up(status: &Value, after_sequence: Option<u64>) -> bool {

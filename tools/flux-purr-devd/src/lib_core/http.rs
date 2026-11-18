@@ -222,21 +222,29 @@ pub(crate) async fn establish_lan_auth(
         last_ipv4: network.ip.as_ref().map(ToString::to_string),
         pairing_token: Some(token),
     };
-    // Prefer the advertised mDNS locator. Some host networks disable mDNS
-    // resolution; in that case the USB network snapshot is an authenticated
-    // fallback locator for this same verified identity.
-    if lan_bridge_read::<Identity>(&config_entry, "identity")
+    // Keep the advertised hostname for discovery, but prefer the current USB
+    // network locator after anonymous identity verification. Resolving .local
+    // can exceed the mutation deadline even when longer GETs still succeed.
+    if let Some(ip) = network.ip.as_ref().map(ToString::to_string) {
+        let candidate =
+            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(lan_bridge_error)?;
+        if lan::verify_device_locator(&candidate, &identity.device_id)
+            .await
+            .is_ok()
+        {
+            config_entry.base_url = candidate;
+        }
+    }
+    lan::verify_device_locator(&config_entry.base_url, &identity.device_id)
         .await
-        .is_err()
-        && let Some(ip) = network.ip.as_ref().map(ToString::to_string)
-    {
-        config_entry.base_url =
-            lan::normalize_lan_base_url(&format!("http://{ip}")).map_err(|_| {
-                HttpError::bad_request(
-                    "invalid_network_address",
-                    "The USB network snapshot did not contain a valid private address.",
-                )
-            })?;
+        .map_err(lan_bridge_error)?;
+    let verified_identity = lan_bridge_read::<Identity>(&config_entry, "identity").await?;
+    validate_lan_bridge_identity(&verified_identity)?;
+    if verified_identity.device_id != identity.device_id {
+        return Err(HttpError::bad_request(
+            "lan_identity_mismatch",
+            "The HTTP device does not match the USB device.",
+        ));
     }
     let mut config = read_user_config()
         .map_err(|_| HttpError::internal("failed to read local LAN device registry"))?;
@@ -249,8 +257,6 @@ pub(crate) async fn establish_lan_auth(
         .into_iter()
         .find(|device| device.id == lan_id)
         .ok_or_else(|| HttpError::internal("LAN authentication registry update was not visible"))?;
-    let verified_identity = identity;
-    validate_lan_bridge_identity(&verified_identity)?;
     // The authenticated identity GET proves the bearer and locator. Reuse the
     // USB snapshots for network/status because older LAN envelopes may reject
     // the larger status payload even though the authenticated route is healthy.
@@ -311,7 +317,10 @@ pub(crate) async fn lan_bridge_read<T: DeserializeOwned>(
         .await
         .map_err(lan_bridge_error)
     {
-        Err(error) if path == "thermal-tuning" && error.status == StatusCode::NOT_FOUND => {
+        Err(error)
+            if path.split('?').next() == Some("thermal-tuning")
+                && error.status == StatusCode::NOT_FOUND =>
+        {
             return Err(HttpError::not_found(
                 "thermal_tuning_unsupported",
                 "The LAN firmware does not provide thermal tuning.",
@@ -333,6 +342,17 @@ pub(crate) async fn lan_bridge_write<T: DeserializeOwned>(
     method: Method,
     body: Option<Value>,
 ) -> Result<T, HttpError> {
+    if lan::is_tuning_safety_stop(&method, path, body.as_ref()) {
+        let value = lan::authorized_json(device, method, path, None, body)
+            .await
+            .map_err(lan_bridge_error)?;
+        return serde_json::from_value(value).map_err(|_| {
+            HttpError::bad_request(
+                "lan_bridge_invalid_response",
+                "LAN device returned an invalid control response.",
+            )
+        });
+    }
     let lease: LanBridgeLease = serde_json::from_value(
         lan::authorized_json(device, Method::POST, "leases", None, None)
             .await
@@ -385,6 +405,12 @@ pub(crate) fn lan_bridge_payload<T: Serialize>(payload: &T) -> Result<Value, Htt
 
 pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
     match error {
+        lan::LanClientError::RequestQueueBusy => HttpError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_retryable",
+            "设备请求繁忙，请稍后重试。",
+            true,
+        ),
         lan::LanClientError::RemoteApi {
             status,
             code,
@@ -396,14 +422,63 @@ pub(crate) fn lan_bridge_error(error: lan::LanClientError) -> HttpError {
             &message,
             retryable,
         ),
-        lan::LanClientError::Request(error) => HttpError::new(
-            StatusCode::BAD_GATEWAY,
-            "transport_unavailable",
-            &format!("LAN request failed: {error}"),
-            true,
-        ),
+        lan::LanClientError::Request(error) => lan_transport_error(error),
         error => HttpError::bad_request("lan_bridge_request_failed", &error.to_string()),
     }
+}
+
+fn lan_transport_error(error: reqwest::Error) -> HttpError {
+    let kind = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_body() {
+        "body"
+    } else {
+        "request"
+    };
+    // Error Display/source strings can embed request URLs and credentials.
+    // Only export typed causes and OS codes, never the original chain text.
+    let mut cause = std::error::Error::source(&error);
+    let mut io_cause = None;
+    for _ in 0..8 {
+        let Some(current) = cause else { break };
+        if let Some(io) = current.downcast_ref::<std::io::Error>() {
+            io_cause = Some(io);
+            break;
+        }
+        cause = current.source();
+    }
+    let message = match io_cause.map(std::io::Error::kind) {
+        Some(std::io::ErrorKind::ConnectionRefused) => "设备 HTTP 连接被拒绝，请重试读取。",
+        Some(std::io::ErrorKind::ConnectionReset) => "设备 HTTP 连接被重置，请重试读取。",
+        Some(std::io::ErrorKind::ConnectionAborted) => "设备 HTTP 连接中断，请重试读取。",
+        _ => match kind {
+            "timeout" => "设备 HTTP 请求超时，请重试读取。",
+            "connect" => "设备 HTTP 连接未能建立，请重试读取。",
+            "decode" => "设备 HTTP 响应格式无效。",
+            "body" => "设备 HTTP 响应未完整读取，请重试读取。",
+            _ => "设备 HTTP 请求未能完成，请重试读取。",
+        },
+    };
+    let mut result = HttpError::new(
+        StatusCode::BAD_GATEWAY,
+        if kind == "decode" {
+            "response_invalid"
+        } else {
+            "transport_unavailable"
+        },
+        message,
+        kind != "decode",
+    );
+    result.error.details = Some(json!({
+        "transportKind": kind,
+        "ioKind": io_cause.map(|io| format!("{:?}", io.kind())),
+        "osCode": io_cause.and_then(std::io::Error::raw_os_error),
+    }));
+    result
 }
 
 pub(crate) fn validate_lan_bridge_identity(identity: &Identity) -> Result<(), HttpError> {
@@ -884,7 +959,7 @@ pub(crate) async fn device_thermal_status(
 pub(crate) async fn device_thermal_tuning(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
-    Query(query): Query<LeaseQuery>,
+    Query(query): Query<ThermalTuningReadQuery>,
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
         let state_lock = state.lock()?;
@@ -894,12 +969,13 @@ pub(crate) async fn device_thermal_tuning(
         let payload = ThermalTuningRequest {
             lease_id: query.lease_id.unwrap_or_default(),
             op: ThermalTuningCommandOp::Read,
-            run_id: None,
+            run_id: query.run_id,
             candidate_id: None,
             candidate_hash: None,
+            owner_proof: None,
             power_class: None,
             targets_c: None,
-            after_sequence: None,
+            after_sequence: query.after_sequence,
             candidate_profile: None,
         };
         return Ok(Json(
@@ -909,13 +985,30 @@ pub(crate) async fn device_thermal_tuning(
     if target.transport == DeviceTransport::Lan {
         let configured = lan_bridge_config(&target)?;
         return Ok(Json(
-            lan_bridge_read::<ThermalTuningStatus>(&configured, "thermal-tuning").await?,
+            lan_bridge_read::<ThermalTuningStatus>(&configured, &thermal_tuning_read_path(&query))
+                .await?,
         ));
     }
     Err(HttpError::bad_request(
         "thermal_tuning_unavailable",
         "Firmware thermal tuning requires a connected device transport.",
     ))
+}
+
+pub(crate) fn thermal_tuning_read_path(query: &ThermalTuningReadQuery) -> String {
+    let mut url =
+        reqwest::Url::parse("http://localhost/thermal-tuning").expect("static tuning URL");
+    if let Some(run_id) = &query.run_id {
+        url.query_pairs_mut().append_pair("run_id", run_id);
+    }
+    if let Some(after_sequence) = query.after_sequence {
+        url.query_pairs_mut()
+            .append_pair("after_sequence", &after_sequence.to_string());
+    }
+    match url.query() {
+        Some(query) => format!("thermal-tuning?{query}"),
+        None => "thermal-tuning".into(),
+    }
 }
 
 pub(crate) async fn configure_thermal_tuning(
@@ -925,7 +1018,12 @@ pub(crate) async fn configure_thermal_tuning(
 ) -> Result<Json<ThermalTuningStatus>, HttpError> {
     let target = {
         let mut state_lock = state.lock()?;
-        state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        // Stopping an active tuning run is the authenticated safety escape
+        // hatch. Start/seal/save still require the devd control lease, while
+        // any client with an authenticated device session may request stop.
+        if payload.op != ThermalTuningCommandOp::Cancel {
+            state_lock.require_lease(&device_id, Some(&payload.lease_id))?;
+        }
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {

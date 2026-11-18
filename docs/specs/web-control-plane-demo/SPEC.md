@@ -60,7 +60,7 @@
 - `REQ-WEB-DEMO-001`：正式构建 MUST 固定 live，公开 Demo 构建 MUST 固定 mock；旧模式参数不得改变运行时边界。
 - `REQ-WEB-DEMO-002`：Demo 初始条件 MUST 由 typed URL 表达，产品操作、Inspector action、日志和任务 MUST 共享内存会话。
 - `REQ-WEB-DEMO-003`：当前设备、故障和能力覆盖 MUST 只作用于路由 identity；保护状态 MUST 优先于已有操作结果。
-- `REQ-WEB-DEMO-004`：Reset MUST 原子恢复完整默认基线并丢弃迟到异步结果，校准离开取消时 URL 与模型 MUST 保持不变。
+- `REQ-WEB-DEMO-004`：「重置应用状态」MUST 按当前 Inspector 预设和选项重新初始化应用、丢弃迟到异步结果，并保留 Inspector 设置、当前设备、页面和 URL。校准离开取消时 URL 与模型 MUST 保持不变。
 - `REQ-WEB-DEMO-005`：WiFi 显式 null 回执 MUST 保持清空字段；分享链接 MUST 只恢复初始条件且复制失败不得提示成功。
 - `REQ-WEB-DEMO-006`：Inspector MUST 提供 scene、persona/permissions、network fault、data toggle、simulated action 与 share state 控制，并保持宽屏 dock、桌面浮层、移动 drawer/bubble、键盘可达和触控目标约束；Inspector MUST 将会话范围的 Demo 设置与当前用例设置分组，scene 与 target MUST 使用紧凑选择器；Inspector 的布局是工具 chrome 偏好，不是 Demo 可控制参数，不得出现在上述状态分组或分享状态中；右键或触摸长按 MUST 在收起按钮上打开布局菜单，点击菜单外区域或按 Escape MUST 关闭菜单，左侧/右侧仅在产品口宽度足够时可用，底部仅在视口高度足够时可用，收起后重新打开 MUST 恢复用户上次选择的布局。
 - `REQ-WEB-DEMO-007`：Demo 初始化失败 MUST 停留在安全错误页面，正式构建 MUST 不请求 Demo 的 mock 或旧模式 API。
@@ -200,7 +200,7 @@
 - Given Demo Inspector，When 查看控制项，Then 全局 Demo 设置只承载会话范围的 Persona/权限，当前 Demo 用例设置承载 scene、target、故障、能力/数据和模拟动作；布局偏好不作为 Demo 控制项出现，scene 与 target 使用紧凑选择器并显示当前摘要。
 - Given Demo Inspector，When 用户在同一个收起按钮上右键或触摸长按，Then 布局菜单显示左侧、右侧、底部、悬浮和收起；空间不足的布局不可选，点击菜单外区域或按 Escape 关闭菜单，收起后左键重新打开恢复上次可用布局。
 - Given Demo 中选定设备，When 注入 lease/network fault 或 thermal warning，Then 故障只作用于当前 URL identity，保护态覆盖已有操作值，fan recovery 不能解除有效安全锁。
-- Given Demo Reset，When 已完成温度、preset、fan、WiFi 或任务操作，Then 原子恢复 normal 与默认开关，保留当前设备和页面，并清理所有设备临时结果、日志、表单、任务、计时器及迟到回调。
+- Given Inspector 已选定场景及选项并在应用内执行了操作，When 点击「重置应用状态」，Then 以当前模拟配置重建应用，清理所有设备临时结果、操作日志、表单、任务、计时器及迟到回调；保留场景、选项、当前设备和页面。例如调优保存演示回到待确认，可再次保存或放弃。
 - Given WiFi clear receipt，When 设备明确返回成功且字段为 null，Then SSID、RSSI、密码长度与失败码保持空值，不被旧快照回填。
 - Given WiFi 配置等待达到 10 秒，When operator 选择取消，Then mock fixture 与 live Web Serial 都等待 `cancel` receipt 的 `idle` 结果；等待、确认成功与取消失败分别有可辨识状态，且取消不会清空保存的 SSID 或密码掩码。
 
@@ -222,7 +222,7 @@
 
 - Method: reducer generation/reset unit tests、路由 Back/Forward E2E 和校准离开保护交互测试。
 - covers: `REQ-WEB-DEMO-004`
-- Pass condition: Reset 完整恢复默认基线，迟到回调不能恢复旧结果，取消确认保持原路由和模型，确认后正确清理。
+- Pass condition: 重置应用状态按当前 Inspector 配置恢复初始状态并保持原路由，迟到回调不能恢复旧结果；取消校准离开确认保持原路由和模型，确认后正确清理。
 
 ### VER-WEB-DEMO-004
 

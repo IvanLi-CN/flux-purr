@@ -1,61 +1,117 @@
 .firmware-tuning {
+  --tuning-surface: var(--industrial-panel);
+  --tuning-surface-soft: var(--industrial-panel-tint);
+  --tuning-border: var(--industrial-panel-border);
+  --tuning-border-strong: var(--industrial-panel-border-strong);
+  --tuning-text: var(--industrial-text);
+  --tuning-muted: var(--industrial-muted-text);
+  --tuning-accent: var(--industrial-accent);
   min-width: 0;
-  padding: 20px 0 32px;
-  color: #1c2930;
+  padding: 24px 0 32px;
+  color: var(--tuning-text);
 }
 
-.firmware-tuning__header,
-.firmware-tuning__toolbar {
+.firmware-tuning__toolbar,
+.firmware-tuning__primary-actions,
+.firmware-tuning__advanced-content {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 10px;
 }
 
-.firmware-tuning__header {
-  justify-content: space-between;
-  border-bottom: 1px solid #d5dee0;
-  padding-bottom: 16px;
-}
-
-.firmware-tuning__header h2 {
-  font-size: 18px;
-  font-weight: 650;
-}
-
-.firmware-tuning__header p {
-  color: #62757c;
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.firmware-tuning__outcome {
-  border-left: 3px solid #75848b;
-  padding: 5px 10px;
-  background: #edf1f2;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.firmware-tuning__outcome--candidate_ready,
-.firmware-tuning__outcome--running {
-  border-color: #2d789c;
-  background: #e6f2f6;
-}
-
-.firmware-tuning__outcome--passed {
-  border-color: #277d58;
-  background: #e8f3ec;
-}
-
-.firmware-tuning__outcome--failed,
-.firmware-tuning__outcome--canceled {
-  border-color: #ae4543;
-  background: #faece9;
-}
-
 .firmware-tuning__toolbar {
-  margin: 18px 0;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+  margin: 18px 0 16px;
+}
+
+.firmware-tuning__primary-actions {
+  min-inline-size: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  gap: 8px;
+}
+
+.firmware-tuning__primary-actions > button,
+.firmware-tuning__advanced-content > button {
+  min-height: 44px;
+}
+
+.firmware-tuning__primary-actions > button:first-child {
+  order: -1;
+}
+
+.firmware-tuning__save-button {
+  min-inline-size: 6rem;
+}
+
+.firmware-tuning__save-button[data-saved]:disabled {
+  opacity: 1;
+  background: var(--industrial-panel);
+  color: var(--industrial-text);
+  box-shadow: inset 0 0 0 1px var(--industrial-panel-border-strong);
+}
+
+.firmware-tuning__save-button[data-saved] svg {
+  color: var(--industrial-green);
+}
+
+.firmware-tuning__save-success {
+  color: var(--tuning-text);
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.firmware-tuning__discard-popover {
+  z-index: 50;
+  max-inline-size: calc(100vw - 16px);
+  padding: 12px;
+  border: 1px solid var(--industrial-panel-border-strong);
+  border-radius: 8px;
+  background: var(--industrial-panel);
+  color: var(--industrial-text);
+  box-shadow: 0 6px 18px var(--industrial-shadow);
+}
+
+.firmware-tuning__discard-popover > p {
+  margin: 0 0 10px;
+  font-size: 0.875rem;
+  font-weight: 650;
+}
+
+.firmware-tuning__discard-popover > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.firmware-tuning__advanced {
+  border-top: 1px solid var(--tuning-border);
+  padding-top: 10px;
+}
+
+.firmware-tuning__advanced summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.firmware-tuning__advanced summary::marker {
+  color: var(--tuning-accent);
+}
+
+.firmware-tuning__advanced-content {
+  padding: 10px 0 2px 18px;
+}
+
+.firmware-tuning__advanced-content > button {
+  min-height: 34px;
 }
 
 .firmware-tuning__toolbar svg,
@@ -66,8 +122,8 @@
 
 .firmware-tuning__candidate {
   max-width: 240px;
-  color: #63757c;
-  font-size: 12px;
+  color: var(--tuning-muted);
+  font-size: 0.76rem;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -77,25 +133,107 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 8px 0;
-  padding: 9px 12px;
-  border-left: 3px solid #b34c46;
-  background: #f9eeeb;
-  color: #812f2c;
-  font-size: 12px;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklch, var(--destructive) 34%, var(--tuning-border));
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--destructive) 8%, var(--tuning-surface));
+  color: color-mix(in oklch, var(--destructive) 72%, var(--tuning-text));
+  font-size: 0.82rem;
+  line-height: 1.5;
 }
 
 .firmware-tuning__facts {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
-  border-top: 1px solid #d5dee0;
-  border-bottom: 1px solid #d5dee0;
+  margin-top: 16px;
+  overflow: hidden;
+  border: 1px solid var(--tuning-border);
+  border-radius: 8px;
+  background: var(--tuning-surface-soft);
+}
+
+.firmware-tuning__parameters {
+  margin: 16px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--tuning-border-strong);
+  border-radius: var(--radius);
+  background: var(--tuning-surface);
+  box-shadow: var(--industrial-surface-inset);
+}
+
+.firmware-tuning__parameters > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--tuning-border);
+  background: var(--tuning-surface-soft);
+}
+
+.firmware-tuning__parameters h3 {
+  color: var(--tuning-text);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.firmware-tuning__parameters p,
+.firmware-tuning__parameters > header > span {
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
+}
+
+.firmware-tuning__parameters > header > span {
+  padding: 4px 8px;
+  border: 1px solid color-mix(in oklch, var(--tuning-accent) 34%, var(--tuning-border));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--tuning-accent) 10%, var(--tuning-surface));
+  color: var(--tuning-accent);
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.firmware-tuning__parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.firmware-tuning__parameter-grid > div {
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 1px solid var(--tuning-border);
+  border-bottom: 1px solid var(--tuning-border);
+  background: color-mix(in oklch, var(--tuning-surface) 72%, var(--tuning-surface-soft));
+}
+
+.firmware-tuning__parameter-grid > div:nth-child(6n) {
+  border-right: 0;
+}
+
+.firmware-tuning__parameter-grid > div:nth-last-child(-n + 6) {
+  border-bottom: 0;
+}
+
+.firmware-tuning__parameter-grid span,
+.firmware-tuning__parameter-grid strong {
+  display: block;
+}
+
+.firmware-tuning__parameter-grid span {
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
+}
+
+.firmware-tuning__parameter-grid strong {
+  margin-top: 4px;
+  font-size: 0.82rem;
 }
 
 .firmware-tuning__facts > div {
   min-width: 0;
   padding: 12px;
-  border-right: 1px solid #d5dee0;
+  border-right: 1px solid var(--tuning-border);
 }
 
 .firmware-tuning__facts > div:last-child {
@@ -108,13 +246,13 @@
 }
 
 .firmware-tuning__facts span {
-  color: #65777f;
-  font-size: 11px;
+  color: var(--tuning-muted);
+  font-size: 0.6875rem;
 }
 
 .firmware-tuning__facts strong {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 0.82rem;
   overflow-wrap: anywhere;
 }
 
@@ -127,55 +265,304 @@
 
 .firmware-tuning__detail > section {
   min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--tuning-border);
+  border-radius: 8px;
+  background: var(--tuning-surface-soft);
 }
 
 .firmware-tuning__detail h3 {
   margin-bottom: 10px;
-  font-size: 14px;
+  color: var(--tuning-text);
+  font-size: 0.88rem;
   font-weight: 650;
 }
 
 .firmware-tuning__detail dl {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  font-size: 0.76rem;
+}
+
+.firmware-tuning__detail-row {
+  display: grid;
   grid-template-columns: 110px minmax(0, 1fr);
   gap: 9px;
-  font-size: 12px;
 }
 
-.firmware-tuning__detail dt {
-  color: #687a80;
+.firmware-tuning__detail-row dt {
+  color: var(--tuning-muted);
 }
 
-.firmware-tuning__detail dd {
+.firmware-tuning__detail-row dd {
+  min-width: 0;
   margin: 0;
-  overflow-wrap: anywhere;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+.firmware-tuning__identifier-field {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+.firmware-tuning__identifier-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  color: var(--tuning-muted);
+  font-family: var(--font-sans, Manrope, "Noto Sans SC", sans-serif);
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.firmware-tuning__identifier-summary {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tuning-text);
+}
+
+.firmware-tuning__identifier-copy {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 21px;
+  padding: 0 6px;
+  gap: 4px;
+  border: 1px solid var(--tuning-border);
+  border-radius: 8px;
+  background: var(--tuning-surface);
+  color: var(--tuning-muted);
+  font-family: var(--font-sans, Manrope, "Noto Sans SC", sans-serif);
+  font-size: 0.66rem;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.firmware-tuning__identifier-copy:hover:not(:disabled) {
+  border-color: var(--tuning-border-strong);
+  color: var(--tuning-accent);
+}
+
+.firmware-tuning__identifier-copy svg {
+  width: 12px;
+  height: 12px;
+}
+
+.firmware-tuning__identifier-tooltip {
+  max-width: min(420px, 50vw);
+  padding: 8px 10px;
+  font:
+    0.7rem / 1.35 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  overflow-wrap: anywhere;
+}
+
+.firmware-tuning__identifier-empty {
+  color: var(--tuning-muted);
+}
+
 .firmware-tuning__event-scroll {
-  max-height: 480px;
-  overflow: auto;
-  border-top: 1px solid #d5dee0;
+  max-height: 240px;
+  overflow: hidden;
+  border-top: 1px solid var(--tuning-border);
+}
+
+.firmware-tuning__detail-toolbar,
+.firmware-tuning__chart-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.firmware-tuning__detail-toolbar {
+  justify-content: space-between;
+}
+
+.firmware-tuning__detail-toolbar h3 {
+  margin: 0;
+}
+
+.firmware-tuning__chart-controls,
+.firmware-tuning__chart-empty,
+.firmware-tuning__chart-gap {
+  color: var(--tuning-muted);
+  font-size: 0.72rem;
+}
+
+.firmware-tuning__chart-controls .firmware-tuning__trial-select {
+  width: auto;
+  height: 28px;
+  background: var(--tuning-surface);
+  border-color: var(--tuning-border-strong);
+  color: var(--tuning-text);
+  padding: 0 7px;
+  font-size: inherit;
+}
+
+.firmware-tuning__trial-best {
+  display: block;
+  flex: none;
+  color: var(--industrial-accent);
+  fill: currentColor;
+}
+
+.firmware-tuning__trial-select > .firmware-tuning__trial-sizing {
+  display: inline-grid;
+  align-items: center;
+  overflow: visible;
+}
+
+.firmware-tuning__trial-sizing > span {
+  grid-area: 1 / 1;
+}
+
+.firmware-tuning__trial-measure {
+  visibility: hidden;
+}
+
+.firmware-tuning__trial-label {
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.industrial-workspace-switch.firmware-tuning__chart-targets {
+  display: flex;
+  flex: 0 0 100%;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: 0;
+  margin: 0;
+  padding: 2px;
+  border-radius: 8px;
+}
+
+.industrial-workspace-switch.firmware-tuning__chart-targets button {
+  flex: 1 0 auto;
+  min-block-size: 28px;
+  padding-inline: 5px;
+  border-radius: 6px;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.industrial-workspace-switch.firmware-tuning__chart-targets button:focus-visible {
+  outline-offset: -2px;
+}
+
+.firmware-tuning__chart-plot {
+  position: relative;
+  width: 100%;
+  min-height: 106px;
+}
+
+.firmware-tuning__chart-plot svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.firmware-tuning__chart svg text {
+  fill: var(--tuning-muted);
+  font-size: 11px;
+}
+
+.firmware-tuning__chart-grid {
+  stroke: var(--tuning-border-strong);
+}
+
+.firmware-tuning__chart-phase--warmup {
+  --phase-color: var(--industrial-accent);
+}
+.firmware-tuning__chart-phase--approach {
+  --phase-color: #526e9b;
+}
+.firmware-tuning__chart-phase--hold {
+  --phase-color: var(--industrial-green);
+}
+
+.firmware-tuning__chart-plot rect {
+  fill: var(--phase-color);
+  fill-opacity: 0.12;
+}
+
+.firmware-tuning__chart-legend,
+.firmware-tuning__chart-legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.firmware-tuning__chart-legend {
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  color: var(--tuning-muted);
+  font-size: 0.72rem;
+}
+
+.firmware-tuning__chart-legend i {
+  width: 8px;
+  height: 8px;
+  background: var(--phase-color);
+  opacity: 0.65;
+}
+
+.firmware-tuning__chart-target {
+  stroke: var(--tuning-muted);
+  stroke-dasharray: 4 3;
+}
+
+.firmware-tuning__chart polyline {
+  fill: none;
+  stroke: var(--tuning-accent);
+  stroke-width: 1.7;
+}
+
+.firmware-tuning__chart circle {
+  fill: var(--tuning-accent);
+}
+
+.firmware-tuning__event-scroll .simplebar-scrollbar::before {
+  background: color-mix(in oklch, var(--tuning-accent) 68%, var(--tuning-surface));
+  opacity: 0.72;
 }
 
 .firmware-tuning__event-scroll table {
   width: 100%;
   border-collapse: collapse;
   text-align: left;
-  font-size: 12px;
+  font-size: 0.76rem;
 }
 
 .firmware-tuning__event-scroll th,
 .firmware-tuning__event-scroll td {
   padding: 8px 10px;
-  border-bottom: 1px solid #e1e7e8;
+  border-bottom: 1px solid var(--tuning-border);
   white-space: nowrap;
 }
 
 .firmware-tuning__event-scroll th {
   position: sticky;
   top: 0;
-  background: #f1f5f5;
+  background: var(--tuning-surface-soft);
 }
 
 @media (max-width: 1000px) {
@@ -183,8 +570,81 @@
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .firmware-tuning__parameter-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-last-child(-n + 6) {
+    border-bottom: 1px solid var(--tuning-border);
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-last-child(-n + 3) {
+    border-bottom: 0;
+  }
+
   .firmware-tuning__detail {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 1180px) {
+  .firmware-tuning {
+    padding: 8px 0 6px;
+  }
+
+  .firmware-tuning__toolbar {
+    margin-block: 6px;
+  }
+
+  .firmware-tuning__warning {
+    margin-block: 8px;
+    padding: 6px 10px;
+    line-height: 1.3;
+  }
+
+  .firmware-tuning__parameters,
+  .firmware-tuning__facts {
+    margin-top: 4px;
+  }
+
+  .firmware-tuning__detail {
+    margin-top: 4px;
+  }
+
+  .firmware-tuning__event-scroll {
+    max-height: 152px;
+  }
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: min-content;
+  }
+
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning > :not(.firmware-tuning__detail) {
+    flex: none;
+  }
+
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__detail {
+    flex: 1 0 auto;
+  }
+
+  .firmware-tuning__results,
+  .firmware-tuning__chart {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .firmware-tuning__chart,
+  .firmware-tuning__chart-plot {
+    flex: 1 0 auto;
   }
 }
 
@@ -193,7 +653,35 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .firmware-tuning__toolbar > button {
+  .firmware-tuning__primary-actions > button {
     flex: 1 1 140px;
+  }
+
+  .firmware-tuning__advanced-content {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-left: 0;
+  }
+
+  .firmware-tuning__parameters > header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .firmware-tuning__parameter-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-last-child(-n + 3) {
+    border-bottom: 1px solid var(--tuning-border);
+  }
+
+  .firmware-tuning__parameter-grid > div:nth-last-child(-n + 2) {
+    border-bottom: 0;
   }
 }

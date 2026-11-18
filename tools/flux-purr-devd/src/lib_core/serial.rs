@@ -564,6 +564,7 @@ pub(crate) async fn serial_thermal_tuning(
         run_id: payload.run_id.as_deref(),
         candidate_id: payload.candidate_id.as_deref(),
         candidate_hash: payload.candidate_hash.as_deref(),
+        owner_proof: payload.owner_proof.as_ref(),
         power_class: payload.power_class,
         targets_c: payload.targets_c.as_ref(),
         after_sequence: payload.after_sequence,
@@ -2652,15 +2653,14 @@ pub(crate) fn decode_usb_response_frame(
     request_id: &str,
 ) -> Result<Option<Value>, HttpError> {
     if frame.frame_type == "error" && frame.request_id.as_deref() == Some(request_id) {
-        return Err(HttpError {
-            status: StatusCode::BAD_GATEWAY,
-            error: frame.error.unwrap_or_else(|| ApiError {
+        return Err(usb_protocol_http_error(frame.error.unwrap_or_else(|| {
+            ApiError {
                 code: "usb_error".to_string(),
                 message: "Firmware returned an unsuccessful USB error frame.".to_string(),
                 retryable: true,
                 details: None,
-            }),
-        });
+            }
+        })));
     }
     if frame.frame_type != "response" || frame.request_id.as_deref() != Some(request_id) {
         return Ok(None);
@@ -2669,15 +2669,22 @@ pub(crate) fn decode_usb_response_frame(
         return Ok(Some(frame.result.unwrap_or(Value::Null)));
     }
 
-    Err(HttpError {
-        status: StatusCode::BAD_GATEWAY,
-        error: frame.error.unwrap_or_else(|| ApiError {
+    Err(usb_protocol_http_error(frame.error.unwrap_or_else(|| {
+        ApiError {
             code: "usb_error".to_string(),
             message: "Firmware returned an unsuccessful USB response.".to_string(),
             retryable: true,
             details: None,
-        }),
-    })
+        }
+    })))
+}
+
+fn usb_protocol_http_error(error: ApiError) -> HttpError {
+    let status = match error.code.as_str() {
+        "thermal_tuning_active" => StatusCode::CONFLICT,
+        _ => StatusCode::BAD_GATEWAY,
+    };
+    HttpError { status, error }
 }
 
 pub(crate) fn serial_io_http_error(error: io::Error) -> HttpError {

@@ -130,6 +130,12 @@ const scenes: Array<{
     modules: ['calibration'],
   },
   {
+    id: 'tuning-save',
+    label: '调优保存后读取失败',
+    description: '调优结果已确认保存，后续读取记录失败',
+    modules: ['calibration'],
+  },
+  {
     id: 'lan-scan-empty',
     label: 'LAN scan · Empty',
     description: 'No mock devices returned',
@@ -215,6 +221,12 @@ const presetCatalog: Array<{
     label: 'Calibration · Running',
   },
   {
+    id: 'tuning-save',
+    module: 'calibration',
+    scene: 'tuning-save',
+    label: '调优保存后读取失败',
+  },
+  {
     id: 'lan-scan-empty',
     module: 'devices',
     scene: 'lan-scan-empty',
@@ -286,6 +298,7 @@ const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
   'blocked-artifact': { demoPersona: 'maintainer', demoArtifact: 'blocked' },
   'calibration-loading': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'calibration-active': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'tuning-save': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'lan-scan-empty': { demoLanScanResults: 'none' },
   'lan-scan-typical': { demoLanScanResults: 'typical' },
   'lan-scan-long': { demoLanScanResults: 'long' },
@@ -751,7 +764,7 @@ function DemoInspectorContent({
 
   const reset = (
     <button type="button" className="demo-inspector__reset" onClick={() => void onReset()}>
-      <RotateCcw size={15} aria-hidden="true" /> Reset current case
+      <RotateCcw size={15} aria-hidden="true" /> 重置应用状态
     </button>
   )
 

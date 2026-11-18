@@ -423,6 +423,24 @@ fn held_temperature_forecast_also_accounts_for_unpowered_cooling() {
 }
 
 #[test]
+fn delayed_forecast_retains_heat_from_a_stronger_previous_pps_contract() {
+    let mut plant = plant(1_000);
+    plant.model.convection_mw_per_c = 0.0;
+    let mut history = AppliedHeatHistory::new();
+    history.configure(1_000);
+    history.observe(0, 60_000.0);
+    history.observe(1_000, 0.0);
+    let before_reduction = history.forecast(1_000, 60.0, 0.0, plant);
+    plant.max_power_mw = 20_000.0;
+    let after_reduction = history.forecast(1_000, 60.0, 0.0, plant);
+    assert!(
+        (before_reduction.temperature_c - after_reduction.temperature_c).abs() < 0.001,
+        "a new command limit cannot erase previously applied heat: {before_reduction:?} / {after_reduction:?}"
+    );
+    assert!((after_reduction.temperature_c - 63.0).abs() < 0.001);
+}
+
+#[test]
 fn forecast_keeps_old_full_power_then_expires_it_at_the_real_delay() {
     let mut history = AppliedHeatHistory::new();
     let plant = plant(700);
@@ -549,6 +567,43 @@ fn duplicate_epoch_shift_and_expired_observations_cannot_invent_heat() {
 }
 
 #[test]
+fn delayed_heat_residual_rejects_endpoint_noise_without_hiding_extra_loss() {
+    let plant = TrajectoryPlant {
+        model: ThermalPlantProjection {
+            convection_mw_per_c: 211.08168,
+            radiation_mw_per_k4: 0.0,
+            thermal_capacity_mj_per_c: 30_753.62,
+            transport_delay_ms: 4_500,
+        },
+        ambient_c: 30.0,
+        max_power_mw: 28_000.0,
+    };
+    let mut history = AppliedHeatHistory::new();
+    history.configure(4_500);
+    // The same plate stays at 60 C in a room 5 C colder than calibration.
+    let applied_mw = plant.loss_mw(60.0) + 5.0 * plant.model.convection_mw_per_c;
+    let expected_residual_mw = plant.loss_mw(60.0) - applied_mw;
+    for now_ms in (0..=18_000).step_by(50) {
+        history.observe(now_ms, applied_mw);
+        let noise_c = if (now_ms / 300).is_multiple_of(2) {
+            0.75
+        } else {
+            -0.75
+        };
+        history.observe_temperature(now_ms, 60.0 + noise_c, plant);
+        if let Some((observed_ms, residual_mw)) = history.transfer.residual
+            && observed_ms == now_ms
+        {
+            assert!(
+                (residual_mw - expected_residual_mw).abs() < 1_000.0,
+                "at {now_ms}ms: expected {expected_residual_mw}mW, got {residual_mw}mW"
+            );
+        }
+    }
+    assert!(history.transfer.residual.is_some());
+}
+
+#[test]
 fn small_quantization_does_not_create_a_full_power_correction() {
     let plant = plant(700);
     let mut history = AppliedHeatHistory::new();
@@ -652,4 +707,71 @@ fn reference_converges_and_every_rate_has_feasible_positive_power() {
         assert!((trajectory.reference.temperature_c - 60.0).abs() < 0.01);
         assert!(trajectory.reference.rise_c_per_s.abs() < 0.01);
     }
+}
+
+#[test]
+fn observed_projection_deficit_cannot_outlive_its_measurement_horizon() {
+    let plant = plant(700);
+    let mut history = AppliedHeatHistory::new();
+    history.transfer.residual = Some((1_000, -5_000.0));
+    assert_eq!(history.residual_at(1_000, 700, plant), -5_000.0);
+    assert_eq!(history.residual_at(1_600, 800, plant), -5_000.0);
+    assert_eq!(history.residual_at(1_600, 801, plant), 0.0);
+    assert_eq!(history.residual_at(2_401, 0, plant), 0.0);
+    assert_eq!(history.residual_at(999, 0, plant), 0.0);
+}
+
+#[test]
+fn projection_maintenance_uses_only_fresh_bounded_heat_evidence() {
+    let plant = plant(700);
+    let mut history = AppliedHeatHistory::new();
+    history.transfer.residual = Some((1_000, -5_000.0));
+    let baseline = plant.loss_mw(220.0);
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_700, 220.0, plant),
+        Some(baseline + 5_000.0)
+    );
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_701, 220.0, plant),
+        Some(baseline)
+    );
+    assert_eq!(
+        history.projection_maintenance_power_mw(999, 220.0, plant),
+        Some(baseline)
+    );
+    history.transfer.residual = Some((1_000, -plant.max_power_mw));
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_000, 220.0, plant),
+        Some(plant.max_power_mw)
+    );
+    history.transfer.residual = Some((1_000, plant.max_power_mw));
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_000, 30.0, plant),
+        Some(0.0)
+    );
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_000, f32::NAN, plant),
+        None
+    );
+    assert_eq!(
+        history.projection_maintenance_power_mw(
+            1_000,
+            220.0,
+            TrajectoryPlant {
+                max_power_mw: 0.0,
+                ..plant
+            }
+        ),
+        None
+    );
+    history.configure_response(Some(HeatResponse {
+        delay_ms: 700,
+        decay_ms: 500,
+        rmse_c: 0.0,
+        maximum_error_c: 0.0,
+    }));
+    assert_eq!(
+        history.projection_maintenance_power_mw(1_000, 220.0, plant),
+        None
+    );
 }

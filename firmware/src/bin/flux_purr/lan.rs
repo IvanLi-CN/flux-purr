@@ -91,6 +91,7 @@ pub(crate) fn control_runtime_status_context(
     );
     UsbRuntimeStatusContext {
         elapsed_ms: context.elapsed_ms,
+        thermal_tuning_active: context.thermal_tuning.armed,
         pd_controller: context.pd_controller,
         last_pd_observation,
         heater_power_backend: *context.heater_power_backend,
@@ -148,7 +149,21 @@ pub(crate) async fn dispatch_control_frame(
     line: &str,
     active_profile: Option<ThermalControlProfile>,
 ) -> (bool, UsbFrame) {
-    match parse_usb_frame(line) {
+    let parsed = parse_usb_frame(line);
+    if context.thermal_tuning.armed
+        && let Ok(frame) = &parsed
+        && let Some(request_id) = frame.tuning_blocked_write_id()
+    {
+        return (
+            false,
+            usb_error_response(
+                request_id.clone(),
+                "thermal_tuning_active",
+                "Firmware tuning is active; only reads and safety stop are allowed.",
+            ),
+        );
+    }
+    match parsed {
         Ok(UsbFrame::Request { request_id, op }) => {
             process_request_frame(context, request_id, op, active_profile).await
         }
@@ -1332,11 +1347,31 @@ fn thermal_tuning_start_response(
 ) -> UsbFrame {
     match result {
         Ok(()) => {
-            context.ui_state.heater_enabled = false;
-            usb_response(
-                request_id,
-                UsbResponsePayload::ThermalTuning(thermal_tuning_status(context, None, true)),
-            )
+            // A tuning run owns the heater intent for its duration.  Keep the
+            // intent armed while the runtime negotiates PPS; the runtime
+            // interlock still holds the physical output off until the
+            // contract, sensor and thermal safety gates are satisfied.
+            context.ui_state.heater_enabled = true;
+            let mut random = [0u8; 32];
+            for chunk in random.chunks_exact_mut(4) {
+                chunk.copy_from_slice(&esp_hal::rng::Rng::new().random().to_le_bytes());
+            }
+            let proof =
+                flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof::from_random_bytes(
+                    random,
+                );
+            if !context.thermal_tuning.bind_owner_proof(&proof) {
+                context.thermal_tuning.fail("owner_proof_binding_failed");
+                context.ui_state.heater_enabled = false;
+                return usb_error_response(
+                    request_id,
+                    "owner_proof_invalid",
+                    "Tuning ownership could not be established.",
+                );
+            }
+            let mut status = thermal_tuning_status(context, None, true);
+            status.owner_proof = Some(proof);
+            usb_response(request_id, UsbResponsePayload::ThermalTuning(status))
         }
         Err(error) => {
             context.ui_state.heater_enabled = false;
@@ -1386,6 +1421,16 @@ async fn process_thermal_tuning_confirm_save(
     request_id: heapless::String<{ flux_purr_firmware::control_plane::REQUEST_ID_MAX_LEN }>,
     command: flux_purr_firmware::control_plane::ThermalTuningCommand,
 ) -> UsbFrame {
+    if let Err(error) = context
+        .thermal_tuning
+        .validate_save_owner(command.owner_proof.as_ref())
+    {
+        return usb_error_response(
+            request_id,
+            thermal_tuning_error_code(error),
+            "Only the tuning initiator may confirm saving this run.",
+        );
+    }
     let validation = match (
         command.run_id.as_deref(),
         command.candidate_id.as_deref(),
@@ -1500,6 +1545,7 @@ async fn persist_thermal_tuning_candidate(
         (Some(run_id), Some(candidate_id), Some(candidate_hash), Some(power_class)) => {
             context.thermal_tuning.confirm_save(
                 flux_purr_firmware::thermal_tuning::ThermalTuningSaveConfirmation {
+                    owner_proof: command.owner_proof.as_ref(),
                     run_id,
                     candidate_id,
                     candidate_hash,
@@ -1651,6 +1697,7 @@ unsafe extern "C" fn flux_purr_write_thermal_tuning_status(
     write_field!(run_id, runtime.run_id.clone());
     write_field!(candidate_id, runtime.candidate_id.clone());
     write_field!(candidate_hash, runtime.candidate_hash.clone());
+    write_field!(owner_proof, None);
     write_field!(targets_c, runtime.targets_c.clone());
     write_field!(target_index, runtime.target_index);
     write_field!(armed, runtime.armed);
@@ -1675,6 +1722,7 @@ fn thermal_tuning_error_code(
 ) -> &'static str {
     use flux_purr_firmware::thermal_tuning::ThermalTuningError;
     match error {
+        ThermalTuningError::OwnerProofMismatch => "owner_proof_invalid",
         ThermalTuningError::InvalidPowerClass => "invalid_power_class",
         ThermalTuningError::InvalidTargets => "invalid_target_scope",
         ThermalTuningError::AlreadyRunning => "tuning_busy",
@@ -1870,6 +1918,10 @@ pub(crate) fn lan_command_to_control_line(
             .map_err(|_| "LAN request is too large")?;
             if let Some(after_sequence) = command.after_sequence {
                 write!(line, r#", "afterSequence":{}"#, after_sequence)
+                    .map_err(|_| "LAN request is too large")?;
+            }
+            if let Some(run_id) = command.run_id.as_deref() {
+                write!(line, r#", "runId":"{}""#, run_id)
                     .map_err(|_| "LAN request is too large")?;
             }
             line.push('}').map_err(|_| "LAN request is too large")?;

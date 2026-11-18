@@ -2160,6 +2160,50 @@ fn record_initial_cooldown(runtime: &mut ThermalTuningRuntime, elapsed_ms: u64) 
 }
 
 #[test]
+fn cooldown_admits_confirmed_working_voltage_with_one_quantum_headroom() {
+    for (voltage_mv, confirmed, expected) in [
+        (9_700, true, ThermalTuningPhase::Warmup),
+        (9_800, true, ThermalTuningPhase::Warmup),
+        (9_600, true, ThermalTuningPhase::Cooldown),
+        (9_900, true, ThermalTuningPhase::Cooldown),
+        (9_700, false, ThermalTuningPhase::Cooldown),
+    ] {
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("run-headroom"),
+                candidate_id: id("candidate-hold"),
+                candidate_hash: hash("hash-hold"),
+                power_class: ThermalTuningPowerClass::Pps5a,
+                targets: &[60],
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: Some(profile_with_targets(&[60])),
+            })
+            .unwrap();
+        let mut cooling = sample(0, ThermalTuningPhase::Cooldown, 2_684);
+        cooling.heater_requested_output_permille = 0;
+        cooling.heater_output_permille = 0;
+        cooling.pps_contract.voltage_mv = voltage_mv;
+        cooling.pps_contract.confirmed = confirmed;
+        cooling.pps_power_ceiling_mv = 9_800;
+        cooling.requested_mv = 9_700;
+        let result = runtime.record_sample(cooling);
+        if !confirmed {
+            assert_eq!(result, Err(ThermalTuningError::InvalidTransition));
+            assert!(!runtime.armed);
+            continue;
+        }
+        result.unwrap();
+        assert_eq!(
+            runtime.phase, expected,
+            "contract={voltage_mv}, confirmed={confirmed}"
+        );
+    }
+}
+
+#[test]
 fn cooldown_accepts_idle_request_when_trial_contract_is_confirmed() {
     let mut runtime = ThermalTuningRuntime::new();
     runtime
@@ -2606,6 +2650,33 @@ fn live_sample_pages_remain_contiguous_beyond_event_capacity() {
             .iter()
             .enumerate()
             .all(|(index, sequence)| *sequence == index as u32)
+    );
+}
+
+#[test]
+fn pages_with_candidate_trial_records_are_bounded_for_usb_jsonl() {
+    let mut runtime = started_single_target_runtime();
+    runtime.push_candidate_trial_event(0);
+    runtime.push_event(
+        ThermalTuningEventKind::PhaseTransition,
+        Some(60),
+        Some(0),
+        None,
+        Some("after candidate trial"),
+    );
+    let mut cursor = None;
+    let trial_page = loop {
+        let page = runtime.events_after(cursor);
+        if page.events.iter().any(|event| event.trial.is_some()) {
+            break page;
+        }
+        cursor = page.next_sequence;
+        assert!(cursor.is_some());
+    };
+    assert!(trial_page.events.len() <= 1);
+    assert_eq!(
+        trial_page.next_sequence,
+        trial_page.events.last().map(|event| event.sequence)
     );
 }
 
@@ -5502,14 +5573,37 @@ fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
                 candidate_profile: Some(profile),
             })
             .unwrap();
+        let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([7; 32]);
+        assert!(runtime.bind_owner_proof(&owner));
         runtime.record_preview_applied().unwrap();
         runtime.sealed = true;
         runtime.armed = false;
         runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
         let delivered = runtime.events_after(None).next_sequence;
         runtime.events_after(delivered);
+        let mut observer = runtime.clone();
+        assert!(
+            observer
+                .confirm_save(ThermalTuningSaveConfirmation {
+                    owner_proof: None,
+                    run_id: "run-save",
+                    candidate_id: "candidate-save",
+                    candidate_hash: candidate_hash.as_str(),
+                    power_class,
+                    readback_verified: true,
+                    bank_revision: 17,
+                    bank_hash: candidate_hash.clone(),
+                })
+                .is_err(),
+            "A reader must not save with public identity alone"
+        );
+        assert_eq!(
+            observer, runtime,
+            "Rejected save must not damage the candidate"
+        );
         let receipt = runtime
             .confirm_save(ThermalTuningSaveConfirmation {
+                owner_proof: Some(&owner),
                 run_id: "run-save",
                 candidate_id: "candidate-save",
                 candidate_hash: candidate_hash.as_str(),
@@ -5528,6 +5622,40 @@ fn save_receipt_binds_eeprom_generation_and_verified_bank_hash() {
             ThermalTuningTerminalDisposition::Passed
         );
     }
+}
+
+#[test]
+fn tuning_owner_proof_cannot_be_replaced_or_reused_after_stop_failure_or_restart() {
+    let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([1; 32]);
+    let other = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([2; 32]);
+    let mut runtime = started_single_target_runtime();
+    assert!(runtime.bind_owner_proof(&owner));
+    assert!(!runtime.bind_owner_proof(&other));
+    assert_eq!(runtime.validate_save_owner(Some(&owner)), Ok(()));
+    assert_eq!(
+        runtime.validate_save_owner(Some(&other)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    let mut failed = runtime.clone();
+    failed.fail("test_safety_failure");
+    assert_eq!(
+        failed.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    runtime.cancel("another_client_stop").unwrap();
+    assert_eq!(
+        runtime.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    runtime.reset_for_run();
+    assert_eq!(
+        runtime.validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
+    assert_eq!(
+        ThermalTuningRuntime::new().validate_save_owner(Some(&owner)),
+        Err(ThermalTuningError::OwnerProofMismatch)
+    );
 }
 
 #[test]
@@ -5661,6 +5789,7 @@ fn seal_cannot_promote_an_unfinished_trial() {
     );
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: None,
             run_id: "run-5a",
             candidate_id: "candidate-5a",
             candidate_hash: "hash-5a",
@@ -5717,6 +5846,22 @@ fn unsealed_ready_candidate_can_be_canceled() {
     let mut runtime = ThermalTuningRuntime::new();
     runtime.terminal_disposition = ThermalTuningTerminalDisposition::CandidateReady;
     assert_eq!(runtime.cancel("owner_cancel"), Ok(()));
+    assert_eq!(
+        runtime.terminal_disposition,
+        ThermalTuningTerminalDisposition::Canceled
+    );
+}
+
+#[test]
+fn safety_stop_is_idempotent_without_rewriting_terminal_evidence() {
+    let mut runtime = ThermalTuningRuntime::new();
+    assert_eq!(runtime.cancel("idle_stop"), Ok(()));
+    assert_eq!(runtime.phase, ThermalTuningPhase::Idle);
+    let mut runtime = started_single_target_runtime();
+    runtime.cancel("first_stop").unwrap();
+    let last_sequence = runtime.last_sequence;
+    runtime.cancel("repeated_stop").unwrap();
+    assert_eq!(runtime.last_sequence, last_sequence);
     assert_eq!(
         runtime.terminal_disposition,
         ThermalTuningTerminalDisposition::Canceled
@@ -5897,12 +6042,15 @@ fn closed_confirmation_trial(events: &[ThermalTuningEvent]) -> Option<ThermalTun
 }
 
 fn assert_single_target_save_gates(runtime: &mut ThermalTuningRuntime) {
+    let owner = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([9; 32]);
+    assert!(runtime.owner_verifier.bind(&owner));
     let digest_before_ack = runtime.trace().digest;
     runtime.events_after(runtime.trace().last_sequence);
     assert_eq!(runtime.trace().digest, digest_before_ack);
     assert!(!runtime.trace().gap);
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: Some(&owner),
             run_id: "run-hold",
             candidate_id: "candidate-hold",
             candidate_hash: "hash-hold",
@@ -5932,6 +6080,7 @@ fn assert_single_target_save_gates(runtime: &mut ThermalTuningRuntime) {
     runtime.events_after(seal_page.next_sequence);
     assert_eq!(
         runtime.confirm_save(ThermalTuningSaveConfirmation {
+            owner_proof: Some(&owner),
             run_id: "run-hold",
             candidate_id: "candidate-hold",
             candidate_hash: "hash-hold",
@@ -6006,6 +6155,30 @@ fn caller_failure_context_overflow_stays_review_incomplete() {
     );
     assert!(runtime.trace().gap);
     assert!(!runtime.trace().complete);
+}
+
+#[test]
+fn delayed_reader_ack_does_not_invalidate_evidence_acknowledged_by_another_reader() {
+    let mut runtime = started_single_target_runtime();
+    for _ in 0..24 {
+        runtime.push_phase_transition_event("reader overlap fixture");
+    }
+    let old_cursor = runtime.events_after(None).next_sequence.unwrap();
+    let newer_cursor = runtime
+        .events_after(Some(old_cursor))
+        .next_sequence
+        .unwrap();
+    runtime.events_after(Some(newer_cursor));
+    let digest_before = runtime.trace().digest;
+
+    let delayed = runtime.events_after(Some(old_cursor));
+    assert!(runtime.armed);
+    assert!(
+        !delayed.trace.gap,
+        "a stale reader cannot revoke already acknowledged evidence"
+    );
+    assert_eq!(runtime.trace().digest, digest_before);
+    assert_eq!(runtime.last_acknowledged_sequence, Some(newer_cursor));
 }
 
 #[test]
@@ -6196,4 +6369,36 @@ fn sample_candidate_identity_mismatch_disarms() {
         runtime.terminal_disposition,
         ThermalTuningTerminalDisposition::Failed
     );
+}
+
+#[test]
+fn factory_default_profile_seeds_both_power_classes_without_upload() {
+    for power_class in [
+        ThermalTuningPowerClass::Pps3a,
+        ThermalTuningPowerClass::Pps5a,
+    ] {
+        let profile = factory_default_profile(power_class);
+        assert!(
+            profile.points[..THERMAL_TUNING_TARGETS_C.len()]
+                .iter()
+                .all(Option::is_some)
+        );
+        let mut runtime = ThermalTuningRuntime::new();
+        runtime
+            .start(ThermalTuningStart {
+                run_id: id("factory-run"),
+                candidate_id: id("factory-run"),
+                candidate_hash: hash("unsealed"),
+                power_class,
+                targets: &THERMAL_TUNING_EXECUTION_ORDER_C,
+                pps_ready: true,
+                thermal_model_available: true,
+                calibration_conflict: false,
+                candidate_profile: None,
+            })
+            .unwrap();
+        assert!(runtime.armed);
+        assert_eq!(runtime.seed_source.as_str(), "factory_default");
+        assert!(runtime.candidate_hash.is_some());
+    }
 }

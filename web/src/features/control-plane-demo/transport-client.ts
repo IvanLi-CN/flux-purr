@@ -28,6 +28,7 @@ import type {
   UsbWifiConfigFrame,
   WifiConfigRequest,
 } from './contracts'
+import { withReadDeadline } from './read-deadline'
 import type { DeviceTarget, EventLogEntry, FirmwareArtifact } from './types'
 
 export class ControlPlaneClientError extends Error {
@@ -43,6 +44,7 @@ export class ControlPlaneClientError extends Error {
   readonly operation?: string
   readonly endpoint?: string
   readonly status?: number
+  readonly protocolCode?: string
 
   constructor(
     message: string,
@@ -54,6 +56,7 @@ export class ControlPlaneClientError extends Error {
       operation?: string
       endpoint?: string
       status?: number
+      protocolCode?: string
     }
   ) {
     super(message)
@@ -65,6 +68,37 @@ export class ControlPlaneClientError extends Error {
     this.operation = metadata?.operation
     this.endpoint = metadata?.endpoint
     this.status = metadata?.status
+    this.protocolCode = metadata?.protocolCode
+  }
+}
+
+export function classifyHttpFailure(
+  status: number,
+  endpoint: string,
+  protocolCode?: string,
+  retryHint?: boolean
+) {
+  const tuningEndpoint = /\/thermal-tuning(?:[/?]|$)/.test(endpoint)
+  const unsupported =
+    status !== 401 &&
+    tuningEndpoint &&
+    (status === 404 || protocolCode === 'thermal_tuning_unsupported')
+  const category: ControlPlaneClientError['category'] =
+    status === 401
+      ? 'unauthorized'
+      : unsupported
+        ? 'thermal_tuning_unsupported'
+        : status >= 500
+          ? 'server_retryable'
+          : undefined
+  return {
+    category,
+    code:
+      status === 401 ? 'unauthorized' : unsupported ? 'thermal_tuning_unsupported' : protocolCode,
+    protocolCode,
+    // Authentication and capability failures require a user/firmware change;
+    // an upstream retry hint cannot make polling them useful.
+    retryable: status === 401 || unsupported ? false : (retryHint ?? status >= 500),
   }
 }
 
@@ -136,7 +170,8 @@ export interface ControlPlaneHttpClient {
   getThermalTuning(
     devdBaseUrl: string,
     deviceId: string,
-    leaseId?: string
+    leaseId?: string,
+    cursor?: Pick<ThermalTuningCommand, 'runId' | 'afterSequence'>
   ): Promise<ThermalTuningStatus>
   configureThermalTuning(
     devdBaseUrl: string,
@@ -346,10 +381,15 @@ export function createControlPlaneHttpClient(
         `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/calibration/thermal-plant/run?lease_id=${encodeURIComponent(leaseId)}${cursor}`
       )
     },
-    getThermalTuning(devdBaseUrl, deviceId, leaseId) {
+    getThermalTuning(devdBaseUrl, deviceId, leaseId, cursor) {
+      const query = [
+        ...(leaseId ? [`lease_id=${encodeURIComponent(leaseId)}`] : []),
+        ...(cursor?.runId ? [`run_id=${encodeURIComponent(cursor.runId)}`] : []),
+        ...(cursor?.afterSequence != null ? [`after_sequence=${cursor.afterSequence}`] : []),
+      ].join('&')
       return requestJson<ThermalTuningStatus>(
         fetcher,
-        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning${leaseId ? `?lease_id=${encodeURIComponent(leaseId)}` : ''}`
+        `${devdBaseUrl}/api/v1/devices/${encodeURIComponent(deviceId)}/thermal-tuning${query ? `?${query}` : ''}`
       )
     },
     configureThermalTuning(devdBaseUrl, deviceId, request) {
@@ -513,6 +553,7 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     calibration: record.status.calibration,
     storedCalibration: record.calibration,
     heaterEnabled: record.status.heaterEnabled,
+    thermalTuningActive: record.status.thermalTuningActive ?? false,
     heaterOutputPercent: record.status.heaterOutputPercent,
     activeCoolingEnabled: record.status.activeCoolingEnabled,
     postHeatCoolingMode:
@@ -533,6 +574,9 @@ export function devdRecordToDeviceTarget(record: DevdDeviceRecord): DeviceTarget
     leaseState: record.transport === 'mock' ? undefined : 'none',
     transportIssue,
     heaterCurve: record.heaterCurve,
+    thermalProfileMode: record.status.thermalProfileMode,
+    thermalProfileResolvedBank: record.status.thermalProfileResolvedBank,
+    thermalControl: record.status.thermalControl,
   }
 }
 
@@ -541,7 +585,13 @@ function devdTransportIssue(record: DevdDeviceRecord) {
     return undefined
   }
 
-  const lastError = normalizeDevdTransportIssue(record.network.lastError)
+  // Older daemon records store serial failures in network.lastError too.
+  // A successful USB connection and typed WiFi failures are not serial faults:
+  // keep USB configuration available so the station can be recovered.
+  const lastError =
+    record.connection !== 'connected' && !record.network.failureCode
+      ? normalizeDevdTransportIssue(record.network.lastError)
+      : null
   if (lastError) {
     return lastError
   }
@@ -950,16 +1000,80 @@ export function redactWifiConfigFrame(frame: UsbWifiConfigFrame): UsbWifiConfigF
 }
 
 async function requestJson<T>(fetcher: typeof fetch, url: string, init?: RequestInit): Promise<T> {
-  const response = await fetcher(url, init)
+  const endpoint = new URL(url, 'http://localhost').pathname
+  const write = init?.method?.toUpperCase() === 'POST'
+  const tuningRead = !write && endpoint.endsWith('/thermal-tuning')
+  const operation = tuningRead ? 'thermal_tuning_read' : write ? 'write' : 'read'
+  if (tuningRead) {
+    // Allow the daemon's 3 s queue + 6 s complete device read budget, while
+    // still terminating a stalled localhost connection or response body.
+    return withReadDeadline(
+      12_000,
+      () =>
+        new ControlPlaneClientError(
+          '固件热控调优读取超时，请重试读取。',
+          'transport_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation, endpoint }
+        ),
+      (signal) => requestJsonResponse<T>(fetcher, url, { ...init, signal }, operation, endpoint)
+    )
+  }
+  return requestJsonResponse<T>(fetcher, url, init, operation, endpoint)
+}
+
+async function requestJsonResponse<T>(
+  fetcher: typeof fetch,
+  url: string,
+  init: RequestInit | undefined,
+  operation: string,
+  endpoint: string
+): Promise<T> {
+  let response: Response
+  try {
+    response = await fetcher(url, init)
+  } catch (cause) {
+    throw new ControlPlaneClientError(
+      '无法访问设备端点，请检查设备连接或本地 devd 状态。',
+      'transport_unavailable',
+      true,
+      cause instanceof Error ? cause.message : cause,
+      { category: 'transport_unavailable', operation, endpoint }
+    )
+  }
   const payload = (await response.json().catch(() => null)) as T | ApiErrorEnvelope | null
 
   if (!response.ok) {
     const envelope = payload as ApiErrorEnvelope | null
+    const failure = classifyHttpFailure(
+      response.status,
+      endpoint,
+      envelope?.error?.code,
+      envelope?.error?.retryable
+    )
     throw new ControlPlaneClientError(
-      envelope?.error.message ?? `Request failed with ${response.status}`,
-      envelope?.error.code,
-      envelope?.error.retryable,
-      envelope?.error.details
+      envelope?.error?.message ?? `Request failed with ${response.status}`,
+      failure.code ?? `http_${response.status}`,
+      failure.retryable,
+      envelope?.error?.details,
+      {
+        category: failure.category,
+        protocolCode: failure.protocolCode,
+        operation,
+        endpoint,
+        status: response.status,
+      }
+    )
+  }
+
+  if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new ControlPlaneClientError(
+      '设备返回的数据格式无效。',
+      'response_invalid',
+      false,
+      undefined,
+      { category: 'response_invalid', operation, endpoint, status: response.status }
     )
   }
 

@@ -256,6 +256,8 @@ pub struct ControlPlaneStatus {
     pub selected_preset_slot: usize,
     pub presets_c: [Option<i16>; FRONTPANEL_PRESET_COUNT],
     pub heater_enabled: bool,
+    #[serde(default)]
+    pub thermal_tuning_active: bool,
     pub heater_output_percent: u8,
     #[serde(default)]
     pub heater_physical_output_percent: u8,
@@ -709,6 +711,7 @@ impl ControlPlaneStatus {
                 selected_preset_slot: memory.selected_preset_slot,
                 presets_c: memory.presets_c,
                 heater_enabled: matches!(status.mode, DeviceMode::Sampling),
+                thermal_tuning_active: false,
                 heater_output_percent,
                 heater_physical_output_percent: status.heater_physical_output_percent.min(100),
                 heater_power_backend: string("unknown"),
@@ -1260,6 +1263,8 @@ pub struct ThermalTuningCommand {
     pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     pub power_class: Option<ThermalTuningPowerClass>,
     pub targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
     pub after_sequence: Option<u32>,
@@ -1296,6 +1301,8 @@ pub struct ThermalTuningStatusWire {
     pub run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     pub candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     pub targets_c: Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>,
     pub target_index: usize,
     pub armed: bool,
@@ -2144,6 +2151,63 @@ pub enum UsbFrame {
     },
 }
 
+impl UsbFrame {
+    /// Identify client mutations forbidden while firmware tuning owns the
+    /// runtime. Both LAN and USB dispatch consume this same decoded frame.
+    /// Unknown request operations default to denied; reads and safety stop
+    /// are the only exceptions, independent of which client owns a lease.
+    pub fn tuning_blocked_write_id(&self) -> Option<&String<REQUEST_ID_MAX_LEN>> {
+        match self {
+            Self::Request { request_id, op } => (!matches!(
+                op,
+                UsbRequestOp::GetIdentity
+                    | UsbRequestOp::GetInstallStatus
+                    | UsbRequestOp::GetNetwork
+                    | UsbRequestOp::GetStatus
+                    | UsbRequestOp::GetThermalStatus
+                    | UsbRequestOp::GetLanPairingCode
+                    | UsbRequestOp::GetCalibration
+                    | UsbRequestOp::GetCalibrationJob
+                    | UsbRequestOp::GetHeaterCurve
+                    | UsbRequestOp::GetThermalTuning
+                    | UsbRequestOp::GetFlashPreparation
+            ))
+            .then_some(request_id),
+            Self::ThermalTuning {
+                request_id,
+                command,
+            } => (!matches!(
+                command.op,
+                ThermalTuningCommandOp::Read | ThermalTuningCommandOp::Cancel
+            ))
+            .then_some(request_id),
+            Self::EepromMaintenance {
+                request_id,
+                command,
+            } => (command.op != EepromMaintenanceOp::Read).then_some(request_id),
+            Self::WifiConfig { request_id, .. }
+            | Self::RuntimeConfig { request_id, .. }
+            | Self::CalibrationConfig { request_id, .. }
+            | Self::CalibrationJob { request_id, .. }
+            | Self::HeaterCurveConfig { request_id, .. }
+            | Self::HeaterCurveSave { request_id } => Some(request_id),
+            #[cfg(feature = "buzzer-test")]
+            Self::BuzzerTest {
+                request_id,
+                command,
+            } => (command.op != BuzzerTestOp::Status).then_some(request_id),
+            Self::ThermalPlantRun { .. }
+            | Self::Hello { .. }
+            | Self::Response { .. }
+            | Self::Status { .. }
+            | Self::Log { .. }
+            | Self::Error { .. } => None,
+            #[cfg(feature = "buzzer-test")]
+            Self::BuzzerTestResponse { .. } => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UsbFrameWire {
@@ -2207,6 +2271,8 @@ struct UsbFrameWire {
     candidate_id: Option<Box<String<REQUEST_ID_MAX_LEN>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_hash: Option<Box<String<THERMAL_TUNING_HASH_MAX_LEN>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     #[serde(skip_serializing_if = "Option::is_none")]
     power_class: Option<ThermalTuningPowerClass>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2381,6 +2447,8 @@ struct UsbThermalTuningInboundWire {
     run_id: Option<String<REQUEST_ID_MAX_LEN>>,
     candidate_id: Option<String<REQUEST_ID_MAX_LEN>>,
     candidate_hash: Option<String<THERMAL_TUNING_HASH_MAX_LEN>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_proof: Option<crate::thermal_tuning_owner::TuningOwnerProof>,
     power_class: Option<ThermalTuningPowerClass>,
     targets_c: Option<Vec<i16, THERMAL_TUNING_TARGET_CAPACITY>>,
     after_sequence: Option<u32>,
@@ -2584,6 +2652,7 @@ fn usb_frame_from_thermal_tuning(value: UsbFrameWire) -> Result<UsbFrame, UsbFra
             run_id: value.run_id.map(|value| *value),
             candidate_id: value.candidate_id.map(|value| *value),
             candidate_hash: value.candidate_hash.map(|value| *value),
+            owner_proof: value.owner_proof,
             power_class: value.power_class,
             targets_c: value.targets_c.map(|value| *value),
             after_sequence: value.after_sequence,
@@ -2717,6 +2786,7 @@ impl From<&UsbFrame> for UsbFrameWire {
             run_id: None,
             candidate_id: None,
             candidate_hash: None,
+            owner_proof: None,
             power_class: None,
             targets_c: None,
             after_sequence: None,
@@ -2860,6 +2930,7 @@ impl UsbFrameWire {
         self.run_id = command.run_id.clone().map(Box::new);
         self.candidate_id = command.candidate_id.clone().map(Box::new);
         self.candidate_hash = command.candidate_hash.clone().map(Box::new);
+        self.owner_proof = command.owner_proof.clone();
         self.power_class = command.power_class;
         self.targets_c = command.targets_c.clone().map(Box::new);
         self.after_sequence = command.after_sequence;
@@ -3362,6 +3433,7 @@ fn parse_usb_thermal_tuning(line: &str) -> Result<UsbFrame, UsbFrameError> {
             run_id: frame.run_id,
             candidate_id: frame.candidate_id,
             candidate_hash: frame.candidate_hash,
+            owner_proof: frame.owner_proof,
             power_class: frame.power_class,
             targets_c: frame.targets_c,
             after_sequence: frame.after_sequence,
@@ -5184,7 +5256,7 @@ mod tests {
         let json = write_usb_frame(&response, &mut out).unwrap();
         assert!(json.len() < USB_LINE_MAX_LEN);
         assert!(json.contains(r#""phase":"cooling""#));
-        assert!(json.contains(r#""formatVersion":6"#));
+        assert!(json.contains(r#""formatVersion":7"#));
         assert!(json.contains(r#""supplyBoundary""#));
         assert_eq!(parse_usb_frame(json).unwrap(), response);
     }
@@ -5207,6 +5279,58 @@ mod tests {
             serde_json::from_str::<ThermalPlantRunAttemptWire>(&encoded).unwrap(),
             attempt
         );
+    }
+
+    #[test]
+    fn active_tuning_write_policy_is_shared_by_decoded_usb_and_lan_frames() {
+        let writes = [
+            r#"{"type":"runtime_config","requestId":"other-client","targetTempC":140}"#,
+            r#"{"type":"wifi_config","requestId":"other-client","op":"clear"}"#,
+            r#"{"type":"request","requestId":"other-client","op":"reset_persistence"}"#,
+            r#"{"type":"request","requestId":"other-client","op":"prepare_flash"}"#,
+            r#"{"type":"heater_curve_save","requestId":"other-client"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"start","runId":"another-run","powerClass":"pps3a"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"seal"}"#,
+            r#"{"type":"thermal_tuning","requestId":"other-client","op":"confirm_save"}"#,
+            r#"{"type":"eeprom_maintenance","requestId":"other-client","op":"erase"}"#,
+        ];
+        for wire in writes {
+            let frame = parse_usb_frame(wire).unwrap();
+            assert_eq!(
+                frame.tuning_blocked_write_id().map(|id| id.as_str()),
+                Some("other-client"),
+                "{wire}"
+            );
+        }
+        let reads_and_stop = [
+            r#"{"type":"request","requestId":"reader","op":"get_identity"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_status"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_calibration"}"#,
+            r#"{"type":"request","requestId":"reader","op":"get_thermal_tuning"}"#,
+            r#"{"type":"thermal_tuning","requestId":"reader","op":"read"}"#,
+            r#"{"type":"thermal_tuning","requestId":"reader","op":"cancel"}"#,
+            r#"{"type":"eeprom_maintenance","requestId":"reader","op":"read","offset":0,"length":8}"#,
+        ];
+        for wire in reads_and_stop {
+            assert!(
+                parse_usb_frame(wire)
+                    .unwrap()
+                    .tuning_blocked_write_id()
+                    .is_none(),
+                "{wire}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "buzzer-test")]
+    fn active_tuning_allows_buzzer_status_but_not_buzzer_mutations() {
+        for (op, blocked) in [("status", false), ("stop", true), ("trigger", true)] {
+            let wire =
+                format!(r#"{{"type":"buzzer_test","requestId":"buzzer-client","op":"{op}"}}"#);
+            let frame = parse_usb_frame(&wire).unwrap();
+            assert_eq!(frame.tuning_blocked_write_id().is_some(), blocked);
+        }
     }
 
     #[test]
@@ -5252,6 +5376,24 @@ mod tests {
                 .0,
             bounds
         );
+    }
+
+    #[test]
+    fn tuning_save_owner_proof_round_trips_without_debug_disclosure() {
+        let proof = crate::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([0xa5; 32]);
+        let wire = format!(
+            r#"{{"type":"thermal_tuning","requestId":"save","op":"confirm_save","ownerProof":{}}}"#,
+            serde_json::to_string(&proof).unwrap()
+        );
+        let frame = parse_usb_frame(&wire).unwrap();
+        let UsbFrame::ThermalTuning { command, .. } = &frame else {
+            panic!("wrong frame")
+        };
+        assert_eq!(command.owner_proof.as_ref(), Some(&proof));
+        assert!(!format!("{frame:?}").contains("a5a5a5a5"));
+        let mut bytes = [0u8; USB_LINE_MAX_LEN];
+        let encoded = write_usb_frame(&frame, &mut bytes).unwrap();
+        assert_eq!(parse_usb_frame(encoded).unwrap(), frame);
     }
 
     #[cfg(feature = "buzzer-test")]

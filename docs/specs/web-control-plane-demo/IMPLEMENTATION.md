@@ -21,7 +21,7 @@
 - 校准运行期间的 Link、程序导航、设备切换、search 变化与浏览器 Back/Forward 统一进入 TanStack blocker resolver；armed 状态同时注册 `beforeunload`。
 - `web/public/edgeone.json` 仅将 `/devices` history 深链 rewrite 到 `/index.html`，让 `/assets/*` 按文件路径提供。
 - `build:demo` 使用 Vite demo mode 输出 `web/dist-demo`；它固定为 fixture runtime、关闭 devd/Web Serial，并把 root replace 到 `fp-lab-01` overview。
-- `DemoSession` 由 App 的 reducer-like state 与 typed command 接线组成，产品操作和 Inspector action 共用同一模拟状态；scene、设备、fault、能力/数据开关和 Reset 共享校准离开保护。
+- `DemoSession` 由 App reducer 管理，产品操作和 Inspector action 共用模拟状态。Inspector 预设和选项由 URL 保持。「重置应用状态」取消待处理的 Inspector 导航并重建模拟会话，保留当前页面和 Inspector 配置。
 - `DemoInspector` 作为控制台同级的可收起工具层，使用 `demoScene`、`demoPersona`、`demoLease`、`demoNetwork`、`demoArtifact`、`demoWifiCapability`、`demoLogs` 与 `demoTelemetry` 复现确定性状态；面板通过按需帮助按钮提供 persona/permissions 与 mock-only 说明，并保留近期 simulated mutation 记录；全局 Demo 设置只承载会话范围的 Persona/权限，当前用例设置承载 scene、target、故障、能力/数据和模拟动作，scene/target 使用项目 Select 组件并显示摘要；Inspector 布局不属于 Demo 状态控制项，只能从同一个收起按钮的右键/触摸长按菜单调整；仅在 1700px+ 且能保留 1280px console 与 gutter 时允许左/右布局，较窄桌面改用占满视口宽度、受控高度的底部布局或悬浮布局，1280px+ 底部布局使用四栏、1180–1279px 使用三栏，各栏独立滚动且页面根层保持固定，不挤压产品口；窄屏使用带 modal 语义的 drawer；收起按钮左键收起，布局菜单点击外部区域或按 Escape 关闭，布局偏好通过 localStorage 保留且不进入 Demo 状态、URL 或分享链接；分享复制等待路由提交并区分 Clipboard 成功/拒绝。
 - `web/src/demo-runtime.ts` 在 RouterProvider 之前建立 public demo 的 mock-only fetch boundary；初始化失败渲染安全停止页面，live API 或跨源请求不会回退到真实服务。
 - `Release Product` 将独立的版本化 public-demo archive 发布到 GitHub Release，并只在发布资产验证完成后通过共享 helper 部署该 archive 到 `flux-purr-demo`；helper 只对上传或 deployment creation 开始前明确处于 `check and set region` 阶段的 transport-level 失败执行有限重试，输出捕获不完整或远端状态不明确时禁止自动重试，保留 CLI 已返回的成功或失败状态，并在部署成功后写入 release marker。Recovery 仍以 marker 作为跳过已标记目标的 guard，不在 marker 上传失败时推断远端部署状态。

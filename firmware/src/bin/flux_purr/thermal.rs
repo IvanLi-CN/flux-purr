@@ -134,8 +134,12 @@ pub(crate) fn production_thermal_controller(
                 // request is not a thermal-output eligibility threshold.
                 && active.voltage_mv > FUSB302B_PPS_MIN_MV
                 && active.operating_current_ma >= required_ma
+                // Validate the APDO that is actually carrying the confirmed
+                // contract. Requiring the source to advertise a 20 V endpoint
+                // here incorrectly disarms tuning when a valid source only
+                // exposes a lower-voltage PPS range.
+                && manual_pps.has_matching_pps_apdo(active.voltage_mv, required_ma)
         })
-        && manual_pps.has_matching_pps_apdo(20_000, required_ma)
     {
         ProductionThermalController::Profile(bank)
     } else {
@@ -1149,6 +1153,7 @@ impl HeaterController {
             && self.phase == HeaterControlPhase::Approach;
         let hold_model_requests = if self.phase == HeaterControlPhase::Hold {
             self.full_response_hold_requests()
+                .or_else(|| self.projection_hold_requests(&frame))
         } else {
             None
         };
@@ -1433,10 +1438,13 @@ impl HeaterController {
             plant,
         );
         if entered_approach || self.approach_trajectory.is_none() {
-            self.approach_trajectory = Some(TemperatureTrajectory::new(
-                input.now_ms,
-                predicted.temperature_c,
-            ));
+            let mut trajectory = TemperatureTrajectory::new(input.now_ms, predicted.temperature_c);
+            if entered_approach && self.heat_response.is_none() {
+                // Preserve the calibrated projection's arriving heat at the
+                // phase boundary; resetting its velocity invents a cold start.
+                trajectory.reference.rise_c_per_s = predicted.rise_c_per_s;
+            }
+            self.approach_trajectory = Some(trajectory);
             self.approach_last_request_permille =
                 Some(flux_purr_firmware::thermal_plant::APPROACH_MIN_PERMILLE);
         }
@@ -1468,7 +1476,18 @@ impl HeaterController {
                 plant,
             )?
         } else {
-            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant)
+            let maintenance_mw = self.applied_heat.projection_maintenance_power_mw(
+                input.now_ms,
+                reference.temperature_c,
+                plant,
+            )?;
+            TemperatureTrajectory::request_permille(
+                reference,
+                predicted,
+                horizon_s,
+                plant,
+                maintenance_mw,
+            )
         };
         let previous_permille = self
             .approach_last_request_permille
@@ -1591,7 +1610,10 @@ impl HeaterController {
         };
         let requested_permille = self.hold_requested_permille(frame, base_permille);
         let pi_percent = percent_from_permille(requested_permille.clamp(0.0, 1_000.0) as u16);
-        if (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
+        // The projection already bounds arriving energy. A second entry ramp
+        // would withhold the passive-loss power and create a delayed cold dip.
+        if (model_request.is_none() || self.heat_response.is_some())
+            && (frame.hold_guard_error_c > 0.0 || frame.natural_cooling_rate_c_per_s.is_some())
             && self.phase_ticks < frame.hold_blend_cycles
         {
             let blend_ratio = f32::from(self.phase_ticks.saturating_add(1))
@@ -1612,17 +1634,9 @@ impl HeaterController {
         duty_percent: u8,
         model_ceiling: Option<u8>,
     ) -> u8 {
-        let Some(input) = self
-            .natural_cooling_input
-            .filter(|_| self.model_approach_available())
-        else {
+        if !self.model_approach_available() {
             return duty_percent;
-        };
-        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
-            model: input.model,
-            ambient_c: input.ambient_temp_c,
-            max_power_mw: input.max_power_mw,
-        };
+        }
         if self.heat_response.is_some() {
             let limit = model_ceiling.unwrap_or(0);
             if duty_percent > limit {
@@ -1630,6 +1644,43 @@ impl HeaterController {
             }
             return duty_percent.min(limit);
         }
+        let limit_percent = model_ceiling
+            .or_else(|| self.projection_hold_arrival_percent(frame))
+            .unwrap_or(0);
+        if duty_percent > limit_percent {
+            self.hold_integral_c = 0.0;
+        }
+        duty_percent.min(limit_percent)
+    }
+
+    /// The projection supplies net-loss feedforward even when no complete
+    /// response curve is available. PI trims that baseline; delayed applied
+    /// heat independently caps it before it reaches the actuator.
+    fn projection_hold_requests(&self, frame: &ThermalControlFrame) -> Option<(u8, u8)> {
+        let ceiling = self.projection_hold_arrival_percent(frame)?;
+        let input = self.natural_cooling_input?;
+        let loss = self.applied_heat.projection_maintenance_power_mw(
+            input.now_ms,
+            f32::from(input.target_temp_c),
+            flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                model: input.model,
+                ambient_c: input.ambient_temp_c,
+                max_power_mw: input.max_power_mw,
+            },
+        )?;
+        let request = (loss / input.max_power_mw * 100.0).clamp(0.0, 100.0) as u8;
+        Some((request, ceiling))
+    }
+
+    fn projection_hold_arrival_percent(&self, frame: &ThermalControlFrame) -> Option<u8> {
+        let input = self
+            .natural_cooling_input
+            .filter(|_| self.model_approach_available())?;
+        let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+            model: input.model,
+            ambient_c: input.ambient_temp_c,
+            max_power_mw: input.max_power_mw,
+        };
         let predicted = self.applied_heat.forecast_from_measurement(
             input.now_ms,
             self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
@@ -1641,7 +1692,12 @@ impl HeaterController {
             .natural_cooling_delay_s
             .max(f32::from(frame.control_target.hold_lead_ticks))
             .max(0.4);
-        let arrival_power_mw = (plant.loss_mw(predicted.temperature_c)
+        let maintenance_mw = self.applied_heat.projection_maintenance_power_mw(
+            input.now_ms,
+            predicted.temperature_c,
+            plant,
+        )?;
+        let arrival_power_mw = (maintenance_mw
             + input.model.thermal_capacity_mj_per_c
                 * (f32::from(input.target_temp_c) - predicted.temperature_c)
                 / horizon_s)
@@ -1649,11 +1705,7 @@ impl HeaterController {
         // Apply after the entry blend so it cannot restore delayed heat into
         // an already high future temperature. Floor conversion never rounds
         // the bounded physical request above the calculated energy limit.
-        let limit_percent = (arrival_power_mw / input.max_power_mw * 100.0) as u8;
-        if duty_percent > limit_percent {
-            self.hold_integral_c = 0.0;
-        }
-        duty_percent.min(limit_percent)
+        Some((arrival_power_mw / input.max_power_mw * 100.0) as u8)
     }
 
     fn hold_requested_permille(&mut self, frame: &ThermalControlFrame, base_permille: f32) -> f32 {
@@ -1846,6 +1898,12 @@ impl HeaterController {
         let delayed_heat_rate = (slope_c_per_s - rate.unwrap_or(0.0)).max(0.0);
         let model_brake =
             (delayed_heat_rate + future_rate.or(rate).unwrap_or(0.0)).max(0.0) * delay_s;
+        // Use the same arriving-energy forecast as Approach. A noisy positive
+        // derivative alone must not invent several seconds of extra full heat
+        // and prematurely end Warmup; recorded stronger PPS heat still counts.
+        let model_brake = self
+            .applied_heat_brake(measured_temp_c, slope_c_per_s)
+            .unwrap_or(model_brake);
         // Keep live environmental prediction, but apply the candidate's braking
         // correction relative to a calibration-only full-power reference. An
         // uncorrected model maximum would mask every lower-distance proposal.
@@ -1869,6 +1927,25 @@ impl HeaterController {
             corrected_model_brake.min(target.brake_distance_c + target.warmup_reenter_error_c),
         );
         (rate, delay_s, feedforward, brake)
+    }
+
+    fn applied_heat_brake(&self, measured_c: f32, slope_c_per_s: f32) -> Option<f32> {
+        let input = self.natural_cooling_input?;
+        if !input.max_power_mw.is_finite() || input.max_power_mw <= 0.0 {
+            return None;
+        }
+        let predicted = self.applied_heat.forecast_from_measurement(
+            input.now_ms,
+            self.last_accepted_measurement_at_ms.unwrap_or(input.now_ms),
+            measured_c,
+            slope_c_per_s,
+            flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                model: input.model,
+                ambient_c: input.ambient_temp_c,
+                max_power_mw: input.max_power_mw,
+            },
+        );
+        Some((predicted.temperature_c - measured_c).max(0.0))
     }
 
     fn full_response_brake(

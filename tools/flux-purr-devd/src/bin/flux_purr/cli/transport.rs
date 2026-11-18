@@ -487,7 +487,13 @@ pub(crate) fn redact_cli_sensitive(value: &Value) -> Value {
                     let key_lc = key.to_ascii_lowercase();
                     if matches!(
                         key_lc.as_str(),
-                        "password" | "psk" | "passphrase" | "secret" | "token"
+                        "password"
+                            | "psk"
+                            | "passphrase"
+                            | "secret"
+                            | "token"
+                            | "ownerproof"
+                            | "owner_proof"
                     ) {
                         (key.clone(), Value::String("<redacted>".to_string()))
                     } else {

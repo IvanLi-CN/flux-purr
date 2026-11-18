@@ -3,6 +3,15 @@ use flux_purr_firmware::thermal_tuning::ThermalTuningPhase;
 
 include!("calibration_cutoff_fixture.rs");
 
+#[path = "thermal_tuning_plant_tests.rs"]
+mod tuning_plant;
+
+#[path = "thermal_boundary_tests.rs"]
+mod thermal_boundary;
+
+#[path = "thermal_tuning_status_tests.rs"]
+mod thermal_tuning_status;
+
 #[test]
 fn unchanged_heater_request_recovers_after_an_asynchronous_pd_disarm() {
     struct Pwm {
@@ -1146,7 +1155,7 @@ fn fusb302b_capability_bridge_preserves_each_usable_apdo() {
     assert_eq!(manual.target_ma, Some(3_000));
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 21_000, 3_000))
+        Some((5_500, 21_000, 5_000))
     );
     assert_eq!(
         adjustable_mode_for_request(24_000, 28_000),
@@ -1214,7 +1223,7 @@ fn thermal_plant_scan_uses_pps_envelope_without_a_fixed_pdo_wattage_cap() {
 }
 
 #[test]
-fn thermal_plant_scan_uses_three_amp_across_five_amp_apdo_voltage_range() {
+fn thermal_plant_scan_uses_full_current_across_five_amp_apdo_voltage_range() {
     let source = SourceCapabilities::from_pdos(&[
         fixed_source_capability(20_000, 3_000),
         pps_source_capability(5_000, 21_000, 5_000),
@@ -1224,7 +1233,7 @@ fn thermal_plant_scan_uses_three_amp_across_five_amp_apdo_voltage_range() {
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 21_000, 3_000))
+        Some((5_500, 21_000, 5_000))
     );
 }
 
@@ -1239,7 +1248,7 @@ fn thermal_plant_scan_does_not_confuse_fixed_current_with_pps_current() {
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((5_500, 21_000, 3_000))
+        Some((5_500, 21_000, 5_000))
     );
 }
 
@@ -1256,7 +1265,7 @@ fn advertised_apdo_identity_does_not_relax_the_product_request_bounds() {
     let candidate = manual
         .automatic_heater_pps_candidate(25.0, None, &MemoryConfig::default(), None)
         .unwrap();
-    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.current_ma, 5_000);
     let request = manual
         .automatic_heater_request_contract(
             25.0,
@@ -1378,7 +1387,7 @@ fn thermal_plant_uses_one_apdo_covering_the_twenty_volt_anchor() {
 
     assert_eq!(
         manual.thermal_plant_source_limits(),
-        Some((20_000, 21_000, 3_000))
+        Some((20_000, 21_000, 5_000))
     );
     assert_eq!(manual.heater_source_limits(), Some((5_500, 25_500, 3_000)));
 }
@@ -2383,6 +2392,7 @@ fn ordinary_heater_off_drops_cached_pps_before_fresh_output_start() {
         current_request_mv: 21_000,
         settle_until_ms: Some(10_000),
         next_request_at_ms: 10_000,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: true,
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: false,
@@ -3056,6 +3066,7 @@ impl UsbControlTx for FakeUsbTx {
 fn test_usb_runtime_status_context() -> UsbRuntimeStatusContext {
     UsbRuntimeStatusContext {
         elapsed_ms: 0,
+        thermal_tuning_active: false,
         pd_controller: ControllerKind::Ch224q,
         last_pd_observation: None,
         heater_power_backend: HeaterPowerBackend::FixedPdPwmFallback {
@@ -4569,6 +4580,7 @@ fn runtime_status_reports_backend_request_when_manual_pps_is_disabled() {
                 current_request_mv: 12_000,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
                 terminal_fixed_pd_disarmed: false,
@@ -4631,6 +4643,7 @@ fn manual_pps_config_validates_capability_and_updates_status_payload() {
                 current_request_mv: 12_000,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 current_limit_fixed_pwm_active: false,
                 current_limit_fixed_request_confirmed: false,
                 terminal_fixed_pd_disarmed: false,
@@ -5453,7 +5466,7 @@ fn vin_auto_job_waits_for_measured_voltage_to_settle_before_sampling() {
 }
 
 #[test]
-fn thermal_plant_auto_job_starts_at_the_power_safe_ceiling_and_caps_current_at_3a() {
+fn thermal_plant_auto_job_starts_at_the_power_safe_ceiling_and_uses_the_apdo_current() {
     for (max_mv, max_ma) in [(20_000, 3_000), (21_000, 3_000), (21_000, 5_000)] {
         let mut calibration = CalibrationRuntimeState::default();
         let mut memory_config = MemoryConfig::default();
@@ -5503,7 +5516,7 @@ fn thermal_plant_auto_job_starts_at_the_power_safe_ceiling_and_caps_current_at_3
         let expected_mv = max_mv;
         assert_eq!(calibration.pps_mv, Some(expected_mv));
         assert_eq!(calibration.job.next_request_mv, Some(expected_mv));
-        assert_eq!(calibration.pps_ma, Some(3_000));
+        assert_eq!(calibration.pps_ma, Some(max_ma));
     }
 }
 
@@ -5693,7 +5706,7 @@ fn assert_auto_thermal_plant_job_start(max_mv: u16, max_ma: u16) {
         "high-voltage preflight is unloaded"
     );
     assert_eq!(manual.target_mv, Some(max_mv));
-    assert_eq!(manual.target_ma, Some(3_000));
+    assert_eq!(manual.target_ma, Some(max_ma));
     assert_eq!(
         workspace
             .job
@@ -5912,6 +5925,7 @@ fn assert_synthetic_fit(
         sample_count as u8,
         None,
         memory_config,
+        3_000,
     )
     .expect("synthetic trace fits");
     let projection = thermal_plant_projection_from_transient(&transaction).unwrap();
@@ -5949,6 +5963,7 @@ fn assert_synthetic_fit(
         sample_count as u8,
         None,
         memory_config,
+        3_000,
     )
     .expect("bounded ADC quantization must still fit");
     assert!(quantized_residual <= 0.20);
@@ -6191,6 +6206,7 @@ fn assert_synthetic_invalid_trace_guards(
             cold_baseline.sample_count,
             None,
             memory_config,
+            3_000,
         )
         .is_none()
     );
@@ -6250,6 +6266,7 @@ fn transient_thermal_fit_excludes_captured_instantaneous_spike_windows() {
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .unwrap();
     let peak_index = rows.iter().position(|row| row[1] == 8014).unwrap();
@@ -6270,6 +6287,7 @@ fn transient_thermal_fit_recovers_with_an_instantaneous_contact_spike() {
         count as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("an isolated contact spike must not corrupt a physical trace");
     assert_eq!(transaction.samples, samples);
@@ -6300,6 +6318,7 @@ fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .expect("a late cooling contact excursion must be excluded, not abort the fit");
     assert!(data.row(spike_index, 0).is_none());
@@ -6310,6 +6329,7 @@ fn transient_thermal_fit_rejects_late_cooling_contact_excursions() {
         count as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("the physical trace remains fit-capable after excluding the excursion");
     assert!(residual <= 0.20);
@@ -6376,6 +6396,7 @@ fn transient_thermal_fit_excludes_sub_slew_heating_contact_peaks() {
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .expect("an isolated sub-slew contact peak must not invalidate the physical trace");
     assert!(data.row(spike_index, 0).is_none());
@@ -6386,6 +6407,7 @@ fn transient_thermal_fit_excludes_sub_slew_heating_contact_peaks() {
         count as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("the accepted physical observations remain fit-capable");
     assert_eq!(transaction.samples, samples);
@@ -6408,7 +6430,8 @@ fn transient_thermal_fit_cannot_use_a_spike_for_heating_coverage() {
             count as u8,
             None,
             &memory,
-            samples[0].raw_rtd_adc_mv
+            samples[0].raw_rtd_adc_mv,
+            3_000,
         )
         .is_none()
     );
@@ -6480,7 +6503,10 @@ fn transient_heat_coverage_preserves_the_integer_adc_minimum_bin() {
         &transaction,
         &memory
     ));
-    assert!(prepare_transient_fit(&samples, count as u8, None, &memory, ambient_raw_mv).is_some());
+    assert!(
+        prepare_transient_fit(&samples, count as u8, None, &memory, ambient_raw_mv, 3_000,)
+            .is_some()
+    );
 
     for sample in transaction.samples[..count]
         .iter_mut()
@@ -6499,6 +6525,7 @@ fn transient_heat_coverage_preserves_the_integer_adc_minimum_bin() {
             None,
             &memory,
             ambient_raw_mv,
+            3_000,
         )
         .is_none()
     );
@@ -6514,6 +6541,7 @@ fn transient_zero_delay_model_does_not_invent_a_multi_second_delay() {
         None,
         &memory,
         runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        3_000,
     )
     .unwrap();
     let (model, residual) = best_transient_projection(&data).unwrap();
@@ -6534,6 +6562,7 @@ fn transient_fit_preserves_a_real_transport_delay() {
         None,
         &memory,
         runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        3_000,
     )
     .unwrap();
     let (model, residual) = best_transient_projection(&data).unwrap();
@@ -6626,6 +6655,7 @@ fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .expect("the captured trace should pass basic acceptance");
     assert!(best_transient_projection(&data).is_none());
@@ -6651,6 +6681,7 @@ fn captured_thermal_trace_requires_confirmed_samples_for_transient_fit() {
         None,
         &memory,
         filtered[0].raw_rtd_adc_mv,
+        3_000,
     );
     let (_, residual) = best_transient_projection(
         &filtered_data.expect("confirmed samples should produce a physical model"),
@@ -6669,6 +6700,7 @@ fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
         None,
         &memory,
         runtime_test_raw_rtd_adc_mv_for_temp(25.0),
+        3_000,
     )
     .unwrap();
     let temperatures: Vec<_> = samples[..count]
@@ -6679,7 +6711,7 @@ fn cached_transient_balances_match_direct_integrals_at_every_delay_edge() {
         .iter()
         .zip(&temperatures)
         .map(|(sample, temperature)| {
-            transient_sample_power_mw(*sample, *temperature, None, &memory).unwrap()
+            transient_sample_power_mw(*sample, *temperature, None, &memory, 3_000).unwrap()
         })
         .collect();
     let ambient =
@@ -6911,6 +6943,7 @@ fn captured_calibration_rejects_impossible_startup_temperature_spikes() {
         Some(&curve),
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     );
     if RTD_ASSUMED_ADC_OFFSET_UV == -13_500 {
         assert!(
@@ -6999,6 +7032,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
             trace.len() as u8,
             Some(&preview_curve),
             &memory_config,
+            3_000,
         )
         .is_none(),
         "a nonterminal recorded trace must not fit"
@@ -7019,6 +7053,7 @@ fn transient_thermal_fit_accepts_the_live_device_trace_shape() {
         trace.len() as u8,
         Some(&preview_curve),
         &memory_config,
+        3_000,
     )
     .expect("live device-shaped trace must produce a physical model");
     assert!(residual <= 0.20);
@@ -7105,6 +7140,7 @@ fn transient_thermal_fit_accepts_physical_3a_stage_transitions() {
         trace.len() as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("physical 3A trace should produce a model");
     assert!(residual <= 0.20);
@@ -7127,6 +7163,7 @@ fn transient_fit_excludes_fan_assisted_cooling_from_energy_balance() {
         count as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("fan-assisted cooling remains terminal evidence, not heater input");
     assert!(residual <= 0.20);
@@ -7181,6 +7218,7 @@ fn transient_fit_accepts_a_zero_duty_cutoff_sample_in_heating_phase() {
             None,
             &memory,
             samples[0].raw_rtd_adc_mv,
+            3_000,
         )
         .is_some()
     );
@@ -7205,6 +7243,7 @@ fn transient_fit_excludes_zero_duty_stage_gap_from_stable_rows() {
         count as u8,
         None,
         &memory,
+        3_000,
     )
     .expect("zero-duty stage gaps must not invalidate a physical fit");
     assert!(residual <= 0.20);
@@ -7833,6 +7872,7 @@ fn transient_trace_compaction_keeps_the_full_heating_span_for_fitting() {
             job.sample_count,
             None,
             &memory,
+            3_000,
         )
         .is_some()
     );
@@ -12514,7 +12554,9 @@ fn hold_actuator_feedback_prevents_positive_integral_windup() {
     controller.phase = HeaterControlPhase::Hold;
     controller.reseed_measurement(59.8);
     let mut input = production_test_input(59.8);
-    input.max_power_mw = 1_000.0;
+    // Leave physical headroom so this isolates actuator feedback rather
+    // than a model whose passive loss already exceeds full output.
+    input.max_power_mw = 10_000.0;
     input.allow_integral = false;
     for now_ms in (0..=1_000).step_by(50) {
         input.now_ms = now_ms;
@@ -12528,6 +12570,26 @@ fn hold_actuator_feedback_prevents_positive_integral_windup() {
     controller.natural_cooling_input = Some(input);
     controller.update_at(60, 59.8, true, Some(profile), 1_050);
     assert!(controller.hold_integral_c > 0.0);
+}
+
+#[test]
+fn projection_hold_does_not_integrate_when_passive_loss_exceeds_source_power() {
+    let profile = production_test_profile(300);
+    let mut controller = HeaterController::new();
+    controller.last_target_temp_c = 60;
+    controller.heater_was_enabled = true;
+    controller.phase = HeaterControlPhase::Hold;
+    controller.phase_ticks = u16::MAX;
+    controller.reseed_measurement(59.8);
+    let mut input = production_test_input(59.8);
+    input.max_power_mw = 1_000.0;
+    for now_ms in (0..=1_000).step_by(50) {
+        input.now_ms = now_ms;
+        controller.natural_cooling_input = Some(input);
+        let output = controller.update_at(60, 59.8, true, Some(profile), now_ms);
+        assert_eq!(output.duty_percent, 100);
+        assert_eq!(controller.hold_integral_c, 0.0);
+    }
 }
 
 #[test]
@@ -12625,6 +12687,30 @@ fn production_controller_requires_the_selected_bank_current() {
     assert_eq!(
         production_thermal_controller(terminal, ThermalProfileMode::W65, &terminal_pps),
         ProductionThermalController::Unavailable
+    );
+}
+
+#[test]
+fn production_controller_accepts_a_confirmed_lower_voltage_pps_apdo() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_000, 11_000, 3_000)]);
+    let request = PdContractRequest::pps(10_000, 3_000).unwrap();
+    let contract = source.select_exact_contract(request).unwrap();
+    let active = ConfirmedActiveContract::from_private_contract(contract, source).unwrap();
+    let power = PowerState {
+        protocol: PowerProtocol::Ready,
+        available: true,
+        requested: None,
+        active: Some(active),
+        source_capabilities: source.view(),
+        failure: None,
+    };
+    let manual = ManualPpsState::from_capabilities(adjustable_capabilities_from_view(
+        power.source_capabilities,
+    ));
+
+    assert_eq!(
+        production_thermal_controller(power, ThermalProfileMode::W65, &manual),
+        ProductionThermalController::Profile(ThermalProfileBank::Pps3a)
     );
 }
 
@@ -13266,6 +13352,28 @@ fn trajectory_heat_observation_rejects_held_samples_and_resets_on_recovery() {
 }
 
 #[test]
+fn calibrated_long_delay_plant_handoff_handles_sparse_measurements() {
+    // Projection read from the device used by HTTP run 528fcd41, exercised
+    // with a matching ideal plant and representative constant power levels.
+    // This isolates delay and sampling, not the complete hardware trace or
+    // the factory profile's subsequent candidate-search lifecycle.
+    for max_power_mw in [28_000.0, 35_000.0, 65_000.0] {
+        assert_trajectory_plant_handoff_with_measurement_interval(
+            ThermalProfileBank::Pps3a,
+            flux_purr_firmware::memory::ThermalPlantProjection {
+                convection_mw_per_c: 211.08168,
+                radiation_mw_per_k4: 0.0,
+                thermal_capacity_mj_per_c: 30_753.62,
+                transport_delay_ms: 4_500,
+            },
+            max_power_mw,
+            60,
+            500,
+        );
+    }
+}
+
+#[test]
 fn trajectory_controller_reaches_physical_hold_with_delayed_calibrated_plants() {
     for (bank, model, max_power_mw) in [
         (
@@ -13467,6 +13575,22 @@ fn assert_trajectory_plant_handoff(
     max_power_mw: f32,
     target: i16,
 ) {
+    assert_trajectory_plant_handoff_with_measurement_interval(
+        bank,
+        model,
+        max_power_mw,
+        target,
+        50,
+    );
+}
+
+fn assert_trajectory_plant_handoff_with_measurement_interval(
+    bank: ThermalProfileBank,
+    model: flux_purr_firmware::memory::ThermalPlantProjection,
+    max_power_mw: f32,
+    target: i16,
+    measurement_interval_ms: u64,
+) {
     let kind = ProductionThermalController::Profile(bank);
     let mut controller = HeaterController::new();
     let mut profile = production_test_profile(1_000);
@@ -13492,18 +13616,20 @@ fn assert_trajectory_plant_handoff(
     let mut entered_hold = false;
     let mut approach_at = 0;
     let mut handoff_ms = 0;
-    let mut peak = input.measured_temp_c;
+    let mut plate_temp_c = input.measured_temp_c;
+    let mut peak = plate_temp_c;
     for now_ms in (0_u64..=100_000).step_by(50) {
         let source_at = now_ms.saturating_sub(u64::from(model.transport_delay_ms));
         while delayed.len() > 1 && delayed[1].0 <= source_at {
             delayed.pop_front();
         }
-        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
-            model,
-            input.measured_temp_c,
-            30.0,
-        );
-        input.measured_temp_c += (delayed[0].1 - loss) / model.thermal_capacity_mj_per_c * 0.05;
+        let loss =
+            flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(model, plate_temp_c, 30.0);
+        plate_temp_c += (delayed[0].1 - loss) / model.thermal_capacity_mj_per_c * 0.05;
+        input.measurement_accepted = now_ms % measurement_interval_ms == 0;
+        if input.measurement_accepted {
+            input.measured_temp_c = plate_temp_c;
+        }
         input.now_ms = now_ms;
         let output = controller
             .update_production_at(kind, input, Some(profile))
@@ -13532,7 +13658,7 @@ fn assert_trajectory_plant_handoff(
             applied = power;
         }
         controller.applied_heat.observe(now_ms, power);
-        peak = peak.max(input.measured_temp_c);
+        peak = peak.max(plate_temp_c);
     }
     assert!(
         entered_hold,
@@ -14576,7 +14702,7 @@ fn automatic_warmup_targets_the_calibrated_boundary_at_full_power() {
 }
 
 #[test]
-fn automatic_heater_policy_caps_the_apdo_budget_at_three_amps() {
+fn automatic_heater_policy_uses_the_advertised_apdo_budget() {
     let apdos = [
         Some(ch224q::PpsApdo {
             min_mv: 5_000,
@@ -14599,9 +14725,9 @@ fn automatic_heater_policy_caps_the_apdo_budget_at_three_amps() {
         None,
     )
     .expect("3.25 A APDO leaves a safe automatic range");
-    assert_eq!(candidate.current_ma, 3_000);
-    assert_eq!(candidate.allowed_mv, 9_600);
-    assert_eq!(candidate.power_mw, 28_800);
+    assert_eq!(candidate.current_ma, 3_250);
+    assert_eq!(candidate.allowed_mv, 10_400);
+    assert_eq!(candidate.power_mw, 33_800);
     assert_eq!(
         heater_available_power_mw_for_temp(
             20.0,
@@ -14671,7 +14797,112 @@ fn automatic_heater_pps_request_ramps_large_voltage_changes() {
 }
 
 #[test]
-fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
+fn warmup_quantized_ceiling_noise_does_not_blank_the_confirmed_gate() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let mut current_mv = 5_500;
+    // Replay the 10.0V -> 9.9V ceiling boundary from the HTTP trace. The
+    // working point must remain inside both envelopes without cycling PWM.
+    for ceiling_mv in [10_000, 9_900, 10_000, 10_100, 10_000, 10_100] {
+        let active = ConfirmedActiveContract::from_private_contract(
+            source
+                .select_exact_contract(PdContractRequest::automatic_pps(current_mv, 3_000).unwrap())
+                .unwrap(),
+            source,
+        );
+        let next_mv = automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            current_mv,
+            ceiling_mv,
+            5_500,
+            ceiling_mv,
+            21_000,
+        );
+        assert!(next_mv <= ceiling_mv);
+        assert!(
+            !automatic_pps_reconciliation_requires_pause(active, ceiling_mv),
+            "safe Warmup transition {current_mv} -> {next_mv} under {ceiling_mv} must not blank"
+        );
+        current_mv = next_mv;
+    }
+}
+
+#[test]
+fn automatic_pps_never_spends_its_quantized_ceiling_headroom() {
+    // HTTP run 1a8acc31: a 10.0V working request was retained at a 10.0V
+    // ceiling, then became unsafe when the ceiling fell to 9.9V. Replaying
+    // the peak and return must actively restore the reserved quantum.
+    for phase in [
+        HeaterControlPhase::Warmup,
+        HeaterControlPhase::Approach,
+        HeaterControlPhase::Hold,
+    ] {
+        let mut current_mv = 9_800;
+        for ceiling_mv in [9_900, 10_000, 10_100, 10_000, 9_900] {
+            let next = automatic_heater_request_mv_for_phase(
+                phase, current_mv, ceiling_mv, 5_500, ceiling_mv, 21_000,
+            );
+            assert!(
+                next <= ceiling_mv - 100,
+                "{phase:?}: {current_mv} -> {next} at {ceiling_mv}"
+            );
+            current_mv = next;
+        }
+    }
+}
+
+#[test]
+fn warmup_reconciliation_keeps_a_safe_contract_ahead_of_the_backend_cache() {
+    let source = SourceCapabilities::from_pdos(&[pps_source_capability(5_500, 21_000, 3_000)]);
+    let active = ConfirmedActiveContract::from_private_contract(
+        source
+            .select_exact_contract(PdContractRequest::automatic_pps(10_900, 3_000).unwrap())
+            .unwrap(),
+        source,
+    );
+    let next_mv = automatic_heater_request_mv_for_phase(
+        HeaterControlPhase::Warmup,
+        10_800,
+        10_900,
+        5_500,
+        10_900,
+        21_000,
+    );
+    assert_eq!(next_mv, 10_800);
+    assert!(automatic_pps_contract_requires_reconciliation(
+        true, active, next_mv, 3_000
+    ));
+    assert!(!automatic_pps_reconciliation_requires_pause(active, 10_900));
+    assert!(automatic_pps_reconciliation_requires_pause(active, 10_800));
+}
+
+#[test]
+fn warmup_ceiling_headroom_never_retains_an_unsafe_contract_or_drops_below_floor() {
+    assert_eq!(
+        automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            10_000,
+            9_800,
+            5_500,
+            9_800,
+            21_000
+        ),
+        9_700
+    );
+    assert_eq!(
+        automatic_heater_request_mv_for_phase(
+            HeaterControlPhase::Warmup,
+            5_500,
+            5_500,
+            5_500,
+            5_500,
+            21_000
+        ),
+        5_500
+    );
+}
+
+#[test]
+fn automatic_heater_warmup_uses_bounded_steps_and_a_guarded_ceiling() {
     assert_eq!(
         automatic_heater_request_mv_for_phase(
             HeaterControlPhase::Warmup,
@@ -14679,6 +14910,7 @@ fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
             21_000,
             5_500,
             21_000,
+            21_000
         ),
         21_000,
     );
@@ -14689,6 +14921,7 @@ fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
             19_700,
             5_500,
             21_000,
+            21_000
         ),
         20_500,
     );
@@ -14699,8 +14932,9 @@ fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
             19_700,
             5_500,
             21_000,
+            21_000
         ),
-        19_700,
+        20_000,
     );
     assert_eq!(
         automatic_heater_request_mv_for_phase(
@@ -14709,6 +14943,7 @@ fn automatic_heater_warmup_requests_the_full_safe_ceiling_without_stepping() {
             19_700,
             5_500,
             21_000,
+            21_000
         ),
         21_000,
     );
@@ -14799,9 +15034,9 @@ fn automatic_heater_boundary_uses_encoded_budget_for_five_amp_apdo() {
     flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
     let candidate = manual
         .automatic_heater_pps_candidate(101.0, None, &config, None)
-        .expect("encoded 3 A budget keeps the calibrated boundary usable");
+        .expect("the old 3 A voltage proof remains conservative without capping negotiation");
 
-    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.current_ma, 5_000);
     assert_eq!(candidate.allowed_mv, 10_000);
     assert!(candidate.boundary_applied);
 }
@@ -14836,7 +15071,7 @@ fn automatic_heater_boundary_matches_a_raw_apdo_below_the_fusb_floor() {
         .automatic_heater_pps_candidate(68.0, None, &config, None)
         .expect("the persisted 3 A boundary should cover the next colder bucket");
 
-    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.current_ma, 5_000);
     assert_eq!(candidate.allowed_mv, 9_200);
     assert!(candidate.boundary_applied);
 }
@@ -14898,7 +15133,7 @@ fn automatic_heater_boundary_carries_the_colder_point_across_a_rounded_bin_edge(
         .automatic_heater_pps_candidate(148.3, None, &config, None)
         .expect("the colder observed point covers the rounded bin edge");
 
-    assert_eq!(candidate.current_ma, 3_000);
+    assert_eq!(candidate.current_ma, 5_000);
     assert_eq!(candidate.allowed_mv, 18_300);
     assert!(candidate.boundary_applied);
 }
@@ -15042,7 +15277,9 @@ fn assert_live_edge_terminal_requests(
         )
         .expect("the encoded terminal step remains safe while its ticket is confirmed");
     assert_eq!(terminal_step_while_temperature_dips.current_ma, 3_000);
-    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 20_000);
+    // Keep the admitted bounded step, without promoting the not-yet-reached
+    // observation's full 21 V ceiling across this narrow dip.
+    assert_eq!(terminal_step_while_temperature_dips.allowed_mv, 20_500);
 
     let terminal_candidate_after_small_settle_blank = manual
         .automatic_heater_pps_for_contract_with_rtd(
@@ -15121,7 +15358,7 @@ fn automatic_heater_fixed_fallback_uses_only_advertised_safe_contracts() {
     let (request, request_ma) = automatic_heater_fixed_request(source, 3.2)
         .expect("the advertised 9 V fixed PDO is safe under the preset load model");
     assert_eq!(request, ch224q::VoltageRequest::V9);
-    assert_eq!(request_ma, 3_000);
+    assert_eq!(request_ma, 3_250);
 
     source.fixed[1] = Some((9_000, 3_000));
     let (request, request_ma) = automatic_heater_fixed_request(source, 2.8)
@@ -15264,6 +15501,7 @@ fn automatic_pps_start_preserves_heater_intent_from_fixed_standby() {
         current_request_mv: 5_500,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
@@ -15405,6 +15643,7 @@ fn heater_backend_uses_pps_mos_only_when_pps_covers_20v() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15478,6 +15717,7 @@ fn heater_backend_uses_the_20v_apdo_current_not_another_range() {
             current_request_mv: 20_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15512,6 +15752,7 @@ fn heater_backend_limits_to_pps_when_avs_is_unavailable() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15553,6 +15794,7 @@ fn heater_backend_clamps_avs_to_advertised_capability() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15594,6 +15836,7 @@ fn heater_backend_ignores_avs_without_advertised_range() {
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -15628,6 +15871,7 @@ fn heater_backend_clamps_low_end_to_advertised_pps_minimum() {
             current_request_mv: 15_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             terminal_fixed_pd_disarmed: false,
@@ -17565,6 +17809,7 @@ fn fusb302b_pps_contract_enables_calibration_and_keeps_the_absolute_guard() {
         current_request_mv: 24_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
@@ -17630,6 +17875,7 @@ fn fusb302b_capability_refresh_preserves_terminal_fixed_pd_disarm() {
         current_request_mv: 20_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: true,
@@ -17678,8 +17924,9 @@ fn complete_idle_clears_failed_pps_adapter_only_with_observed_capability() {
                 terminal_fixed_pd_disarmed: true,
                 settle_until_ms: None,
                 next_request_at_ms: 0,
+                pps_request_failure_count: 0,
                 ..
-            } if capability_max_ma == 3_000
+            } if capability_max_ma == current_ma
         ));
         assert!(!reset_idle_failed_pps_backend(&mut backend, capabilities));
     }
@@ -17697,6 +17944,7 @@ fn fusb302b_rediscovery_preserves_terminal_fixed_pd_disarm() {
         current_request_mv: 20_000,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: true,
@@ -18793,22 +19041,73 @@ fn fixed_contract_does_not_emit_liveness_probes() {
 #[test]
 fn continuous_calibration_pps_transition_keeps_the_global_heater_permit() {
     assert!(continuous_pps_transition_keeps_heater_permit(
-        true, true, true, true, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        false, true, true, true, true
+        None, true, true, true, true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, false, true, true, true
+        Some(PowerIntentOwner::Calibration),
+        false,
+        true,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, false, true, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        false,
+        true,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, true, false, true
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        false,
+        true
     ));
     assert!(!continuous_pps_transition_keeps_heater_permit(
-        true, true, true, true, false
+        Some(PowerIntentOwner::Calibration),
+        true,
+        true,
+        true,
+        false
+    ));
+}
+
+#[test]
+fn automatic_thermal_pps_steps_preserve_the_gate_without_bypassing_interlocks() {
+    // Thermal tuning uses the production AutomaticThermal ticket, including
+    // Warmup's successive voltage steps on the confirmed APDO/current.
+    assert!(continuous_pps_transition_keeps_heater_permit(
+        Some(PowerIntentOwner::AutomaticThermal),
+        true,
+        true,
+        true,
+        true
+    ));
+    for denied_condition in 0..4 {
+        let mut conditions = [true; 4];
+        conditions[denied_condition] = false;
+        assert!(!continuous_pps_transition_keeps_heater_permit(
+            Some(PowerIntentOwner::AutomaticThermal),
+            conditions[0],
+            conditions[1],
+            conditions[2],
+            conditions[3],
+        ));
+    }
+    assert!(!continuous_pps_transition_keeps_heater_permit(
+        Some(PowerIntentOwner::ManualOperator),
+        true,
+        true,
+        true,
+        true
     ));
 }
 
@@ -18986,6 +19285,20 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
         TuningPdWaitDecision::Fail("pd_contract_lost")
     );
 
+    let transient = PowerState {
+        failure: Some(PowerFailure::TransportFault),
+        ..pending
+    };
+    assert_eq!(
+        tuning_pd_wait_decision(transient, Some(100), 129, Some(100), false),
+        TuningPdWaitDecision::Wait,
+        "a transient observation gap during an admitted PPS request must be retried"
+    );
+    assert_eq!(
+        tuning_pd_wait_decision(transient, Some(100), 30_101, Some(100), false),
+        TuningPdWaitDecision::Fail("pd_request_timeout")
+    );
+
     let (ready, _) = production_power_fixture(5_000);
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, Some(100), false),
@@ -18999,6 +19312,14 @@ fn tuning_waits_for_an_admitted_pd_request_instead_of_failing_at_first_missing_s
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, None, false),
         TuningPdWaitDecision::Ready
+    );
+
+    let (mut standby, _) = production_power_fixture(3_000);
+    standby.active.as_mut().unwrap().voltage_mv = FUSB302B_PPS_MIN_MV;
+    assert_eq!(
+        tuning_pd_wait_decision(standby, Some(100), 129, None, false),
+        TuningPdWaitDecision::Wait,
+        "the standby PPS floor is a recovery state, not a working tuning contract"
     );
     assert_eq!(
         tuning_pd_wait_decision(ready, Some(100), 129, None, true),
@@ -19590,7 +19911,7 @@ fn tuning_cooldown_releases_completed_calibration_power_lock_without_heating() {
         };
         assert!(!terminal_fixed_pd_disarmed);
         assert_eq!(current_mode, None);
-        assert_eq!(capability_max_ma, 3_000);
+        assert_eq!(capability_max_ma, capability_ma);
         assert!(!automatic_heater_power_is_idle(false, 0, false, true));
         let request_mv = automatic_pps_request_mv(
             0,
@@ -19635,6 +19956,7 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
         current_request_mv: 20_000,
         settle_until_ms: Some(100),
         next_request_at_ms: 100,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: true,
         current_limit_fixed_request_confirmed: true,
         terminal_fixed_pd_disarmed: true,
@@ -19654,6 +19976,7 @@ fn manual_pps_calibration_releases_terminal_disarm_without_enabling_the_heater()
             current_request_mv: 12_000,
             settle_until_ms: None,
             next_request_at_ms: 0,
+            pps_request_failure_count: 0,
             current_limit_fixed_pwm_active: false,
             current_limit_fixed_request_confirmed: false,
             ..
@@ -20441,8 +20764,11 @@ fn automatic_boundary_caps_previous_requests_across_warmup() {
         assert!(candidate.boundary_applied);
         let expected_mv = match temp_c {
             100.0 => 17_000,
-            105.0 => 17_000,
-            108.0 => 18_400,
+            // The 18.4 V observation is conservatively capped by the later
+            // 17.5 V point. That existing 17.5 V working request retains the
+            // same bounded dip allowance; the 18.4 V peak is never requested.
+            105.0 => 17_500,
+            108.0 => 17_500,
             110.0 => 17_500,
             _ => unreachable!(),
         };
@@ -20637,6 +20963,7 @@ fn diagnose_real_failed_thermal_plant_trace_fit() {
         None,
         &memory,
         runtime_test_raw_rtd_adc_mv_for_temp(25.39),
+        3_000,
     );
     let data = prepared.expect("the captured trace must pass structural preparation");
     let (_, full_residual) =
@@ -20689,6 +21016,7 @@ fn transient_fit_replays_a_real_failed_hil_trace_after_quantized_voltage_filter(
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .expect("HIL fixture passes structural preparation");
     let (_, full_residual) =
@@ -20737,6 +21065,7 @@ fn transient_fit_replays_the_latest_failed_hil_trace() {
         None,
         &memory,
         samples[0].raw_rtd_adc_mv,
+        3_000,
     )
     .expect("latest HIL fixture passes structural preparation");
     let full = best_transient_projection(&data);
@@ -20796,6 +21125,7 @@ fn transient_fit_replays_the_completed_final_hil_trace() {
         None,
         &memory,
         ambient_raw_rtd_adc_mv,
+        3_000,
     )
     .expect("completed HIL fixture passes structural preparation");
     let (projection, residual) = best_transient_projection_without_radiation(&data)
@@ -21071,3 +21401,88 @@ fn full_range_scan_completion_at_169c_keeps_heating_without_rescan() {
 
 #[path = "thermal_plant_publication_tests.rs"]
 mod thermal_plant_publication_tests;
+
+#[test]
+fn tuning_output_pause_diagnostic_keeps_both_voltages_within_wire_limit() {
+    let pause = 7 | (255 << 8) | (255 << 16);
+    for cause in 0..=3 {
+        let reason = tuning_output_pause_reason(cause, true, true, true, pause, u32::MAX);
+        assert!(reason.contains("flags7 cached25500 next25500 active65535 cap65535"));
+        assert!(reason.len() <= flux_purr_firmware::thermal_tuning::THERMAL_TUNING_REASON_MAX_LEN);
+    }
+}
+
+#[test]
+fn automatic_heater_full_output_can_reach_the_source_endpoint() {
+    for max_mv in [20_000, 21_000] {
+        for current_ma in [3_000, 3_250, 5_000] {
+            let next_mv = automatic_heater_request_mv_for_phase(
+                HeaterControlPhase::Warmup,
+                max_mv - 500,
+                max_mv,
+                5_500,
+                max_mv,
+                max_mv,
+            );
+            assert_eq!(next_mv, max_mv);
+            let source =
+                SourceCapabilities::from_pdos(&[pps_source_capability(5_500, max_mv, current_ma)]);
+            let request = PdContractRequest::automatic_pps(
+                next_mv,
+                encode_automatic_pps_current_ma(current_ma),
+            )
+            .unwrap();
+            let contract = source
+                .select_exact_contract(request)
+                .expect("source endpoint must be negotiable at its actual current");
+            assert_eq!(contract.voltage_mv, max_mv);
+            assert_eq!(contract.current_ma, current_ma);
+        }
+    }
+}
+
+#[test]
+fn transient_power_reference_uses_the_recorded_scan_current_without_a_watt_cap() {
+    let sample = ThermalPlantTransientSample {
+        duty_percent: 100,
+        heater_voltage_125mv: 168,
+        elapsed_ticks: 1,
+        raw_rtd_adc_mv: 1_000,
+    };
+    for current_ma in [3_000, 3_250, 5_000] {
+        let power =
+            transient_sample_power_mw(sample, 200.0, None, &MemoryConfig::default(), current_ma)
+                .unwrap();
+        assert_eq!(power, 21.0 * f32::from(current_ma));
+    }
+    assert!(transient_sample_power_mw(sample, 200.0, None, &MemoryConfig::default(), 0).is_none());
+}
+
+#[test]
+fn thermal_plant_continuation_preserves_the_actual_scan_current() {
+    let memory = MemoryConfig::default();
+    for current_ma in [3_000, 3_250, 5_000] {
+        let manual = thermal_plant_job_manual_pps(20_000, current_ma);
+        let mut boundary = synthetic_supply_boundary();
+        boundary.source_max_ma = current_ma;
+        boundary.points[0].request_current_ma = current_ma;
+        let input = CalibrationJobUpdateInput {
+            now_ms: 140_000,
+            latest_rtd_raw_code: 2_000,
+            latest_vin_raw_code: 2_000,
+            wifi_started: Some(false),
+            pd_conduction_allowed: true,
+            pd_confirmed: true,
+            latest_rtd_raw_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(100.0),
+            latest_vin_raw_adc_mv: 1_500,
+            latest_temp_c: 100.0,
+            latest_vin_mv: 10_000,
+            heater_duty_percent: 100,
+        };
+        assert_eq!(
+            thermal_plant_continuation_request(&boundary, &memory, &manual, input),
+            Some((10_000, current_ma)),
+            "continuing a completed scan must not impose a 3 A fallback"
+        );
+    }
+}

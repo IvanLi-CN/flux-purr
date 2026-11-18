@@ -31,6 +31,42 @@ impl ForecastBias {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct EnergySlope {
+    count: u32,
+    time_mean_s: f32,
+    energy_mean_mj: f32,
+    time_variance: f32,
+    time_energy_covariance: f32,
+}
+
+impl EnergySlope {
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            time_mean_s: 0.0,
+            energy_mean_mj: 0.0,
+            time_variance: 0.0,
+            time_energy_covariance: 0.0,
+        }
+    }
+
+    fn observe(&mut self, time_s: f32, energy_mj: f32) {
+        self.count += 1;
+        let delta_time = time_s - self.time_mean_s;
+        let delta_energy = energy_mj - self.energy_mean_mj;
+        self.time_mean_s += delta_time / self.count as f32;
+        self.energy_mean_mj += delta_energy / self.count as f32;
+        self.time_variance += delta_time * (time_s - self.time_mean_s);
+        self.time_energy_covariance += delta_time * (energy_mj - self.energy_mean_mj);
+    }
+
+    fn power_mw(self) -> Option<f32> {
+        (self.count >= 2 && self.time_variance > 0.0)
+            .then(|| self.time_energy_covariance / self.time_variance)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct HeatTransferObservation {
     origin: Option<(u64, f32)>,
     last_measurement_ms: Option<u64>,
@@ -42,6 +78,7 @@ struct HeatTransferObservation {
     loss_energy_mj: f32,
     delayed_energy_mj: f32,
     received_energy_mj: f32,
+    energy_slope: EnergySlope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -121,6 +158,7 @@ impl AppliedHeatHistory {
                 loss_energy_mj: 0.0,
                 delayed_energy_mj: 0.0,
                 received_energy_mj: 0.0,
+                energy_slope: EnergySlope::new(),
             },
         }
     }
@@ -487,18 +525,23 @@ impl AppliedHeatHistory {
             self.correct_response_heat(origin_ms, now_ms, plant);
             return;
         }
-        // Accumulate only intervals with their own accepted temperature
-        // origin. PPS gaps and ADC shifts contribute no time or temperature
-        // difference; valid evidence on either side may share this average.
+        // Fit the cumulative energy discrepancy over all accepted intervals.
+        // A free intercept removes the noisy first-temperature anchor; using
+        // only two endpoints converts quantization into a large false power.
+        // PPS gaps contribute neither time nor temperature differences.
+        self.transfer.energy_slope.observe(
+            self.transfer.valid_ms as f32 / 1_000.0,
+            self.transfer.loss_energy_mj
+                + plant.model.thermal_capacity_mj_per_c * self.transfer.temperature_delta_c
+                - self.transfer.delayed_energy_mj,
+        );
         if self.transfer.valid_ms < delay_ms.max(100) {
             return;
         }
-        let valid_s = self.transfer.valid_ms as f32 / 1_000.0;
-        let residual_mw = ((self.transfer.loss_energy_mj
-            + plant.model.thermal_capacity_mj_per_c * self.transfer.temperature_delta_c
-            - self.transfer.delayed_energy_mj)
-            / valid_s)
-            .clamp(-plant.max_power_mw, plant.max_power_mw);
+        let Some(residual_mw) = self.transfer.energy_slope.power_mw() else {
+            return;
+        };
+        let residual_mw = residual_mw.clamp(-plant.max_power_mw, plant.max_power_mw);
         self.transfer.residual = Some((now_ms, residual_mw));
         self.clear_transfer_energy_window();
     }
@@ -581,6 +624,7 @@ impl AppliedHeatHistory {
         self.transfer.loss_energy_mj = 0.0;
         self.transfer.delayed_energy_mj = 0.0;
         self.transfer.received_energy_mj = 0.0;
+        self.transfer.energy_slope = EnergySlope::new();
     }
 
     fn residual_at(&self, now_ms: u64, future_ms: u64, plant: TrajectoryPlant) -> f32 {
@@ -592,10 +636,47 @@ impl AppliedHeatHistory {
         if now_ms < observed_ms || age_ms > horizon_ms * 2 {
             return 0.0;
         }
+        if residual_mw < 0.0 {
+            // A fresh measured heat deficit can be a continuing extra loss,
+            // not stored heat that vanishes before the next command arrives.
+            // Keep it over the existing two-delay observation horizon only;
+            // neither future prediction nor a blind interval renews evidence.
+            return if age_ms.saturating_add(future_ms) <= horizon_ms * 2 {
+                residual_mw
+            } else {
+                0.0
+            };
+        }
         // A bounded two-delay decay expresses model uncertainty, not a newly
         // fitted thermal constant. No persistent or cross-run learned state.
         let decay = 1.0 + (age_ms + future_ms) as f32 / (horizon_ms * 2) as f32;
         residual_mw / (decay * decay)
+    }
+
+    /// Net maintenance demand at command arrival for a pure-delay projection.
+    /// Use the same bounded discrepancy as the arrival forecast: otherwise a
+    /// known extra loss lowers the prediction but is omitted from its power
+    /// request and ceiling. This never increases the electrical power limit.
+    pub fn projection_maintenance_power_mw(
+        &self,
+        now_ms: u64,
+        temperature_c: f32,
+        plant: TrajectoryPlant,
+    ) -> Option<f32> {
+        if self.response.is_some()
+            || !temperature_c.is_finite()
+            || !plant.max_power_mw.is_finite()
+            || plant.max_power_mw <= 0.0
+        {
+            return None;
+        }
+        let loss_mw = plant.loss_mw(temperature_c);
+        if !loss_mw.is_finite() {
+            return None;
+        }
+        let discrepancy_mw =
+            self.residual_at(now_ms, u64::from(plant.model.transport_delay_ms), plant);
+        Some((loss_mw - discrepancy_mw).clamp(0.0, plant.max_power_mw))
     }
 
     pub fn forecast(
@@ -644,13 +725,15 @@ impl AppliedHeatHistory {
             let end_ms = ((at_ms / self.width_ms + 1) * self.width_ms).min(now_ms);
             let arrival_ms = at_ms.saturating_add(delay_ms);
             let power_mw = self.power_at(at_ms).map_or(inferred_mw, |power_mw| {
+                // A weaker new PPS limit constrains future commands, not
+                // energy already applied under a stronger confirmed contract.
                 (power_mw
                     + self.residual_at(
                         arrival_ms.min(now_ms),
                         arrival_ms.saturating_sub(now_ms),
                         plant,
                     ))
-                .clamp(0.0, plant.max_power_mw)
+                .clamp(0.0, power_mw.max(plant.max_power_mw))
             });
             temperature_c +=
                 plant.rise(temperature_c, power_mw) * (end_ms - at_ms) as f32 / 1_000.0;
@@ -667,7 +750,7 @@ impl AppliedHeatHistory {
                 temperature_c,
                 self.power_at(now_ms).map_or(inferred_mw, |power_mw| {
                     (power_mw + self.residual_at(now_ms, delay_ms, plant))
-                        .clamp(0.0, plant.max_power_mw)
+                        .clamp(0.0, power_mw.max(plant.max_power_mw))
                 }),
             ),
         }
@@ -730,12 +813,12 @@ impl TemperatureTrajectory {
         predicted: ReferenceState,
         horizon_s: f32,
         plant: TrajectoryPlant,
+        maintenance_mw: f32,
     ) -> u16 {
         let rise = reference.rise_c_per_s
             + (reference.temperature_c - predicted.temperature_c) / horizon_s.max(0.4)
             + 0.5 * (reference.rise_c_per_s - predicted.rise_c_per_s);
-        let power_mw =
-            plant.loss_mw(reference.temperature_c) + plant.model.thermal_capacity_mj_per_c * rise;
+        let power_mw = maintenance_mw + plant.model.thermal_capacity_mj_per_c * rise;
         (power_mw * 1_000.0 / plant.max_power_mw).clamp(50.0, 1_000.0) as u16
     }
 

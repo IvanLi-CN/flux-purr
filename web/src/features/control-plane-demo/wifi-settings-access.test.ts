@@ -9,6 +9,22 @@ const base = {
 }
 
 describe('resolveWifiSettingsAccess', () => {
+  it('keeps an otherwise writable USB route read-only while firmware tuning is active', () => {
+    expect(
+      resolveWifiSettingsAccess({
+        ...base,
+        transport: 'devd',
+        bridgeTransport: 'usb',
+        leaseId: 'lease-1',
+        leaseState: 'active',
+        thermalTuningActive: true,
+      })
+    ).toEqual({
+      mode: 'read-only',
+      reason: '设备正在执行固件热控调优；仅允许读取和停止调优。',
+    })
+  })
+
   it('allows active native USB bridge writes', () => {
     expect(
       resolveWifiSettingsAccess({

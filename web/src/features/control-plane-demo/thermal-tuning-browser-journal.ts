@@ -2,7 +2,8 @@ import type { ThermalTuningEvent } from './contracts'
 import type { ThermalTuningRecording } from './thermal-tuning-recorder'
 
 const DATABASE = 'flux-purr-thermal-tuning-v2'
-const VERSION = 1
+const VERSION = 2
+const HISTORY_LIMIT = 10
 
 interface StoredRun {
   deviceId: string
@@ -16,6 +17,8 @@ interface StoredEvent {
   event: ThermalTuningEvent
 }
 
+type ArchivedRun = StoredRun & { order: number }
+
 let databasePromise: Promise<IDBDatabase> | null = null
 
 function database(): Promise<IDBDatabase> {
@@ -26,14 +29,39 @@ function database(): Promise<IDBDatabase> {
       return
     }
     const request = indexedDB.open(DATABASE, VERSION)
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result
-      if (!db.objectStoreNames.contains('runs'))
-        db.createObjectStore('runs', { keyPath: 'deviceId' })
       if (!db.objectStoreNames.contains('events'))
         db.createObjectStore('events', { keyPath: 'key' })
+      const history = db.createObjectStore('history', { keyPath: ['deviceId', 'runId'] })
+      history.createIndex('order', 'order')
+      history.createIndex('device', ['deviceId', 'order'])
+      const upgrade = request.transaction
+      if (event.oldVersion === 1 && upgrade) {
+        const legacy = upgrade.objectStore('runs').openCursor()
+        let order = 0
+        legacy.onsuccess = () => {
+          const cursor = legacy.result
+          if (!cursor) {
+            const keys = history.index('order').getAllKeys()
+            keys.onsuccess = () => pruneHistory(history, upgrade.objectStore('events'), keys.result)
+            return
+          }
+          const saved = cursor.value as StoredRun
+          history.put({ ...saved, order: ++order } satisfies ArchivedRun)
+          cursor.delete()
+          cursor.continue()
+        }
+      }
     }
-    request.onsuccess = () => resolve(request.result)
+    request.onsuccess = () => {
+      const db = request.result
+      db.onversionchange = () => {
+        db.close()
+        databasePromise = null
+      }
+      resolve(db)
+    }
     request.onerror = () => reject(request.error ?? new Error('无法打开调优事件日志。'))
     request.onblocked = () => reject(new Error('调优事件日志被其他页面占用。'))
   })
@@ -61,20 +89,41 @@ function committed(transaction: IDBTransaction): Promise<void> {
 }
 
 export async function loadThermalTuningRecording(
-  deviceId: string
+  deviceId: string,
+  runId?: string
 ): Promise<ThermalTuningRecording | null> {
   const db = await database()
-  const transaction = db.transaction(['runs', 'events'], 'readonly')
-  const saved = (await result(transaction.objectStore('runs').get(deviceId))) as
-    | StoredRun
-    | undefined
+  const transaction = db.transaction(['history', 'events'], 'readonly')
+  const history = transaction.objectStore('history')
+  const saved: ArchivedRun | undefined = runId
+    ? await result(history.get([deviceId, runId]))
+    : (
+        await result(
+          history
+            .index('device')
+            .openCursor(
+              IDBKeyRange.bound([deviceId, 0], [deviceId, Number.MAX_SAFE_INTEGER]),
+              'prev'
+            )
+        )
+      )?.value
   if (!saved) return null
-  const range = IDBKeyRange.bound(
-    [deviceId, saved.runId, 0],
-    [deviceId, saved.runId, Number.MAX_SAFE_INTEGER]
-  )
-  const entries = (await result(transaction.objectStore('events').getAll(range))) as StoredEvent[]
+  const entries = (await result(
+    transaction.objectStore('events').getAll(eventRange(deviceId, saved.runId))
+  )) as StoredEvent[]
   return { ...saved.recording, events: entries.map((entry) => entry.event) }
+}
+
+function eventRange(deviceId: string, runId: string) {
+  return IDBKeyRange.bound([deviceId, runId, 0], [deviceId, runId, Number.MAX_SAFE_INTEGER])
+}
+
+function pruneHistory(history: IDBObjectStore, events: IDBObjectStore, keys: IDBValidKey[]) {
+  for (const key of keys.slice(0, Math.max(0, keys.length - HISTORY_LIMIT))) {
+    const [deviceId, runId] = key as [string, string]
+    history.delete(key)
+    events.delete(eventRange(deviceId, runId))
+  }
 }
 
 export async function persistThermalTuningRecording(
@@ -83,12 +132,20 @@ export async function persistThermalTuningRecording(
 ): Promise<void> {
   if (!recording.runId) throw new Error('调优事件日志缺少 runId。')
   const db = await database()
-  const transaction = db.transaction(['runs', 'events'], 'readwrite')
+  const transaction = db.transaction(['history', 'events'], 'readwrite')
   const completion = committed(transaction)
+  void completion.catch(() => {})
   try {
-    const runs = transaction.objectStore('runs')
-    const saved = (await result(runs.get(deviceId))) as StoredRun | undefined
-    const priorSequence = saved?.runId === recording.runId ? saved.persistedThrough : -1
+    const history = transaction.objectStore('history')
+    const saved = (await result(history.get([deviceId, recording.runId]))) as
+      | ArchivedRun
+      | undefined
+    const priorSequence = saved?.persistedThrough ?? -1
+    const persistedThrough = recording.events.at(-1)?.sequence ?? -1
+    if (persistedThrough < priorSequence) {
+      await completion
+      return
+    }
     const events = transaction.objectStore('events')
     for (const event of recording.events) {
       if (event.sequence > priorSequence) {
@@ -98,16 +155,38 @@ export async function persistThermalTuningRecording(
         } satisfies StoredEvent)
       }
     }
-    const { events: _events, ...withoutEvents } = recording
-    runs.put({
+    const { events: _events, status, ...withoutEvents } = recording
+    const { ownerProof: _proof, ...publicStatus } = status as typeof status & {
+      ownerProof?: unknown
+    }
+    // A browser tab may read an older run again, so only first observation sets its order.
+    const orderIndex = history.index('order')
+    const priorRun = saved ? null : await result(orderIndex.openKeyCursor(null, 'prev'))
+    const order = saved?.order ?? Number(priorRun?.key ?? 0) + 1
+    history.put({
       deviceId,
       runId: recording.runId,
-      recording: withoutEvents,
-      persistedThrough: recording.events.at(-1)?.sequence ?? -1,
-    } satisfies StoredRun)
+      recording: {
+        ...withoutEvents,
+        status: {
+          ...publicStatus,
+          candidateProfile:
+            publicStatus.candidateProfile ?? saved?.recording.status.candidateProfile ?? null,
+        },
+      },
+      persistedThrough,
+      order,
+    } satisfies ArchivedRun)
+    if (!saved) {
+      pruneHistory(history, events, await result(orderIndex.getAllKeys()))
+    }
     await completion
   } catch (error) {
-    transaction.abort()
+    try {
+      transaction.abort()
+    } catch {
+      // The transaction may already have aborted.
+    }
     throw error
   }
 }

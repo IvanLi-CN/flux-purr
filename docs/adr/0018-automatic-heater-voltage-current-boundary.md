@@ -4,6 +4,8 @@
 
 Superseded in its calibration source and auxiliary-load accounting by [ADR 0019](0019-heater-supply-boundary-calibration.md). The contract ordering, mode boundaries, final-request cap, and pause/recovery rules remain applicable.
 
+电流封顶与边界电流来源以 [ADR 0028](0028-source-capability-driven-heater-negotiation.md) 为准；下文的固定 3A 条款仅保留原始决策背景。
+
 ## Decision
 
 Normal Auto/W65 automatic heating must limit requested supply voltage using the heater resistance-versus-temperature estimate and source current capability so that the heater's predicted conduction current stays within the available source budget. Calibration data takes priority; the preset theoretical resistance model is the fallback. This 3A boundary applies to Auto/W65 normal automatic heating, including its Fixed fallback and all entry points into that mode. Explicit W100 is a separate 5A production path: it requires an independently confirmed 5A source contract and does not use or claim protection from this 3A boundary, which has no 5A whole-device calibration record. Calibration heating and manual PPS debugging retain their existing behavior and are not covered by this automatic-heating guarantee.

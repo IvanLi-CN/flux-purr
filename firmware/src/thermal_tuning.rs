@@ -4,7 +4,9 @@ use heapless::{String, Vec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::adapters::pd::{FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV};
+use crate::adapters::pd::{
+    FUSB302B_PD_ABSOLUTE_MAX_MV, FUSB302B_PD_ABSOLUTE_MIN_MV, PD_PPS_VOLTAGE_STEP_MV,
+};
 use crate::heater_phase::{HOLD_ENTRY_BELOW_C, hold_entry_ready};
 use crate::memory::{
     ThermalControlProfileConfig, ThermalControlProfilePointConfig, ThermalProfileBank,
@@ -15,6 +17,7 @@ use crate::thermal_tuning_limits::{
 use crate::thermal_tuning_measurement::{
     QualificationContinuity, QualificationMeasurement, QualificationObservation,
 };
+use crate::thermal_tuning_owner::{TuningOwnerProof, TuningOwnerVerifier};
 use crate::thermal_tuning_strategy::{
     CurveClass, TuneEvidence, bounded_failure_alternative, braking_boundary_damping_candidate,
     limited_hold_outputs, observed_low_side_hold_failure, reseed_after_hold_confirm, tune_point,
@@ -38,6 +41,10 @@ pub const THERMAL_TUNING_EVENT_CAPACITY: usize = 256;
 // shared LAN 6 KiB body envelope while letting USB hosts drain the live stream
 // faster than the runtime produces samples at its 200 ms cadence.
 pub const THERMAL_TUNING_EVENT_PAGE_SIZE: usize = 6;
+// Candidate-trial events carry the full profile snapshot and timing evidence.
+// Keep a page containing one of these large records below the LAN response
+// envelope; subsequent reads continue with the returned sequence cursor.
+const THERMAL_TUNING_EVENT_PAGE_WITH_TRIAL_SIZE: usize = 1;
 pub const THERMAL_TUNING_HOLD_CONFIRM_MS: u64 = 60_000;
 pub const THERMAL_TUNING_SCOUT_HOLD_MS: u64 = 12_000;
 // Leave control-cycle scheduling margin below the required 333ms sample span.
@@ -50,6 +57,45 @@ pub const THERMAL_TUNING_ID_MAX_LEN: usize = 48;
 pub const THERMAL_TUNING_REASON_MAX_LEN: usize = 96;
 // `sha256:` plus 64 hexadecimal characters.
 pub const THERMAL_TUNING_HASH_LEN: usize = 71;
+
+/// Factory-safe seed used when a device has no persisted calibration profile
+/// and the host did not upload a candidate. It is deliberately compiled into
+/// firmware so the tuning flow never treats an empty `Default` profile as a
+/// usable thermal model.
+pub fn factory_default_profile(
+    power_class: ThermalTuningPowerClass,
+) -> ThermalControlProfileConfig {
+    let mut profile = ThermalControlProfileConfig::default();
+    let warmup_power_permille = match power_class {
+        ThermalTuningPowerClass::Pps3a => 650,
+        ThermalTuningPowerClass::Pps5a => 850,
+    };
+    for (index, target_temp_c) in THERMAL_TUNING_TARGETS_C.iter().copied().enumerate() {
+        profile.points[index] = Some(ThermalControlProfilePointConfig {
+            target_temp_c,
+            brake_distance_centi_c: 500,
+            warmup_power_permille,
+            warmup_reenter_centi_c: 400,
+            approach_power_permille: warmup_power_permille,
+            approach_floor_power_permille: 150,
+            approach_damping_exponent_permille: 1_000,
+            approach_tail_window_centi_c: 300,
+            hold_power_permille: 180,
+            hold_reheat_power_permille: 120,
+            hold_entry_centi_c: 90,
+            hold_exit_centi_c: 200,
+            hold_on_centi_c: 30,
+            hold_off_centi_c: 5,
+            overshoot_cutoff_centi_c: 25,
+            hold_kp_permille_per_c: 120,
+            hold_ki_permille_per_c_tick: 12,
+            hold_blend_ticks: 12,
+            approach_lead_ticks: 0,
+            hold_lead_ticks: 0,
+        });
+    }
+    profile
+}
 
 pub type TuningId = String<THERMAL_TUNING_ID_MAX_LEN>;
 pub type TuningHash = String<THERMAL_TUNING_HASH_LEN>;
@@ -68,6 +114,7 @@ pub struct ThermalTuningStart<'a> {
 }
 
 pub struct ThermalTuningSaveConfirmation<'a> {
+    pub owner_proof: Option<&'a TuningOwnerProof>,
     pub run_id: &'a str,
     pub candidate_id: &'a str,
     pub candidate_hash: &'a str,
@@ -375,6 +422,7 @@ struct TrialStopReasonInput {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalTuningError {
+    OwnerProofMismatch,
     InvalidPowerClass,
     InvalidTargets,
     AlreadyRunning,
@@ -451,6 +499,7 @@ impl FailureBracketAxis {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalTuningRuntime {
+    owner_verifier: TuningOwnerVerifier,
     pub phase: ThermalTuningPhase,
     pub terminal_disposition: ThermalTuningTerminalDisposition,
     pub review_disposition: ThermalTuningReviewDisposition,
@@ -565,6 +614,7 @@ impl Default for ThermalTuningRuntime {
 
 impl ThermalTuningRuntime {
     const EMPTY: Self = Self {
+        owner_verifier: TuningOwnerVerifier::empty(),
         phase: ThermalTuningPhase::Idle,
         terminal_disposition: ThermalTuningTerminalDisposition::Running,
         review_disposition: ThermalTuningReviewDisposition::Pending,
@@ -715,6 +765,7 @@ impl ThermalTuningRuntime {
             calibration_conflict,
             candidate_profile,
         } = request;
+        let supplied_candidate = candidate_profile.is_some();
         if self.armed {
             return Err(ThermalTuningError::AlreadyRunning);
         }
@@ -724,8 +775,16 @@ impl ThermalTuningRuntime {
         self.run_id = Some(run_id);
         self.candidate_id = Some(candidate_id);
         self.candidate_hash = Some(candidate_hash);
-        self.candidate_profile = candidate_profile;
-        self.seed_source = bounded_reason("initial_candidate");
+        self.candidate_profile =
+            candidate_profile.or_else(|| Some(factory_default_profile(power_class)));
+        if !supplied_candidate && let Some(profile) = self.candidate_profile {
+            self.candidate_hash = hash_profile(&profile);
+        }
+        self.seed_source = bounded_reason(if supplied_candidate {
+            "initial_candidate"
+        } else {
+            "factory_default"
+        });
         if targets.is_empty() || targets.len() > THERMAL_TUNING_MAX_TARGETS {
             self.fail("invalid_target_scope");
             return Err(ThermalTuningError::InvalidTargets);
@@ -2554,11 +2613,15 @@ impl ThermalTuningRuntime {
         let start_temperature_centi_c = sample.temperature_centi_c;
         let cooled = i32::from(sample.temperature_centi_c)
             <= i32::from(cooldown_threshold_c(expected_target)) * 100;
-        // Cooldown intentionally restores the request to the idle voltage. The
-        // settled contract, rather than the pending request, is the safety
-        // evidence that the next warmup can raise power to the ceiling.
+        // Production Warmup reserves one PPS quantum below the live ceiling.
+        // Admit that confirmed working point too: requiring exact equality
+        // deadlocks a cold, stable board at the intentional headroom voltage.
+        // Neither an unconfirmed nor an above-ceiling contract is acceptable.
+        let confirmed_mv = u32::from(sample.pps_contract.voltage_mv);
         let trial_power_ready = sample.pps_contract.confirmed
-            && u32::from(sample.pps_contract.voltage_mv) == sample.pps_power_ceiling_mv;
+            && confirmed_mv > 0
+            && confirmed_mv <= sample.pps_power_ceiling_mv
+            && sample.pps_power_ceiling_mv - confirmed_mv <= u32::from(PD_PPS_VOLTAGE_STEP_MV);
         let measurement_accepted = sample.has_fresh_measurement();
         self.push_event(
             ThermalTuningEventKind::Sample,
@@ -3361,6 +3424,7 @@ impl ThermalTuningRuntime {
         self.armed = false;
         self.review_disposition = ThermalTuningReviewDisposition::Complete;
         if self.failed_target_mask != 0 {
+            self.owner_verifier = TuningOwnerVerifier::empty();
             self.phase = ThermalTuningPhase::Failed;
             self.terminal_disposition = ThermalTuningTerminalDisposition::Failed;
         } else {
@@ -3390,11 +3454,14 @@ impl ThermalTuningRuntime {
     }
 
     pub fn cancel(&mut self, reason: &str) -> Result<(), ThermalTuningError> {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         if !self.armed
             && !self.sealed
             && self.terminal_disposition != ThermalTuningTerminalDisposition::CandidateReady
         {
-            return Err(ThermalTuningError::NotRunning);
+            // Safety-stop retries and a second client's stop are successful
+            // once disarmed. Preserve the existing terminal result and trace.
+            return Ok(());
         }
         self.armed = false;
         self.sealed = false;
@@ -3416,6 +3483,7 @@ impl ThermalTuningRuntime {
         confirmation: ThermalTuningSaveConfirmation<'_>,
     ) -> Result<ThermalTuningSaveReceipt, ThermalTuningError> {
         let ThermalTuningSaveConfirmation {
+            owner_proof,
             run_id,
             candidate_id,
             candidate_hash,
@@ -3424,6 +3492,10 @@ impl ThermalTuningRuntime {
             bank_revision,
             bank_hash,
         } = confirmation;
+        if !self.sealed {
+            return Err(ThermalTuningError::NotSealed);
+        }
+        self.validate_save_owner(owner_proof)?;
         self.validate_save_identity(run_id, candidate_id, candidate_hash, power_class)?;
         if !readback_verified || bank_hash.as_str() != candidate_hash {
             self.fail("candidate_readback_not_verified");
@@ -3431,6 +3503,7 @@ impl ThermalTuningRuntime {
             return Err(ThermalTuningError::IdentityMismatch);
         }
         self.save_confirmed = true;
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.phase = ThermalTuningPhase::Completed;
         self.terminal_disposition = ThermalTuningTerminalDisposition::Passed;
         self.push_event(ThermalTuningEventKind::Decision, None, None, None, None);
@@ -3447,6 +3520,29 @@ impl ThermalTuningRuntime {
         };
         self.save_receipt = Some(receipt.clone());
         Ok(receipt)
+    }
+
+    /// Bound only by the trusted start handler, with fresh MCU randomness.
+    pub fn bind_owner_proof(&mut self, proof: &TuningOwnerProof) -> bool {
+        self.armed && self.owner_verifier.bind(proof)
+    }
+
+    /// Call before attempting any EEPROM mutation, not just after readback.
+    pub fn validate_save_owner(
+        &self,
+        proof: Option<&TuningOwnerProof>,
+    ) -> Result<(), ThermalTuningError> {
+        if !matches!(
+            self.terminal_disposition,
+            ThermalTuningTerminalDisposition::Failed
+                | ThermalTuningTerminalDisposition::Canceled
+                | ThermalTuningTerminalDisposition::Passed
+        ) && self.owner_verifier.verifies(proof)
+        {
+            Ok(())
+        } else {
+            Err(ThermalTuningError::OwnerProofMismatch)
+        }
     }
 
     pub fn validate_save_identity(
@@ -3545,6 +3641,10 @@ impl ThermalTuningRuntime {
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
         }
         let after_sequence = if invalid_ack { None } else { after_sequence };
+        let already_acknowledged = after_sequence.is_some_and(|after| {
+            self.last_acknowledged_sequence
+                .is_some_and(|previous| after <= previous)
+        });
         if let Some(acknowledged) = after_sequence {
             self.last_acknowledged_sequence = Some(
                 self.last_acknowledged_sequence
@@ -3552,8 +3652,13 @@ impl ThermalTuningRuntime {
             );
         }
         let first = self.events.first().map(|event| event.sequence);
-        if after_sequence
-            .is_some_and(|after| first.is_some_and(|sequence| after.saturating_add(1) < sequence))
+        // A delayed or independent reader can repeat an older confirmed
+        // cursor. It cannot revoke evidence already acknowledged by a newer
+        // request, even when those records have left the retained ring.
+        if !already_acknowledged
+            && after_sequence.is_some_and(|after| {
+                first.is_some_and(|sequence| after.saturating_add(1) < sequence)
+            })
         {
             self.trace_gap = true;
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
@@ -3570,9 +3675,20 @@ impl ThermalTuningRuntime {
             }
         }
         page.events.clear();
+        let page_limit = if self
+            .events
+            .iter()
+            .filter(|event| after_sequence.is_none_or(|after| event.sequence > after))
+            .take(THERMAL_TUNING_EVENT_PAGE_SIZE)
+            .any(|event| event.trial.is_some())
+        {
+            THERMAL_TUNING_EVENT_PAGE_WITH_TRIAL_SIZE
+        } else {
+            THERMAL_TUNING_EVENT_PAGE_SIZE
+        };
         for event in self.events.iter() {
             if after_sequence.is_none_or(|after| event.sequence > after)
-                && page.events.push(event.clone()).is_err()
+                && (page.events.len() >= page_limit || page.events.push(event.clone()).is_err())
             {
                 break;
             }
@@ -3599,6 +3715,7 @@ impl ThermalTuningRuntime {
     }
 
     pub fn fail(&mut self, reason: &str) {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.armed = false;
         self.sealed = false;
         self.phase = ThermalTuningPhase::Failed;
@@ -3631,6 +3748,7 @@ impl ThermalTuningRuntime {
     }
 
     fn reset_for_run(&mut self) {
+        self.owner_verifier = TuningOwnerVerifier::empty();
         self.phase = ThermalTuningPhase::Idle;
         self.terminal_disposition = ThermalTuningTerminalDisposition::Running;
         self.review_disposition = ThermalTuningReviewDisposition::Pending;
@@ -3828,6 +3946,7 @@ impl ThermalTuningRuntime {
         }
         self.last_sequence = Some(sequence);
         if self.events.push(event).is_err() {
+            self.owner_verifier = TuningOwnerVerifier::empty();
             self.trace_gap = true;
             self.review_disposition = ThermalTuningReviewDisposition::ReviewIncomplete;
             self.armed = false;

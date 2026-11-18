@@ -289,7 +289,7 @@ Token endpoints require `Authorization: Bearer <token>`:
 - `POST /api/v1/leases`, `PUT|DELETE /api/v1/leases`
 - `PUT /api/v1/runtime|calibration|heater-curve|thermal-profile` and `POST /api/v1/calibration/job`
 
-The device accepts two simultaneous HTTP connections. Authenticated identity and network reads are served from published snapshots, while status, SSE, and mutations share the bounded control workspace; each response carries `X-Flux-Purr-Revision: <u32>`. Control mutations are serialized by the main-loop mailbox and must carry both `X-Flux-Purr-Lease: <lease-id>` and the revision returned by a serial `GET /api/v1/status` immediately before that write. A missing revision returns `428 revision_required`; an outdated revision returns `409 stale_write` without executing the command. The mailbox retains the admission-checked lease ID and the main loop revalidates it immediately before execution; an expired queued write returns `409 lease_expired` without touching runtime state. A successful mutation increments the revision and returns the new value. Direct-LAN clients read a current snapshot immediately before a mutation; if `stale_write` still occurs, they may read once to reconcile displayed state but must not automatically replay a side-effecting request. Lease create, heartbeat, and release are lease coordination operations and do not require a control revision. A lease has a `30s` TTL and only one LAN writer can own it. After a device restart, a paired browser target may reacquire its expired lease only when the operator explicitly reselects that connection; heartbeat expiry remains read-only, and an explicit conflict is never automatically stolen. Token reset is intentionally absent from device HTTP.
+The device uses four fixed HTTP workers, each independently listening on its own socket: three request slots and one spare for overlap while completed connections flush their resets. A single acceptor must not hand established connections to otherwise idle workers: concurrent SYNs can be rejected before another socket begins listening. Authenticated identity and network reads are served from published snapshots, while status, SSE, and mutations share two bounded request workspaces; each response carries `X-Flux-Purr-Revision: <u32>`. Control mutations are serialized by the main-loop mailbox and must carry both `X-Flux-Purr-Lease: <lease-id>` and the revision returned by a serial `GET /api/v1/status` immediately before that write. A missing revision returns `428 revision_required`; an outdated revision returns `409 stale_write` without executing the command. The mailbox retains the admission-checked lease ID and the main loop revalidates it immediately before execution; an expired queued write returns `409 lease_expired` without touching runtime state. A successful mutation increments the revision and returns the new value. Direct-LAN clients read a current snapshot immediately before a mutation; if `stale_write` still occurs, they may read once to reconcile displayed state but must not automatically replay a side-effecting request. Lease create, heartbeat, and release are lease coordination operations and do not require a control revision. A lease has a `30s` TTL and only one LAN writer can own it. After a device restart, a paired browser target may reacquire its expired lease only when the operator explicitly reselects that connection; heartbeat expiry remains read-only, and an explicit conflict is never automatically stolen. Token reset is intentionally absent from device HTTP.
 
 The device reflects `https://flux-purr.ivanli.cc` and explicit localhost development origins in CORS responses. Chromium private-network preflight receives `Access-Control-Allow-Private-Network: true`; Safari and other browsers without Chromium PNA support must not offer direct-LAN control. `GET /api/v1/events` returns one authorized `text/event-stream` status frame per connection, and the browser fetch-stream client reconnects without putting the token in a URL.
 
@@ -586,6 +586,8 @@ Web Update dry-check uses the catalog plus verify endpoint. Browser CORS preflig
 
 ## User CLI
 
+Native LAN clients admit at most two requests per device origin, with a 3s queue deadline. Authenticated GET requests, including the revision snapshot before a mutation, have a 6s complete-response deadline so bounded device TCP buffers can finish a valid status or tuning body. Mutation requests keep their 3s deadline and are never automatically replayed. A response deadline includes the body, not only headers.
+
 The released command-line control surface is `flux-purr`. It talks to `flux-purr-devd`, creates a device lease, heartbeats it during long operations, releases it before exit, and supports `--json` for machine-readable output.
 
 Core commands:
@@ -819,6 +821,22 @@ The response returns the updated status:
 ```
 
 `manualPpsEnabled=false` clears the debug override. `calibration` controls the owner-facing calibration workbench. CH224Q rejects PPS requests outside its advertised capability or off the required `100mV / 50mA` steps. FUSB302BMPX accepts manual PPS within its advertised live APDO and requires a qualifying PPS contract for calibration. `thermalControlProfile` supports `preview` / `clear_preview` for RAM-only preview state and `save` / `clear_saved` for persistent active thermal profile state.
+
+### `thermal_tuning`
+
+固件热控调优使用独立的 `thermal_tuning` JSONL 帧，LAN HTTP 对应 `/api/v1/thermal-tuning`。操作为 `start`、`read`、`cancel`、`seal` 和 `confirm_save`。GET/read 不要求 mutation lease；已认证的 cancel 是无 mutation lease、无 optimistic revision 的幂等安全停止例外，其余写入仍受租约和 revision 保护。
+
+成功 start 的响应只向该请求返回一个不透明的 `ownerProof`。固件以 MCU 随机源生成证明，运行内只保存校验摘要；普通状态、事件、候选哈希和保存回执均不包含证明。客户端不得从公开 runId 或 candidateHash 推导保存权限，也不得把证明放入诊断日志或可分享报告。
+
+Web 将启动响应中的证明独立保存在发起页面的内存和 sessionStorage，按稳定设备身份与 runId 隔离；同页刷新可恢复，不放入共享 localStorage、运行日志或导出报告。普通读取不能授予保存权限，确认保存按钮还须检查本页持有的证明；停止不依赖该证明。
+
+事件读取的 `after_sequence` 确认在同一运行内单调推进。延迟请求或另一读取者重复已确认的旧游标时，不回退确认位置，也不因对应事件已离开保留缓冲而标记全局追踪缺口；确认未曾交付的未来序号仍使证据无效。页面因本地记录失败或缺口自动停止时，只能停止本页持有 owner proof 的运行；观察者自己的记录缺失不能自动中止其他客户端的运行，已认证用户主动停止仍不要求该证明。
+
+confirm_save 必须同时提交 `ownerProof`、`runId`、`candidateId`、`candidateHash` 和 `powerClass`。固件在任何 EEPROM 写入之前校验发起者证明，再校验候选身份、RAM preview、封存与事件确认边界；保存仍只更新对应功率档位的 bank，并须原子提交及 readback。缺少或不匹配的证明返回 `owner_proof_invalid`，不触发重新配对、不修改持久化 bank，也不改变候选运行。停止、失败、重新启动和成功保存使原证明失效。
+
+运行活动期间，USB 与 LAN 共用设备端禁写判定；其它客户端仍可读取或停止，写入返回 `thermal_tuning_active`。devd 将该错误保留为 HTTP 409，不能报告成连接或网关故障。devd 的 ownership lease 只授权客户端到 daemon 的链路，不替代固件 mutation lease 或保存 owner proof。
+
+桥接连接完成后，Web 顶部连接目标、路由选择与 devd ownership lease 必须指向同一具体通道。调优写入失败应独立保留，不得被后台只读成功清除；租约恢复、租约占用与传输失败应分别解释，不能把未发出的启动操作显示为调优读取失败。
 
 ### `calibration_config`
 

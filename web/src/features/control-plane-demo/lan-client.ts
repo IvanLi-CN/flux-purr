@@ -1,5 +1,6 @@
 import type { ControlPlaneStatus, Identity, NetworkSummary } from './contracts'
-import { ControlPlaneClientError } from './transport-client'
+import { withReadDeadline } from './read-deadline'
+import { ControlPlaneClientError, classifyHttpFailure } from './transport-client'
 import type { DeviceTarget } from './types'
 
 const LAN_STORAGE_PREFIX = 'flux-purr:lan-device:'
@@ -70,8 +71,14 @@ export type LanProbeMode = 'concurrent' | 'serial'
 
 export type DirectLanStaleResource = 'runtime' | 'calibration' | 'heater-curve'
 
-export function isDirectLanDevice(device: Pick<DeviceTarget, 'baseUrl' | 'transport'>) {
-  return device.transport === 'wifi' && device.baseUrl.startsWith('http://')
+export function isDirectLanDevice(
+  device: Pick<DeviceTarget, 'baseUrl' | 'transport' | 'bridgeTransport'>
+) {
+  return (
+    device.baseUrl.startsWith('http://') &&
+    (device.transport === 'wifi' ||
+      (device.transport === 'devd' && device.bridgeTransport === 'wifi'))
+  )
 }
 
 /**
@@ -145,8 +152,12 @@ export function lanProbeToDeviceTarget(session: LanDeviceSession, probe: LanProb
     manualPpsError: status.manualPpsError ?? null,
     faultAttentionPending: status.faultAttentionPending ?? false,
     heaterLockReason: status.heaterLockReason ?? null,
+    thermalProfileMode: status.thermalProfileMode,
+    thermalProfileResolvedBank: status.thermalProfileResolvedBank,
+    thermalControl: status.thermalControl,
     calibration: status.calibration,
     heaterEnabled: status.heaterEnabled,
+    thermalTuningActive: status.thermalTuningActive ?? false,
     heaterOutputPercent: status.heaterOutputPercent,
     activeCoolingEnabled: status.activeCoolingEnabled,
     postHeatCoolingMode:
@@ -805,11 +816,22 @@ async function probeLanDeviceRequests(
     lanRequest<T>(fetcher, session.baseUrl, path, { headers }, rememberRevision)
   if (concurrent) {
     // Firmware exposes two HTTP workers. Start only the two independent reads
-    // together, then free a worker before asking the device for runtime status.
-    const [identity, network] = await Promise.all([
+    // together, then free both workers before asking the device for runtime
+    // status. Promise.all() rejects as soon as one request fails, which can
+    // start the serial fallback while the sibling request is still occupying
+    // a firmware HTTP worker. Wait for both outcomes before retrying.
+    const results = await Promise.allSettled([
       request<Identity>('/api/v1/identity'),
       request<NetworkSummary>('/api/v1/network'),
     ])
+    if (results[0].status === 'rejected') {
+      throw results[0].reason
+    }
+    if (results[1].status === 'rejected') {
+      throw results[1].reason
+    }
+    const identity = results[0].value
+    const network = results[1].value
     const status = await request<ControlPlaneStatus>('/api/v1/status')
     return { identity, network, status }
   }
@@ -852,9 +874,12 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
   method = 'GET',
   body?: Record<string, unknown>,
   leaseId?: string,
-  fetcher: typeof fetch = fetch
+  fetcher: typeof fetch = fetch,
+  query?: Record<string, string | number | undefined>
 ) {
-  const isWrite = method !== 'GET'
+  const safetyStop =
+    method === 'POST' && path.replace(/^\//, '') === 'thermal-tuning' && body?.op === 'cancel'
+  const isWrite = method !== 'GET' && !safetyStop
   const headers: Record<string, string> = {
     ...bearerHeaders(session),
     ...(leaseId ? { 'X-Flux-Purr-Lease': leaseId } : {}),
@@ -862,10 +887,16 @@ export async function authorizedLanRequest<T = Record<string, unknown>>(
   if (isWrite) {
     headers['X-Flux-Purr-Revision'] = String(await refreshLanControlRevision(session, fetcher))
   }
+  const queryString = query
+    ? Object.entries(query)
+        .filter(([, value]) => value !== undefined)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&')
+    : ''
   return lanRequest<T>(
     fetcher,
     session.baseUrl,
-    `/api/v1/${path.replace(/^\//, '')}`,
+    `/api/v1/${path.replace(/^\//, '')}${queryString ? `?${queryString}` : ''}`,
     {
       method,
       headers,
@@ -945,41 +976,64 @@ async function lanRequest<T = Record<string, unknown>>(
     headers,
     targetAddressSpace: 'private',
   } satisfies PrivateNetworkRequestInit
-  let response: Response
-  try {
-    response = await fetcher(`${baseUrl}${path}`, request as RequestInit)
-  } catch (error) {
-    if (error instanceof TypeError) {
+  const read = async (signal?: AbortSignal): Promise<T> => {
+    if (signal) request.signal = signal
+    let response: Response
+    try {
+      response = await fetcher(`${baseUrl}${path}`, request as RequestInit)
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new ControlPlaneClientError(
+          operation === 'thermal_tuning_read'
+            ? '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
+            : 'LAN 设备暂时无响应，请稍后重试。',
+          'lan_transport_unavailable',
+          true,
+          undefined,
+          { category: 'transport_unavailable', operation, endpoint: path }
+        )
+      }
+      throw error
+    }
+    if (!response.ok) throw await responseError(response, baseUrl, path, operation)
+    try {
+      const payload = (await response.json()) as T
+      signal?.throwIfAborted()
+      if (payload == null || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('Expected a JSON object')
+      }
+      const revision = Number(response.headers.get('X-Flux-Purr-Revision'))
+      if (Number.isSafeInteger(revision) && revision >= 0) onRevision?.(revision)
+      return payload
+    } catch {
       throw new ControlPlaneClientError(
-        operation === 'thermal_tuning_read'
-          ? '设备已连接，但固件热控调优读取暂时失败，请稍后重试。'
-          : 'LAN 设备暂时无响应，请稍后重试。',
-        'lan_transport_unavailable',
-        true,
+        '设备返回的数据格式无效。',
+        'lan_response_invalid',
+        false,
         undefined,
-        { category: 'transport_unavailable', operation, endpoint: path }
+        {
+          category: 'response_invalid',
+          operation,
+          endpoint: path,
+          status: response.status,
+        }
       )
     }
-    throw error
   }
-  if (!response.ok) throw await responseError(response, baseUrl, path, operation)
-  const revision = Number(response.headers.get('X-Flux-Purr-Revision'))
-  if (Number.isSafeInteger(revision) && revision >= 0) onRevision?.(revision)
-  try {
-    return (await response.json()) as T
-  } catch {
-    throw new ControlPlaneClientError(
-      '设备返回的数据格式无效。',
-      'lan_response_invalid',
-      false,
-      undefined,
-      {
-        category: 'response_invalid',
-        operation,
-        endpoint: path,
-      }
-    )
-  }
+  return operation === 'thermal_tuning_read'
+    ? withReadDeadline(
+        5_000,
+        () =>
+          new ControlPlaneClientError(
+            '设备已连接，但固件热控调优读取超时，请稍后重试。',
+            'lan_transport_unavailable',
+            true,
+            undefined,
+            { category: 'transport_unavailable', operation, endpoint: path }
+          ),
+        read
+      )
+    : read()
 }
 
 function requireLanControlRevision(session: LanDeviceSession) {
@@ -1023,26 +1077,29 @@ async function responseError(response: Response, baseUrl: string, path = '', ope
     error?: { code?: string; message?: string; retryable?: boolean }
   } | null
   if (response.status === 401) invalidateLanDeviceAuthorization(baseUrl)
-  const thermalUnsupported = path.includes('thermal-tuning') && response.status === 404
-  const category = thermalUnsupported
-    ? 'thermal_tuning_unsupported'
-    : response.status === 401
-      ? 'unauthorized'
-      : response.status >= 500
-        ? 'server_retryable'
-        : undefined
+  const failure = classifyHttpFailure(
+    response.status,
+    path,
+    payload?.error?.code,
+    payload?.error?.retryable
+  )
+  const thermalUnsupported = failure.category === 'thermal_tuning_unsupported'
   return new ControlPlaneClientError(
     thermalUnsupported
       ? '当前固件未提供热控调优接口。'
       : response.status === 401
         ? '设备拒绝了当前配对凭据，请重新配对。'
         : (payload?.error?.message ?? `设备请求失败 (${response.status})`),
-    thermalUnsupported
-      ? 'thermal_tuning_unsupported'
-      : (payload?.error?.code ?? 'lan_request_failed'),
-    thermalUnsupported ? false : (payload?.error?.retryable ?? response.status >= 500),
+    failure.code ?? 'lan_request_failed',
+    failure.retryable,
     payload?.error,
-    { category, operation, endpoint: path, status: response.status }
+    {
+      category: failure.category,
+      protocolCode: failure.protocolCode,
+      operation,
+      endpoint: path,
+      status: response.status,
+    }
   )
 }
 

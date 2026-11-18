@@ -28,6 +28,84 @@ import { ControlPlaneClientError } from './transport-client'
 import type { DeviceTarget } from './types'
 
 describe('LAN browser client', () => {
+  it.each([
+    'null',
+    '42',
+    '"status"',
+    '[]',
+  ])('rejects a successful tuning response that is not an object: %s', async (body) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(body))
+    await expect(
+      authorizedLanRequest(
+        { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) },
+        'thermal-tuning',
+        'GET',
+        undefined,
+        undefined,
+        fetcher
+      )
+    ).rejects.toMatchObject({ category: 'response_invalid', retryable: false, status: 200 })
+  })
+
+  it.each(['headers', 'body'])('bounds the entire tuning GET stalled at %s', async (stage) => {
+    vi.useFakeTimers()
+    try {
+      const session = { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }
+      const response = new Response('{}')
+      vi.spyOn(response, 'json').mockImplementation(() => new Promise(() => {}))
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockImplementation(() =>
+          stage === 'headers' ? new Promise(() => {}) : Promise.resolve(response)
+        )
+      let outcome: unknown
+      void authorizedLanRequest(
+        session,
+        'thermal-tuning',
+        'GET',
+        undefined,
+        undefined,
+        fetcher
+      ).catch((error: unknown) => {
+        outcome = error
+      })
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(outcome).toMatchObject({
+        category: 'transport_unavailable',
+        retryable: true,
+        operation: 'thermal_tuning_read',
+      })
+      expect(fetcher).toHaveBeenCalledTimes(1)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('sends an authenticated safety stop without a revision preflight or write lease', async () => {
+    const session = { baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ armed: false }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    await authorizedLanRequest(
+      session,
+      'thermal-tuning',
+      'POST',
+      { op: 'cancel' },
+      undefined,
+      fetcher
+    )
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    const [url, init] = fetcher.mock.calls[0] ?? []
+    expect(url).toBe('http://192.168.1.10/api/v1/thermal-tuning')
+    expect(init?.headers).toMatchObject({ Authorization: `Bearer ${session.token}` })
+    expect(init?.headers).not.toHaveProperty('X-Flux-Purr-Revision')
+    expect(init?.headers).not.toHaveProperty('X-Flux-Purr-Lease')
+  })
+
   it('reads the same device resource after a rejected stale write', () => {
     expect(directLanStaleReadPath('runtime')).toBe('status')
     expect(directLanStaleReadPath('calibration')).toBe('calibration')
@@ -473,9 +551,13 @@ describe('LAN browser client', () => {
   it('falls back to a serial probe when the two-worker read batch hits a transport limit', async () => {
     let activeRequests = 0
     let concurrentFailure = false
+    let serialFallbackStartedWhileSiblingActive = false
     const fetcher = vi.fn(async (_input: RequestInfo | URL) => {
       activeRequests += 1
       try {
+        if (concurrentFailure && activeRequests > 1) {
+          serialFallbackStartedWhileSiblingActive = true
+        }
         if (activeRequests > 1 && !concurrentFailure) {
           concurrentFailure = true
           throw new TypeError('Failed to fetch')
@@ -497,6 +579,7 @@ describe('LAN browser client', () => {
       probeLanDevice({ baseUrl: 'http://192.168.1.10', token: 'a'.repeat(64) }, fetcher)
     ).resolves.toBeDefined()
     expect(concurrentFailure).toBe(true)
+    expect(serialFallbackStartedWhileSiblingActive).toBe(false)
     expect(fetcher).toHaveBeenCalledTimes(5)
   })
 
@@ -593,6 +676,29 @@ describe('LAN browser client', () => {
       })
     )
     expect(fetcher.mock.calls[0]?.[1]?.headers).not.toHaveProperty('X-Flux-Purr-Lease')
+  })
+
+  it('carries the thermal tuning run cursor over direct LAN HTTP reads', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ phase: 'running', trialPurpose: 'scout' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+    const session = {
+      baseUrl: 'http://192.168.1.10',
+      token: 'a'.repeat(64),
+      controlRevision: 7,
+    }
+
+    await authorizedLanRequest(session, 'thermal-tuning', 'GET', undefined, undefined, fetcher, {
+      run_id: 'run-1',
+      after_sequence: 42,
+    })
+
+    expect(String(fetcher.mock.calls[0]?.[0])).toBe(
+      'http://192.168.1.10/api/v1/thermal-tuning?run_id=run-1&after_sequence=42'
+    )
   })
 
   it('reports a LAN transport failure without claiming a lease conflict', async () => {
@@ -791,6 +897,7 @@ describe('LAN browser client', () => {
           currentTempC: 25,
           targetTempC: 120,
           heaterEnabled: false,
+          thermalTuningActive: true,
           heaterOutputPercent: 0,
           activeCoolingEnabled: true,
           fanDisplayState: 'AUTO',
@@ -802,6 +909,37 @@ describe('LAN browser client', () => {
           pdRequestMv: 20000,
           pdContractMv: 20000,
           pdState: 'ready',
+          thermalProfileMode: '65w',
+          thermalProfileResolvedBank: 'pps3a',
+          thermalControl: {
+            profileActive: true,
+            profileCoversTarget: true,
+            profileSource: 'default',
+            targetTempC: 150,
+            brakeDistanceCentiC: 700,
+            warmupPowerPermille: 1000,
+            approachPowerPermille: 320,
+            approachFloorPowerPermille: 200,
+            approachDampingExponentPermille: 800,
+            holdPowerPermille: 220,
+            holdReheatPowerPermille: 220,
+            holdEntryCentiC: 18,
+            holdExitCentiC: 90,
+            holdOnCentiC: 30,
+            holdOffCentiC: 100,
+            overshootCutoffCentiC: 120,
+            holdKpPermillePerC: 30,
+            holdKiPermillePerCTick: 1,
+            holdBlendTicks: 12,
+            approachLeadTicks: 0,
+            holdLeadTicks: 0,
+            tempFilterAlphaPermille: 750,
+            warmupReenterCentiC: 400,
+            approachMaxTicks: 5,
+            approachMinPowerRatioPermille: 0,
+            autoAdjustableWorkingFloorMv: 5000,
+            heaterCurrentReserveMa: 200,
+          },
           calibration: {
             mode: 'off',
             ppsEnabled: false,
@@ -813,7 +951,10 @@ describe('LAN browser client', () => {
         },
       }
     )
+    expect(target.thermalTuningActive).toBe(true)
     expect(target.transport).toBe('wifi')
+    expect(target.thermalProfileResolvedBank).toBe('pps3a')
+    expect(target.thermalControl?.profileSource).toBe('default')
     expect(JSON.stringify(target)).not.toContain('a'.repeat(64))
   })
 

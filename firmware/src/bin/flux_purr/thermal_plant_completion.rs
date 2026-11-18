@@ -78,20 +78,20 @@ pub(crate) fn thermal_plant_continuation_request(
     input: CalibrationJobUpdateInput,
 ) -> Option<(u16, u16)> {
     let range = manual.thermal_plant_pps_range()?;
-    let (min_mv, max_mv, _) = manual.thermal_plant_source_limits()?;
+    let (min_mv, max_mv, current_ma) = manual.thermal_plant_source_limits()?;
     boundary
         .safe_point(
             flux_purr_firmware::heater_supply::BoundaryQuery {
                 temperature_centi_c: round_to_i16(input.latest_temp_c * 100.0),
                 current_rtd_mv: Some(input.latest_rtd_raw_adc_mv),
                 current_request_mv: manual.target_mv,
-                current_ma: 3_000,
+                current_ma,
                 wifi_started: input.wifi_started?,
                 source_min_mv: range.min_mv,
                 source_max_mv: range.max_mv,
                 operational_source_min_mv: min_mv.max(5_500).div_ceil(100) * 100,
                 operational_source_max_mv: max_mv.min(21_000) / 100 * 100,
-                source_max_ma: 3_000,
+                source_max_ma: current_ma,
                 source_power_limit_mw: manual.thermal_plant_source_power_limit_mw(),
             },
             |mv| projected_rtd_temperature_c(memory, mv).map(|t| round_to_i16(t * 100.0)),

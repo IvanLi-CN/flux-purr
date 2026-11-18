@@ -19,8 +19,7 @@ use crate::{
         CommandOrigin, ControlMailboxCommand, DeviceNames, HTTP_SERVICE_PORT, HttpGate, HttpMethod,
         HttpReadGate, HttpRequest, HttpResponse, LAN_HTTP_BODY_MAX_LEN,
         LAN_HTTP_LIGHT_BODY_MAX_LEN, LightHttpResponse, NetHttpState, device_names_from_mac,
-        format_http_response_headers, http_socket_slot_count, http_workspace_slot_count,
-        identity_from_device_names,
+        format_http_response_headers, http_socket_slot_count, identity_from_device_names,
     },
     wifi_state::{
         SAVING_TIMEOUT_MS, WifiEvent as ProvisioningEvent, WifiProvisioningMachine, WifiTransition,
@@ -54,19 +53,22 @@ pub type SharedI2cBus = Mutex<CriticalSectionRawMutex, I2c<'static, Async>>;
 use serde::Serialize;
 use static_cell::StaticCell;
 
-// Three sockets at 1 KiB per direction use less static RAM than the previous
-// two-socket 2 KiB layout while still covering the largest HTTP header and
-// streaming larger bodies through the shared request workspace.
+// Three request slots plus a spare listener absorb short connection-teardown
+// overlap without allocating another full request workspace. Buffers stay at
+// 1 KiB per direction; the control mailbox still serializes mutations.
 const HTTP_TCP_BUFFER_LEN: usize = 1024;
 const HTTP_REQUEST_BUFFER_LEN: usize = LAN_HTTP_BODY_MAX_LEN + 1_024;
 const HTTP_LIGHT_REQUEST_BUFFER_LEN: usize = 512;
 // One mutation-capable request plus two independent readers cover the browser
 // event/status path and lease heartbeat without allowing concurrent
-// writes. Identity and network use the published snapshot path and never
-// consume the mutation workspace.
+// writes in the control executor. Identity and network use the published
+// snapshot path and never consume a full request workspace.
 const HTTP_ACTIVE_REQUEST_BUDGET: usize = 1;
 const HTTP_SOCKET_COUNT: usize = http_socket_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
-const HTTP_WORKSPACE_COUNT: usize = http_workspace_slot_count(HTTP_ACTIVE_REQUEST_BUDGET);
+// Keep two full request workspaces available so a long-poll/event response
+// cannot block a lease acquisition or tuning command behind the single
+// mutation mailbox. The control executor still serializes state mutation.
+const HTTP_WORKSPACE_COUNT: usize = 2;
 const MDNS_MULTICAST_V4: Ipv4Address = Ipv4Address::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 const WIFI_ASSOCIATION_TIMEOUT_SECS: u64 = 8;
@@ -108,14 +110,15 @@ static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
 // The mutation-capable HTTP worker owns its full request workspace outside the
 // executor arena. Lightweight readers are served from published snapshots.
 static HTTP_WORKSPACE_0: StaticCell<HttpWorkspace> = StaticCell::new();
+static HTTP_WORKSPACE_1: StaticCell<HttpWorkspace> = StaticCell::new();
 static HTTP_RX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_RX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
+static HTTP_RX_3: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_0: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_1: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_TX_2: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
-static HTTP_SOCKETS: Channel<CriticalSectionRawMutex, HttpSocket, HTTP_SOCKET_COUNT> =
-    Channel::new();
+static HTTP_TX_3: StaticCell<[u8; HTTP_TCP_BUFFER_LEN]> = StaticCell::new();
 static HTTP_WORKSPACES: Channel<CriticalSectionRawMutex, HttpWorkspaceSlot, HTTP_WORKSPACE_COUNT> =
     Channel::new();
 
@@ -157,6 +160,7 @@ struct ParsedHttpHeader {
     expected_revision: Option<u32>,
     after_sample: Option<u8>,
     after_sequence: Option<u32>,
+    run_id: Option<String<128>>,
     private_network: bool,
     content_length: usize,
 }
@@ -172,6 +176,7 @@ impl ParsedHttpHeader {
             expected_revision: self.expected_revision,
             after_sample: self.after_sample,
             after_sequence: self.after_sequence,
+            run_id: self.run_id.as_ref().map(String::as_str),
             request_private_network: self.private_network,
             body,
             entropy: random_entropy(),
@@ -464,6 +469,9 @@ pub async fn command_lease_is_active(command: &ControlMailboxCommand) -> bool {
     if command.origin != CommandOrigin::Lan {
         return true;
     }
+    if crate::net_http::is_tuning_safety_stop(command.method, command.endpoint, &command.body) {
+        return true;
+    }
     let Some(lease_id) = command.lease_id else {
         return !matches!(
             command.method,
@@ -601,10 +609,17 @@ where
             HTTP_RX_2.init([0; HTTP_TCP_BUFFER_LEN]),
             HTTP_TX_2.init([0; HTTP_TCP_BUFFER_LEN]),
         ),
+        TcpSocket::new(
+            stack,
+            HTTP_RX_3.init([0; HTTP_TCP_BUFFER_LEN]),
+            HTTP_TX_3.init([0; HTTP_TCP_BUFFER_LEN]),
+        ),
     ];
     for mut socket in sockets {
         socket.set_timeout(Some(Duration::from_secs(5)));
-        HTTP_SOCKETS.send(HttpSocket(socket)).await;
+        spawner
+            .spawn(http_connection_task(stack, HttpSocket(socket)))
+            .map_err(|_| LanStartupError::HttpTaskCapacity)?;
     }
     HTTP_WORKSPACES
         .send(HttpWorkspaceSlot {
@@ -612,9 +627,12 @@ where
             response_slot: 0,
         })
         .await;
-    spawner
-        .spawn(http_listener_task(stack, *spawner))
-        .map_err(|_| LanStartupError::HttpTaskCapacity)?;
+    HTTP_WORKSPACES
+        .send(HttpWorkspaceSlot {
+            workspace: HTTP_WORKSPACE_1.init_with(HttpWorkspace::new),
+            response_slot: 1,
+        })
+        .await;
     spawner
         .spawn(mdns_task(stack, names))
         .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
@@ -1112,29 +1130,34 @@ fn net_config(config: &WifiRuntimeConfig) -> NetConfig {
     })
 }
 
-#[embassy_executor::task]
-async fn http_listener_task(stack: Stack<'static>, spawner: Spawner) {
+// Each socket is listening before a connection arrives. A single acceptor that
+// hands established sockets to workers leaves only one socket in LISTEN: two
+// SYNs processed in the same network poll then reject the second connection,
+// even when the other workers and buffers are idle.
+#[embassy_executor::task(pool_size = 4)]
+async fn http_connection_task(stack: Stack<'static>, socket: HttpSocket) {
+    let mut socket = socket.0;
     loop {
         stack.wait_config_up().await;
-        let HttpSocket(mut socket) = HTTP_SOCKETS.receive().await;
         if socket.accept(HTTP_SERVICE_PORT).await.is_err() {
-            HTTP_SOCKETS.send(HttpSocket(socket)).await;
+            socket.abort();
+            let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
             Timer::after(Duration::from_millis(200)).await;
             continue;
         }
-        let _ = spawner.spawn(http_connection_task(HttpSocket(socket)));
+        handle_http_socket(&mut socket).await;
+        // Complete the reset before reusing this socket. No dynamic task spawn
+        // or pool hand-off can lose a slot during connection teardown.
+        socket.abort();
+        let _ = with_timeout(Duration::from_secs(1), socket.flush()).await;
     }
 }
 
-#[embassy_executor::task(pool_size = 3)]
-async fn http_connection_task(socket: HttpSocket) {
-    let mut socket = socket.0;
+async fn handle_http_socket(socket: &mut TcpSocket<'_>) {
     let mut header = [0u8; HTTP_LIGHT_REQUEST_BUFFER_LEN];
-    let header_len = read_http_header(&mut socket, &mut header)
-        .await
-        .unwrap_or(0);
+    let header_len = read_http_header(socket, &mut header).await.unwrap_or(0);
     let light_handled = if header_len > 0 {
-        handle_light_http_connection(&mut socket, &header[..header_len])
+        handle_light_http_connection(socket, &header[..header_len])
             .await
             .unwrap_or(true)
     } else {
@@ -1146,7 +1169,7 @@ async fn http_connection_task(socket: HttpSocket) {
             response_slot,
         } = HTTP_WORKSPACES.receive().await;
         let _ = handle_http_connection(
-            &mut socket,
+            socket,
             &mut workspace.request,
             &mut workspace.response,
             &mut workspace.command,
@@ -1162,9 +1185,6 @@ async fn http_connection_task(socket: HttpSocket) {
             })
             .await;
     }
-    socket.close();
-    let _ = socket.flush().await;
-    HTTP_SOCKETS.send(HttpSocket(socket)).await;
 }
 
 async fn read_http_header(
@@ -1195,6 +1215,7 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
         expected_revision: None,
         after_sample: None,
         after_sequence: None,
+        run_id: None,
         private_network: false,
         content_length: 0,
     };
@@ -1228,6 +1249,15 @@ fn parse_http_header(bytes: &[u8]) -> ParsedHttpHeader {
                 .then(|| value.parse().ok())
                 .flatten()
         })
+    });
+    parsed.run_id = query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key != "run_id" && key != "runId" {
+            return None;
+        }
+        let mut run_id = String::new();
+        run_id.push_str(value).ok()?;
+        Some(run_id)
     });
     for line in lines {
         let Some((key, value)) = line.trim_end_matches('\r').split_once(':') else {
@@ -1501,7 +1531,7 @@ fn stage_http_gate(
             let is_sse = command.endpoint == crate::lan::LanEndpoint::Events
                 && command.method == HttpMethod::Get;
             response_slot.allow_origin = allow_origin;
-            *command_slot = Some(command);
+            *command_slot = Some(*command);
             Some((request_id, is_sse))
         }
     }

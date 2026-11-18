@@ -3,6 +3,51 @@ use std::process::ExitStatus;
 use tempfile::tempdir;
 
 #[test]
+fn ordinary_status_preserves_tuning_activity_and_accepts_legacy_firmware() {
+    let mut status = mock_status(&mock_network());
+    status.thermal_tuning_active = true;
+    let mut wire = serde_json::to_value(&status).unwrap();
+    assert_eq!(wire["thermalTuningActive"], true);
+    let decoded: ControlPlaneStatus = serde_json::from_value(wire.clone()).unwrap();
+    assert!(decoded.thermal_tuning_active);
+    wire.as_object_mut().unwrap().remove("thermalTuningActive");
+    let legacy: ControlPlaneStatus = serde_json::from_value(wire).unwrap();
+    assert!(!legacy.thermal_tuning_active);
+}
+
+#[test]
+fn thermal_tuning_get_preserves_run_bound_zero_and_full_width_cursors_without_a_lease() {
+    for after_sequence in [0, u32::MAX] {
+        let query = ThermalTuningReadQuery {
+            lease_id: None,
+            run_id: Some("run/one & two".into()),
+            after_sequence: Some(after_sequence),
+        };
+        let path = thermal_tuning_read_path(&query);
+        let url = reqwest::Url::parse(&format!("http://localhost/{path}")).unwrap();
+        let pairs: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("run_id").map(String::as_str),
+            Some("run/one & two")
+        );
+        assert_eq!(
+            pairs.get("after_sequence"),
+            Some(&after_sequence.to_string())
+        );
+        assert!(!pairs.contains_key("lease_id"));
+        assert_eq!(url.path(), "/thermal-tuning");
+    }
+    assert_eq!(
+        thermal_tuning_read_path(&ThermalTuningReadQuery {
+            lease_id: None,
+            run_id: None,
+            after_sequence: None,
+        }),
+        "thermal-tuning"
+    );
+}
+
+#[test]
 fn calibration_bridge_preserves_the_firmware_shutdown_response() {
     let response = flux_purr_firmware::thermal_response::HeatResponse {
         delay_ms: 0,
@@ -476,6 +521,43 @@ fn transport_events_redact_lan_pairing_codes() {
 }
 
 #[test]
+fn tuning_owner_proof_is_forwarded_but_never_logged() {
+    let proof =
+        flux_purr_firmware::thermal_tuning_owner::TuningOwnerProof::from_random_bytes([3; 32]);
+    let payload: ThermalTuningRequest = serde_json::from_value(json!({
+        "leaseId": "lease", "op": "confirm_save", "ownerProof": proof
+    }))
+    .unwrap();
+    let wire = UsbThermalTuningWire {
+        frame_type: "thermal_tuning",
+        request_id: "save",
+        op: payload.op,
+        run_id: None,
+        candidate_id: None,
+        candidate_hash: None,
+        owner_proof: payload.owner_proof.as_ref(),
+        power_class: None,
+        targets_c: None,
+        after_sequence: None,
+        candidate_profile: None,
+    };
+    let json = serde_json::to_value(&wire).unwrap();
+    assert_eq!(json["ownerProof"], serde_json::to_value(&proof).unwrap());
+    assert!(!format!("{wire:?}").contains("03030303"));
+    let redacted = redact_transport_frame(json.clone());
+    assert_eq!(redacted["ownerProof"], "<redacted>");
+    assert_eq!(
+        redact_transport_frame(json!({"nested":{"owner_proof":proof}}))["nested"]["owner_proof"],
+        "<redacted>"
+    );
+    assert!(
+        !serde_json::to_string(&redacted)
+            .unwrap()
+            .contains("03030303")
+    );
+}
+
+#[test]
 fn lan_pairing_code_requires_a_consistent_active_state() {
     assert!(
         validate_lan_pairing_code(LanPairingCode {
@@ -733,6 +815,21 @@ fn serial_refresh_removes_stale_native_devices_and_leases() {
     assert!(!state.devices.contains_key("serial-stale"));
     assert!(state.leases.is_empty());
     assert_eq!(stale_ports, vec!["/dev/tty.Bluetooth-Incoming-Port"]);
+}
+
+#[test]
+fn active_tuning_usb_rejection_is_a_control_conflict_not_a_gateway_failure() {
+    for kind in ["response", "error"] {
+        let frame = serde_json::json!({
+            "type": kind, "requestId": "second-client", "ok": false,
+            "error": { "code": "thermal_tuning_active", "message": "Only reads and safety stop are allowed.", "retryable": false }
+        });
+        let frame: UsbResponseWire = serde_json::from_value(frame).unwrap();
+        let error = decode_usb_response_frame(frame, "second-client").unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "thermal_tuning_active");
+        assert!(!error.error.retryable);
+    }
 }
 
 #[test]
@@ -4351,6 +4448,80 @@ fn lan_bridge_error_preserves_remote_conflict_status_and_code() {
     assert_eq!(error.status, StatusCode::CONFLICT);
     assert_eq!(error.error.code, "stale_write");
     assert!(!error.error.retryable);
+}
+
+#[tokio::test]
+async fn lan_transport_failure_reports_safe_cause_without_request_secrets() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    let failure = reqwest::Client::new()
+        .get(format!(
+            "http://{addr}/api/v1/status?token=private-query-value"
+        ))
+        .bearer_auth("private-bearer-value")
+        .send()
+        .await
+        .unwrap_err();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "transport_unavailable");
+    assert!(error.error.retryable);
+    assert_eq!(
+        error.error.details.as_ref().unwrap()["transportKind"],
+        "connect"
+    );
+    assert_eq!(
+        error.error.details.as_ref().unwrap()["ioKind"],
+        "ConnectionRefused"
+    );
+    let encoded = serde_json::to_string(&error.error).unwrap();
+    assert!(!encoded.contains("private-query-value"));
+    assert!(!encoded.contains("private-bearer-value"));
+    assert!(!encoded.contains("http://"));
+}
+
+#[tokio::test]
+async fn lan_response_decode_failure_is_not_a_retryable_connection_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route("/status", axum::routing::get(|| async { "invalid-json" }));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let failure = reqwest::get(format!("http://{addr}/status"))
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap_err();
+    server.abort();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "response_invalid");
+    assert!(!error.error.retryable);
+    assert_eq!(error.error.details.unwrap()["transportKind"], "decode");
+}
+
+#[tokio::test]
+async fn lan_timeout_reports_typed_retryable_cause() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/status",
+        axum::routing::get(|| async {
+            std::future::pending::<()>().await;
+            "unreachable"
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let failure = reqwest::Client::new()
+        .get(format!("http://{addr}/status"))
+        .timeout(Duration::from_millis(25))
+        .send()
+        .await
+        .unwrap_err();
+    server.abort();
+    let error = lan_bridge_error(lan::LanClientError::Request(failure));
+    assert_eq!(error.error.code, "transport_unavailable");
+    assert!(error.error.retryable);
+    assert_eq!(error.error.details.unwrap()["transportKind"], "timeout");
 }
 
 #[test]

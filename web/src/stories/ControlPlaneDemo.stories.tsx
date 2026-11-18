@@ -93,6 +93,49 @@ export const Default: Story = {
   args: mockDemoStoryArgs,
 }
 
+const tuningLockedScenario: ControlPlaneScenario = {
+  ...controlPlaneScenario,
+  devices: controlPlaneScenario.devices.map((device) =>
+    device.id === controlPlaneScenario.selectedDeviceId
+      ? { ...device, thermalTuningActive: true }
+      : device
+  ),
+}
+
+export const TuningLocksDashboardWrites: Story = {
+  args: { ...mockDemoStoryArgs, scenario: tuningLockedScenario },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('region', { name: '调优运行保护' })).toBeVisible()
+    await expect(canvas.getByRole('button', { name: '停止调优' })).toBeEnabled()
+    await expect(canvas.getByRole('button', { name: /Hold heater|Resume heater/ })).toBeDisabled()
+    await userEvent.click(canvas.getByRole('button', { name: /Advanced PPS/ }))
+    await expect(canvas.getByRole('slider', { name: 'Manual PPS voltage' })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: 'Apply PPS' })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: /^Clear$/ })).toBeDisabled()
+  },
+}
+
+export const TuningLocksSettingsWrites: Story = {
+  args: { ...mockDemoStoryArgs, scenario: tuningLockedScenario, initialView: 'settings' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', { name: '停止调优' })).toBeEnabled()
+    const presets = canvasElement.querySelector('.industrial-settings-section--presets')
+    if (!presets) throw new Error('Preset editor missing')
+    const writes = presets.querySelectorAll('button, input')
+    expect(writes.length).toBeGreaterThan(0)
+    for (const write of writes) await expect(write).toBeDisabled()
+    await userEvent.click(canvas.getByRole('tab', { name: '风扇策略' }))
+    for (const label of ['主动降温', '加热防过热']) {
+      const modes = within(canvas.getByRole('group', { name: label })).getAllByRole('button')
+      for (const mode of modes) await expect(mode).toBeDisabled()
+    }
+    await expect(canvas.getByRole('button', { name: '保存风扇策略' })).toBeDisabled()
+    await expect(canvas.getByRole('button', { name: '停止调优' })).toBeEnabled()
+  },
+}
+
 export const Degraded: Story = {
   args: {
     ...mockDemoStoryArgs,

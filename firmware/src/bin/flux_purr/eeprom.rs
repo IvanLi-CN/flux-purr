@@ -446,8 +446,6 @@ pub(crate) async fn load_eeprom_memory_record(
         read_fpr2_domains(i2c, address, &mut staging, read_generation).await;
     marker_scan.contains_data |= domain_contains_data;
     marker_scan.read_failed |= domain_read_failed;
-    let domains = domains;
-
     let prepared_recovery = marker_scan.latest_active_marker.is_none()
         && marker_scan.latest_prepared_marker.is_some_and(|marker| {
             marker.kind == LayoutMarkerKind::LegacyMigration
@@ -589,8 +587,13 @@ pub(crate) async fn read_fpr2_domains(
     address: u8,
     staging: &mut SensitiveEepromStaging<'_>,
     read_generation: Option<u32>,
-) -> ([Option<PersistRecord>; 6], bool, bool) {
-    let mut domains: [Option<PersistRecord>; 6] = [None, None, None, None, None, None];
+) -> (Box<[Option<PersistRecord>; 6]>, bool, bool) {
+    // Allocate records individually through the boxed slice so the six large
+    // enum slots are never materialized as an array on the MCU task stack.
+    let mut domains: Box<[Option<PersistRecord>; 6]> =
+        Box::from_iter(core::iter::repeat_with(|| None).take(6))
+            .try_into()
+            .expect("six persistence domain slots");
     let mut contains_data = false;
     let mut read_failed = false;
     for (domain, offsets, slot_size) in [
@@ -1296,33 +1299,37 @@ pub(crate) async fn persist_memory_domains(
         record_staging,
     } = input;
     let domains = [
-        (
-            PersistDomainData::SafetyCalibration(SafetyCalibration::from_config(expected_config)),
-            PersistSlot::A,
-        ),
-        (
-            PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(expected_config)),
-            PersistSlot::A,
-        ),
-        (
-            PersistDomainData::UserPreferences(UserPreferences::from_config(expected_config)),
-            PersistSlot::Single,
-        ),
-        (
-            PersistDomainData::NetworkAndPairing(NetworkAndPairing::from_config(expected_config)),
-            PersistSlot::Single,
-        ),
-        (
-            PersistDomainData::ThermalPlant(ThermalPlantPersistence::from_config(expected_config)),
-            PersistSlot::Single,
-        ),
+        PersistDomain::SafetyCalibration,
+        PersistDomain::ThermalPolicy,
+        PersistDomain::UserPreferences,
+        PersistDomain::NetworkAndPairing,
+        PersistDomain::ThermalPlant,
     ];
     let mut scratch = new_memory_io_scratch();
-    for (data, single_slot) in domains.iter() {
-        let domain = data.domain();
+    for domain in domains {
         if !domains_to_write.includes(domain) || (domain.slot_count() == 2) != double_slot_domains {
             continue;
         }
+        // Keep only the selected domain alive across the write. An array of
+        // all five large enum payloads multiplies the control future's stack.
+        let data = match domain {
+            PersistDomain::SafetyCalibration => PersistDomainData::SafetyCalibration(
+                SafetyCalibration::from_config(expected_config),
+            ),
+            PersistDomain::ThermalPolicy => {
+                PersistDomainData::ThermalPolicy(ThermalPolicy::from_config(expected_config))
+            }
+            PersistDomain::UserPreferences => {
+                PersistDomainData::UserPreferences(UserPreferences::from_config(expected_config))
+            }
+            PersistDomain::NetworkAndPairing => PersistDomainData::NetworkAndPairing(
+                NetworkAndPairing::from_config(expected_config),
+            ),
+            PersistDomain::ThermalPlant => PersistDomainData::ThermalPlant(
+                ThermalPlantPersistence::from_config(expected_config),
+            ),
+            PersistDomain::LayoutMarker => unreachable!("layout markers are published separately"),
+        };
         let slot = if domain.slot_count() == 2 {
             if sequence % 2 == 1 {
                 PersistSlot::A
@@ -1330,7 +1337,7 @@ pub(crate) async fn persist_memory_domains(
                 PersistSlot::B
             }
         } else {
-            *single_slot
+            PersistSlot::Single
         };
         #[cfg(feature = "hil-eeprom-commit-fault")]
         let result = Err(MemoryCommitError::Injected);
@@ -1339,7 +1346,7 @@ pub(crate) async fn persist_memory_domains(
             i2c,
             PersistRecordWriteInput {
                 sequence,
-                data,
+                data: &data,
                 slot,
                 scratch: &mut scratch,
                 record_staging,
@@ -1744,7 +1751,7 @@ pub(crate) async fn read_prepared_fpr2_domains(
     address: u8,
     sequence: u32,
     staging: &mut SensitiveEepromStaging<'_>,
-) -> ([Option<PersistRecord>; 6], bool) {
+) -> (Box<[Option<PersistRecord>; 6]>, bool) {
     let specs = [
         PreparedFpr2DomainSpec {
             domain: PersistDomain::SafetyCalibration,
@@ -1777,7 +1784,10 @@ pub(crate) async fn read_prepared_fpr2_domains(
             sequence,
         },
     ];
-    let mut domains = [None, None, None, None, None, None];
+    let mut domains: Box<[Option<PersistRecord>; 6]> =
+        Box::from_iter(core::iter::repeat_with(|| None).take(6))
+            .try_into()
+            .expect("six persistence domain slots");
     let mut read_failed = false;
     for spec in specs {
         let (selected, failed) = read_prepared_fpr2_domain(i2c, address, spec, staging).await;
@@ -2496,6 +2506,7 @@ pub(crate) fn select_heater_power_backend_with_source_limits(
         current_request_mv: idle_request_mv,
         settle_until_ms: None,
         next_request_at_ms: 0,
+        pps_request_failure_count: 0,
         current_limit_fixed_pwm_active: false,
         current_limit_fixed_request_confirmed: false,
         terminal_fixed_pd_disarmed: false,
@@ -2519,6 +2530,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
                 current_request_mv,
                 settle_until_ms,
                 next_request_at_ms,
+                pps_request_failure_count,
                 current_limit_fixed_pwm_active,
                 current_limit_fixed_request_confirmed,
                 terminal_fixed_pd_disarmed,
@@ -2536,6 +2548,7 @@ pub(crate) fn constrain_heater_backend_to_controller(
                 current_request_mv: current_request_mv.clamp(pps_min_mv, pps_max_mv),
                 settle_until_ms,
                 next_request_at_ms,
+                pps_request_failure_count,
                 current_limit_fixed_pwm_active,
                 current_limit_fixed_request_confirmed,
                 terminal_fixed_pd_disarmed,

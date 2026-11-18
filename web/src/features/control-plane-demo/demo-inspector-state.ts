@@ -29,6 +29,7 @@ export const demoSceneIds = [
   'blocked-artifact',
   'calibration-loading',
   'calibration-active',
+  'tuning-save',
   'lan-scan-empty',
   'lan-scan-typical',
   'lan-scan-long',

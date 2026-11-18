@@ -738,6 +738,37 @@
   scrollbar-gutter: auto;
 }
 
+/* Firmware tuning uses the full calibration canvas; its event list already
+   owns its own scroll surface, so the generic tab content inset is redundant. */
+.industrial-calibration-tabs__content:has(.firmware-tuning) {
+  padding-right: 0;
+  scrollbar-gutter: auto;
+}
+
+@media (min-width: 1180px) {
+  .industrial-calibration-tabs__content:has(.firmware-tuning) {
+    overflow: hidden;
+  }
+}
+
+.industrial-calibration-tabs__firmware-scroll {
+  height: 100%;
+  min-height: 0;
+}
+
+.industrial-calibration-tabs__firmware-scroll .simplebar-content {
+  min-height: 100%;
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-calibration-tabs__firmware-scroll
+    > .simplebar-wrapper
+    > .simplebar-mask
+    .simplebar-content {
+    height: 100%;
+  }
+}
+
 .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
   height: 100%;
   min-height: 0;

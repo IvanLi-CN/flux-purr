@@ -221,6 +221,7 @@ export function webSerialProbeToDeviceTarget(probe: WebSerialProbe): DeviceTarge
     faultAttentionPending: probe.status.faultAttentionPending ?? false,
     calibration: probe.status.calibration,
     heaterEnabled: probe.status.heaterEnabled,
+    thermalTuningActive: probe.status.thermalTuningActive ?? false,
     heaterOutputPercent: probe.status.heaterOutputPercent,
     activeCoolingEnabled: probe.status.activeCoolingEnabled,
     postHeatCoolingMode:

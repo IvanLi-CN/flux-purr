@@ -1,0 +1,1813 @@
+{
+  "evidenceKind": "selected-observed-events",
+  "runs": [
+    {
+      "runId": "web-pps3a-f4e2ccd9-c10f-40af-aca7-62d1bd5c419b",
+      "firmware": "0.30.10-dev.d1d3cdb",
+      "heatingFanGuardMode": "high",
+      "eventCount": 2603,
+      "firstSequence": 0,
+      "lastSequence": 2602,
+      "contiguous": true,
+      "terminalElapsedMs": 759968,
+      "peakCentiC": 19587,
+      "first220Warmup100To170Ms": 118031,
+      "nonFullWarmupSamples": 0,
+      "trials": [
+        {
+          "trialIndex": 0,
+          "decisionSequence": 1364,
+          "elapsedMs": 398938,
+          "stopReason": "trial stage timeout",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 150,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": null
+          },
+          "peakCentiC": 17654,
+          "approachSamples": []
+        },
+        {
+          "trialIndex": 1,
+          "decisionSequence": 1974,
+          "elapsedMs": 579404,
+          "stopReason": "trial stage timeout",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 150,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": null
+          },
+          "peakCentiC": 19343,
+          "approachSamples": []
+        },
+        {
+          "trialIndex": 2,
+          "decisionSequence": 2595,
+          "elapsedMs": 759968,
+          "stopReason": "trial stage timeout",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 150,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": null
+          },
+          "peakCentiC": 19587,
+          "approachSamples": []
+        }
+      ]
+    },
+    {
+      "runId": "web-pps3a-c71bbf56-7f06-4204-aae9-2d29fc75da75",
+      "firmware": "0.30.10-dev.d1d3cdb",
+      "heatingFanGuardMode": "low",
+      "eventCount": 3636,
+      "firstSequence": 0,
+      "lastSequence": 3635,
+      "contiguous": true,
+      "terminalElapsedMs": 1060980,
+      "peakCentiC": 21918,
+      "first220Warmup100To170Ms": 65753,
+      "nonFullWarmupSamples": 0,
+      "trials": [
+        {
+          "trialIndex": 0,
+          "decisionSequence": 1386,
+          "elapsedMs": 404600,
+          "stopReason": "trial stage timeout",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 150,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": null
+          },
+          "peakCentiC": 20694,
+          "approachSamples": []
+        },
+        {
+          "trialIndex": 1,
+          "decisionSequence": 1743,
+          "elapsedMs": 508873,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 150,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 508873,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 503871
+          },
+          "peakCentiC": 21554,
+          "approachSamples": [
+            {
+              "sequence": 1724,
+              "elapsedMs": 503871,
+              "temperatureCentiC": 21501,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1725,
+              "elapsedMs": 504030,
+              "temperatureCentiC": 21480,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1726,
+              "elapsedMs": 504310,
+              "temperatureCentiC": 21471,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1727,
+              "elapsedMs": 504549,
+              "temperatureCentiC": 21452,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1728,
+              "elapsedMs": 504756,
+              "temperatureCentiC": 21499,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1729,
+              "elapsedMs": 505098,
+              "temperatureCentiC": 21534,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1730,
+              "elapsedMs": 505389,
+              "temperatureCentiC": 21514,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1731,
+              "elapsedMs": 505661,
+              "temperatureCentiC": 21554,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1732,
+              "elapsedMs": 505957,
+              "temperatureCentiC": 21494,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1733,
+              "elapsedMs": 506278,
+              "temperatureCentiC": 21505,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1734,
+              "elapsedMs": 506606,
+              "temperatureCentiC": 21508,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1735,
+              "elapsedMs": 506940,
+              "temperatureCentiC": 21534,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1736,
+              "elapsedMs": 507290,
+              "temperatureCentiC": 21543,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1737,
+              "elapsedMs": 507569,
+              "temperatureCentiC": 21526,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1738,
+              "elapsedMs": 507878,
+              "temperatureCentiC": 21520,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1739,
+              "elapsedMs": 508132,
+              "temperatureCentiC": 21501,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1740,
+              "elapsedMs": 508508,
+              "temperatureCentiC": 21451,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 1741,
+              "elapsedMs": 508873,
+              "temperatureCentiC": 21496,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        },
+        {
+          "trialIndex": 2,
+          "decisionSequence": 2160,
+          "elapsedMs": 630877,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 410,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 630877,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 625795
+          },
+          "peakCentiC": 21858,
+          "approachSamples": [
+            {
+              "sequence": 2142,
+              "elapsedMs": 625795,
+              "temperatureCentiC": 21855,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2143,
+              "elapsedMs": 625962,
+              "temperatureCentiC": 21843,
+              "requestedPermille": 990,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2144,
+              "elapsedMs": 626281,
+              "temperatureCentiC": 21788,
+              "requestedPermille": 850,
+              "physicalPermille": 740,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2145,
+              "elapsedMs": 626639,
+              "temperatureCentiC": 21858,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2146,
+              "elapsedMs": 626890,
+              "temperatureCentiC": 21855,
+              "requestedPermille": 830,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2147,
+              "elapsedMs": 627210,
+              "temperatureCentiC": 21790,
+              "requestedPermille": 840,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2148,
+              "elapsedMs": 627527,
+              "temperatureCentiC": 21758,
+              "requestedPermille": 910,
+              "physicalPermille": 800,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2149,
+              "elapsedMs": 627866,
+              "temperatureCentiC": 21814,
+              "requestedPermille": 840,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2150,
+              "elapsedMs": 628195,
+              "temperatureCentiC": 21759,
+              "requestedPermille": 900,
+              "physicalPermille": 790,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2151,
+              "elapsedMs": 628535,
+              "temperatureCentiC": 21779,
+              "requestedPermille": 870,
+              "physicalPermille": 760,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2152,
+              "elapsedMs": 628885,
+              "temperatureCentiC": 21745,
+              "requestedPermille": 900,
+              "physicalPermille": 790,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2153,
+              "elapsedMs": 629228,
+              "temperatureCentiC": 21728,
+              "requestedPermille": 910,
+              "physicalPermille": 800,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2154,
+              "elapsedMs": 629560,
+              "temperatureCentiC": 21683,
+              "requestedPermille": 930,
+              "physicalPermille": 810,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2155,
+              "elapsedMs": 629872,
+              "temperatureCentiC": 21706,
+              "requestedPermille": 910,
+              "physicalPermille": 790,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2156,
+              "elapsedMs": 630222,
+              "temperatureCentiC": 21710,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2157,
+              "elapsedMs": 630531,
+              "temperatureCentiC": 21681,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2158,
+              "elapsedMs": 630877,
+              "temperatureCentiC": 21642,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        },
+        {
+          "trialIndex": 3,
+          "decisionSequence": 2533,
+          "elapsedMs": 740195,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 590,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 740195,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 735066
+          },
+          "peakCentiC": 21852,
+          "approachSamples": [
+            {
+              "sequence": 2514,
+              "elapsedMs": 735066,
+              "temperatureCentiC": 21852,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2515,
+              "elapsedMs": 735244,
+              "temperatureCentiC": 21834,
+              "requestedPermille": 1000,
+              "physicalPermille": 880,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2516,
+              "elapsedMs": 735575,
+              "temperatureCentiC": 21848,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2517,
+              "elapsedMs": 735892,
+              "temperatureCentiC": 21834,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2518,
+              "elapsedMs": 736188,
+              "temperatureCentiC": 21806,
+              "requestedPermille": 750,
+              "physicalPermille": 660,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2519,
+              "elapsedMs": 736471,
+              "temperatureCentiC": 21802,
+              "requestedPermille": 750,
+              "physicalPermille": 660,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2520,
+              "elapsedMs": 736678,
+              "temperatureCentiC": 21762,
+              "requestedPermille": 810,
+              "physicalPermille": 710,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2521,
+              "elapsedMs": 737011,
+              "temperatureCentiC": 21811,
+              "requestedPermille": 750,
+              "physicalPermille": 660,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2522,
+              "elapsedMs": 737346,
+              "temperatureCentiC": 21737,
+              "requestedPermille": 840,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2523,
+              "elapsedMs": 737661,
+              "temperatureCentiC": 21799,
+              "requestedPermille": 1000,
+              "physicalPermille": 880,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2524,
+              "elapsedMs": 737948,
+              "temperatureCentiC": 21755,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2525,
+              "elapsedMs": 738255,
+              "temperatureCentiC": 21787,
+              "requestedPermille": 980,
+              "physicalPermille": 860,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2526,
+              "elapsedMs": 738579,
+              "temperatureCentiC": 21736,
+              "requestedPermille": 990,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2527,
+              "elapsedMs": 738936,
+              "temperatureCentiC": 21721,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2528,
+              "elapsedMs": 739266,
+              "temperatureCentiC": 21701,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2529,
+              "elapsedMs": 739591,
+              "temperatureCentiC": 21713,
+              "requestedPermille": 940,
+              "physicalPermille": 820,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2530,
+              "elapsedMs": 739912,
+              "temperatureCentiC": 21690,
+              "requestedPermille": 950,
+              "physicalPermille": 830,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2531,
+              "elapsedMs": 740195,
+              "temperatureCentiC": 21686,
+              "requestedPermille": 950,
+              "physicalPermille": 830,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        },
+        {
+          "trialIndex": 4,
+          "decisionSequence": 2911,
+          "elapsedMs": 850555,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 590,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 850555,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 845418
+          },
+          "peakCentiC": 21902,
+          "approachSamples": [
+            {
+              "sequence": 2891,
+              "elapsedMs": 845418,
+              "temperatureCentiC": 21902,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2892,
+              "elapsedMs": 845558,
+              "temperatureCentiC": 21884,
+              "requestedPermille": 990,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2893,
+              "elapsedMs": 845887,
+              "temperatureCentiC": 21899,
+              "requestedPermille": 690,
+              "physicalPermille": 600,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2894,
+              "elapsedMs": 846184,
+              "temperatureCentiC": 21875,
+              "requestedPermille": 680,
+              "physicalPermille": 590,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2895,
+              "elapsedMs": 846518,
+              "temperatureCentiC": 21845,
+              "requestedPermille": 660,
+              "physicalPermille": 580,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2896,
+              "elapsedMs": 846732,
+              "temperatureCentiC": 21871,
+              "requestedPermille": 650,
+              "physicalPermille": 570,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2897,
+              "elapsedMs": 847084,
+              "temperatureCentiC": 21864,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2898,
+              "elapsedMs": 847427,
+              "temperatureCentiC": 21847,
+              "requestedPermille": 700,
+              "physicalPermille": 610,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2899,
+              "elapsedMs": 847729,
+              "temperatureCentiC": 21839,
+              "requestedPermille": 740,
+              "physicalPermille": 650,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2900,
+              "elapsedMs": 848023,
+              "temperatureCentiC": 21858,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2901,
+              "elapsedMs": 848388,
+              "temperatureCentiC": 21759,
+              "requestedPermille": 850,
+              "physicalPermille": 740,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2902,
+              "elapsedMs": 848610,
+              "temperatureCentiC": 21782,
+              "requestedPermille": 800,
+              "physicalPermille": 700,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2903,
+              "elapsedMs": 848894,
+              "temperatureCentiC": 21761,
+              "requestedPermille": 840,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2904,
+              "elapsedMs": 849190,
+              "temperatureCentiC": 21768,
+              "requestedPermille": 830,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2905,
+              "elapsedMs": 849446,
+              "temperatureCentiC": 21762,
+              "requestedPermille": 830,
+              "physicalPermille": 730,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2906,
+              "elapsedMs": 849735,
+              "temperatureCentiC": 21736,
+              "requestedPermille": 870,
+              "physicalPermille": 760,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2907,
+              "elapsedMs": 850046,
+              "temperatureCentiC": 21751,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2908,
+              "elapsedMs": 850398,
+              "temperatureCentiC": 21693,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 2909,
+              "elapsedMs": 850555,
+              "temperatureCentiC": 21715,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        },
+        {
+          "trialIndex": 5,
+          "decisionSequence": 3281,
+          "elapsedMs": 959406,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 590,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 959406,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 954351
+          },
+          "peakCentiC": 21918,
+          "approachSamples": [
+            {
+              "sequence": 3261,
+              "elapsedMs": 954351,
+              "temperatureCentiC": 21918,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3262,
+              "elapsedMs": 954555,
+              "temperatureCentiC": 21903,
+              "requestedPermille": 990,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3263,
+              "elapsedMs": 954818,
+              "temperatureCentiC": 21904,
+              "requestedPermille": 760,
+              "physicalPermille": 670,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3264,
+              "elapsedMs": 955166,
+              "temperatureCentiC": 21885,
+              "requestedPermille": 700,
+              "physicalPermille": 610,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3265,
+              "elapsedMs": 955427,
+              "temperatureCentiC": 21909,
+              "requestedPermille": 660,
+              "physicalPermille": 580,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3266,
+              "elapsedMs": 955706,
+              "temperatureCentiC": 21847,
+              "requestedPermille": 730,
+              "physicalPermille": 640,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3267,
+              "elapsedMs": 956000,
+              "temperatureCentiC": 21878,
+              "requestedPermille": 690,
+              "physicalPermille": 600,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3268,
+              "elapsedMs": 956353,
+              "temperatureCentiC": 21847,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3269,
+              "elapsedMs": 956637,
+              "temperatureCentiC": 21860,
+              "requestedPermille": 710,
+              "physicalPermille": 620,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3270,
+              "elapsedMs": 956863,
+              "temperatureCentiC": 21795,
+              "requestedPermille": 790,
+              "physicalPermille": 690,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3271,
+              "elapsedMs": 957177,
+              "temperatureCentiC": 21825,
+              "requestedPermille": 930,
+              "physicalPermille": 810,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3272,
+              "elapsedMs": 957508,
+              "temperatureCentiC": 21814,
+              "requestedPermille": 960,
+              "physicalPermille": 840,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3273,
+              "elapsedMs": 957827,
+              "temperatureCentiC": 21825,
+              "requestedPermille": 920,
+              "physicalPermille": 810,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3274,
+              "elapsedMs": 958106,
+              "temperatureCentiC": 21811,
+              "requestedPermille": 930,
+              "physicalPermille": 810,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3275,
+              "elapsedMs": 958413,
+              "temperatureCentiC": 21787,
+              "requestedPermille": 910,
+              "physicalPermille": 800,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3276,
+              "elapsedMs": 958628,
+              "temperatureCentiC": 21824,
+              "requestedPermille": 870,
+              "physicalPermille": 760,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3277,
+              "elapsedMs": 958894,
+              "temperatureCentiC": 21788,
+              "requestedPermille": 890,
+              "physicalPermille": 780,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3278,
+              "elapsedMs": 959252,
+              "temperatureCentiC": 21733,
+              "requestedPermille": 950,
+              "physicalPermille": 830,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3279,
+              "elapsedMs": 959406,
+              "temperatureCentiC": 21773,
+              "requestedPermille": 910,
+              "physicalPermille": 800,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        },
+        {
+          "trialIndex": 6,
+          "decisionSequence": 3627,
+          "elapsedMs": 1060980,
+          "stopReason": "full-speed-to-stable budget exhausted",
+          "timing": {
+            "allowedApproachFloorPermille": 50,
+            "configuredApproachFloorPermille": 590,
+            "effectiveApproachFloorPermille": 50,
+            "extendedAtMs": null,
+            "extensionLimitMs": 15000,
+            "floorObservedAtMs": null,
+            "modelApproachFloorPermille": 50,
+            "originalDeadlineObservedAtMs": 1060980,
+            "originalDeadlinePhase": "approach",
+            "originalLimitMs": 5000,
+            "policyVersion": 5,
+            "stableWindowStartedAtMs": null,
+            "stableWindowVerifiedAtMs": null,
+            "warmupExitedAtMs": 1055881
+          },
+          "peakCentiC": 21905,
+          "approachSamples": [
+            {
+              "sequence": 3607,
+              "elapsedMs": 1055881,
+              "temperatureCentiC": 21905,
+              "requestedPermille": 50,
+              "physicalPermille": 40,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3608,
+              "elapsedMs": 1056036,
+              "temperatureCentiC": 21902,
+              "requestedPermille": 950,
+              "physicalPermille": 830,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3609,
+              "elapsedMs": 1056323,
+              "temperatureCentiC": 21860,
+              "requestedPermille": 850,
+              "physicalPermille": 740,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3610,
+              "elapsedMs": 1056556,
+              "temperatureCentiC": 21868,
+              "requestedPermille": 650,
+              "physicalPermille": 570,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3611,
+              "elapsedMs": 1056761,
+              "temperatureCentiC": 21868,
+              "requestedPermille": 690,
+              "physicalPermille": 600,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3612,
+              "elapsedMs": 1057087,
+              "temperatureCentiC": 21885,
+              "requestedPermille": 620,
+              "physicalPermille": 540,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3613,
+              "elapsedMs": 1057384,
+              "temperatureCentiC": 21852,
+              "requestedPermille": 630,
+              "physicalPermille": 550,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3614,
+              "elapsedMs": 1057661,
+              "temperatureCentiC": 21843,
+              "requestedPermille": 620,
+              "physicalPermille": 540,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3615,
+              "elapsedMs": 1058003,
+              "temperatureCentiC": 21793,
+              "requestedPermille": 670,
+              "physicalPermille": 580,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3616,
+              "elapsedMs": 1058313,
+              "temperatureCentiC": 21835,
+              "requestedPermille": 630,
+              "physicalPermille": 550,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3617,
+              "elapsedMs": 1058540,
+              "temperatureCentiC": 21772,
+              "requestedPermille": 720,
+              "physicalPermille": 630,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": true,
+                "outputLevel": "low",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3618,
+              "elapsedMs": 1058879,
+              "temperatureCentiC": 21789,
+              "requestedPermille": 680,
+              "physicalPermille": 590,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3619,
+              "elapsedMs": 1059181,
+              "temperatureCentiC": 21739,
+              "requestedPermille": 770,
+              "physicalPermille": 670,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3620,
+              "elapsedMs": 1059516,
+              "temperatureCentiC": 21738,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3621,
+              "elapsedMs": 1059805,
+              "temperatureCentiC": 21724,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3622,
+              "elapsedMs": 1060083,
+              "temperatureCentiC": 21741,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3623,
+              "elapsedMs": 1060444,
+              "temperatureCentiC": 21677,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3624,
+              "elapsedMs": 1060829,
+              "temperatureCentiC": 21737,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            },
+            {
+              "sequence": 3625,
+              "elapsedMs": 1060980,
+              "temperatureCentiC": 21721,
+              "requestedPermille": 1000,
+              "physicalPermille": 870,
+              "contractMv": 21000,
+              "contractMa": 3250,
+              "fan": {
+                "enabled": false,
+                "outputLevel": "off",
+                "pwmPermille": 1000
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

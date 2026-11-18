@@ -412,6 +412,17 @@ static APPLIED_HEATER_DUTY_PERCENT: AtomicU8 = AtomicU8::new(0);
 #[derive(Clone, Copy, Default)]
 pub(crate) struct HeaterPwmGate;
 
+// Last physical zero-output cause: explicit command, denied permit, or revocation.
+#[cfg(target_arch = "xtensa")]
+pub(crate) static HEATER_OUTPUT_ZERO_CAUSE: AtomicU8 = AtomicU8::new(0);
+
+// Last PPS pause context: safety/reconciliation/range bits, cached and desired 100 mV units.
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PPS_OUTPUT_PAUSE_CONTEXT: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(target_arch = "xtensa")]
+pub(crate) static PPS_OUTPUT_PAUSE_LIMITS: AtomicU32 = AtomicU32::new(0);
+
 #[cfg(target_arch = "xtensa")]
 impl HeaterPwmGate {
     pub(crate) const fn new() -> Self {
@@ -433,6 +444,7 @@ impl HeaterPwmGate {
         PD_HEATER_PERMIT_EXPIRES_AT_MS.store(0, Ordering::Release);
         let mut gate = Self::new();
         let _ = gate.set_duty_cycle(0);
+        HEATER_OUTPUT_ZERO_CAUSE.store(3, Ordering::Release);
     }
 }
 
@@ -460,6 +472,9 @@ impl SetDutyCycle for HeaterPwmGate {
                 PD_HEATER_PERMIT.store(0, Ordering::Release);
                 0
             };
+            if effective_duty == 0 {
+                HEATER_OUTPUT_ZERO_CAUSE.store(1 + u8::from(duty == 0), Ordering::Release);
+            }
             let mut storage = slot.borrow_mut();
             let Some(pwm) = storage.as_mut() else {
                 APPLIED_HEATER_DUTY_PERCENT.store(0, Ordering::Release);

@@ -9,7 +9,6 @@ import { DemoInspector } from '@/features/control-plane-demo/components/demo-ins
 import {
   type DemoActionKind,
   type DemoInspectorState,
-  defaultDemoInspectorState,
   demoInspectorSearch,
   demoInspectorStateFromSearch,
   deriveDemoScenario,
@@ -465,67 +464,57 @@ function App() {
   )
 
   const updateInspectorState = useCallback(
-    (
-      nextState: Partial<DemoInspectorState>,
-      options?: { preserveRoute?: boolean; ignoreBlocker?: boolean; priority?: boolean }
-    ) =>
-      enqueueInspectorNavigation(
-        async () => {
-          const previousState = inspectorStateRef.current
-          const mergedState = { ...previousState, ...nextState }
-          const {
-            demoScene: _demoScene,
-            demoPersona: _demoPersona,
-            demoLease: _demoLease,
-            demoNetwork: _demoNetwork,
-            demoArtifact: _demoArtifact,
-            demoWifiCapability: _demoWifiCapability,
-            demoLogs: _demoLogs,
-            demoTelemetry: _demoTelemetry,
-            demoLanScanResults: _demoLanScanResults,
-            ...searchWithoutInspector
-          } = inspectorSearchRef.current
-          const nextSearch = {
-            ...searchWithoutInspector,
-            ...demoInspectorSearch(mergedState),
-          }
-          const sceneChanged = mergedState.demoScene !== previousState.demoScene
-          const nextScenario = deriveDemoScenario(
-            mergedState,
-            demoSession.events,
-            demoSession.actions,
-            sceneChanged
-              ? undefined
-              : inspectorPathnameRef.current.match(/^\/devices\/([^/]+)/)?.[1]
-          )
-          const nextPathname =
-            sceneChanged && !options?.preserveRoute
-              ? inspectorPathnameRef.current.replace(
-                  /^(\/devices\/)[^/]+(\/.*)$/,
-                  `$1${encodeURIComponent(nextScenario.selectedDeviceId)}$2`
-                )
-              : inspectorPathnameRef.current
-          const completed = await settleInspectorNavigation(
-            () =>
-              navigate({
-                to: nextPathname as '/',
-                search: nextSearch,
-                replace: true,
-                ignoreBlocker: options?.ignoreBlocker,
-              }),
-            inspectorNavigationTargetKey(nextPathname, nextSearch)
-          )
-          if (!completed) return false
-          if (sceneChanged) {
-            dispatchDemoSession({ type: 'clear-results' })
-          }
-          inspectorStateRef.current = mergedState
-          inspectorSearchRef.current = nextSearch
-          inspectorPathnameRef.current = nextPathname
-          return true
-        },
-        { priority: options?.priority }
-      ),
+    (nextState: Partial<DemoInspectorState>) =>
+      enqueueInspectorNavigation(async () => {
+        const previousState = inspectorStateRef.current
+        const mergedState = { ...previousState, ...nextState }
+        const {
+          demoScene: _demoScene,
+          demoPersona: _demoPersona,
+          demoLease: _demoLease,
+          demoNetwork: _demoNetwork,
+          demoArtifact: _demoArtifact,
+          demoWifiCapability: _demoWifiCapability,
+          demoLogs: _demoLogs,
+          demoTelemetry: _demoTelemetry,
+          demoLanScanResults: _demoLanScanResults,
+          ...searchWithoutInspector
+        } = inspectorSearchRef.current
+        const nextSearch = {
+          ...searchWithoutInspector,
+          ...demoInspectorSearch(mergedState),
+        }
+        const sceneChanged = mergedState.demoScene !== previousState.demoScene
+        const nextScenario = deriveDemoScenario(
+          mergedState,
+          demoSession.events,
+          demoSession.actions,
+          sceneChanged ? undefined : inspectorPathnameRef.current.match(/^\/devices\/([^/]+)/)?.[1]
+        )
+        const nextPathname = sceneChanged
+          ? inspectorPathnameRef.current.replace(
+              /^(\/devices\/)[^/]+(\/.*)$/,
+              `$1${encodeURIComponent(nextScenario.selectedDeviceId)}$2`
+            )
+          : inspectorPathnameRef.current
+        const completed = await settleInspectorNavigation(
+          () =>
+            navigate({
+              to: nextPathname as '/',
+              search: nextSearch,
+              replace: true,
+            }),
+          inspectorNavigationTargetKey(nextPathname, nextSearch)
+        )
+        if (!completed) return false
+        if (sceneChanged) {
+          dispatchDemoSession({ type: 'clear-results' })
+        }
+        inspectorStateRef.current = mergedState
+        inspectorSearchRef.current = nextSearch
+        inspectorPathnameRef.current = nextPathname
+        return true
+      }),
     [
       demoSession.actions,
       demoSession.events,
@@ -594,15 +583,15 @@ function App() {
   )
 
   const resetDemo = useCallback(async () => {
-    const completed = await updateInspectorState(defaultDemoInspectorState, {
-      preserveRoute: true,
-      ignoreBlocker: true,
-      priority: true,
-    })
-    if (completed !== false) {
-      dispatchDemoSession({ type: 'reset' })
-    }
-  }, [updateInspectorState])
+    await enqueueInspectorNavigation(
+      async () => {
+        setCalibrationGuard(null)
+        dispatchDemoSession({ type: 'reset' })
+        return undefined
+      },
+      { priority: true }
+    )
+  }, [enqueueInspectorNavigation])
 
   const navigation = useMemo<ConsoleNavigationAdapter | undefined>(() => {
     if (!routeState) return undefined
@@ -628,6 +617,7 @@ function App() {
         allowDemoControls={!isLive}
         mockOnly={mockOnly}
         demoThermalPlantRunLoading={!isLive && inspectorState.demoScene === 'calibration-loading'}
+        demoTuningSave={!isLive && inspectorState.demoScene === 'tuning-save'}
         demoLanScanResults={inspectorState.demoLanScanResults}
         firmwareArtifacts={mockOnly ? firmwareDemoArtifacts : undefined}
         initialFirmwareActivity={mockOnly ? firmwareDemoActivity : undefined}
