@@ -236,6 +236,54 @@ fn projection_only_hold_supplies_its_modelled_passive_loss() {
     );
 }
 
+#[test]
+fn projection_hold_maintains_the_observed_steady_heat_loss() {
+    let kind = ProductionThermalController::Profile(ThermalProfileBank::Pps3a);
+    let mut profile = production_test_profile(1_000);
+    profile.points[0].as_mut().unwrap().target_temp_c = 220;
+    let mut input = production_test_input(220.0);
+    input.target_temp_c = 220;
+    input.now_ms = 20_000;
+    input.max_power_mw = 68_250.0;
+    input.model.convection_mw_per_c = 228.28497;
+    input.model.thermal_capacity_mj_per_c = 29_687.969;
+    input.model.transport_delay_ms = 3_100;
+    let plant = flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+        model: input.model,
+        ambient_c: input.ambient_temp_c,
+        max_power_mw: input.max_power_mw,
+    };
+    let observed_power_mw = 62_000.0;
+    let mut controller = HeaterController::new();
+    controller.production_controller = Some(kind);
+    controller.phase = HeaterControlPhase::Hold;
+    controller.heater_was_enabled = true;
+    controller.last_target_temp_c = 220;
+    controller.filtered_temp_c = Some(220.0);
+    controller.previous_measured_temp_c = Some(220.0);
+    controller.phase_ticks = u16::MAX;
+    controller
+        .applied_heat
+        .configure(input.model.transport_delay_ms);
+    // The plate stays at 220 C under a measured, constant heat input. This
+    // identifies its net maintenance demand independently of the stored
+    // passive-loss projection; no new factory or fan constant is inferred.
+    for now_ms in (0..=input.now_ms).step_by(100) {
+        controller.applied_heat.observe(now_ms, observed_power_mw);
+        controller
+            .applied_heat
+            .observe_temperature(now_ms, 220.0, plant);
+    }
+    let (output, disarmed) = controller.update_production_at(kind, input, Some(profile));
+    assert!(!disarmed);
+    assert_eq!(output.phase, HeaterControlPhase::Hold);
+    let requested_power_mw = f32::from(output.duty_percent) / 100.0 * input.max_power_mw;
+    assert!(
+        (requested_power_mw - observed_power_mw).abs() <= input.max_power_mw / 100.0,
+        "a steady plate must retain its observed maintenance heat, got {output:?}"
+    );
+}
+
 struct PlantReplay {
     tuning: tuning::ThermalTuningRuntime,
     controller: HeaterController,

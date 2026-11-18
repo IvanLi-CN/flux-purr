@@ -653,6 +653,32 @@ impl AppliedHeatHistory {
         residual_mw / (decay * decay)
     }
 
+    /// Net maintenance demand at command arrival for a pure-delay projection.
+    /// Use the same bounded discrepancy as the arrival forecast: otherwise a
+    /// known extra loss lowers the prediction but is omitted from its power
+    /// request and ceiling. This never increases the electrical power limit.
+    pub fn projection_maintenance_power_mw(
+        &self,
+        now_ms: u64,
+        temperature_c: f32,
+        plant: TrajectoryPlant,
+    ) -> Option<f32> {
+        if self.response.is_some()
+            || !temperature_c.is_finite()
+            || !plant.max_power_mw.is_finite()
+            || plant.max_power_mw <= 0.0
+        {
+            return None;
+        }
+        let loss_mw = plant.loss_mw(temperature_c);
+        if !loss_mw.is_finite() {
+            return None;
+        }
+        let discrepancy_mw =
+            self.residual_at(now_ms, u64::from(plant.model.transport_delay_ms), plant);
+        Some((loss_mw - discrepancy_mw).clamp(0.0, plant.max_power_mw))
+    }
+
     pub fn forecast(
         &self,
         now_ms: u64,

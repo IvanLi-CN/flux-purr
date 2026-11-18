@@ -1642,17 +1642,21 @@ impl HeaterController {
         duty_percent.min(limit_percent)
     }
 
-    /// The projection supplies passive-loss feedforward even when no complete
+    /// The projection supplies net-loss feedforward even when no complete
     /// response curve is available. PI trims that baseline; delayed applied
     /// heat independently caps it before it reaches the actuator.
     fn projection_hold_requests(&self, frame: &ThermalControlFrame) -> Option<(u8, u8)> {
         let ceiling = self.projection_hold_arrival_percent(frame)?;
         let input = self.natural_cooling_input?;
-        let loss = flux_purr_firmware::thermal_plant::natural_cooling_loss_mw(
-            input.model,
+        let loss = self.applied_heat.projection_maintenance_power_mw(
+            input.now_ms,
             f32::from(input.target_temp_c),
-            input.ambient_temp_c,
-        );
+            flux_purr_firmware::thermal_trajectory::TrajectoryPlant {
+                model: input.model,
+                ambient_c: input.ambient_temp_c,
+                max_power_mw: input.max_power_mw,
+            },
+        )?;
         let request = (loss / input.max_power_mw * 100.0).clamp(0.0, 100.0) as u8;
         Some((request, ceiling))
     }
@@ -1677,7 +1681,12 @@ impl HeaterController {
             .natural_cooling_delay_s
             .max(f32::from(frame.control_target.hold_lead_ticks))
             .max(0.4);
-        let arrival_power_mw = (plant.loss_mw(predicted.temperature_c)
+        let maintenance_mw = self.applied_heat.projection_maintenance_power_mw(
+            input.now_ms,
+            predicted.temperature_c,
+            plant,
+        )?;
+        let arrival_power_mw = (maintenance_mw
             + input.model.thermal_capacity_mj_per_c
                 * (f32::from(input.target_temp_c) - predicted.temperature_c)
                 / horizon_s)

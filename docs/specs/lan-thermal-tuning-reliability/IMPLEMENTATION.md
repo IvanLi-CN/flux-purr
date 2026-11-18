@@ -249,3 +249,14 @@
 完整产品固件`711b5672`镜像为2,090,560/2,097,152字节，ELF SHA-256为`7f81cdc3e4119d304a95eea218af37de3f0a3b23d2d935cbde460f296e8fd227`；`just firmware-image-check`和栈门禁通过。首次CLI烧录返回授权USB目标身份检查失败，没有切换端口；只读系统元数据确认原精确路径、VID/PID及串号仍匹配`d0cf1308a148`后，一次保留身份守卫的重试返回`flash completed`，HTTP health确认`0.30.10-dev.711b567`。烧录按授权跳过EEPROM备份，未生成归档，健康状态未知。
 
 Web页面通过已保存凭据重新连接同一LAN设备并启动`web-pps3a-62760a1f-2122-4413-9828-9b5dda53b981`，设备以`pps_contract_unavailable`拒绝，sequence 0即失败。HTTP status连续显示`pdState=negotiating / pdContractKind=none / pdContractCurrentMa=0 / pdDegradedReason=pd_fusb_source_caps_requested`，PPS能力为空，VIN约4.9V，加热及输出均关闭，Low配置仍保留。界面12V数值在无合同事实时不能证明已确认12V。此结果只证明启动门禁保持关闭，不能验证净供热不足修复的实际加热效果，也不能据此判断电源缺少PPS能力；PD重启恢复与匹配镜像的完整Web HTTP调优验收仍未完成。
+
+
+### 供电重新附着后的 Web HTTP 完整复测
+
+主人重新插拔供电线后，设备 uptime 同时归零，PPS 源能力恢复至5.5–21V/3.25A；因此该观察不能单独证明仅重新附着而不重启MCU就能恢复。空间8原页面沿用已保存认证，通过devd LAN HTTP启动`web-pps3a-5d66ba3e-83cb-4fce-b4a7-379ded816968`，固件为`0.30.10-dev.711b567`，风扇配置Low。连续sequence 0–4899共4,900条事件覆盖1,412,978ms；60°C短时筛选和独立60秒确认通过，220°C搜索耗尽稳定期限，整轮失败。最高确认合同21V/3.25A，全部Warmup采样实际输出1000‰，不能把启动或60°C通过当成整轮成功。
+
+终态HTTP GET为200、`phase=failed / armed=false / trace.complete=true / trace.gap=false / saveConfirmed=false`，digest为`633db9251fc8980f97c12fdeb4d1a1117e0b4cc495b04a78e50bcd72e4c5eb1b`。独立HTTP status确认加热关闭、逻辑及物理输出为零、调优不活动、Low保留，模型事务仍为`1470196405`。没有确认保存或替换旧bank。
+
+### 纯延迟路径的净散热维持功率
+
+有效热量差额已进入到达预测，但纯延迟Hold前馈和到达功率上限只采用被动散热，造成同一控制计算的能量基准不一致。生产路径反例在220°C、持续62W已知供热及稳定温度观测下，旧代码只请求65%（约44W）。62W是可重复合成输入，不是工厂数据或实测风扇散热。前馈及到达功率上限统一采用模型散热减去同一有限寿命净差额，电气上限不变；正负差额过期、未来时间边界、无效输入、功率钳制和完整响应路径隔离均有回归。完整固件1,319项测试、无忽略，host/Xtensa严格Clippy和结构检查通过。匹配镜像的完整Web HTTP调优仍需实测，不能由稳态反例通过推断真机已修复。
