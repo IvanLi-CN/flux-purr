@@ -1476,7 +1476,18 @@ impl HeaterController {
                 plant,
             )?
         } else {
-            TemperatureTrajectory::request_permille(reference, predicted, horizon_s, plant)
+            let maintenance_mw = self.applied_heat.projection_maintenance_power_mw(
+                input.now_ms,
+                reference.temperature_c,
+                plant,
+            )?;
+            TemperatureTrajectory::request_permille(
+                reference,
+                predicted,
+                horizon_s,
+                plant,
+                maintenance_mw,
+            )
         };
         let previous_permille = self
             .approach_last_request_permille

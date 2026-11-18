@@ -813,12 +813,12 @@ impl TemperatureTrajectory {
         predicted: ReferenceState,
         horizon_s: f32,
         plant: TrajectoryPlant,
+        maintenance_mw: f32,
     ) -> u16 {
         let rise = reference.rise_c_per_s
             + (reference.temperature_c - predicted.temperature_c) / horizon_s.max(0.4)
             + 0.5 * (reference.rise_c_per_s - predicted.rise_c_per_s);
-        let power_mw =
-            plant.loss_mw(reference.temperature_c) + plant.model.thermal_capacity_mj_per_c * rise;
+        let power_mw = maintenance_mw + plant.model.thermal_capacity_mj_per_c * rise;
         (power_mw * 1_000.0 / plant.max_power_mw).clamp(50.0, 1_000.0) as u16
     }
 
