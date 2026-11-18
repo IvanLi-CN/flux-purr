@@ -1570,3 +1570,30 @@ fn unsafe_or_incomplete_evidence_never_changes_candidate() {
     facts.overshoot_c = 9.0;
     assert_eq!(tune_point(previous, facts), previous);
 }
+
+#[test]
+fn low_side_confirmation_reseed_never_increases_a_short_brake() {
+    for brake in [60, 70, 80, 110, 120, 150, 500] {
+        let previous = ThermalControlProfilePointConfig {
+            brake_distance_centi_c: brake,
+            approach_damping_exponent_permille: 100,
+            approach_lead_ticks: 0,
+            approach_floor_power_permille: 590,
+            approach_power_permille: 1_000,
+            ..point(220)
+        };
+        let facts = TuneEvidence {
+            deadline_temperature_centi_c: Some(21_845),
+            under_c: 1.55,
+            settle_limit_ms: 5_000,
+            ..evidence(220)
+        };
+        assert!(unobserved_low_side_failure(facts));
+        let next = reseed_after_hold_confirm(previous, facts);
+        assert!(
+            next.brake_distance_centi_c <= brake,
+            "low-side failure moved braking earlier: {brake} -> {}",
+            next.brake_distance_centi_c
+        );
+    }
+}

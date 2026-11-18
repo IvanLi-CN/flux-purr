@@ -733,7 +733,12 @@ pub(crate) fn reseed_after_hold_confirm(
     let mut point = tune_base_point(previous, base);
     let (failure, _) = stability_gate_evidence(evidence);
     if evidence.target_c > 150 {
-        reseed_high_temperature_hold(&mut point, evidence, failure);
+        reseed_high_temperature_hold(
+            &mut point,
+            evidence,
+            failure,
+            previous.brake_distance_centi_c,
+        );
     } else {
         reseed_low_temperature_hold(&mut point, evidence, failure);
     }
@@ -744,6 +749,7 @@ fn reseed_high_temperature_hold(
     point: &mut ThermalControlProfilePointConfig,
     evidence: TuneEvidence,
     failure: GateFailure,
+    previous_brake_centi_c: u16,
 ) {
     let median = evidence.hold_median_output_permille.unwrap_or(0);
     let p90 = evidence.hold_p90_output_permille.unwrap_or(0);
@@ -765,7 +771,13 @@ fn reseed_high_temperature_hold(
     if matches!(failure, GateFailure::BrokeLow | GateFailure::MissedLow)
         && (median == 0 || p90 < 900)
     {
-        point.brake_distance_centi_c = point.brake_distance_centi_c.saturating_sub(40).max(120);
+        // A lower bound for ordinary seeds must not move an already shorter
+        // measured candidate toward earlier braking after a low-side miss.
+        point.brake_distance_centi_c = point
+            .brake_distance_centi_c
+            .saturating_sub(40)
+            .max(120.min(previous_brake_centi_c))
+            .min(previous_brake_centi_c);
         point.approach_lead_ticks = point.approach_lead_ticks.saturating_sub(1);
         point.hold_power_permille = point
             .hold_power_permille

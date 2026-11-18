@@ -269,3 +269,12 @@ Web页面通过已保存凭据重新连接同一LAN设备并启动`web-pps3a-627
 空间8原Web页面通过已保存凭据连接devd LAN HTTP，点击开始运行`web-pps3a-bac659f9-e045-4810-bc79-00da336e2440`。60°C短时及独立60秒确认通过；220°C trial 3与6短时筛选通过，trial 4与7独立确认均因稳定时限失败，最终目标预算耗尽。连续sequence 0–4842共4,843条事件覆盖1,401,827ms，最高确认合同21V/3.25A，所有Warmup样本实际输出1000‰。终态HTTP200、failed、armed=false、saveConfirmed=false、trace complete=true/gap=false，digest为`9f2c3c2d8e68ebf0f58bf1d02f847af79114855f075bf15aa230df3d2e015859`。独立HTTP status确认加热关闭、逻辑及物理输出零、Low保留、模型事务仍为1470196405，没有保存或覆盖旧bank。[筛选、确认及终态证据](assets/http-net-maintenance-run.json)保留真实处置。
 
 接近阶段仍使用被动散热反算，而其预测已计入额外散热，与Hold前馈修复存在同类不一致。生产路径回归在218°C稳态、已观测62W平衡供热时，修复前Approach请求65%（约44W）；62W仅为合成反例，不是工厂或风扇标定。Approach以相同有限寿命差额生成净散热基准，保留轨迹误差项和所有输出边界。独立确认失败的完整硬件因果仍需匹配镜像复测，不能用该反例替代。
+
+
+### Approach净散热反算的完整HTTP实机结果
+
+完整产品固件`ceb27cea`通过镜像及栈门禁，镜像2,090,912/2,097,152字节，授权端口烧录成功，HTTP health确认`0.30.10-dev.ceb27ce`且PPS源能力正常。空间8原页面沿用保存凭据，从Web按钮经devd LAN HTTP启动`web-pps3a-3045d2d7-54d7-4260-a43f-45c6181b2693`。60°C筛选和独立60秒确认通过；220°C trial 4、6、8短时通过，trial 5、7、9独立确认均未通过稳定时限，最终目标预算耗尽。连续sequence 0–4919共4,920条事件覆盖1,413,977ms，全部Warmup实际输出1000‰，最高合同21V/3.25A。
+
+终态HTTP200、failed、armed=false、saveConfirmed=false、trace complete=true/gap=false，digest为`992c32691da831b737bb8b1d6538938bfd912604664df2f9c82a6d3dd69387ca`。独立HTTP status确认加热关闭、逻辑/物理输出零、Low保留、模型事务1470196405不变，没有保存或替换旧bank。[真实判定及候选参数](assets/http-projection-approach-run.json)保留确认失败与后续候选变化。
+
+trial 5确认低侧未入带后，刹车距离由1.1°C变成1.2°C，后续直到trial 10仍使用1.2°C，trial 11才提出0.8°C但未及完成就耗尽预算。确认低侧分支的减小操作以1.2°C为下界，能反向增大已经更短的候选。回归验证0.6/0.7/0.8/1.1/1.2/1.5/5°C候选的低侧确认修正不增大制动距离；旧代码首先将0.6°C变为1.2°C。修复只保留此分支相对原候选的单调方向，较长种子下界、高侧和安全路径保持，仍需匹配镜像真机复测。旧斜率提前分支并非本轮所有失败的解释，多轮approachLeadTicks=0，不将其作为已确认主因或据此更改交接规则。
