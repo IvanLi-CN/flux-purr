@@ -40,11 +40,6 @@
 /* The standard desktop keeps all tuning controls visible when the page
    interlock appears. Only spacing changes; identifiers and actions stay intact. */
 @media (min-width: 1280px) and (min-height: 860px) {
-  .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__header,
-  .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__header {
-    padding-bottom: 2px;
-  }
-
   .industrial-console__work-area:has(.tuning-write-notice) .firmware-tuning__parameters > header,
   .firmware-tuning:has(.firmware-tuning__warning) .firmware-tuning__parameters > header {
     padding-block: 8px;

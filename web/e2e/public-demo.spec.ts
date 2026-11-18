@@ -1,5 +1,35 @@
 import { expect, type Page, test } from '@playwright/test'
 
+test('Web Demo confirms tuning save despite a later record read failure', async ({ page }) => {
+  await page.clock.install()
+  await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await page.clock.pauseAt(new Date((await page.evaluate(() => Date.now())) + 50))
+  await page.getByRole('button', { name: '保存', exact: true }).click()
+  const saving = page.getByRole('button', { name: '保存中', exact: true })
+  await expect(saving).toHaveAttribute('aria-busy', 'true')
+  await page.clock.runFor(999)
+  await expect(saving).toBeVisible()
+  await page.clock.runFor(1)
+  const saved = page.getByRole('button', { name: '已保存', exact: true })
+  await expect(saved).toBeVisible()
+  await expect(page.getByRole('status').filter({ hasText: '调优参数已保存到设备' })).toBeVisible()
+  await page.clock.runFor(2_999)
+  await expect(saved).toBeVisible()
+  await expect(page.getByText('调优记录读取失败，已保存的参数不受影响。')).toBeVisible()
+  await page.clock.runFor(1)
+  await expect(page.getByRole('button', { name: '开始调优' })).toBeEnabled()
+  await expect(page.getByText('上次保存结果', { exact: true })).toBeVisible()
+
+  await page.clock.resume()
+  await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+  await page.getByRole('button', { name: '重置应用状态' }).click()
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await expect(page.getByText('上次保存结果', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('调优记录读取失败，已保存的参数不受影响。')).toHaveCount(0)
+  await expect(page).toHaveURL(/\/calibration\/firmware-tuning\?demoScene=tuning-save$/)
+})
+
 async function selectInspectorOption(page: Page, label: string, value: string) {
   await page.getByRole('combobox', { name: label }).click()
   await page.locator(`[role="option"][data-value="${value}"]`).click()
@@ -120,15 +150,15 @@ test.describe('public demo build', () => {
     expect(copiedUrl).toContain('demoScene=degraded')
     expect(copiedUrl).not.toContain('thermal')
 
-    await page.getByRole('button', { name: 'Reset current case' }).click()
-    await expect(page).toHaveURL(/\/devices\/fp-lab-01\/overview$/)
+    await page.getByRole('button', { name: '重置应用状态' }).click()
+    await expect(page).toHaveURL(copiedUrl)
     await expect(page.getByText('simulated thermal warning latched on current target')).toHaveCount(
       0
     )
     await expect(page.getByRole('combobox', { name: 'WiFi capability' })).toContainText(
-      'Default capability'
+      'Unavailable'
     )
-    await expect(page.getByRole('checkbox', { name: 'Simulate lease conflict' })).not.toBeChecked()
+    await expect(page.getByRole('checkbox', { name: 'Simulate lease conflict' })).toBeChecked()
   })
 
   test('shares persona permissions and records simulated mutations', async ({ page }) => {
@@ -155,7 +185,7 @@ test.describe('public demo build', () => {
     await expect(page.getByRole('switch', { name: '标定模式' })).toBeChecked()
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
 
-    await page.getByRole('button', { name: 'Reset current case' }).click()
+    await page.getByRole('button', { name: '重置应用状态' }).click()
 
     await expect(page).toHaveURL('/devices/fp-lab-01/calibration/rtd-adc')
     await expect(page.getByRole('switch', { name: '标定模式' })).not.toBeChecked()
@@ -172,7 +202,7 @@ test.describe('public demo build', () => {
     await selectInspectorOption(page, 'Current target', 'fp-kit-02')
     await expect(page.getByRole('dialog', { name: '校准未关闭' })).toBeVisible()
 
-    await page.getByRole('button', { name: 'Reset current case' }).click()
+    await page.getByRole('button', { name: '重置应用状态' }).click()
 
     await expect(page).toHaveURL('/devices/fp-lab-01/calibration/rtd-adc')
     await expect(page.getByRole('switch', { name: '标定模式' })).not.toBeChecked()
@@ -203,10 +233,10 @@ test.describe('public demo build', () => {
   }) => {
     await page.goto('/devices/fp-kit-02/settings/presets?demoScene=degraded')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
-    await page.getByRole('button', { name: 'Reset current case' }).click()
+    await page.getByRole('button', { name: '重置应用状态' }).click()
 
-    await expect(page).toHaveURL('/devices/fp-kit-02/settings/presets')
-    await expect(page.getByRole('combobox', { name: 'Current scene' })).toContainText('Normal')
+    await expect(page).toHaveURL('/devices/fp-kit-02/settings/presets?demoScene=degraded')
+    await expect(page.getByRole('combobox', { name: 'Current scene' })).toContainText('Degraded')
 
     await page.goto('/devices/fp-lab-01/overview')
     await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
@@ -259,7 +289,7 @@ test.describe('public demo build', () => {
     expect((await openButton.boundingBox())?.height).toBeGreaterThanOrEqual(48)
     await openButton.click()
     await expect(page.getByRole('dialog', { name: 'Demo Inspector' })).toBeVisible()
-    const reset = page.getByRole('button', { name: 'Reset current case' })
+    const reset = page.getByRole('button', { name: '重置应用状态' })
     expect((await reset.boundingBox())?.height).toBeGreaterThanOrEqual(48)
 
     for (const button of [

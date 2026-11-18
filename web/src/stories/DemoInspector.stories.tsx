@@ -53,9 +53,7 @@ function InspectorStory({
           ])
         }
         onReset={() => {
-          setState(defaultDemoInspectorState)
           setActions([])
-          setSelectedDeviceId(deriveDemoScenario(defaultDemoInspectorState).selectedDeviceId)
         }}
       />
     </div>
@@ -192,9 +190,9 @@ export const ResetState: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('button', { name: '打开 Demo Inspector' }))
-    await userEvent.click(await canvas.findByRole('button', { name: 'Reset current case' }))
+    await userEvent.click(await canvas.findByRole('button', { name: '重置应用状态' }))
     await expect(await canvas.findByRole('combobox', { name: 'Current scene' })).toHaveTextContent(
-      'Normal'
+      'Degraded'
     )
   },
 }

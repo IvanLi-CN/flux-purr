@@ -56,6 +56,7 @@ import {
   rememberSuccessfulRoute,
 } from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
+import { TuningSaveScene } from '@/tuning-save-demo'
 import {
   type FirmwareActivityEntry,
   type FirmwareActivityInput,
@@ -254,6 +255,7 @@ export interface ConsoleNavigationAdapter {
 }
 
 interface ControlPlaneDemoProps {
+  demoTuningSave?: boolean
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
   navigation?: ConsoleNavigationAdapter
@@ -861,6 +863,7 @@ export function ControlPlaneDemo({
   allowDemoControls = true,
   mockOnly = false,
   demoThermalPlantRunLoading = false,
+  demoTuningSave = false,
   firmwareArtifacts,
   initialFirmwareActivity,
   lanPairing,
@@ -2742,12 +2745,6 @@ export function ControlPlaneDemo({
   const visibleDeviceLeaseId = visibleDevice.leaseId
   const visibleDeviceNetworkState = visibleDevice.networkState
   const visibleDeviceIsDirectWebSerial = isDirectWebSerialDevice(visibleDevice)
-  const thermalTuningPowerReady =
-    visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'pps'
-  const thermalTuningPowerBlockedReason =
-    visibleDevice.pdState === 'ready' && visibleDevice.pdContractKind === 'fixed'
-      ? '空闲供电为固定 5V；开始调优后固件会自动协商 PPS，确认前保持加热关闭。'
-      : '尚未确认 PPS 合同；开始调优后由固件检查供电能力并协商，确认前不加热。'
   const liveDevdTargetForVisibleDevice = useMemo(
     () =>
       [...activeScenario.devices]
@@ -5380,29 +5377,31 @@ export function ControlPlaneDemo({
                   thermalPlantRunLoading={thermalPlantRunLoading}
                   thermalPlantRunReadError={thermalPlantRunReadError}
                   firmwareTuningWorkspace={
-                    <FirmwareTuningWorkspace
-                      key={visibleDevice.id}
-                      // A persisted LAN session may be rendered before its
-                      // identity probe has repopulated capabilities. The
-                      // read-only endpoint itself is the authoritative support
-                      // check; a 404 is mapped to the unsupported state.
-                      supported={
-                        visibleDevice.capabilities.includes('thermal_tuning') ||
-                        isDirectLanDevice(visibleDevice)
-                      }
-                      writesBlocked={visibleDevice.thermalTuningActive}
-                      powerReady={thermalTuningPowerReady}
-                      powerBlockedReason={thermalTuningPowerBlockedReason}
-                      deviceId={visibleDevice.id}
-                      transport={visibleDeviceTransport}
-                      parameterSnapshot={{
-                        mode: visibleDevice.thermalProfileMode,
-                        bank: visibleDevice.thermalProfileResolvedBank,
-                        control: visibleDevice.thermalControl,
-                      }}
-                      readStatus={readFirmwareTuning}
-                      sendCommand={commandFirmwareTuning}
-                    />
+                    mockOnly && demoTuningSave ? (
+                      <TuningSaveScene key={visibleDevice.id} />
+                    ) : (
+                      <FirmwareTuningWorkspace
+                        key={visibleDevice.id}
+                        // A persisted LAN session may be rendered before its
+                        // identity probe has repopulated capabilities. The
+                        // read-only endpoint itself is the authoritative support
+                        // check; a 404 is mapped to the unsupported state.
+                        supported={
+                          visibleDevice.capabilities.includes('thermal_tuning') ||
+                          isDirectLanDevice(visibleDevice)
+                        }
+                        writesBlocked={visibleDevice.thermalTuningActive}
+                        deviceId={visibleDevice.id}
+                        transport={visibleDeviceTransport}
+                        parameterSnapshot={{
+                          mode: visibleDevice.thermalProfileMode,
+                          bank: visibleDevice.thermalProfileResolvedBank,
+                          control: visibleDevice.thermalControl,
+                        }}
+                        readStatus={readFirmwareTuning}
+                        sendCommand={commandFirmwareTuning}
+                      />
+                    )
                   }
                   runtimeCalibration={visibleRuntimeCalibration}
                   calibrationRefs={visibleCalibrationRefs}

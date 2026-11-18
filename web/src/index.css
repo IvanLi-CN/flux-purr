@@ -760,6 +760,12 @@
   min-height: 100%;
 }
 
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-calibration-tabs__firmware-scroll > .simplebar-wrapper > .simplebar-mask .simplebar-content {
+    height: 100%;
+  }
+}
+
 .industrial-calibration-tabs__scroll-area:has(.thermal-plant-run-card) {
   height: 100%;
   min-height: 0;

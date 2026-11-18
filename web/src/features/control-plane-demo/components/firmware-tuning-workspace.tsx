@@ -1,13 +1,19 @@
 import {
+  CheckCircle2,
   Clipboard,
   Copy,
   Download,
   LoaderCircle,
+  Play,
+  RotateCw,
   Save,
   ShieldAlert,
   Square,
+  Trash2,
   Upload,
+  X,
 } from 'lucide-react'
+import { Popover } from 'radix-ui'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -30,6 +36,7 @@ import {
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import { ControlPlaneClientError } from '../transport-client'
 import { tuningOwnerSession } from '../tuning-owner-session'
+import { FirmwareTuningTemperatureChart } from './firmware-tuning-temperature-chart'
 import './firmware-tuning-workspace.css'
 
 const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
@@ -116,8 +123,6 @@ interface ImportedCandidate {
 export function FirmwareTuningWorkspace({
   supported,
   writesBlocked = false,
-  powerReady = true,
-  powerBlockedReason,
   deviceId,
   transport,
   parameterSnapshot,
@@ -126,8 +131,6 @@ export function FirmwareTuningWorkspace({
 }: {
   supported: boolean
   writesBlocked?: boolean
-  powerReady?: boolean
-  powerBlockedReason?: string
   deviceId: string
   transport: string
   parameterSnapshot?: {
@@ -141,6 +144,8 @@ export function FirmwareTuningWorkspace({
   sendCommand: (command: DeviceCommand) => Promise<ThermalTuningStatus>
 }) {
   const [recording, setRecording] = useState<ThermalTuningRecording | null>(null)
+  const [lastLocalRun, setLastLocalRun] = useState<ThermalTuningRecording | null>(null)
+  const [showEvents, setShowEvents] = useState(false)
   const recordingRef = useRef<ThermalTuningRecording | null>(null)
   const readStatusRef = useRef(readStatus)
   const sendCommandRef = useRef(sendCommand)
@@ -150,6 +155,7 @@ export function FirmwareTuningWorkspace({
   const [identityVerified, setIdentityVerified] = useState(false)
   const [candidate, setCandidate] = useState<ImportedCandidate | null>(null)
   const [pending, setPending] = useState(false)
+  const [saveFeedback, setSaveFeedback] = useState<'idle' | 'loading' | 'success'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [commandError, setCommandError] = useState<string | null>(null)
   const [pollAttempt, setPollAttempt] = useState(0)
@@ -178,9 +184,16 @@ export function FirmwareTuningWorkspace({
   }, [])
 
   useEffect(() => {
+    if (saveFeedback !== 'success') return
+    const timer = window.setTimeout(() => setSaveFeedback('idle'), 3_000)
+    return () => window.clearTimeout(timer)
+  }, [saveFeedback])
+
+  useEffect(() => {
     let cancelled = false
     recordingRef.current = null
     setRecording(null)
+    setLastLocalRun(null)
     setJournalReady(false)
     setIdentityVerified(false)
     setCommandError(null)
@@ -188,6 +201,7 @@ export function FirmwareTuningWorkspace({
     void loadThermalTuningRecording(deviceId)
       .then((restored) => {
         if (cancelled) return
+        setLastLocalRun(restored)
         // A persisted trace gap belongs to the previous run. Reusing its
         // cursor would keep every new read blocked forever; the next status
         // request must establish a fresh cursor for the current device run.
@@ -224,6 +238,7 @@ export function FirmwareTuningWorkspace({
       // and turn a healthy run into device_trace_gap.
       recordingRef.current = updated
       setRecording(updated)
+      if (updated.runId) setLastLocalRun(updated)
       // A later successful status page proves the endpoint is reachable again;
       // clear a stale transport warning left by an earlier bounded retry.
       setError(null)
@@ -333,23 +348,81 @@ export function FirmwareTuningWorkspace({
       .catch((failure) => setError(messageOf(failure)))
   }, [deviceId, recordStatus, recording, sendCommand])
 
-  const apply = async (command: DeviceCommand) => {
+  const apply = async (command: DeviceCommand, reviewAction?: 'save' | 'discard') => {
     // Stopping is the authenticated safety exception: read/journal recovery
     // must never prevent a user from stopping the last observed active run.
-    if (command.op !== 'cancel' && (!journalReady || !identityVerified)) return
+    if ((command.op !== 'cancel' || reviewAction) && (!journalReady || !identityVerified)) return
     // A read already in flight belongs to the state before this command.
     // Its late response must not replace a newly started or stopped run.
     commandEpochRef.current += 1
     setPending(true)
     setCommandError(null)
+    const minimumSaveTime =
+      reviewAction === 'save'
+        ? new Promise<void>((resolve) => window.setTimeout(resolve, 1_000))
+        : null
+    if (minimumSaveTime) setSaveFeedback('loading')
+    let saveSucceeded = false
     try {
+      if (reviewAction === 'save') {
+        await saveTuningResult(
+          command,
+          status?.sealed === true,
+          async (step) => {
+            const next = await tuningOwnerSession.command(deviceId, step, sendCommand)
+            await recordStatus(next)
+            return next
+          },
+          async () => {
+            // Sealing adds an event; the device requires it to be acknowledged before saving.
+            for (let attempt = 0; attempt < 4; attempt += 1) {
+              const current = recordingRef.current
+              if (!current || current.runId !== command.runId || current.gap) break
+              if (current.complete) return current.status
+              const cursor = nextTuningReadCommand(current, true)
+              if (!cursor) break
+              const next = await readStatus(cursor)
+              await recordStatus(next, cursor.afterSequence)
+            }
+            const current = recordingRef.current
+            if (current?.complete && current.runId === command.runId) return current.status
+            throw new Error('本轮调优记录尚未读完，未保存。请稍后重试。')
+          }
+        )
+        saveSucceeded = true
+        setReadState('ready')
+        return
+      }
+      if (reviewAction === 'discard') {
+        const current = await readStatus()
+        await recordStatus(current)
+        if (
+          current.runId !== command.runId ||
+          current.terminalDisposition !== 'candidate_ready' ||
+          current.armed ||
+          current.saveConfirmed
+        ) {
+          throw new Error('调优结果已变化，请查看当前状态。')
+        }
+      }
       const next = await tuningOwnerSession.command(deviceId, command, sendCommand)
       await recordStatus(next)
       setReadState('ready')
     } catch (failure) {
+      if (minimumSaveTime) await minimumSaveTime
+      if (!mountedRef.current) return
       setCommandError(messageOf(failure, 'write'))
+      if (reviewAction) {
+        setIdentityVerified(false)
+        setPollAttempt(0)
+        setReadState('idle')
+      }
     } finally {
-      setPending(false)
+      if (minimumSaveTime) await minimumSaveTime
+      if (mountedRef.current) {
+        if (minimumSaveTime) setSaveFeedback(saveSucceeded ? 'success' : 'idle')
+        setPending(false)
+      }
     }
   }
 
@@ -422,73 +495,134 @@ export function FirmwareTuningWorkspace({
     candidateHash: status?.candidateHash ?? undefined,
     powerClass: status?.powerClass ?? undefined,
   }
-  const canSeal =
-    identityVerified && terminal === 'candidate_ready' && recording?.complete && !status?.sealed
-  const canSave =
+  const chartRecording = recording?.runId ? recording : lastLocalRun
+  const saveVerified =
+    status?.saveConfirmed === true && status.saveReceipt?.readbackVerified === true
+  const reviewing = terminal === 'candidate_ready' && !armed && !status?.saveConfirmed
+  const showingSave = saveFeedback !== 'idle'
+  const savedRunInStandby = saveVerified && !armed && !showingSave
+  const currentRun = savedRunInStandby ? null : recording
+  const currentStatus = currentRun?.status
+  const canStart =
+    supported &&
+    journalReady &&
     identityVerified &&
-    tuningOwnerSession.proofFor(deviceId, status?.runId) != null &&
-    terminal === 'candidate_ready' &&
-    recording?.complete &&
-    status?.sealed &&
-    status.previewReceipt != null &&
-    !status.saveConfirmed
+    Boolean(powerClass) &&
+    !armed &&
+    !writesBlocked &&
+    terminal !== 'candidate_ready' &&
+    !showingSave &&
+    !pending
+  const ownsResult = tuningOwnerSession.proofFor(deviceId, status?.runId) != null
+  const canSave =
+    journalReady &&
+    identityVerified &&
+    ownsResult &&
+    reviewing &&
+    (status?.sealed || recording?.complete) &&
+    status?.previewReceipt != null
 
   return (
     <section className="firmware-tuning" aria-label="固件热控调优">
-      <header className="firmware-tuning__header">
-        <p className="firmware-tuning__context">
-          {powerClass ? `${powerClassLabel(powerClass)} · ` : '功率档位未知 · '}
-          {status?.runId ?? '未运行'}
-        </p>
-        <span
-          className={`firmware-tuning__outcome firmware-tuning__outcome--${terminal ?? 'idle'}`}
-        >
-          {terminalLabel(terminal)}
-        </span>
-      </header>
-
       <div className="firmware-tuning__toolbar">
         <fieldset className="firmware-tuning__primary-actions" aria-label="调优操作">
-          <Button
-            type="button"
-            disabled={
-              !supported ||
-              !journalReady ||
-              !identityVerified ||
-              !powerClass ||
-              armed ||
-              writesBlocked ||
-              terminal === 'candidate_ready' ||
-              pending
-            }
-            onClick={start}
-          >
-            {pending ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : null}
-            开始调优
-          </Button>
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={!supported || !armed || pending}
-            onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
-          >
-            <Square aria-hidden="true" /> 停止
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!canSeal || writesBlocked || pending}
-            onClick={() => void apply({ op: 'seal', ...identity })}
-          >
-            封存候选
-          </Button>
-          <Button
-            type="button"
-            disabled={!canSave || writesBlocked || pending}
-            onClick={() => void apply({ op: 'confirm_save', ...identity })}
-          >
-            <Save aria-hidden="true" /> 确认保存
-          </Button>
+          {reviewing || showingSave ? (
+            <>
+              <Button
+                type="button"
+                className="firmware-tuning__save-button"
+                data-saved={saveFeedback === 'success' || undefined}
+                disabled={!supported || !canSave || writesBlocked || pending || showingSave}
+                aria-busy={saveFeedback === 'loading'}
+                aria-describedby={
+                  reviewing && !showingSave && identityVerified && !ownsResult
+                    ? 'tuning-save-owner'
+                    : undefined
+                }
+                onClick={() => void apply({ op: 'confirm_save', ...identity }, 'save')}
+              >
+                {saveFeedback === 'loading' ? (
+                  <>
+                    <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" /> 保存中
+                  </>
+                ) : saveFeedback === 'success' ? (
+                  <>
+                    <CheckCircle2 aria-hidden="true" /> 已保存
+                  </>
+                ) : (
+                  <>
+                    <Save aria-hidden="true" /> 保存
+                  </>
+                )}
+              </Button>
+              <Popover.Root modal>
+                <Popover.Trigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={
+                      !supported ||
+                      !journalReady ||
+                      !identityVerified ||
+                      writesBlocked ||
+                      pending ||
+                      showingSave
+                    }
+                  >
+                    <Trash2 aria-hidden="true" /> 放弃
+                  </Button>
+                </Popover.Trigger>
+                <Popover.Portal>
+                  <Popover.Content
+                    className="firmware-tuning__discard-popover"
+                    align="start"
+                    sideOffset={8}
+                    aria-label="放弃本轮调优结果？"
+                  >
+                    <p>放弃本轮调优结果？</p>
+                    <div>
+                      <Popover.Close asChild>
+                        <Button type="button" variant="outline" size="sm">
+                          <X aria-hidden="true" /> 取消
+                        </Button>
+                      </Popover.Close>
+                      <Popover.Close asChild>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="sm"
+                          onClick={() =>
+                            void apply({ op: 'cancel', runId: identity.runId }, 'discard')
+                          }
+                        >
+                          <Trash2 aria-hidden="true" /> 确认放弃
+                        </Button>
+                      </Popover.Close>
+                    </div>
+                  </Popover.Content>
+                </Popover.Portal>
+              </Popover.Root>
+            </>
+          ) : (
+            <>
+              <Button type="button" disabled={!canStart} onClick={start}>
+                {pending ? (
+                  <LoaderCircle className="motion-safe:animate-spin" aria-hidden="true" />
+                ) : (
+                  <Play aria-hidden="true" />
+                )}
+                开始调优
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={!supported || !armed || pending}
+                onClick={() => void apply({ op: 'cancel', runId: status?.runId ?? undefined })}
+              >
+                <Square aria-hidden="true" /> 停止
+              </Button>
+            </>
+          )}
           <Button
             type="button"
             variant="outline"
@@ -497,25 +631,37 @@ export function FirmwareTuningWorkspace({
           >
             <Download aria-hidden="true" /> 导出报告
           </Button>
-        </fieldset>
-        <details className="firmware-tuning__advanced">
-          <summary>高级选项：导入候选</summary>
-          <div className="firmware-tuning__advanced-content">
-            <input
-              ref={fileInput}
-              type="file"
-              accept=".json,application/json"
-              hidden
-              onChange={(event) => void importCandidate(event.currentTarget.files?.[0])}
-            />
-            <Button type="button" variant="outline" onClick={() => fileInput.current?.click()}>
-              <Upload aria-hidden="true" /> 导入候选
-            </Button>
-            <span className="firmware-tuning__candidate" title={candidate?.hash}>
-              {candidate?.name ?? '未选择高级候选，使用固件工厂缺省基线'}
+          {saveFeedback === 'success' ? (
+            <span className="firmware-tuning__save-success" role="status">
+              调优参数已保存到设备
             </span>
-          </div>
-        </details>
+          ) : null}
+        </fieldset>
+        {reviewing && !showingSave && identityVerified && !ownsResult ? (
+          <p id="tuning-save-owner" className="firmware-tuning__warning">
+            请在发起本轮调优的页面保存。
+          </p>
+        ) : null}
+        {canStart ? (
+          <details className="firmware-tuning__advanced">
+            <summary>高级选项：导入候选</summary>
+            <div className="firmware-tuning__advanced-content">
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".json,application/json"
+                hidden
+                onChange={(event) => void importCandidate(event.currentTarget.files?.[0])}
+              />
+              <Button type="button" variant="outline" onClick={() => fileInput.current?.click()}>
+                <Upload aria-hidden="true" /> 导入候选
+              </Button>
+              <span className="firmware-tuning__candidate" title={candidate?.hash}>
+                {candidate?.name ?? '未选择高级候选，使用固件工厂缺省基线'}
+              </span>
+            </div>
+          </details>
+        ) : null}
       </div>
 
       {!supported ? (
@@ -525,21 +671,19 @@ export function FirmwareTuningWorkspace({
       ) : null}
       {supported && readState === 'failed' ? (
         <div className="firmware-tuning__warning">
-          <span>{error ?? '固件调优读取失败。'}</span>
+          <span>
+            {saveVerified
+              ? '调优记录读取失败，已保存的参数不受影响。'
+              : (error ?? '固件调优读取失败。')}
+          </span>
           <Button type="button" variant="outline" size="sm" onClick={retryRead} disabled={pending}>
-            重试读取
+            <RotateCw aria-hidden="true" /> 重试读取
           </Button>
         </div>
       ) : null}
       {supported && !powerClass ? (
         <p className="firmware-tuning__warning">
           <ShieldAlert aria-hidden="true" /> 当前设备尚未解析出 PPS 功率档位，无法安全启动调优。
-        </p>
-      ) : null}
-      {supported && powerClass && !powerReady && !error && !commandError ? (
-        <p className="firmware-tuning__warning">
-          <ShieldAlert aria-hidden="true" />{' '}
-          {powerBlockedReason ?? '当前电源合同尚未切换到 PPS；开始调优后固件会先完成安全协商。'}
         </p>
       ) : null}
       {recording?.gap ? (
@@ -599,24 +743,38 @@ export function FirmwareTuningWorkspace({
         <Fact
           label="目标"
           value={
-            status?.targetsC[status.targetIndex] != null
-              ? `${status.targetsC[status.targetIndex]}°C`
+            currentStatus?.targetsC[currentStatus.targetIndex] != null
+              ? `${currentStatus.targetsC[currentStatus.targetIndex]}°C`
               : '—'
           }
         />
-        <Fact label="阶段" value={status?.phase ?? '—'} />
-        <Fact label="轮次" value={status?.trialPurpose ?? '—'} />
-        <Fact label="设备事件" value={`${recording?.events.length ?? 0}`} />
+        <Fact
+          label="状态"
+          value={
+            savedRunInStandby
+              ? terminalLabel(undefined)
+              : saveVerified && saveFeedback === 'success'
+                ? '已保存'
+                : terminal === 'running'
+                  ? (status?.phase ?? terminalLabel(terminal))
+                  : terminalLabel(terminal)
+          }
+        />
+        <Fact label="轮次" value={currentStatus?.trialPurpose ?? '—'} />
+        <Fact label="设备事件" value={`${currentRun?.events.length ?? 0}`} />
         <Fact
           label="审查"
-          value={reviewDispositionLabel(status?.reviewDisposition, Boolean(recording?.runId))}
+          value={reviewDispositionLabel(
+            currentStatus?.reviewDisposition,
+            Boolean(currentRun?.runId)
+          )}
         />
-        <Fact label="追踪" value={trackingLabel(recording)} />
+        <Fact label="追踪" value={trackingLabel(currentRun)} />
       </div>
 
       <div className="firmware-tuning__detail">
         <section>
-          <h3>候选与保存</h3>
+          <h3>{savedRunInStandby ? '上次保存结果' : '候选与保存'}</h3>
           <dl>
             <IdentifierValue
               kind="candidate"
@@ -644,26 +802,51 @@ export function FirmwareTuningWorkspace({
             </div>
           </dl>
         </section>
-        <section>
-          <h3>设备事件</h3>
-          <ScrollArea className="firmware-tuning__event-scroll" autoHide>
-            <table>
-              <thead>
-                <tr>
-                  <th>序号</th>
-                  <th>时间</th>
-                  <th>类型</th>
-                  <th>目标</th>
-                  <th>记录</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recording?.events.slice(-80).map((event) => (
-                  <EventRow key={event.sequence} event={event} />
-                ))}
-              </tbody>
-            </table>
-          </ScrollArea>
+        <section className="firmware-tuning__results">
+          <header className="firmware-tuning__detail-toolbar">
+            <h3>
+              {showEvents
+                ? '设备事件'
+                : chartRecording && !currentRun?.runId
+                  ? '上次调优曲线'
+                  : '温度曲线'}
+            </h3>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setShowEvents(!showEvents)}
+            >
+              {showEvents ? '温度曲线' : '设备事件'}
+            </Button>
+          </header>
+          {showEvents ? (
+            <ScrollArea className="firmware-tuning__event-scroll" autoHide>
+              <table>
+                <thead>
+                  <tr>
+                    <th>序号</th>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>目标</th>
+                    <th>记录</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {chartRecording?.events.slice(-80).map((event) => (
+                    <EventRow key={event.sequence} event={event} />
+                  ))}
+                </tbody>
+              </table>
+            </ScrollArea>
+          ) : (
+            <FirmwareTuningTemperatureChart
+              key={chartRecording?.runId ?? 'idle'}
+              events={chartRecording?.events ?? []}
+              currentTarget={chartRecording?.status.targetsC[chartRecording.status.targetIndex]}
+              traceGap={chartRecording?.gap === true}
+            />
+          )}
         </section>
       </div>
     </section>
@@ -681,10 +864,6 @@ function parameterSourceLabel(source: string) {
     default:
       return source || '参数来源未知'
   }
-}
-
-function powerClassLabel(powerClass: 'pps3a' | 'pps5a') {
-  return powerClass === 'pps3a' ? 'PPS 3A' : 'PPS 5A'
 }
 
 export function compactIdentifier(value: string | null | undefined) {
@@ -920,7 +1099,7 @@ function terminalLabel(value: ThermalTuningStatus['terminalDisposition'] | undef
     case 'running':
       return '运行中'
     case 'candidate_ready':
-      return '待审查候选'
+      return '待确认'
     case 'passed':
       return '通过'
     case 'failed':
@@ -938,8 +1117,45 @@ export function visibleTerminalDisposition(
   return status?.armed || status?.runId ? status.terminalDisposition : undefined
 }
 
+async function saveTuningResult(
+  identity: Omit<DeviceCommand, 'op'>,
+  sealed: boolean,
+  send: (command: DeviceCommand) => Promise<ThermalTuningStatus>,
+  acknowledge: () => Promise<ThermalTuningStatus>
+) {
+  if (!identity.runId || !identity.candidateId || !identity.candidateHash || !identity.powerClass) {
+    throw new Error('无法确认本轮调优结果，请重新读取。')
+  }
+  if (!sealed) await send({ ...identity, op: 'seal' })
+  const verified = await acknowledge()
+  if (
+    !verified.sealed ||
+    verified.armed ||
+    verified.saveConfirmed ||
+    verified.terminalDisposition !== 'candidate_ready' ||
+    verified.previewReceipt == null ||
+    verified.runId !== identity.runId ||
+    verified.candidateId !== identity.candidateId ||
+    verified.candidateHash !== identity.candidateHash ||
+    verified.powerClass !== identity.powerClass
+  ) {
+    throw new Error('设备未能校验本轮调优结果，未保存。')
+  }
+  const result = await send({ ...identity, op: 'confirm_save' })
+  if (
+    result.runId !== identity.runId ||
+    !result.saveConfirmed ||
+    result.saveReceipt?.readbackVerified !== true
+  ) {
+    throw new Error('未收到设备的保存确认，请查看当前状态。')
+  }
+}
+
 export function messageOf(error: unknown, operation: 'read' | 'write' = 'read') {
   if (error instanceof ControlPlaneClientError) {
+    if (operation === 'read' && error.code === 'response_too_large') {
+      return '调优记录读取失败：设备返回的数据量超出上限。'
+    }
     if (error.code === 'devd_lease_unavailable') return error.message
     if (error.code === 'lease_busy' || error.code === 'lease_conflict') {
       return '设备写入租约暂被占用；设备仍已连接，请在租约释放后重试操作。'

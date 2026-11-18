@@ -119,6 +119,9 @@
 - When device calibration data is absent, the selected factory baseline MUST be used without requiring a file upload or user-supplied candidate.
 - Tuning changes MUST remain in RAM as a candidate until the tuning initiator explicitly confirms save. Stop, power loss, or a failed run MUST preserve the last persisted profile for that power class.
 - A confirmed save MUST update only the selected power-class profile bank and MUST retain the other bank unchanged.
+- For a completed result, the Web UI MUST offer Save and Discard. Save runs sealing and preview validation internally before requesting persistent save. The Save button shows a loading icon for at least one second. After the device confirms readback, the button shows a check mark for at least three seconds before the panel returns to standby, keeping the previous result available. Discard requires confirmation in a popover and clears the pending result on the device without changing the saved profile or removing the browser's diagnostic record.
+- The browser MUST silently retain up to ten observed tuning runs in local storage scoped to the Web origin, including their collected status and events. The archive MUST exclude owner proofs and other authentication secrets and MUST NOT require upload or user interaction.
+- The Web tuning workspace MUST plot recorded, accepted temperature samples against elapsed time for each measured target and trial, with a target reference and observed peak and overshoot. Missing evidence MUST be indicated and not interpolated across gaps. The chart MUST NOT replace device qualification or trace evidence.
 
 ### REQ-LTR-014 Tuning run ownership and cross-client writes
 
