@@ -4,12 +4,20 @@
 
 ## Current Status
 
-- Implementation: 无文件调优启动、LAN 身份存储、端点错误、owner proof、固件活动运行写保护及 Web 全局禁写已有实现；两份完整工厂基线、完整跨客户端验收、adapter parity 和完整调优验收仍待收口。现有控制参数种子不能当作完整工厂基线。
+- Implementation: 无文件调优启动、LAN 身份存储、端点错误、owner proof、固件活动运行写保护及 Web 全局禁写已有实现。已有设备标定的 pps3a 实机通过 Web HTTP 八目标完整调优；两份完整工厂基线、完整跨客户端验收及 adapter parity 仍待收口。现有控制参数种子不能当作完整工厂基线。
 - 电源状态语义已明确：空闲时固定 5V/1A 属于正常安全状态；只有调优运行意图存在时才触发 PPS 协商。PPS 未确认前固件不加热、不采样，Web 应显示电源合同等待或失败原因，不得显示设备连接失败。
 - 显式开始调优会建立待恢复的加热意图；实际输出仍须等待已确认的 PPS 合同，并继续通过传感器、过温、commissioning 和持久化安全门禁。调优进入 warmup 后，只有这些门禁全部满足才会驱动加热器。
 - Web 固定 5V 提示说明这是正常空闲供电，启动后固件自动协商 PPS；未确认 PPS 只能说明暂时不加热，不应解释为无法发起调优。
 - Lifecycle: active
-- Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；跨 adapter 错误一致性与完整运行验收尚未收敛。
+- Catalog note: Web LAN session、tuning GET/POST、能力声明与有限读取已有实现；已验证 pps3a 的 devd LAN HTTP 实机路径，跨 adapter 错误一致性仍待验收。
+
+## Web HTTP 八目标完整验收
+
+完整产品固件 `de8b82f7` 的镜像为 2,090,928/2,097,152 字节，ELF SHA-256 为 `ca56c0b02a491d095e53fbf613e454d4d4acaa04542f9cca836a47e75cfb914f`。镜像、栈门禁、host/Xtensa 严格 Clippy、样式及 1,321 项固件测试通过。授权端口烧录成功，HTTP health 确认 `0.30.10-dev.de8b82f`；按授权跳过 EEPROM 备份，未生成归档，EEPROM 健康状态未知。
+
+空间 8 原页面沿用已保存认证，经 devd LAN HTTP 点击开始，无需导入文件。运行 `web-pps3a-467c430f-a6ea-4f78-add5-4bf9bb048b81` 按 60、220、120、80、100、160、140、180°C 的顺序逐一通过独立 60 秒保持确认。用时 2,619,943ms；共收集连续 sequence 0–9076，最高确认 PPS 21V/3.25A，所有 Warmup 样本实际输出 1000‰。终态 HTTP 200，`completed / candidate_ready / armed=false / saveConfirmed=false`，追踪完整且无缺段，digest 为 `c663ed9e1cdca67f6a86cf0596ddabb64f6a7b53e91c27ad31cdd13eb1d433c3`。
+
+页面停留在「待审查候选」；独立 HTTP 读回确认加热已停、逻辑及物理输出为零、加热风扇策略 Low、热模型事务 `1470196405` 保持。未确认保存，未覆盖旧 bank。这轮证明已有标定设备上的 pps3a 完整调优可用；220°C 的首次独立确认即通过，未在实机触发高温确认失败后的刹车修正分支，该分支由回归测试验证。此轮不覆盖无标定冷启动、pps5a 或跨客户端保存。
 
 ## 中间升压与运行活动状态
 
