@@ -5186,9 +5186,8 @@ export function ControlPlaneDemo({
     !routeHasInvalidLanCredential &&
     !routeAllowsIndependentFirmwareMaintenance &&
     (!routeDeviceChoice ||
-      (!routeHasDirectLanConnection &&
-        ((routeHasFailedLanResume && routeConnectionKind !== 'wifi') ||
-          (routeResumeFailed && !routeHasKnownBridgeTransportIssue))))
+      (routeHasFailedLanResume && routeConnectionUnavailable) ||
+      (!routeHasDirectLanConnection && routeResumeFailed && !routeHasKnownBridgeTransportIssue))
   ) {
     const recoveryLeaveGuard = calibrationLeaveGuard
       ? {
