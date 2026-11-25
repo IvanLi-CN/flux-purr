@@ -6467,7 +6467,15 @@
     gap: 0.75rem;
   }
 
-  @media (min-width: 1180px) {
+  /* Split into task and log columns only when this workspace can hold the
+     26rem log track plus the main column's own minimum. Measuring the element
+     instead of the viewport keeps outer shell padding and the fixed chassis
+     from squeezing the active task at intermediate widths. */
+  .industrial-console__work-area {
+    container-type: inline-size;
+  }
+
+  @container (min-width: 1246px) {
     .industrial-console__workspace {
       grid-template-columns: minmax(0, 1fr) 26rem;
     }
