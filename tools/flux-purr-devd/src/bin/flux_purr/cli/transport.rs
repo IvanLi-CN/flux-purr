@@ -242,7 +242,10 @@ pub(crate) async fn handle_hardware_command(
                 name,
                 transport: SavedTransport::Usb,
                 device,
-                devd: devd.or_else(|| Some(default_devd.to_string())),
+                // Only an explicitly supplied endpoint is durable. The daemon
+                // a command starts is a temporary socket that disappears with
+                // the process, so persisting it would poison later commands.
+                devd: devd.or_else(|| devd_flag_was_supplied().then(|| default_devd.to_string())),
                 last_seen_unix_seconds: Some(current_unix_seconds()),
             };
             let saved = upsert_hardware(&mut registry, hardware);
@@ -302,15 +305,36 @@ pub(crate) fn resolve_target(
                 .ok_or_else(|| format!("saved hardware not found: {id}"))?;
             Ok(ResolvedUsbTarget {
                 device: hardware.device.clone(),
-                devd: hardware
-                    .devd
-                    .clone()
-                    .unwrap_or_else(|| default_devd.to_string()),
+                devd: saved_target_devd(
+                    hardware.devd.as_deref(),
+                    default_devd,
+                    devd_flag_was_supplied(),
+                ),
                 hardware_id: Some(id),
             })
         }
         (None, None) => Err("command requires --device or --hardware".into()),
     }
+}
+
+/// Resolve the daemon endpoint for a saved hardware target.
+///
+/// An explicit `--devd` already reached this function through `default_devd`
+/// and always wins. A registry value is only usable while it still names a
+/// local control endpoint: entries written by the removed HTTP transport hold
+/// `http://...` URLs that this CLI can no longer contact, so they fall back to
+/// the current daemon instead of failing the whole command.
+pub(crate) fn saved_target_devd(
+    saved: Option<&str>,
+    default_devd: &str,
+    explicit_devd: bool,
+) -> String {
+    if explicit_devd {
+        return default_devd.to_string();
+    }
+    saved
+        .filter(|endpoint| validate_local_control_endpoint(endpoint).is_ok())
+        .map_or_else(|| default_devd.to_string(), str::to_owned)
 }
 
 pub(crate) fn resolve_lan_target(

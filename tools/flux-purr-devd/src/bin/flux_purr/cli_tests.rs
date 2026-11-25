@@ -106,6 +106,10 @@ fn snapshot_port_uses_raw_io_for_macos_usb_serial_jtag() {
         snapshot_uses_raw_usb_port("/dev/cu.usbmodem-fixture"),
         cfg!(target_os = "macos")
     );
+    assert_eq!(
+        snapshot_uses_raw_usb_port("/dev/tty.usbmodem-fixture"),
+        cfg!(target_os = "macos")
+    );
     assert!(!snapshot_uses_raw_usb_port("/dev/cu.usbserial-1234"));
 }
 
@@ -159,6 +163,30 @@ fn output_enable_requires_explicit_target_selector() {
     .unwrap_err()
     .to_string();
     assert!(err.contains("only one"));
+}
+
+#[test]
+fn saved_hardware_rejects_legacy_http_devd_and_honors_the_explicit_endpoint() {
+    // Registry entries written before the socket-only control plane still hold
+    // `http://` endpoints. They must not fail the command, and an explicit
+    // `--devd` must always win over whatever the registry stored.
+    let stale = Some("http://127.0.0.1:14830");
+    assert_eq!(
+        saved_target_devd(stale, "/tmp/devd.sock", false),
+        "/tmp/devd.sock"
+    );
+    assert_eq!(
+        saved_target_devd(Some("/tmp/legacy.sock"), "/tmp/devd.sock", false),
+        "/tmp/legacy.sock"
+    );
+    assert_eq!(
+        saved_target_devd(Some("/tmp/legacy.sock"), "/tmp/devd.sock", true),
+        "/tmp/devd.sock"
+    );
+    assert_eq!(
+        saved_target_devd(None, "/tmp/devd.sock", false),
+        "/tmp/devd.sock"
+    );
 }
 
 #[test]
@@ -6527,6 +6555,74 @@ fn legacy_eeprom_backup_accepts_a_responsive_transfer_longer_than_thirty_seconds
     assert_eq!(image, vec![0xa5; EEPROM_CAPACITY_BYTES]);
     assert_eq!(elapsed.get(), Duration::from_secs(128));
     assert_eq!(serial.next_offset, EEPROM_CAPACITY_BYTES as u64);
+}
+
+#[test]
+fn snapshot_bulk_reader_splits_coalesced_frames_and_keeps_the_tail() {
+    // The firmware can deliver several frames in one USB packet burst. A
+    // buffered read must return the first matching line and retain the rest
+    // rather than dropping them.
+    let mut serial = SnapshotFixtureReader::from_bytes(
+        b"{\"ok\":true,\"requestId\":\"first\",\"capacity\":8192}\n{\"ok\":true,\"requestId\":\"second\",\"offset\":32}\n",
+    );
+    let deadline = StdInstant::now() + Duration::from_secs(1);
+    let first = read_snapshot_response(&mut serial, "first", deadline).unwrap();
+    assert_eq!(first["capacity"], 8192);
+}
+
+#[test]
+fn snapshot_chunk_retry_recovers_a_single_silent_stall() {
+    // A stalled read leaves no bytes and no error frame; the retry must be able
+    // to complete the transfer instead of failing the whole backup.
+    struct StallOnce {
+        bytes: VecDeque<u8>,
+        stalled: bool,
+    }
+    impl Read for StallOnce {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.stalled {
+                self.stalled = true;
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "stall"));
+            }
+            let Some(byte) = self.bytes.pop_front() else {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "fixture exhausted"));
+            };
+            buf[0] = byte;
+            Ok(1)
+        }
+    }
+    impl Write for StallOnce {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let payload: Vec<String> = (0..32).map(|index| index.to_string()).collect();
+    let line = format!(
+        "{{\"ok\":true,\"requestId\":\"chunk\",\"offset\":0,\"bytes\":[{}]}}\n",
+        payload.join(",")
+    );
+    let line = line.as_bytes();
+    let mut serial = StallOnce {
+        bytes: line.iter().copied().collect(),
+        stalled: false,
+    };
+    let chunk = read_snapshot_chunk(
+        &mut serial,
+        "/dev/cu.usbmodem-fixture",
+        None,
+        "chunk",
+        0,
+        Duration::from_millis(50),
+    )
+    .unwrap();
+    assert_eq!(chunk.len(), 32);
+    assert_eq!(chunk[0], 0);
+    assert_eq!(chunk[31], 31);
 }
 
 #[test]
