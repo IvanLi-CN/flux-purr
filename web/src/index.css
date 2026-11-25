@@ -2234,8 +2234,16 @@
     width: 100%;
     height: 100dvh;
     min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     place-items: center;
     padding: clamp(0.75rem, 2vw, 1.25rem);
+  }
+
+  @media (min-width: 1280px) and (min-height: 860px) {
+    .industrial-console-wrap {
+      padding: min(1.25rem, max(0px, calc(50vw - 640px)), max(0px, calc(50dvh - 430px)));
+    }
   }
 
   .industrial-shell--fixed .industrial-console-wrap {
@@ -2351,12 +2359,6 @@
     display: grid;
     min-height: 0;
     gap: 0.85rem;
-  }
-
-  @media (min-width: 1180px) {
-    .industrial-console__workspace {
-      grid-template-columns: minmax(0, 1fr) clamp(28rem, 35vw, 34rem);
-    }
   }
 
   .industrial-console__main,
@@ -6467,7 +6469,7 @@
 
   @media (min-width: 1180px) {
     .industrial-console__workspace {
-      grid-template-columns: minmax(0, 1fr) minmax(22rem, 28rem);
+      grid-template-columns: minmax(0, 1fr) 26rem;
     }
   }
 
@@ -10892,6 +10894,37 @@
   overscroll-behavior: contain;
 }
 
+.industrial-console__main:has(.industrial-dashboard-scroll) {
+  display: grid;
+  min-height: 0;
+}
+
+.industrial-console__main:has(.industrial-dashboard-scroll) > .industrial-view-panel {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-console__main:has(.industrial-dashboard-scroll) {
+    padding-bottom: 10px;
+  }
+}
+
+.industrial-dashboard-scroll {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+}
+
+.industrial-dashboard-content {
+  min-width: 0;
+}
+
+.industrial-dashboard-scroll.simplebar-scrollable-y .industrial-dashboard-content {
+  padding-right: 0.75rem;
+}
+
 .scroll-area .simplebar-track.simplebar-vertical {
   right: 0.18rem;
   width: 0.72rem;
@@ -10906,6 +10939,20 @@
     width 140ms ease-out;
 }
 
+@media (min-width: 760px) {
+  .industrial-console__main .industrial-dashboard-scroll .simplebar-track.simplebar-vertical {
+    top: calc(22px - clamp(0.82rem, 1.5vw, 1.1rem));
+    right: calc(14px - clamp(0.82rem, 1.5vw, 1.1rem) - 0.36rem);
+    bottom: calc(22px - clamp(0.82rem, 1.5vw, 1.1rem));
+  }
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-console__main .industrial-dashboard-scroll .simplebar-track.simplebar-vertical {
+    bottom: 12px;
+  }
+}
+
 .scroll-area:hover .simplebar-track.simplebar-vertical,
 .scroll-area:focus-within .simplebar-track.simplebar-vertical,
 .scroll-area .simplebar-track.simplebar-vertical:hover,
@@ -10917,12 +10964,11 @@
 .scroll-area .simplebar-scrollbar::before {
   inset: 3px 2px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--scroll-area-thumb-start), var(--scroll-area-thumb-end));
+  background: var(--scroll-area-thumb-start);
   opacity: 0.96;
   box-shadow:
-    0 0 8px color-mix(in oklch, var(--industrial-light) 42%, transparent),
-    inset 1px 1px 1px color-mix(in oklch, var(--industrial-light) 72%, transparent),
-    inset -1px -1px 2px color-mix(in oklch, var(--industrial-shadow-deep) 42%, transparent);
+    0 0 4px color-mix(in oklch, var(--industrial-light) 38%, transparent),
+    inset 0 0 0 1px color-mix(in oklch, var(--industrial-shadow) 24%, transparent);
 }
 
 .industrial-lan-pairing-panel__scan-results-scroll .simplebar-track.simplebar-vertical {
@@ -12221,4 +12267,91 @@
 
 .demo-inspector__scroll .simplebar-track.simplebar-vertical {
   right: -0.75rem;
+}
+
+@media (min-width: 940px) and (min-height: 860px) {
+  .industrial-console {
+    gap: 0.5rem;
+  }
+
+  .industrial-console__top {
+    gap: 0.6rem;
+  }
+
+  .industrial-console__identity {
+    gap: 0.15rem;
+  }
+
+  .industrial-brand-mark {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  .industrial-app-mark {
+    gap: 0.45rem;
+    font-size: 0.68rem;
+  }
+
+  .industrial-app-mark .industrial-status {
+    padding: 0.2rem 0.42rem;
+    font-size: 0.58rem;
+  }
+
+  .industrial-console__identity h1 {
+    font-size: clamp(1.75rem, 2vw, 1.85rem);
+    line-height: 0.95;
+  }
+
+  .industrial-status-strip {
+    gap: 0.45rem;
+    padding: 0.25rem;
+  }
+
+  .industrial-device-select {
+    height: 44px;
+    min-height: 44px;
+    padding-block: 0.35rem;
+  }
+
+  .industrial-status-datum {
+    padding: 0.3rem 0.45rem;
+  }
+
+  .industrial-status-datum strong {
+    font-size: 0.78rem;
+  }
+
+  .industrial-status-strip__button {
+    min-height: 38px;
+  }
+
+  .industrial-workspace-switch {
+    min-height: 44px;
+    padding: 0.2rem;
+  }
+
+  .industrial-workspace-switch button {
+    min-height: 36px;
+  }
+
+  .industrial-view-tabs {
+    gap: 0.4rem;
+    padding: 0.25rem;
+  }
+
+  .industrial-log-filters button,
+  .industrial-log-count,
+  .industrial-log-follow,
+  .industrial-device-select-option small,
+  .industrial-device-select-value small,
+  .industrial-advanced__state,
+  .industrial-setpoint-control span,
+  .thermal-plant-run-card__metric small,
+  .thermal-plant-run-card__section-heading > span,
+  .thermal-plant-run-card__legend,
+  .thermal-plant-run-card__run-evidence,
+  .thermal-plant-run-card__table-wrap table,
+  .thermal-plant-run-card__table-wrap th {
+    font-size: 0.7rem;
+  }
 }

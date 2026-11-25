@@ -1,5 +1,4 @@
-import { Star } from 'lucide-react'
-import { RadioGroup } from 'radix-ui'
+import { ChartNoAxesCombined, Star } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import {
   Select,
@@ -90,35 +89,42 @@ function collectTrials(events: readonly ThermalTuningEvent[]) {
   return { targets, adoptedTrials, holdRanges }
 }
 
+export function tuningChartTargets(events: readonly ThermalTuningEvent[]) {
+  return [...collectTrials(events).targets.keys()].sort((left, right) => left - right)
+}
+
 export function FirmwareTuningTemperatureChart({
   events,
-  currentTarget,
+  selectedTarget,
   traceGap,
 }: {
   events: readonly ThermalTuningEvent[]
-  currentTarget?: number
+  selectedTarget: number
   traceGap: boolean
 }) {
   const { targets, adoptedTrials, holdRanges } = useMemo(() => collectTrials(events), [events])
-  const [selectedTarget, setSelectedTarget] = useState<number>()
   const [selectedTrial, setSelectedTrial] = useState<number>()
   const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(400, 106)
-  const target =
-    selectedTarget != null && targets.has(selectedTarget)
-      ? selectedTarget
-      : currentTarget != null && targets.has(currentTarget)
-        ? currentTarget
-        : [...targets.keys()].at(-1)
-  const trials = target != null ? targets.get(target) : undefined
-  const adoptedTrial = target != null ? adoptedTrials.get(target) : undefined
+  const target = selectedTarget
+  const hasTargetData = targets.has(target)
+  const trials = targets.get(target)
+  const adoptedTrial = adoptedTrials.get(target)
   const trial =
     selectedTrial != null && trials?.has(selectedTrial)
       ? selectedTrial
       : [...(trials?.keys() ?? [])].at(-1)
   const series = trial != null ? trials?.get(trial) : undefined
   const points = series?.points
-  if (target == null || trial == null || !points?.length) {
-    return <p className="firmware-tuning__chart-empty">暂无有效温度采样</p>
+  if (!hasTargetData || trial == null || !points?.length) {
+    return (
+      <output className="firmware-tuning__chart-empty" aria-label="暂无有效温度采样">
+        <ChartNoAxesCombined className="firmware-tuning__chart-empty-visual" aria-hidden="true" />
+        <div className="firmware-tuning__chart-empty-copy">
+          <strong>暂无有效温度采样</strong>
+          <span>温度曲线将在有效采样到达后显示。</span>
+        </div>
+      </output>
+    )
   }
   const trialOptions = [...(trials?.keys() ?? [])]
   const holdRange = holdRanges.get(`${target}:${trial}`)
@@ -149,27 +155,7 @@ export function FirmwareTuningTemperatureChart({
   return (
     <div className="firmware-tuning__chart">
       <div className="firmware-tuning__chart-controls">
-        <RadioGroup.Root
-          className="industrial-workspace-switch firmware-tuning__chart-targets"
-          aria-label="曲线目标温度"
-          value={String(target)}
-          onValueChange={(value) => {
-            setSelectedTarget(Number(value))
-            setSelectedTrial(undefined)
-          }}
-        >
-          {[...targets.keys()]
-            .sort((a, b) => a - b)
-            .map((value) => (
-              <RadioGroup.Item
-                key={value}
-                value={String(value)}
-                className={value === target ? 'is-selected' : undefined}
-              >
-                {value}°C
-              </RadioGroup.Item>
-            ))}
-        </RadioGroup.Root>
+        <span className="firmware-tuning__chart-target-label">目标 {target} °C</span>
         <Select value={String(trial)} onValueChange={(value) => setSelectedTrial(Number(value))}>
           <SelectTrigger aria-label="曲线试验轮次" className="firmware-tuning__trial-select">
             <span className="firmware-tuning__trial-sizing">

@@ -4,7 +4,9 @@ test('Web Demo confirms tuning save despite a later record read failure', async 
   await page.clock.install()
   await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
   await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
-  await page.clock.pauseAt(new Date((await page.evaluate(() => Date.now())) + 50))
+  // Freeze close to "now" but with enough slack that the two CDP round trips
+  // cannot let the installed clock tick past the target.
+  await page.clock.pauseAt(new Date((await page.evaluate(() => Date.now())) + 2_000))
   await page.getByRole('button', { name: '保存', exact: true }).click()
   const saving = page.getByRole('button', { name: '保存中', exact: true })
   await expect(saving).toHaveAttribute('aria-busy', 'true')
@@ -30,12 +32,505 @@ test('Web Demo confirms tuning save despite a later record read failure', async 
   await expect(page).toHaveURL(/\/calibration\/firmware-tuning\?demoScene=tuning-save$/)
 })
 
+test('exposes deterministic firmware tuning presets in the Demo Inspector', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 860 })
+  await page.goto('/devices/fp-lab-01/calibration/firmware-tuning')
+  await page.getByRole('button', { name: '打开 Demo Inspector' }).click()
+
+  const moduleSelect = page.getByRole('combobox', { name: 'Current demo module' })
+  await expect(moduleSelect).toContainText('Tuning · Firmware tuning')
+
+  await page.getByRole('combobox', { name: 'Current scene' }).click()
+  const presetValues = await page
+    .locator('[role="option"]')
+    .evaluateAll((options) => options.map((option) => option.getAttribute('data-value')))
+  expect(presetValues).toEqual([
+    'tuning-idle',
+    'tuning-active',
+    'tuning-save',
+    'tuning-partial',
+    'tuning-unsupported',
+  ])
+  await page.keyboard.press('Escape')
+  await expect(page.getByText('5 presets available for this module')).toBeVisible()
+
+  await selectInspectorOption(page, 'Current scene', 'tuning-idle')
+  await expect(page.getByRole('button', { name: '开始调优' })).toBeEnabled()
+  await expect(page.locator('.firmware-tuning__chart-empty')).toBeVisible()
+  await expect(page.locator('.firmware-tuning__facts').getByText('待命')).toBeVisible()
+
+  await selectInspectorOption(page, 'Current scene', 'tuning-active')
+  await expect(page.locator('.firmware-tuning__chart-plot svg')).toBeVisible({ timeout: 10_000 })
+  await expect(page.getByRole('button', { name: '停止', exact: true })).toBeEnabled()
+  await expect(page.locator('.firmware-tuning__facts')).toContainText(/warmup|approach|hold/)
+
+  await selectInspectorOption(page, 'Current scene', 'tuning-unsupported')
+  await expect(page.getByText('当前设备固件不支持调优事件协议。')).toBeVisible()
+
+  await selectInspectorOption(page, 'Current scene', 'tuning-save')
+  await expect(page.getByRole('button', { name: '保存', exact: true })).toBeEnabled()
+  await expect(page.locator('.firmware-tuning__target-grid button')).toHaveCount(8)
+})
+
 async function selectInspectorOption(page: Page, label: string, value: string) {
   await page.getByRole('combobox', { name: label }).click()
   await page.locator(`[role="option"][data-value="${value}"]`).click()
 }
 
 test.describe('public demo build', () => {
+  test('keeps overview feedback reachable inside the main panel at desktop sizes', async ({
+    page,
+  }) => {
+    for (const viewport of [
+      { width: 1440, height: 900, standard: true, scrollable: false },
+      { width: 1280, height: 860, standard: true, scrollable: false },
+      { width: 1280, height: 800, standard: false, scrollable: true },
+    ]) {
+      await page.setViewportSize(viewport)
+      await page.goto('/devices/fp-lab-01/overview')
+
+      const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+      if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+      const panel = page.locator('.industrial-console__main')
+      const shell = page.locator('.industrial-console')
+      const dashboardScroll = page.locator(
+        '.industrial-dashboard-scroll .simplebar-content-wrapper'
+      )
+      const feedback = page.locator('.industrial-action-feedback')
+      await expect(panel).toBeVisible()
+      await expect(feedback).toBeAttached()
+
+      const scrollable = await dashboardScroll.evaluate(
+        (element) => element.scrollHeight > element.clientHeight
+      )
+      expect(scrollable).toBe(viewport.scrollable)
+      if (viewport.standard) {
+        const shellBounds = await shell.evaluate((element) =>
+          element.getBoundingClientRect().toJSON()
+        )
+        expect(Math.abs(shellBounds.width - 1280)).toBeLessThan(1)
+        expect(Math.abs(shellBounds.height - 860)).toBeLessThan(1)
+        const documentSize = await page.evaluate(() => ({
+          width: document.documentElement.scrollWidth,
+          height: document.documentElement.scrollHeight,
+        }))
+        expect(documentSize.width).toBeLessThanOrEqual(viewport.width)
+        expect(documentSize.height).toBeLessThanOrEqual(viewport.height)
+      }
+      if (viewport.scrollable) {
+        await feedback.scrollIntoViewIfNeeded()
+        expect(await dashboardScroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+      }
+
+      const bounds = await Promise.all([
+        panel.evaluate((element) => element.getBoundingClientRect().toJSON()),
+        page
+          .locator('.industrial-dashboard-scroll')
+          .evaluate((element) => element.getBoundingClientRect().toJSON()),
+        feedback.evaluate((element) => element.getBoundingClientRect().toJSON()),
+      ])
+      expect(bounds[1].left).toBeGreaterThanOrEqual(bounds[0].left)
+      expect(bounds[1].right).toBeLessThanOrEqual(bounds[0].right)
+      expect(bounds[2].top).toBeGreaterThanOrEqual(bounds[0].top - 1)
+      expect(bounds[2].bottom).toBeLessThanOrEqual(bounds[0].bottom + 1)
+
+      if (viewport.scrollable) {
+        const track = await page
+          .locator('.industrial-dashboard-scroll .simplebar-track.simplebar-vertical')
+          .evaluate((element) => element.getBoundingClientRect().toJSON())
+        const content = await page.locator('.industrial-dashboard-content').evaluate((element) => {
+          const rect = element.getBoundingClientRect()
+          return {
+            right: rect.right,
+            paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+          }
+        })
+        expect(Math.abs(track.x + track.width / 2 - (bounds[0].right - 15))).toBeLessThan(1)
+        expect(Math.abs(track.top - (bounds[0].top + 23))).toBeLessThan(1)
+        expect(Math.abs(track.bottom - (bounds[0].bottom - 23))).toBeLessThan(1)
+        expect(track.left - (content.right - content.paddingRight)).toBeGreaterThanOrEqual(8)
+        const thumb = await page
+          .locator(
+            '.industrial-dashboard-scroll .simplebar-track.simplebar-vertical .simplebar-scrollbar'
+          )
+          .evaluate((element) => {
+            const style = getComputedStyle(element, '::before')
+            return {
+              backgroundImage: style.backgroundImage,
+              corners: [
+                style.borderTopLeftRadius,
+                style.borderTopRightRadius,
+                style.borderBottomRightRadius,
+                style.borderBottomLeftRadius,
+              ],
+            }
+          })
+        expect(thumb.backgroundImage).toBe('none')
+        expect(new Set(thumb.corners).size).toBe(1)
+      }
+    }
+  })
+
+  test('keeps a consistent bounded log column across desktop workspaces', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    const routes = [
+      '/devices/fp-lab-01/overview',
+      '/devices/fp-lab-01/settings/presets',
+      '/devices/fp-lab-01/calibration/heater-curve',
+      '/devices/fp-lab-01/calibration/firmware-tuning',
+    ]
+    const widths: Array<{ main: number; log: number }> = []
+
+    for (const route of routes) {
+      await page.goto(route)
+      const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+      if (await collapseInspector.isVisible()) await collapseInspector.click()
+      await expect(page.locator('.industrial-log-panel')).toBeVisible()
+      await page.evaluate(() => {
+        const inspector = document.querySelector('.demo-inspector')
+        if (inspector instanceof HTMLElement) inspector.style.setProperty('display', 'none')
+      })
+
+      const geometry = await page.evaluate(() => {
+        const workspace = document.querySelector('.industrial-console__workspace')
+        const main = document.querySelector('.industrial-console__main')
+        const log = document.querySelector('.industrial-log-panel')
+        if (!workspace || !main || !log) throw new Error('Workspace columns are not rendered')
+        const workspaceStyle = getComputedStyle(workspace)
+        return {
+          main: main.getBoundingClientRect().width,
+          log: log.getBoundingClientRect().width,
+          gap: Number.parseFloat(workspaceStyle.columnGap),
+          workspace: workspace.getBoundingClientRect().width,
+        }
+      })
+
+      expect(geometry.log).toBe(416)
+      expect(geometry.main).toBe(818)
+      expect(
+        Math.abs(geometry.main + geometry.log + geometry.gap - geometry.workspace)
+      ).toBeLessThan(1)
+      widths.push({ main: geometry.main, log: geometry.log })
+    }
+
+    expect(
+      Math.max(...widths.map(({ log }) => log)) - Math.min(...widths.map(({ log }) => log))
+    ).toBe(0)
+    expect(
+      Math.max(...widths.map(({ main }) => main)) - Math.min(...widths.map(({ main }) => main))
+    ).toBe(0)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/devices/fp-lab-01/overview')
+    const wideLogWidth = await page
+      .locator('.industrial-log-panel')
+      .evaluate((element) => element.getBoundingClientRect().width)
+    expect(wideLogWidth).toBe(416)
+  })
+
+  test('gives the empty tuning chart a full-height illustration and uniform desktop spacing', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+    await expect(page.locator('.firmware-tuning__chart-empty')).toBeVisible()
+    const targetSequence = page.locator('.firmware-tuning__target-sequence')
+    await expect(targetSequence).toBeVisible()
+    await expect(targetSequence).toContainText('60°C')
+    await expect(targetSequence).toContainText('220°C')
+    expect(await targetSequence.locator('button').count()).toBe(8)
+
+    const layout = await page.evaluate(() => {
+      const tuning = document.querySelector('.firmware-tuning')
+      const empty = document.querySelector('.firmware-tuning__chart-empty')
+      const visual = document.querySelector('.firmware-tuning__chart-empty-visual')
+      if (!tuning || !empty || !visual) throw new Error('Chart empty state is not rendered')
+      const blocks = [...tuning.children]
+        .map((element) => {
+          const rect = element.getBoundingClientRect()
+          return { top: rect.top, bottom: rect.bottom }
+        })
+        .filter((rect) => rect.bottom > rect.top)
+      return {
+        gap: Number.parseFloat(getComputedStyle(tuning).rowGap),
+        gaps: blocks.slice(1).map((block, index) => block.top - blocks[index].bottom),
+        emptyHeight: empty.getBoundingClientRect().height,
+        visual: visual.getBoundingClientRect().toJSON(),
+        title: empty.querySelector('strong')?.textContent?.trim(),
+        description: empty.querySelector('span')?.textContent?.trim(),
+      }
+    })
+    expect(layout.gap).toBe(8)
+    expect(layout.gaps.length).toBeGreaterThanOrEqual(2)
+    expect(layout.gaps.every((gap) => Math.abs(gap - 8) < 1)).toBe(true)
+    expect(layout.emptyHeight).toBeGreaterThan(350)
+    expect(layout.visual.width).toBe(84)
+    expect(layout.visual.height).toBe(84)
+    expect(layout.title).toBe('暂无有效温度采样')
+    expect(layout.description).toContain('有效采样')
+  })
+
+  test('renders the populated tuning curve from the deterministic save fixture', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
+    const curve = page.locator('.firmware-tuning__chart-plot svg')
+    await expect(curve).toBeVisible({ timeout: 10_000 })
+    expect(await curve.locator('polyline').count()).toBeGreaterThan(0)
+    await expect(page.getByText('预热', { exact: true })).toBeVisible()
+    await expect(page.getByText('接近目标', { exact: true })).toBeVisible()
+    await expect(page.getByText('稳温', { exact: true })).toBeVisible()
+    const targetGrid = page.locator('.firmware-tuning__target-grid button')
+    await expect(targetGrid).toHaveCount(8)
+    await expect(targetGrid).toHaveText([
+      '60°C',
+      '220°C',
+      '120°C',
+      '80°C',
+      '100°C',
+      '160°C',
+      '140°C',
+      '180°C',
+    ])
+    await expect(page.locator('.firmware-tuning__target-grid button.is-selected')).toHaveCount(1)
+    await expect(page.locator('.firmware-tuning__target-grid button.is-selected')).toHaveText(
+      '180°C'
+    )
+
+    const detailHeights = await page.evaluate(() => {
+      const candidate = document.querySelector('.firmware-tuning__detail > section:first-child')
+      const results = document.querySelector('.firmware-tuning__results')
+      const card = document.querySelector('.firmware-tuning__detail > section:first-child')
+      const wrapper = document.querySelector(
+        '.industrial-calibration-tabs__firmware-scroll .simplebar-content-wrapper'
+      )
+      if (!candidate || !results || !card) throw new Error('Tuning detail columns are not rendered')
+      return {
+        candidate: candidate.getBoundingClientRect().height,
+        results: results.getBoundingClientRect().height,
+        rows: [...document.querySelectorAll('.firmware-tuning__target-grid button')].map(
+          (row) => row.getBoundingClientRect().height
+        ),
+        overflow: wrapper ? wrapper.scrollHeight - wrapper.clientHeight : 0,
+      }
+    })
+    // Both detail columns share one row track, so the candidate card matches
+    // the chart card and the target list absorbs the leftover height.
+    expect(Math.abs(detailHeights.candidate - detailHeights.results)).toBeLessThan(1)
+    expect(detailHeights.overflow).toBeLessThanOrEqual(1)
+    expect(Math.max(...detailHeights.rows) - Math.min(...detailHeights.rows)).toBeLessThan(1)
+
+    const controls = await page
+      .locator('.firmware-tuning__primary-actions > button')
+      .evaluateAll((buttons) => buttons.map((button) => button.getBoundingClientRect().height))
+    expect(controls.length).toBeGreaterThan(0)
+    expect(Math.max(...controls)).toBeLessThanOrEqual(40)
+  })
+
+  test('switches the tuning curve when a target cell is clicked', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
+    await expect(page.locator('.firmware-tuning__chart-plot svg')).toBeVisible({ timeout: 10_000 })
+    // The floating Inspector overlays the candidate card; collapse it so the
+    // target grid receives real pointer events instead of a hit-test miss.
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+    const grid = page.locator('.firmware-tuning__target-grid')
+    const selected = page.locator('.firmware-tuning__target-grid button.is-selected')
+    await expect(selected).toHaveText('180°C')
+
+    // Every target in a full run is selectable, and the curve follows the pick.
+    await grid.getByRole('radio', { name: '60°C', exact: true }).click()
+    await expect(selected).toHaveText('60°C')
+    await expect(page.locator('.firmware-tuning__target-sequence-heading')).toContainText(
+      '当前 60°C'
+    )
+    await expect(page.getByText(/峰值 60\.\d °C/)).toBeVisible()
+    await expect(page.locator('.firmware-tuning__chart-target-label')).toHaveText('目标 60 °C')
+    expect(
+      await page.evaluate(
+        () => document.querySelector('.firmware-tuning__chart-plot polyline') !== null
+      )
+    ).toBe(true)
+
+    await grid.getByRole('radio', { name: '180°C', exact: true }).click()
+    await expect(selected).toHaveText('180°C')
+    await expect(page.getByText(/峰值 180\.\d °C/)).toBeVisible()
+
+    // Targets without samples are disabled rather than silently falling back.
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-unsupported')
+    await expect(page.locator('.firmware-tuning__target-grid button:disabled')).toHaveCount(8)
+    await expect(page.locator('.firmware-tuning__target-grid button.is-selected')).toHaveCount(0)
+  })
+
+  test('disables target cells that have no tuning trace in a partial run', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-partial')
+    await expect(page.locator('.firmware-tuning__chart-plot svg')).toBeVisible({ timeout: 10_000 })
+
+    const cells = page.locator('.firmware-tuning__target-grid button')
+    await expect(cells).toHaveCount(8)
+    // Only the three targets the run actually reached stay selectable.
+    await expect(cells.nth(0)).toBeEnabled()
+    await expect(cells.nth(1)).toBeEnabled()
+    await expect(cells.nth(2)).toBeEnabled()
+    for (const index of [3, 4, 5, 6, 7]) await expect(cells.nth(index)).toBeDisabled()
+    await expect(page.locator('.firmware-tuning__target-grid button:disabled')).toHaveCount(5)
+    await expect(page.locator('.firmware-tuning__target-grid button:disabled').first()).toHaveText(
+      /80°C\s*无采样/
+    )
+    await expect(
+      page.locator('.firmware-tuning__target-grid button:enabled').first().locator('small')
+    ).toHaveCount(0)
+
+    const selected = page.locator('.firmware-tuning__target-grid button.is-selected')
+    await expect(selected).toHaveText('120°C')
+    await cells.nth(0).click()
+    await expect(selected).toHaveText('60°C')
+    await expect(page.getByText(/峰值 60\.\d °C/)).toBeVisible()
+
+    // Disabled cells must not change the active selection.
+    await page
+      .locator('.firmware-tuning__target-grid button:disabled')
+      .first()
+      .click({ force: true })
+    await expect(selected).toHaveText('60°C')
+  })
+
+  test('preserves the tuning chart area by keeping the facts row single-line', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+    await expect(page.locator('.firmware-tuning__facts')).toBeVisible()
+
+    const desktop = await page.evaluate(() => {
+      const facts = document.querySelector('.firmware-tuning__facts')
+      const detail = document.querySelector('.firmware-tuning__detail')
+      const results = document.querySelector('.firmware-tuning__results')
+      const candidate = document.querySelector('.firmware-tuning__detail > section:first-child')
+      if (!facts || !detail || !results || !candidate) {
+        throw new Error('Tuning chart workspace is not rendered')
+      }
+      const cells = [...facts.children].map((cell) => {
+        const rect = cell.getBoundingClientRect()
+        return { y: rect.y, width: rect.width }
+      })
+      return {
+        columns: getComputedStyle(facts).gridTemplateColumns.split(' ').length,
+        factsHeight: facts.getBoundingClientRect().height,
+        cells,
+        detailHeight: detail.getBoundingClientRect().height,
+        candidateHeight: candidate.getBoundingClientRect().height,
+        resultsHeight: results.getBoundingClientRect().height,
+      }
+    })
+    expect(desktop.columns).toBe(6)
+    expect(desktop.factsHeight).toBeLessThan(64)
+    expect(desktop.cells.every((cell) => Math.abs(cell.y - desktop.cells[0].y) < 1)).toBe(true)
+    expect(desktop.cells.every((cell) => cell.width < 140)).toBe(true)
+    expect(desktop.detailHeight).toBeGreaterThan(400)
+    expect(Math.abs(desktop.candidateHeight - desktop.resultsHeight)).toBeLessThan(1)
+    expect(desktop.resultsHeight).toBeGreaterThan(400)
+  })
+
+  test('keeps functional desktop text at a readable minimum size', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    const routes = [
+      {
+        path: '/devices/fp-lab-01/overview',
+        selector:
+          '.industrial-log-filters button, .industrial-log-count, .industrial-log-follow__label, .industrial-device-select-value small, .industrial-advanced__state, .industrial-setpoint-control span',
+      },
+      {
+        path: '/devices/fp-lab-01/calibration/heater-curve',
+        selector:
+          '.industrial-log-filters button, .industrial-log-count, .industrial-log-follow__label, .industrial-device-select-value small, .thermal-plant-run-card__metric small, .thermal-plant-run-card__section-heading > span, .thermal-plant-run-card__run-evidence, .thermal-plant-run-card__table-wrap th, .thermal-plant-run-card__table-wrap td',
+      },
+      {
+        path: '/devices/fp-lab-01/calibration/firmware-tuning',
+        selector:
+          '.industrial-log-filters button, .industrial-log-count, .industrial-log-follow__label, .industrial-device-select-value small, .firmware-tuning__identifier-header, .firmware-tuning__identifier-copy, .firmware-tuning__facts span, .firmware-tuning__parameters p, .firmware-tuning__parameter-grid span',
+      },
+    ]
+
+    for (const route of routes) {
+      await page.goto(route.path)
+      const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+      if (await collapseInspector.isVisible()) await collapseInspector.click()
+      await expect(page.locator('.industrial-log-panel')).toBeVisible()
+      await page.evaluate(() => {
+        const inspector = document.querySelector('.demo-inspector')
+        if (inspector instanceof HTMLElement) inspector.style.setProperty('display', 'none')
+      })
+
+      const sizes = await page.locator(route.selector).evaluateAll((elements) =>
+        elements
+          .map((element) => {
+            const rect = element.getBoundingClientRect()
+            return {
+              fontSize: Number.parseFloat(getComputedStyle(element).fontSize),
+              visible: rect.width > 0 && rect.height > 0,
+              text: element.textContent?.trim(),
+            }
+          })
+          .filter((item) => item.visible && item.text)
+          .map((item) => item.fontSize)
+      )
+      expect(sizes.length).toBeGreaterThan(0)
+      expect(Math.min(...sizes)).toBeGreaterThanOrEqual(11)
+    }
+  })
+
+  test('compacts the desktop header without shrinking its primary controls', async ({ page }) => {
+    for (const viewport of [
+      { width: 1440, height: 900 },
+      { width: 1280, height: 860 },
+    ]) {
+      await page.setViewportSize(viewport)
+      await page.goto('/devices/fp-lab-01/overview')
+
+      const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+      if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+      const measure = async (selector: string) =>
+        page.locator(selector).evaluate((element) => {
+          const rect = element.getBoundingClientRect()
+          return { top: rect.top, bottom: rect.bottom, height: rect.height }
+        })
+      const [shell, header, nav, workspace, device, workspaceSwitch, navTab] = await Promise.all([
+        measure('.industrial-console'),
+        measure('.industrial-console__top'),
+        measure('.industrial-view-tabs'),
+        measure('.industrial-console__work-area'),
+        measure('.industrial-device-select'),
+        measure('.industrial-workspace-switch'),
+        measure('.industrial-view-tab:first-child'),
+      ])
+
+      expect(shell.height).toBe(860)
+      expect(header.height).toBeLessThanOrEqual(58)
+      expect(nav.height).toBeLessThanOrEqual(50)
+      expect(workspace.top).toBeLessThanOrEqual(nav.bottom + 8)
+      expect(device.height).toBeGreaterThanOrEqual(44)
+      expect(workspaceSwitch.height).toBeGreaterThanOrEqual(40)
+      expect(navTab.height).toBeGreaterThanOrEqual(40)
+    }
+
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/devices/fp-lab-01/overview')
+    const adaptiveHeader = await page.locator('.industrial-console__top').evaluate((element) => {
+      const style = getComputedStyle(element)
+      return { gap: style.gap, columns: style.gridTemplateColumns }
+    })
+    expect(adaptiveHeader.gap).toBe('12.8px')
+    expect(adaptiveHeader.columns.split(' ').length).toBe(2)
+  })
+
   test('forces the complete mock console, preserves scene state, and never reaches devd', async ({
     page,
   }) => {

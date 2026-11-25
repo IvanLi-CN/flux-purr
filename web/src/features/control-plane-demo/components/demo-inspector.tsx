@@ -85,7 +85,7 @@ interface DemoInspectorContentProps {
   onPlacementChange: (placement: DemoInspectorPlacement) => void
 }
 
-type DemoModuleKind = 'devices' | 'overview' | 'settings' | 'calibration' | 'update'
+type DemoModuleKind = 'devices' | 'overview' | 'settings' | 'calibration' | 'tuning' | 'update'
 
 const scenes: Array<{
   id: DemoSceneId
@@ -130,10 +130,34 @@ const scenes: Array<{
     modules: ['calibration'],
   },
   {
+    id: 'tuning-idle',
+    label: '调优待命',
+    description: '功率档位已解析，尚未启动本轮调优',
+    modules: ['tuning'],
+  },
+  {
+    id: 'tuning-active',
+    label: '调优进行中',
+    description: '预热、接近与稳温采样持续写入',
+    modules: ['tuning'],
+  },
+  {
     id: 'tuning-save',
-    label: '调优保存后读取失败',
-    description: '调优结果已确认保存，后续读取记录失败',
-    modules: ['calibration'],
+    label: '候选待保存',
+    description: '八目标曲线已完整，等待确认保存；保存后读取失败',
+    modules: ['tuning'],
+  },
+  {
+    id: 'tuning-partial',
+    label: '部分目标有结果',
+    description: '调优在第 4 个目标前结束，其余目标无采样',
+    modules: ['tuning'],
+  },
+  {
+    id: 'tuning-unsupported',
+    label: '固件不支持调优',
+    description: '设备固件缺少调优事件协议',
+    modules: ['tuning'],
   },
   {
     id: 'lan-scan-empty',
@@ -220,11 +244,25 @@ const presetCatalog: Array<{
     scene: 'calibration-active',
     label: 'Calibration · Running',
   },
+  { id: 'tuning-idle', module: 'tuning', scene: 'tuning-idle', label: '调优 · 待命' },
+  { id: 'tuning-active', module: 'tuning', scene: 'tuning-active', label: '调优 · 进行中' },
   {
     id: 'tuning-save',
-    module: 'calibration',
+    module: 'tuning',
     scene: 'tuning-save',
-    label: '调优保存后读取失败',
+    label: '调优 · 候选待保存',
+  },
+  {
+    id: 'tuning-partial',
+    module: 'tuning',
+    scene: 'tuning-partial',
+    label: '调优 · 部分目标有结果',
+  },
+  {
+    id: 'tuning-unsupported',
+    module: 'tuning',
+    scene: 'tuning-unsupported',
+    label: '调优 · 固件不支持',
   },
   {
     id: 'lan-scan-empty',
@@ -272,6 +310,7 @@ const presetCatalog: Array<{
 
 function moduleKind(path: string): DemoModuleKind {
   if (path === '/devices/new') return 'devices'
+  if (path.includes('/calibration/firmware-tuning')) return 'tuning'
   if (path.includes('/calibration/')) return 'calibration'
   if (path.includes('/settings/')) return 'settings'
   if (path.endsWith('/update')) return 'update'
@@ -298,7 +337,11 @@ const presetParameters: Record<DemoSceneId, Partial<DemoInspectorState>> = {
   'blocked-artifact': { demoPersona: 'maintainer', demoArtifact: 'blocked' },
   'calibration-loading': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'calibration-active': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'tuning-idle': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'tuning-active': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'tuning-save': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'tuning-partial': { demoPersona: 'maintainer', demoTelemetry: 'available' },
+  'tuning-unsupported': { demoPersona: 'maintainer', demoTelemetry: 'available' },
   'lan-scan-empty': { demoLanScanResults: 'none' },
   'lan-scan-typical': { demoLanScanResults: 'typical' },
   'lan-scan-long': { demoLanScanResults: 'long' },

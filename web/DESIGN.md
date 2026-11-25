@@ -169,7 +169,7 @@ The application fills the dynamic viewport and centers a bounded instrument chas
 
 ### Standard desktop canvas
 
-The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
+The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. At the exact baseline viewport it fills the canvas without an outer inset; when both viewport dimensions provide spare room, a balanced outer inset of up to 20px preserves the chassis shadow. Within the desktop workspace, the active task uses the flexible column and the persistent event panel uses a 26rem track. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
 
 The adaptive layout is a separate responsive mode. It uses the available dynamic viewport, collapses columns, stacks controls, and assigns scrolling to the active work area. Mobile dimensions and flow are evaluated for reachability and legibility, not for pixel parity with the standard desktop canvas.
 
