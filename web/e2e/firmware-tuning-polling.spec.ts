@@ -82,15 +82,14 @@ test('plots recorded temperatures by target and trial and keeps device events av
   await expect(page.getByRole('img', { name: /80 °C 温度曲线/ }).getByText('3.0 s')).toBeVisible()
   await expect(page.getByText('稳温峰峰值 未记录')).toBeVisible()
   await expect(trial.getByRole('img', { name: '最佳' })).toHaveCount(0)
-  // Arrow keys walk the firmware's eight-target execution order, so the cell
-  // before 80°C is 120°C — a target with no samples in this fixture.
+  // Targets without samples are disabled, so roving focus cannot land on them:
+  // 80°C keeps its selection because every neighbour in the execution order is
+  // unrecorded in this fixture.
   const target120 = targets.getByRole('radio', { name: '120°C', exact: true })
+  await expect(target120).toBeDisabled()
   await target80.focus()
-  await page.keyboard.down('ArrowLeft')
-  await expect(target120).toBeChecked()
-  await page.keyboard.up('ArrowLeft')
-  await expect(page.locator('.firmware-tuning__chart-empty')).toBeVisible()
-  await target80.click()
+  await page.keyboard.press('ArrowLeft')
+  await page.keyboard.press('ArrowRight')
   await expect(target80).toBeChecked()
   await expect(page.getByText('峰值 80.5 °C · 超调 0.5 °C')).toBeVisible()
   await target60.click()

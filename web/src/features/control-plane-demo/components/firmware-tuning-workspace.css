@@ -268,10 +268,10 @@
   flex-direction: column;
   min-width: 0;
   min-height: 100%;
-  padding: 14px;
-  border: 1px solid var(--tuning-border);
-  border-radius: 8px;
-  background: var(--tuning-surface-soft);
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
 }
 
 .firmware-tuning__results {

@@ -355,7 +355,7 @@
     align-content: center;
     min-height: 16rem;
     border: 1px solid rgba(255, 255, 255, 0.55);
-    border-radius: 18px;
+    border-radius: 14px;
     background:
       radial-gradient(circle at 18% 16%, rgba(255, 255, 255, 0.88), transparent 30%),
       linear-gradient(145deg, rgba(224, 229, 236, 0.94), rgba(209, 217, 230, 0.9));
@@ -547,7 +547,7 @@
     gap: 0.75rem;
     min-height: 4.3rem;
     border: 1px solid rgba(255, 255, 255, 0.48);
-    border-radius: 16px;
+    border-radius: 14px;
     background: rgba(224, 229, 236, 0.68);
     box-shadow:
       inset 2px 2px 5px rgba(186, 190, 204, 0.72),
@@ -2704,7 +2704,7 @@
   .industrial-setting-control,
   .industrial-compact-phase {
     min-width: 0;
-    border-radius: 16px;
+    border-radius: 14px;
     background: var(--industrial-bg);
     box-shadow:
       inset 4px 4px 8px var(--industrial-shadow),
@@ -6582,7 +6582,7 @@
     display: grid;
     gap: 0.62rem;
     border: 1px solid rgba(255, 255, 255, 0.5);
-    border-radius: 16px;
+    border-radius: 14px;
     background: rgba(224, 229, 236, 0.68);
     box-shadow:
       inset 3px 3px 7px rgba(186, 190, 204, 0.62),
