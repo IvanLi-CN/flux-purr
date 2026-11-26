@@ -792,33 +792,6 @@ export function FirmwareTuningWorkspace({
 
       <div className="firmware-tuning__detail">
         <section>
-          <h3>{savedRunInStandby ? '上次保存结果' : '候选与保存'}</h3>
-          <dl>
-            <IdentifierValue
-              kind="candidate"
-              value={status?.candidateId}
-              copied={copiedIdentifier === 'candidate'}
-              onCopy={copyIdentifier}
-            />
-            <IdentifierValue
-              kind="hash"
-              value={status?.candidateHash}
-              copied={copiedIdentifier === 'hash'}
-              onCopy={copyIdentifier}
-            />
-            <div className="firmware-tuning__detail-row">
-              <dt>RAM preview</dt>
-              <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
-            </div>
-            <div className="firmware-tuning__detail-row">
-              <dt>EEPROM</dt>
-              <dd>
-                {status?.saveReceipt?.readbackVerified
-                  ? `已读回 · revision ${status.saveReceipt.bankRevision}`
-                  : '未保存'}
-              </dd>
-            </div>
-          </dl>
           <div className="firmware-tuning__target-sequence">
             <div className="firmware-tuning__target-sequence-heading">
               <h4>调优目标顺序</h4>
@@ -856,6 +829,33 @@ export function FirmwareTuningWorkspace({
               })}
             </RadioGroup.Root>
           </div>
+          <h3>{savedRunInStandby ? '上次保存结果' : '候选与保存'}</h3>
+          <dl>
+            <IdentifierValue
+              kind="candidate"
+              value={status?.candidateId}
+              copied={copiedIdentifier === 'candidate'}
+              onCopy={copyIdentifier}
+            />
+            <IdentifierValue
+              kind="hash"
+              value={status?.candidateHash}
+              copied={copiedIdentifier === 'hash'}
+              onCopy={copyIdentifier}
+            />
+            <div className="firmware-tuning__detail-row">
+              <dt>RAM preview</dt>
+              <dd>{status?.previewReceipt ? '已核对' : '未核对'}</dd>
+            </div>
+            <div className="firmware-tuning__detail-row">
+              <dt>EEPROM</dt>
+              <dd>
+                {status?.saveReceipt?.readbackVerified
+                  ? `已读回 · revision ${status.saveReceipt.bankRevision}`
+                  : '未保存'}
+              </dd>
+            </div>
+          </dl>
         </section>
         <section className="firmware-tuning__results">
           <header className="firmware-tuning__detail-toolbar">
@@ -920,12 +920,6 @@ function parameterSourceLabel(source: string) {
   }
 }
 
-export function compactIdentifier(value: string | null | undefined) {
-  if (!value) return '—'
-  if (value.length <= 24) return value
-  return `${value.slice(0, 12)}…${value.slice(-8)}`
-}
-
 export function resolveTuningPowerClass(
   bank: string | undefined,
   statusPowerClass: ThermalTuningStatus['powerClass'] | undefined
@@ -947,7 +941,6 @@ function IdentifierValue({
   onCopy: (kind: 'candidate' | 'hash', value: string | null | undefined) => void
 }) {
   const label = kind === 'candidate' ? 'Candidate' : 'Hash'
-  const summary = compactIdentifier(value)
   return (
     <TooltipProvider>
       <div className="firmware-tuning__identifier-field">
@@ -967,13 +960,13 @@ function IdentifierValue({
         {value ? (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="firmware-tuning__identifier-summary">{summary}</span>
+              <span className="firmware-tuning__identifier-summary">{value}</span>
             </TooltipTrigger>
             <TooltipContent className="firmware-tuning__identifier-tooltip">{value}</TooltipContent>
           </Tooltip>
         ) : (
           <span className="firmware-tuning__identifier-summary firmware-tuning__identifier-empty">
-            {summary}
+            —
           </span>
         )}
       </div>

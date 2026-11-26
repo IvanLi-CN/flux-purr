@@ -4,7 +4,6 @@ import { describe, expect, it } from 'vitest'
 import { ControlPlaneClientError } from '../transport-client'
 import {
   buildTuningStartCommand,
-  compactIdentifier,
   FirmwareTuningWorkspace,
   messageOf,
   resolveTuningPowerClass,
@@ -40,13 +39,6 @@ describe('firmware tuning workspace', () => {
       )
     ).toContain('设备写入租约暂被占用')
   })
-  it('keeps full machine identifiers available while compacting the default row', () => {
-    const value = 'sha256:d0c6ccbd8efc209d8febcf9dfeff4f3ba1cfa2702e3711840ebec9ec'
-    expect(compactIdentifier(value)).toBe('sha256:d0c6c…0ebec9ec')
-    expect(compactIdentifier(value)).not.toBe(value)
-    expect(compactIdentifier('short-id')).toBe('short-id')
-  })
-
   it('uses the firmware-resolved PPS bank instead of guessing pps5a', () => {
     expect(resolveTuningPowerClass('pps3a', null)).toBe('pps3a')
     expect(resolveTuningPowerClass('pps5a', 'pps3a')).toBe('pps5a')

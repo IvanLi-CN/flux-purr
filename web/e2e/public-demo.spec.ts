@@ -280,6 +280,44 @@ test.describe('public demo build', () => {
     }
   })
 
+  test('lets the tuning identifiers use the full column width before clipping', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+    const summaries = page.locator('.firmware-tuning__identifier-summary')
+    await expect(summaries.first()).toBeVisible()
+
+    const measured = await summaries.evaluateAll((nodes) =>
+      nodes.map((node) => ({
+        text: node.textContent ?? '',
+        clientWidth: node.clientWidth,
+        scrollWidth: node.scrollWidth,
+        // The identifier sits in a grid track that spans the whole column.
+        trackWidth: node.closest('.firmware-tuning__identifier-field')?.clientWidth ?? 0,
+        columnWidth:
+          node.closest('.firmware-tuning__detail > section')?.getBoundingClientRect().width ?? 0,
+      }))
+    )
+
+    expect(measured).toHaveLength(2)
+    for (const item of measured) {
+      // A fixed character budget used to clip the value even when the column had
+      // room, so the rendered text must never carry a pre-baked ellipsis.
+      expect(item.text).not.toContain('…')
+      expect(item.clientWidth).toBeGreaterThan(0)
+      expect(item.clientWidth).toBeLessThanOrEqual(item.columnWidth + 1)
+      // The value box fills the whole track instead of a fixed character budget.
+      expect(item.trackWidth).toBeGreaterThan(0)
+      expect(item.clientWidth).toBeCloseTo(item.trackWidth, 0)
+    }
+    const overflowing = measured.filter((item) => item.scrollWidth > item.clientWidth + 1)
+    expect(overflowing.every((item) => item.text.length > 20)).toBe(true)
+  })
+
   test('gives the empty tuning chart a full-height illustration and uniform desktop spacing', async ({
     page,
   }) => {
