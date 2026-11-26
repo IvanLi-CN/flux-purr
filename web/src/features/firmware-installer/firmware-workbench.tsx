@@ -1824,11 +1824,7 @@ function FirmwarePhaseProgress({
         aria-valuemax={100}
         aria-valuenow={progress}
       >
-        <span
-          style={{
-            transform: `scaleX(${Math.max(0, Math.min(progress, 100)) / 100})`,
-          }}
-        />
+        <span style={{ width: `${Math.max(0, Math.min(progress, 100))}%` }} />
       </div>
       <ol aria-label={`${progressLabel}阶段`}>
         {stages.map((stage, index) => (
