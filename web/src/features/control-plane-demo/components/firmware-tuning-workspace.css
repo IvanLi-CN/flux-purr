@@ -264,11 +264,20 @@
 }
 
 .firmware-tuning__detail > section {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  padding: 14px;
-  border: 1px solid var(--tuning-border);
-  border-radius: 8px;
-  background: var(--tuning-surface-soft);
+  min-height: 100%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+.firmware-tuning__results {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .firmware-tuning__detail h3 {
@@ -360,7 +369,10 @@
 }
 
 .firmware-tuning__identifier-tooltip {
-  max-width: min(420px, 50vw);
+  /* Wide enough for a full sha256 on one line; identifiers are read by pattern,
+     so wrapping them defeats the purpose of the tooltip. */
+  max-width: min(560px, 50vw);
+  width: max-content;
   padding: 8px 10px;
   font:
     0.7rem / 1.35 ui-monospace,
@@ -368,10 +380,124 @@
     Menlo,
     monospace;
   overflow-wrap: anywhere;
+  /* The bubble overlaps the identifier row below it; let clicks reach the
+     controls underneath instead of shrinking the text to dodge them. */
+  pointer-events: none;
+}
+
+[data-radix-popper-content-wrapper]:has(.firmware-tuning__identifier-tooltip) {
+  pointer-events: none;
 }
 
 .firmware-tuning__identifier-empty {
   color: var(--tuning-muted);
+}
+
+.firmware-tuning__target-sequence {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--tuning-border);
+  padding-bottom: 10px;
+}
+
+.firmware-tuning__target-sequence-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.firmware-tuning__target-sequence-heading h4 {
+  margin: 0;
+  color: var(--tuning-text);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.firmware-tuning__target-sequence-heading > span {
+  color: var(--tuning-muted);
+  font-size: 0.68rem;
+}
+
+.firmware-tuning__target-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(32px, 1fr);
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklch, var(--tuning-border) 85%, transparent);
+  border-radius: 6px;
+}
+
+.firmware-tuning__target-grid button {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 9px;
+  border: 0;
+  border-right: 1px solid color-mix(in oklch, var(--tuning-border) 70%, transparent);
+  border-bottom: 1px solid color-mix(in oklch, var(--tuning-border) 70%, transparent);
+  border-radius: 0;
+  background: color-mix(in oklch, var(--tuning-surface) 55%, transparent);
+  color: var(--tuning-text);
+  cursor: pointer;
+  transition: background 120ms ease-out;
+}
+
+.firmware-tuning__target-grid button:nth-child(2n) {
+  border-right: 0;
+}
+
+.firmware-tuning__target-grid button:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.firmware-tuning__target-grid button strong {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.firmware-tuning__target-grid button:disabled {
+  cursor: not-allowed;
+  background: color-mix(in oklch, var(--tuning-surface-soft) 70%, transparent);
+}
+
+.firmware-tuning__target-grid button:disabled strong {
+  color: color-mix(in oklch, var(--tuning-muted) 55%, transparent);
+  font-weight: 600;
+}
+
+.firmware-tuning__target-grid button small {
+  margin-left: 5px;
+  color: color-mix(in oklch, var(--tuning-muted) 62%, transparent);
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.firmware-tuning__target-grid button:not(:disabled):hover {
+  background: color-mix(in oklch, var(--tuning-accent) 7%, var(--tuning-surface));
+}
+
+.firmware-tuning__target-grid button:focus-visible {
+  outline: 2px solid var(--tuning-accent);
+  outline-offset: -2px;
+}
+
+.firmware-tuning__target-grid button.is-selected:not(:disabled) {
+  background: color-mix(in oklch, var(--tuning-accent) 13%, var(--tuning-surface));
+  box-shadow: inset 2px 0 0 var(--tuning-accent);
+}
+
+.firmware-tuning__target-grid button.is-selected:not(:disabled) strong {
+  color: var(--tuning-accent);
 }
 
 .firmware-tuning__event-scroll {
@@ -397,10 +523,64 @@
 }
 
 .firmware-tuning__chart-controls,
-.firmware-tuning__chart-empty,
 .firmware-tuning__chart-gap {
   color: var(--tuning-muted);
   font-size: 0.72rem;
+}
+
+.firmware-tuning__chart-empty {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 24px;
+  color: var(--tuning-muted);
+  font-size: 0.72rem;
+}
+
+.firmware-tuning__chart-empty-visual {
+  width: 84px;
+  height: 84px;
+  flex: 0 0 auto;
+  color: var(--tuning-accent);
+  opacity: 0.78;
+  stroke-width: 1.2;
+}
+
+.firmware-tuning__chart-empty-copy {
+  display: grid;
+  max-width: 22rem;
+  gap: 8px;
+}
+
+.firmware-tuning__chart-empty-copy strong {
+  color: var(--tuning-text);
+  font-size: 1rem;
+  font-weight: 750;
+}
+
+.firmware-tuning__chart-empty-copy span {
+  color: var(--tuning-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .firmware-tuning__chart-empty {
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+
+  .firmware-tuning__chart-empty-visual {
+    width: 72px;
+    height: 72px;
+  }
 }
 
 .firmware-tuning__chart-controls .firmware-tuning__trial-select {
@@ -442,28 +622,11 @@
   white-space: nowrap;
 }
 
-.industrial-workspace-switch.firmware-tuning__chart-targets {
-  display: flex;
-  flex: 0 0 100%;
-  flex-wrap: wrap;
-  min-width: 0;
-  gap: 0;
-  margin: 0;
-  padding: 2px;
-  border-radius: 8px;
-}
-
-.industrial-workspace-switch.firmware-tuning__chart-targets button {
-  flex: 1 0 auto;
-  min-block-size: 28px;
-  padding-inline: 5px;
-  border-radius: 6px;
-  letter-spacing: 0;
+.firmware-tuning__chart-target-label {
+  color: var(--tuning-muted);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 650;
   white-space: nowrap;
-}
-
-.industrial-workspace-switch.firmware-tuning__chart-targets button:focus-visible {
-  outline-offset: -2px;
 }
 
 .firmware-tuning__chart-plot {
@@ -589,30 +752,47 @@
   .firmware-tuning__detail {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .firmware-tuning__detail > section {
+    min-height: 0;
+  }
 }
 
 @media (min-width: 1180px) {
+  .firmware-tuning__identifier-header,
+  .firmware-tuning__identifier-copy,
+  .firmware-tuning__parameters p,
+  .firmware-tuning__parameters > header > span,
+  .firmware-tuning__parameter-grid span,
+  .firmware-tuning__facts span {
+    font-size: 0.7rem;
+  }
+
   .firmware-tuning {
     padding: 8px 0 6px;
+    row-gap: 8px;
+  }
+
+  .firmware-tuning__toolbar,
+  .firmware-tuning__warning,
+  .firmware-tuning__parameters,
+  .firmware-tuning__facts,
+  .firmware-tuning__detail {
+    margin: 0;
   }
 
   .firmware-tuning__toolbar {
-    margin-block: 6px;
+    gap: 8px;
   }
 
   .firmware-tuning__warning {
-    margin-block: 8px;
     padding: 6px 10px;
     line-height: 1.3;
   }
 
-  .firmware-tuning__parameters,
-  .firmware-tuning__facts {
-    margin-top: 4px;
-  }
-
-  .firmware-tuning__detail {
-    margin-top: 4px;
+  .firmware-tuning__primary-actions > button {
+    min-height: 40px;
+    padding-inline: 0.75rem;
   }
 
   .firmware-tuning__event-scroll {
@@ -620,12 +800,20 @@
   }
 }
 
-@media (min-width: 1280px) and (min-height: 860px) {
+@media (min-width: 1001px) {
   .industrial-calibration-tabs__firmware-scroll .firmware-tuning {
     display: flex;
     flex-direction: column;
     height: 100%;
-    min-height: min-content;
+    gap: 8px;
+  }
+
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__toolbar,
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__warning,
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__parameters,
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__facts,
+  .industrial-calibration-tabs__firmware-scroll .firmware-tuning__detail {
+    margin: 0;
   }
 
   .industrial-calibration-tabs__firmware-scroll .firmware-tuning > :not(.firmware-tuning__detail) {
@@ -644,7 +832,7 @@
 
   .firmware-tuning__chart,
   .firmware-tuning__chart-plot {
-    flex: 1 0 auto;
+    flex: 1 1 auto;
   }
 }
 

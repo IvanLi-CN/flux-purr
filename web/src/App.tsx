@@ -135,9 +135,9 @@ function App() {
       { value: `${base}/settings/fan`, label: 'Settings · Fan' },
       { value: `${base}/settings/wifi`, label: 'Settings · WiFi' },
       { value: `${base}/calibration/heater-curve`, label: 'Calibration · Heater curve' },
+      { value: `${base}/calibration/firmware-tuning`, label: 'Tuning · Firmware tuning' },
       { value: `${base}/calibration/rtd-adc`, label: 'Calibration · RTD ADC' },
       { value: `${base}/calibration/vin-adc`, label: 'Calibration · VIN ADC' },
-      { value: `${base}/calibration/firmware-tuning`, label: 'Calibration · Firmware tuning' },
       { value: `${base}/update`, label: 'Firmware update' },
     ]
   }, [activeScenario.selectedDeviceId, routeState])
@@ -617,7 +617,7 @@ function App() {
         allowDemoControls={!isLive}
         mockOnly={mockOnly}
         demoThermalPlantRunLoading={!isLive && inspectorState.demoScene === 'calibration-loading'}
-        demoTuningSave={!isLive && inspectorState.demoScene === 'tuning-save'}
+        demoTuningScene={!isLive ? inspectorState.demoScene : undefined}
         demoLanScanResults={inspectorState.demoLanScanResults}
         firmwareArtifacts={mockOnly ? firmwareDemoArtifacts : undefined}
         initialFirmwareActivity={mockOnly ? firmwareDemoActivity : undefined}

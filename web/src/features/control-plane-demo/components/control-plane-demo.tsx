@@ -56,7 +56,7 @@ import {
   rememberSuccessfulRoute,
 } from '@/routing/route-preferences'
 import type { AppSearch } from '@/routing/search'
-import { TuningSaveScene } from '@/tuning-save-demo'
+import { isTuningDemoScene, TuningDemoScene } from '@/tuning-demo-scene'
 import {
   type FirmwareActivityEntry,
   type FirmwareActivityInput,
@@ -255,7 +255,7 @@ export interface ConsoleNavigationAdapter {
 }
 
 interface ControlPlaneDemoProps {
-  demoTuningSave?: boolean
+  demoTuningScene?: string
   scenario?: ControlPlaneScenario
   initialView?: ConsoleView
   navigation?: ConsoleNavigationAdapter
@@ -863,7 +863,7 @@ export function ControlPlaneDemo({
   allowDemoControls = true,
   mockOnly = false,
   demoThermalPlantRunLoading = false,
-  demoTuningSave = false,
+  demoTuningScene,
   firmwareArtifacts,
   initialFirmwareActivity,
   lanPairing,
@@ -5376,8 +5376,11 @@ export function ControlPlaneDemo({
                   thermalPlantRunLoading={thermalPlantRunLoading}
                   thermalPlantRunReadError={thermalPlantRunReadError}
                   firmwareTuningWorkspace={
-                    mockOnly && demoTuningSave ? (
-                      <TuningSaveScene key={visibleDevice.id} />
+                    mockOnly ? (
+                      <TuningDemoScene
+                        key={visibleDevice.id}
+                        scene={isTuningDemoScene(demoTuningScene) ? demoTuningScene : 'tuning-idle'}
+                      />
                     ) : (
                       <FirmwareTuningWorkspace
                         key={visibleDevice.id}
@@ -7636,86 +7639,91 @@ function DashboardView({
   const controlsBlocked = deviceWriteBlockReason(device) != null
   return (
     <div className="industrial-view-panel">
-      <PanelHeader kicker="Dashboard" title="Thermal runtime" />
-      <div className="industrial-runtime-surface">
-        <section className={`industrial-temp-dial is-${temperatureBand(device.currentTempC)}`}>
-          <p className="industrial-label">Current temp</p>
-          <div className="industrial-temp-dial__value">
-            <strong>{formatTempNumber(device.currentTempC)}</strong>
-            {isRenderableTemperature(device.currentTempC) ? <span>℃</span> : null}
+      <ScrollArea className="industrial-dashboard-scroll" autoHide>
+        <div className="industrial-dashboard-content">
+          <PanelHeader kicker="Dashboard" title="Thermal runtime" />
+          <div className="industrial-runtime-surface">
+            <section className={`industrial-temp-dial is-${temperatureBand(device.currentTempC)}`}>
+              <p className="industrial-label">Current temp</p>
+              <div className="industrial-temp-dial__value">
+                <strong>{formatTempNumber(device.currentTempC)}</strong>
+                {isRenderableTemperature(device.currentTempC) ? <span>℃</span> : null}
+              </div>
+              <div className="industrial-heat-output-track">
+                <meter
+                  className="industrial-heat-output"
+                  aria-label="Heater output"
+                  value={device.heaterOutputPercent}
+                  min={0}
+                  max={100}
+                  style={{ '--heat-output': device.heaterOutputPercent } as CSSProperties}
+                />
+              </div>
+              <small>Heater {device.heaterOutputPercent}%</small>
+            </section>
+
+            <div className="industrial-signal-stack">
+              <StatusCard
+                className="industrial-status-card--pd"
+                label="PD contract"
+                value={formatVolts(device.pdContractMv)}
+                detail={formatPdContractDetail(device, powerCapabilityMa)}
+              />
+              <StatusCard
+                label="Cooling"
+                value={device.fanState}
+                detail={device.activeCoolingEnabled ? 'Active cooling enabled' : 'Cooling disabled'}
+              />
+            </div>
           </div>
-          <meter
-            className="industrial-heat-output"
-            aria-label="Heater output"
-            value={device.heaterOutputPercent}
-            min={0}
-            max={100}
-          >
-            <span style={{ width: `${device.heaterOutputPercent}%` }} />
-          </meter>
-          <small>Heater {device.heaterOutputPercent}%</small>
-        </section>
 
-        <div className="industrial-signal-stack">
-          <StatusCard
-            className="industrial-status-card--pd"
-            label="PD contract"
-            value={formatVolts(device.pdContractMv)}
-            detail={formatPdContractDetail(device, powerCapabilityMa)}
+          <ManualPpsPanel
+            device={device}
+            open={advancedOpen}
+            valueMv={manualPpsDraftMv}
+            onOpenChange={setAdvancedOpen}
+            onValueChange={(millivolts) => {
+              setManualPpsDraftMv(millivolts)
+              setManualPpsDraftDirty(true)
+            }}
+            onApply={() => onManualPpsApply(manualPpsDraftMv)}
+            onClear={async () => {
+              await onManualPpsClear()
+              setManualPpsDraftDirty(false)
+            }}
           />
-          <StatusCard
-            label="Cooling"
-            value={device.fanState}
-            detail={device.activeCoolingEnabled ? 'Active cooling enabled' : 'Cooling disabled'}
-          />
+
+          <div className="industrial-secondary-actions">
+            <TargetTempControl
+              value={device.targetTempC}
+              disabled={controlsBlocked}
+              onChange={onTargetTempChange}
+            />
+            <button
+              type="button"
+              className="industrial-button industrial-button--secondary"
+              disabled={controlsBlocked}
+              onClick={onHeaterHoldToggle}
+            >
+              <Power size={16} aria-hidden="true" />
+              {device.heaterEnabled ? 'Hold heater' : 'Resume heater'}
+            </button>
+            {device.faultAttentionPending ? (
+              <button
+                type="button"
+                className="industrial-button industrial-button--secondary"
+                disabled={controlsBlocked}
+                onClick={onFaultAttentionAcknowledge}
+              >
+                消告警
+              </button>
+            ) : null}
+            <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
+          </div>
+          <CapabilityStrip device={device} />
+          <ActionFeedbackPanel feedback={feedback} />
         </div>
-      </div>
-
-      <ManualPpsPanel
-        device={device}
-        open={advancedOpen}
-        valueMv={manualPpsDraftMv}
-        onOpenChange={setAdvancedOpen}
-        onValueChange={(millivolts) => {
-          setManualPpsDraftMv(millivolts)
-          setManualPpsDraftDirty(true)
-        }}
-        onApply={() => onManualPpsApply(manualPpsDraftMv)}
-        onClear={async () => {
-          await onManualPpsClear()
-          setManualPpsDraftDirty(false)
-        }}
-      />
-
-      <div className="industrial-secondary-actions">
-        <TargetTempControl
-          value={device.targetTempC}
-          disabled={controlsBlocked}
-          onChange={onTargetTempChange}
-        />
-        <button
-          type="button"
-          className="industrial-button industrial-button--secondary"
-          disabled={controlsBlocked}
-          onClick={onHeaterHoldToggle}
-        >
-          <Power size={16} aria-hidden="true" />
-          {device.heaterEnabled ? 'Hold heater' : 'Resume heater'}
-        </button>
-        {device.faultAttentionPending ? (
-          <button
-            type="button"
-            className="industrial-button industrial-button--secondary"
-            disabled={controlsBlocked}
-            onClick={onFaultAttentionAcknowledge}
-          >
-            消告警
-          </button>
-        ) : null}
-        <RuntimeMiniStatus device={device} artifact={artifact} heaterState={heaterState} />
-      </div>
-      <CapabilityStrip device={device} />
-      <ActionFeedbackPanel feedback={feedback} />
+      </ScrollArea>
     </div>
   )
 }
@@ -10152,15 +10160,16 @@ function CalibrationHeaterFeedback({
         <span>{heaterEnabled ? '加热强度' : '加热已停'}</span>
         <strong>{clampedOutput}%</strong>
       </div>
-      <meter
-        className="industrial-heat-output industrial-calibration-heater-feedback__meter"
-        aria-label="加热强度"
-        value={clampedOutput}
-        min={0}
-        max={100}
-      >
-        <span style={{ width: `${clampedOutput}%` }} />
-      </meter>
+      <div className="industrial-heat-output-track">
+        <meter
+          className="industrial-heat-output industrial-calibration-heater-feedback__meter"
+          aria-label="加热强度"
+          value={clampedOutput}
+          min={0}
+          max={100}
+          style={{ '--heat-output': clampedOutput } as CSSProperties}
+        />
+      </div>
     </div>
   )
 }
@@ -10753,7 +10762,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     <aside className="industrial-panel industrial-log-panel" aria-label="全局日志">
       <div className="industrial-log-panel__header">
         <div>
-          <p className="industrial-label text-[#a8b2d1]">全局日志</p>
+          <p className="industrial-panel-kicker">全局日志</p>
           <h2>运行时追踪</h2>
         </div>
         <fieldset className="industrial-log-filters">
@@ -10943,7 +10952,7 @@ function PanelHeader({ kicker, title }: { kicker: string; title: string }) {
   return (
     <header className="industrial-panel-header">
       <div>
-        <p className="industrial-label">{kicker}</p>
+        <p className="industrial-panel-kicker">{kicker}</p>
         <h2>{title}</h2>
       </div>
     </header>

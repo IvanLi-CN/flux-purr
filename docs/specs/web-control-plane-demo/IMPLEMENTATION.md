@@ -26,6 +26,7 @@
 - `web/src/demo-runtime.ts` 在 RouterProvider 之前建立 public demo 的 mock-only fetch boundary；初始化失败渲染安全停止页面，live API 或跨源请求不会回退到真实服务。
 - `Release Product` 将独立的版本化 public-demo archive 发布到 GitHub Release，并只在发布资产验证完成后通过共享 helper 部署该 archive 到 `flux-purr-demo`；helper 只对上传或 deployment creation 开始前明确处于 `check and set region` 阶段的 transport-level 失败执行有限重试，输出捕获不完整或远端状态不明确时禁止自动重试，保留 CLI 已返回的成功或失败状态，并在部署成功后写入 release marker。Recovery 仍以 marker 作为跳过已标记目标的 guard，不在 marker 上传失败时推断远端部署状态。
 - `web/src/features/control-plane-demo/**` 提供 scenario types、deterministic mock data 与工业风固定控制台界面。
+- Demo Inspector 的 Module 将固件热控调优单独拆为 `tuning`：`Calibration · Heater curve / RTD ADC / VIN ADC` 共享 `calibration` 模块，调优页独立提供 `tuning-idle`、`tuning-active`、`tuning-save`、`tuning-partial`、`tuning-unsupported` 五个场景。`tuning-partial` 在第 4 个目标前结束，只有前三个目标有曲线，其余目标在目标网格中置灰并标注「无采样」。`web/src/tuning-demo-scene.tsx` 用同一套 `FirmwareTuningWorkspace` 复现待命空态、递增采样的进行中曲线、可保存候选与固件不支持状态；Public Demo 进入调优路由且未指定调优场景时默认 `tuning-idle`。
 - `web/src/stories/ControlPlaneDemo.stories.tsx` 覆盖 default、degraded、settings review、update review、gallery、mobile review 与 interaction smoke。
 - 工业风 token 与组件样式集中在 `web/src/index.css` 的 `.industrial-*` class；当前 UI 提供 Dashboard / Settings / Calibration / Update 与桌面全局日志，不改变 frontpanel preview 渲染器。
 - Dashboard 当前温度为首要信息，目标温度 stepper 放在主操作行内；变更立即写入 mock runtime 与 trace。

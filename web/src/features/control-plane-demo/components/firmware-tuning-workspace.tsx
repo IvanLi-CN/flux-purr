@@ -13,8 +13,8 @@ import {
   Upload,
   X,
 } from 'lucide-react'
-import { Popover } from 'radix-ui'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Popover, RadioGroup } from 'radix-ui'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -36,7 +36,10 @@ import {
 import { exportThermalTuningV2 } from '../thermal-tuning-v2-export'
 import { ControlPlaneClientError } from '../transport-client'
 import { tuningOwnerSession } from '../tuning-owner-session'
-import { FirmwareTuningTemperatureChart } from './firmware-tuning-temperature-chart'
+import {
+  FirmwareTuningTemperatureChart,
+  tuningChartTargets,
+} from './firmware-tuning-temperature-chart'
 import './firmware-tuning-workspace.css'
 
 const EXECUTION_ORDER = [60, 220, 120, 80, 100, 160, 140, 180]
@@ -503,6 +506,23 @@ export function FirmwareTuningWorkspace({
   const savedRunInStandby = saveVerified && !armed && !showingSave
   const currentRun = savedRunInStandby ? null : recording
   const currentStatus = currentRun?.status
+  const targetSequence = EXECUTION_ORDER
+  const availableTuningTargets = useMemo(
+    () => tuningChartTargets(chartRecording?.events ?? []),
+    [chartRecording?.events]
+  )
+  const currentRunTarget =
+    currentStatus?.targetsC[currentStatus.targetIndex] ?? currentStatus?.targetsC.at(-1)
+  const [requestedChartTarget, setRequestedChartTarget] = useState<number | null>(null)
+  // Only recorded targets are selectable, so a request that no longer has data
+  // (for example after switching runs) must fall back instead of pinning an
+  // empty chart.
+  const chartTarget =
+    requestedChartTarget != null && availableTuningTargets.includes(requestedChartTarget)
+      ? requestedChartTarget
+      : currentRunTarget != null && availableTuningTargets.includes(currentRunTarget)
+        ? currentRunTarget
+        : (availableTuningTargets[0] ?? EXECUTION_ORDER[0])
   const canStart =
     supported &&
     journalReady &&
@@ -772,6 +792,43 @@ export function FirmwareTuningWorkspace({
 
       <div className="firmware-tuning__detail">
         <section>
+          <div className="firmware-tuning__target-sequence">
+            <div className="firmware-tuning__target-sequence-heading">
+              <h4>调优目标顺序</h4>
+              <span>
+                {availableTuningTargets.length > 0
+                  ? `当前 ${chartTarget}°C · 共 ${targetSequence.length} 个目标`
+                  : `${targetSequence.length} 个目标`}
+              </span>
+            </div>
+            <RadioGroup.Root
+              className="firmware-tuning__target-grid"
+              aria-label="曲线目标温度"
+              value={availableTuningTargets.length > 0 ? String(chartTarget) : ''}
+              onValueChange={(value) => setRequestedChartTarget(Number(value))}
+            >
+              {targetSequence.map((targetC) => {
+                // Only targets present in the current trace can be plotted; the
+                // rest are shown but disabled so the grid keeps the firmware's
+                // eight-target shape without offering dead options.
+                const recorded = availableTuningTargets.includes(targetC)
+                return (
+                  <RadioGroup.Item
+                    key={targetC}
+                    value={String(targetC)}
+                    aria-label={`${targetC}°C`}
+                    disabled={!recorded}
+                    checked={recorded ? chartTarget === targetC : false}
+                    className={recorded && chartTarget === targetC ? 'is-selected' : undefined}
+                    data-recorded={recorded}
+                  >
+                    <strong>{targetC}°C</strong>
+                    {recorded ? null : <small>无采样</small>}
+                  </RadioGroup.Item>
+                )
+              })}
+            </RadioGroup.Root>
+          </div>
           <h3>{savedRunInStandby ? '上次保存结果' : '候选与保存'}</h3>
           <dl>
             <IdentifierValue
@@ -839,9 +896,8 @@ export function FirmwareTuningWorkspace({
             </ScrollArea>
           ) : (
             <FirmwareTuningTemperatureChart
-              key={chartRecording?.runId ?? 'idle'}
               events={chartRecording?.events ?? []}
-              currentTarget={chartRecording?.status.targetsC[chartRecording.status.targetIndex]}
+              selectedTarget={chartTarget}
               traceGap={chartRecording?.gap === true}
             />
           )}
@@ -862,12 +918,6 @@ function parameterSourceLabel(source: string) {
     default:
       return source || '参数来源未知'
   }
-}
-
-export function compactIdentifier(value: string | null | undefined) {
-  if (!value) return '—'
-  if (value.length <= 24) return value
-  return `${value.slice(0, 12)}…${value.slice(-8)}`
 }
 
 export function resolveTuningPowerClass(
@@ -891,7 +941,6 @@ function IdentifierValue({
   onCopy: (kind: 'candidate' | 'hash', value: string | null | undefined) => void
 }) {
   const label = kind === 'candidate' ? 'Candidate' : 'Hash'
-  const summary = compactIdentifier(value)
   return (
     <TooltipProvider>
       <div className="firmware-tuning__identifier-field">
@@ -911,13 +960,21 @@ function IdentifierValue({
         {value ? (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span className="firmware-tuning__identifier-summary">{summary}</span>
+              <span className="firmware-tuning__identifier-summary">{value}</span>
             </TooltipTrigger>
-            <TooltipContent className="firmware-tuning__identifier-tooltip">{value}</TooltipContent>
+            {/* Above would sit on this row's copy button; below keeps the
+                current row clear and only floats over the next one. */}
+            <TooltipContent
+              side="bottom"
+              align="start"
+              className="firmware-tuning__identifier-tooltip"
+            >
+              {value}
+            </TooltipContent>
           </Tooltip>
         ) : (
           <span className="firmware-tuning__identifier-summary firmware-tuning__identifier-empty">
-            {summary}
+            —
           </span>
         )}
       </div>

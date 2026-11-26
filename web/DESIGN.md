@@ -160,8 +160,11 @@ The palette describes workshop materials and operational signals rather than bra
 - **Title** (Manrope, weight 800, 1.35rem, line-height 1.1): Strong module headings with a subtle embossed highlight.
 - **Body** (Manrope, weight 600, 1rem, line-height 1.45): Dense but readable operating copy, normally constrained to short instructions and status explanations.
 - **Label** (JetBrains Mono, weight 800, 0.7rem, line-height 1.2): Uppercase where appropriate, wide-set, and reserved for metadata, measurements, badges, and control legends.
+- **Panel kicker** (JetBrains Mono, weight 600, 0.72rem, line-height 1.2): Sentence case, light tracking, and the muted token; it labels the module a panel belongs to under the One Heading Rule.
 
 **The Data Face Rule.** Measurements, identifiers, timestamps, and machine state use the mono face; prose and navigation stay in the humanist face.
+
+**The One Heading Rule.** Each panel has one visual heading. A kicker names the module and never competes with the title: it stays below it in size and weight, keeps sentence case instead of the uppercase, wide-tracked data treatment, and switches to the light text token on dark panels so it does not disappear into the surface.
 
 ## Layout
 
@@ -169,7 +172,9 @@ The application fills the dynamic viewport and centers a bounded instrument chas
 
 ### Standard desktop canvas
 
-The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
+The standard desktop canvas is a fixed 1280 × 860 CSS pixel chassis. Desktop layout, spacing, component density, and visual evidence use this canvas as the primary design baseline; the chassis is centered in the available viewport and never grows beyond these bounds. At the exact baseline viewport it fills the canvas without an outer inset; when both viewport dimensions provide spare room, a balanced outer inset of up to 20px preserves the chassis shadow. Within the desktop workspace, the active task uses the flexible column and the persistent event panel uses a 26rem track. A viewport smaller than the baseline switches to the adaptive layout instead of compressing the desktop composition.
+
+The workspace splits into the task column and the 26rem event track only when the workspace itself is at least 1246 CSS pixels wide, which is the 818-pixel task minimum plus the track and its gap. The breakpoint is a container query on the work area rather than a viewport media query, so shell padding, the fixed chassis, and viewport height cannot squeeze the active task at intermediate widths. A narrower workspace keeps one full-width column.
 
 The adaptive layout is a separate responsive mode. It uses the available dynamic viewport, collapses columns, stacks controls, and assigns scrolling to the active work area. Mobile dimensions and flow are evaluated for reachability and legibility, not for pixel parity with the standard desktop canvas.
 

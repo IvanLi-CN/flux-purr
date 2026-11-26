@@ -355,7 +355,7 @@
     align-content: center;
     min-height: 16rem;
     border: 1px solid rgba(255, 255, 255, 0.55);
-    border-radius: 18px;
+    border-radius: 14px;
     background:
       radial-gradient(circle at 18% 16%, rgba(255, 255, 255, 0.88), transparent 30%),
       linear-gradient(145deg, rgba(224, 229, 236, 0.94), rgba(209, 217, 230, 0.9));
@@ -492,41 +492,54 @@
     color: var(--industrial-accent);
   }
 
-  .industrial-heat-output {
+  /* The native value box is a plain rectangle whose right edge cuts the pill
+     flat at partial output, and its border radius only rounds the corners of
+     its own box. Paint the track on a wrapper and let the meter draw the ramp
+     at full track width, masked left-to-right to the current value, so a
+     partial reading keeps the colour that value maps to instead of squashing
+     the whole ramp into the filled part. */
+  .industrial-heat-output-track {
+    position: relative;
     display: block;
     overflow: hidden;
-    width: min(100%, 22rem);
+    width: 100%;
     height: 0.82rem;
     margin-top: 1rem;
     border-radius: 999px;
     background: var(--industrial-muted);
-    appearance: none;
     box-shadow:
       inset 2px 2px 5px rgba(0, 0, 0, 0.2),
       inset -2px -2px 5px rgba(255, 255, 255, 0.82);
   }
 
+  .industrial-heat-output {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background:
+      linear-gradient(90deg, #52f36b, #ffb23a, var(--industrial-accent)) left center / 100% 100%
+      no-repeat;
+    appearance: none;
+    /* Clip rather than mask: `round` keeps a pill cap at the reveal edge, so a
+       partial reading never shows a square corner inside the capsule. */
+    clip-path: inset(0 calc(100% - var(--heat-output, 0) * 1%) 0 0 round 999px);
+  }
+
   .industrial-heat-output::-webkit-meter-bar {
     border: 0;
-    border-radius: inherit;
+    background: transparent;
+    appearance: none;
+  }
+
+  .industrial-heat-output::-webkit-meter-optimum-value,
+  .industrial-heat-output::-webkit-meter-suboptimum-value,
+  .industrial-heat-output::-webkit-meter-even-less-good-value {
     background: transparent;
   }
 
-  .industrial-heat-output::-webkit-meter-optimum-value {
-    border-radius: inherit;
-    background: linear-gradient(90deg, #52f36b, #ffb23a, var(--industrial-accent));
-  }
-
   .industrial-heat-output::-moz-meter-bar {
-    border-radius: inherit;
-    background: linear-gradient(90deg, #52f36b, #ffb23a, var(--industrial-accent));
-  }
-
-  .industrial-heat-output span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: linear-gradient(90deg, #52f36b, #ffb23a, var(--industrial-accent));
+    background: transparent;
   }
 
   .industrial-temp-dial small {
@@ -547,7 +560,7 @@
     gap: 0.75rem;
     min-height: 4.3rem;
     border: 1px solid rgba(255, 255, 255, 0.48);
-    border-radius: 16px;
+    border-radius: 14px;
     background: rgba(224, 229, 236, 0.68);
     box-shadow:
       inset 2px 2px 5px rgba(186, 190, 204, 0.72),
@@ -745,7 +758,7 @@
   scrollbar-gutter: auto;
 }
 
-@media (min-width: 1180px) {
+@container (min-width: 1246px) {
   .industrial-calibration-tabs__content:has(.firmware-tuning) {
     overflow: hidden;
   }
@@ -754,6 +767,10 @@
 .industrial-calibration-tabs__firmware-scroll {
   height: 100%;
   min-height: 0;
+  /* Grid items default to min-width: auto, so the scroll area kept the width
+     it had at the widest layout and overflowed the column after the viewport
+     narrowed again. */
+  min-width: 0;
 }
 
 .industrial-calibration-tabs__firmware-scroll .simplebar-content {
@@ -788,7 +805,9 @@
   overflow: hidden;
 }
 
-@media (min-width: 760px) and (max-width: 1179px) {
+/* Keep the log strip compact while the workspace stacks, so the calibration
+   task keeps the height its chart needs. */
+@container (max-width: 1245px) {
   .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench) {
     grid-template-rows: minmax(0, 1fr) 10rem;
   }
@@ -2234,8 +2253,16 @@
     width: 100%;
     height: 100dvh;
     min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     place-items: center;
     padding: clamp(0.75rem, 2vw, 1.25rem);
+  }
+
+  @media (min-width: 1280px) and (min-height: 860px) {
+    .industrial-console-wrap {
+      padding: min(1.25rem, max(0px, calc(50vw - 640px)), max(0px, calc(50dvh - 430px)));
+    }
   }
 
   .industrial-shell--fixed .industrial-console-wrap {
@@ -2262,16 +2289,13 @@
     overflow: hidden;
   }
 
+  /* The header row keeps one split for every width: a capped 280px identity
+     column and the rest for status. Narrow layouts below override this. */
   .industrial-console__top {
     display: grid;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
     gap: 0.8rem;
-    align-items: end;
-  }
-
-  @media (min-width: 940px) {
-    .industrial-console__top {
-      grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.28fr);
-    }
+    align-items: center;
   }
 
   .industrial-console__top h1 {
@@ -2351,12 +2375,6 @@
     display: grid;
     min-height: 0;
     gap: 0.85rem;
-  }
-
-  @media (min-width: 1180px) {
-    .industrial-console__workspace {
-      grid-template-columns: minmax(0, 1fr) clamp(28rem, 35vw, 34rem);
-    }
   }
 
   .industrial-console__main,
@@ -2702,7 +2720,7 @@
   .industrial-setting-control,
   .industrial-compact-phase {
     min-width: 0;
-    border-radius: 16px;
+    border-radius: 14px;
     background: var(--industrial-bg);
     box-shadow:
       inset 4px 4px 8px var(--industrial-shadow),
@@ -3953,6 +3971,26 @@
     justify-content: space-between;
     gap: 1rem;
     margin-bottom: 1rem;
+  }
+
+  /* The panel kicker names the module its title belongs to. It stays quieter
+     than both the title and the uppercase data labels, so the heading owns the
+     row instead of competing with a second all-caps stamp. */
+  .industrial-panel-kicker {
+    margin: 0;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", "Roboto Mono", monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1.2;
+    text-transform: none;
+  }
+
+  /* Dark panels invert the surface, so the muted token loses contrast. */
+  .industrial-panel--dark .industrial-panel-kicker,
+  .industrial-log-panel .industrial-panel-kicker {
+    color: color-mix(in oklch, #eef4f8 62%, transparent);
   }
 
   .industrial-panel-header h2 {
@@ -5510,23 +5548,6 @@
     opacity: 0.62;
   }
 
-  .industrial-progress {
-    overflow: hidden;
-    height: 0.68rem;
-    border-radius: 999px;
-    background: var(--industrial-muted);
-    box-shadow:
-      inset 2px 2px 4px rgba(0, 0, 0, 0.18),
-      inset -2px -2px 4px rgba(255, 255, 255, 0.78);
-  }
-
-  .industrial-progress span {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: linear-gradient(90deg, var(--industrial-accent), #ff7a86);
-  }
-
   .industrial-event {
     display: grid;
     grid-template-columns: 4.6rem 5.8rem minmax(0, 1fr);
@@ -5724,10 +5745,6 @@
   .industrial-console__identity .industrial-status {
     padding: 0.34rem 0.58rem;
     font-size: 0.66rem;
-  }
-
-  .industrial-console__top {
-    align-items: center;
   }
 
   .industrial-view-tab {
@@ -6339,12 +6356,6 @@
     padding: clamp(0.72rem, 1.4vw, 1rem);
   }
 
-  .industrial-console__top {
-    grid-template-columns: minmax(220px, 0.58fr) minmax(0, 1.42fr);
-    gap: 0.8rem;
-    align-items: center;
-  }
-
   .industrial-console__identity {
     display: grid;
     gap: 0.28rem;
@@ -6465,9 +6476,17 @@
     gap: 0.75rem;
   }
 
-  @media (min-width: 1180px) {
+  /* Split into task and log columns only when this workspace can hold the
+     26rem log track plus the main column's own minimum. Measuring the element
+     instead of the viewport keeps outer shell padding and the fixed chassis
+     from squeezing the active task at intermediate widths. */
+  .industrial-console__work-area {
+    container-type: inline-size;
+  }
+
+  @container (min-width: 1246px) {
     .industrial-console__workspace {
-      grid-template-columns: minmax(0, 1fr) minmax(22rem, 28rem);
+      grid-template-columns: minmax(0, 1fr) 26rem;
     }
   }
 
@@ -6580,7 +6599,7 @@
     display: grid;
     gap: 0.62rem;
     border: 1px solid rgba(255, 255, 255, 0.5);
-    border-radius: 16px;
+    border-radius: 14px;
     background: rgba(224, 229, 236, 0.68);
     box-shadow:
       inset 3px 3px 7px rgba(186, 190, 204, 0.62),
@@ -7283,6 +7302,7 @@
 
   .industrial-calibration-tabs__content {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.55rem;
     min-width: 0;
     min-height: 0;
@@ -10075,10 +10095,6 @@
   color: var(--industrial-muted-text);
 }
 
-.industrial-console__top {
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
-}
-
 .industrial-status-strip {
   grid-template-columns: minmax(16rem, 1fr) repeat(2, minmax(4.9rem, auto)) minmax(11.4rem, auto);
 }
@@ -10481,11 +10497,11 @@
 
 .firmware-workbench__progress span {
   display: block;
-  width: 100%;
   height: 100%;
   background: var(--industrial-accent);
-  transform-origin: left;
-  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  /* Track progress as a width, matching how the heater bar is drawn, so the
+     fill never depends on a scale transform to read the value. */
+  transition: width 240ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .firmware-workbench__status ol {
@@ -10892,6 +10908,41 @@
   overscroll-behavior: contain;
 }
 
+.industrial-console__main:has(.industrial-dashboard-scroll) {
+  display: grid;
+  min-height: 0;
+}
+
+.industrial-console__main:has(.industrial-dashboard-scroll) > .industrial-view-panel {
+  height: 100%;
+  min-height: 0;
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-console__main:has(.industrial-dashboard-scroll) {
+    padding-bottom: 10px;
+  }
+}
+
+.industrial-dashboard-scroll {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+}
+
+.industrial-dashboard-content {
+  min-width: 0;
+  /* SimpleBar clips its content wrapper, so buttons flush with the right edge
+     lose the bottom-right half of their lift shadow. Reserve the shadow's blur
+     plus offset instead of shortening the buttons. */
+  padding: 4px 10px 10px 4px;
+}
+
+.industrial-dashboard-scroll.simplebar-scrollable-y .industrial-dashboard-content {
+  padding-right: 0.75rem;
+}
+
 .scroll-area .simplebar-track.simplebar-vertical {
   right: 0.18rem;
   width: 0.72rem;
@@ -10906,6 +10957,20 @@
     width 140ms ease-out;
 }
 
+@media (min-width: 760px) {
+  .industrial-console__main .industrial-dashboard-scroll .simplebar-track.simplebar-vertical {
+    top: calc(22px - clamp(0.82rem, 1.5vw, 1.1rem));
+    right: calc(14px - clamp(0.82rem, 1.5vw, 1.1rem) - 0.36rem);
+    bottom: calc(22px - clamp(0.82rem, 1.5vw, 1.1rem));
+  }
+}
+
+@media (min-width: 1280px) and (min-height: 860px) {
+  .industrial-console__main .industrial-dashboard-scroll .simplebar-track.simplebar-vertical {
+    bottom: 12px;
+  }
+}
+
 .scroll-area:hover .simplebar-track.simplebar-vertical,
 .scroll-area:focus-within .simplebar-track.simplebar-vertical,
 .scroll-area .simplebar-track.simplebar-vertical:hover,
@@ -10917,12 +10982,11 @@
 .scroll-area .simplebar-scrollbar::before {
   inset: 3px 2px;
   border-radius: 999px;
-  background: linear-gradient(180deg, var(--scroll-area-thumb-start), var(--scroll-area-thumb-end));
+  background: var(--scroll-area-thumb-start);
   opacity: 0.96;
   box-shadow:
-    0 0 8px color-mix(in oklch, var(--industrial-light) 42%, transparent),
-    inset 1px 1px 1px color-mix(in oklch, var(--industrial-light) 72%, transparent),
-    inset -1px -1px 2px color-mix(in oklch, var(--industrial-shadow-deep) 42%, transparent);
+    0 0 4px color-mix(in oklch, var(--industrial-light) 38%, transparent),
+    inset 0 0 0 1px color-mix(in oklch, var(--industrial-shadow) 24%, transparent);
 }
 
 .industrial-lan-pairing-panel__scan-results-scroll .simplebar-track.simplebar-vertical {
@@ -11156,7 +11220,7 @@
     background: color-mix(in oklch, var(--industrial-accent) 8%, var(--industrial-panel));
     color: var(--industrial-accent);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0;
     padding: 0.34rem 0.56rem;
@@ -11238,7 +11302,7 @@
     padding: 0 0.38rem 0 0;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 800;
   }
 
@@ -11253,7 +11317,7 @@
   .demo-inspector__scope-hint {
     margin: -0.15rem 0 0.6rem;
     color: var(--industrial-muted-text);
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     line-height: 1.4;
   }
 
@@ -11273,7 +11337,7 @@
   .demo-inspector__selection-summary span {
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     line-height: 1.4;
     overflow-wrap: anywhere;
   }
@@ -11299,7 +11363,7 @@
     padding: 0.25rem 0.5rem 0.35rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.61rem;
+    font-size: 0.7rem;
     font-weight: 800;
     text-transform: uppercase;
   }
@@ -11344,7 +11408,7 @@
   .demo-inspector__layout-menu small {
     margin-top: 0.12rem;
     color: var(--industrial-muted-text);
-    font-size: 0.59rem;
+    font-size: 0.7rem;
     line-height: 1.25;
   }
 
@@ -11409,7 +11473,7 @@
     margin-top: 0.18rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.59rem;
+    font-size: 0.7rem;
     line-height: 1.35;
     overflow-wrap: anywhere;
   }
@@ -11495,7 +11559,7 @@
     min-height: 2.75rem;
     border-radius: 8px;
     color: var(--industrial-text);
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     font-weight: 750;
     line-height: 1.3;
     overflow-wrap: anywhere;
@@ -11605,7 +11669,7 @@
   .demo-inspector__help-panel strong {
     display: block;
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 850;
   }
 
@@ -11692,7 +11756,7 @@
   .demo-inspector__history-item span {
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     overflow-wrap: anywhere;
   }
 
@@ -11711,7 +11775,7 @@
     color: var(--industrial-muted-text);
     box-shadow: var(--industrial-surface-inset);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.62rem;
+    font-size: 0.7rem;
     padding: 0.5rem;
   }
 
@@ -11781,7 +11845,7 @@
     gap: 0.45rem;
     padding: 0 0.76rem;
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     font-weight: 800;
   }
 
@@ -12221,4 +12285,91 @@
 
 .demo-inspector__scroll .simplebar-track.simplebar-vertical {
   right: -0.75rem;
+}
+
+@media (min-width: 940px) and (min-height: 860px) {
+  .industrial-console {
+    gap: 0.5rem;
+  }
+
+  .industrial-console__top {
+    gap: 0.6rem;
+  }
+
+  .industrial-console__identity {
+    gap: 0.15rem;
+  }
+
+  .industrial-brand-mark {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  .industrial-app-mark {
+    gap: 0.45rem;
+    font-size: 0.68rem;
+  }
+
+  .industrial-app-mark .industrial-status {
+    padding: 0.2rem 0.42rem;
+    font-size: 0.58rem;
+  }
+
+  .industrial-console__identity h1 {
+    font-size: clamp(1.75rem, 2vw, 1.85rem);
+    line-height: 0.95;
+  }
+
+  .industrial-status-strip {
+    gap: 0.45rem;
+    padding: 0.25rem;
+  }
+
+  .industrial-device-select {
+    height: 44px;
+    min-height: 44px;
+    padding-block: 0.35rem;
+  }
+
+  .industrial-status-datum {
+    padding: 0.3rem 0.45rem;
+  }
+
+  .industrial-status-datum strong {
+    font-size: 0.78rem;
+  }
+
+  .industrial-status-strip__button {
+    min-height: 38px;
+  }
+
+  .industrial-workspace-switch {
+    min-height: 44px;
+    padding: 0.2rem;
+  }
+
+  .industrial-workspace-switch button {
+    min-height: 36px;
+  }
+
+  .industrial-view-tabs {
+    gap: 0.4rem;
+    padding: 0.25rem;
+  }
+
+  .industrial-log-filters button,
+  .industrial-log-count,
+  .industrial-log-follow,
+  .industrial-device-select-option small,
+  .industrial-device-select-value small,
+  .industrial-advanced__state,
+  .industrial-setpoint-control span,
+  .thermal-plant-run-card__metric small,
+  .thermal-plant-run-card__section-heading > span,
+  .thermal-plant-run-card__legend,
+  .thermal-plant-run-card__run-evidence,
+  .thermal-plant-run-card__table-wrap table,
+  .thermal-plant-run-card__table-wrap th {
+    font-size: 0.7rem;
+  }
 }

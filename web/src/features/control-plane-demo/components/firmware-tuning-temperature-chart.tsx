@@ -1,6 +1,5 @@
-import { Star } from 'lucide-react'
-import { RadioGroup } from 'radix-ui'
-import { useMemo, useState } from 'react'
+import { ChartNoAxesCombined, Star } from 'lucide-react'
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react'
 import {
   Select,
   SelectContent,
@@ -9,12 +8,58 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import type { ThermalTuningEvent } from '../contracts'
-import { useResponsiveSvgHeight } from './use-responsive-svg-height'
 
 type Point = { time: number; temperature: number; segment: number }
 const phaseLabels = { warmup: '预热', approach: '接近目标', hold: '稳温' } as const
 type PlotPhase = keyof typeof phaseLabels
 type Trial = { points: Point[]; phases: { phase: PlotPhase; time: number; sequence: number }[] }
+
+/**
+ * Keeps the tuning plot's viewBox at one unit per CSS pixel. The shared
+ * height-only hook derives the viewBox height from a fixed viewBox width,
+ * which rescales every axis label with the panel width.
+ */
+function usePlotViewBox() {
+  const [container, setContainer] = useState<HTMLDivElement | null>(null)
+  const [size, setSize] = useState({ width: 400, height: 106 })
+  const containerRef = useCallback((node: HTMLDivElement | null) => setContainer(node), [])
+
+  useLayoutEffect(() => {
+    if (!container) return
+    const update = () => {
+      const rect = container.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+      setSize((current) =>
+        Math.abs(current.width - rect.width) < 0.5 && Math.abs(current.height - rect.height) < 0.5
+          ? current
+          : { width: rect.width, height: rect.height }
+      )
+    }
+    let frameId = 0
+    const scheduleUpdate = () => {
+      update()
+      if (typeof requestAnimationFrame !== 'function') return
+      if (frameId !== 0) cancelAnimationFrame(frameId)
+      frameId = requestAnimationFrame(() => {
+        frameId = 0
+        update()
+      })
+    }
+    const observer =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleUpdate)
+    update()
+    scheduleUpdate()
+    observer?.observe(container)
+    window.addEventListener('resize', scheduleUpdate)
+    return () => {
+      observer?.disconnect()
+      if (frameId !== 0) cancelAnimationFrame(frameId)
+      window.removeEventListener('resize', scheduleUpdate)
+    }
+  }, [container])
+
+  return { containerRef, viewBoxWidth: size.width, viewBoxHeight: size.height }
+}
 
 function isPlotPhase(phase: string): phase is PlotPhase {
   return phase === 'warmup' || phase === 'approach' || phase === 'hold'
@@ -90,35 +135,42 @@ function collectTrials(events: readonly ThermalTuningEvent[]) {
   return { targets, adoptedTrials, holdRanges }
 }
 
+export function tuningChartTargets(events: readonly ThermalTuningEvent[]) {
+  return [...collectTrials(events).targets.keys()].sort((left, right) => left - right)
+}
+
 export function FirmwareTuningTemperatureChart({
   events,
-  currentTarget,
+  selectedTarget,
   traceGap,
 }: {
   events: readonly ThermalTuningEvent[]
-  currentTarget?: number
+  selectedTarget: number
   traceGap: boolean
 }) {
   const { targets, adoptedTrials, holdRanges } = useMemo(() => collectTrials(events), [events])
-  const [selectedTarget, setSelectedTarget] = useState<number>()
   const [selectedTrial, setSelectedTrial] = useState<number>()
-  const { containerRef, viewBoxHeight } = useResponsiveSvgHeight(400, 106)
-  const target =
-    selectedTarget != null && targets.has(selectedTarget)
-      ? selectedTarget
-      : currentTarget != null && targets.has(currentTarget)
-        ? currentTarget
-        : [...targets.keys()].at(-1)
-  const trials = target != null ? targets.get(target) : undefined
-  const adoptedTrial = target != null ? adoptedTrials.get(target) : undefined
+  const { containerRef, viewBoxWidth, viewBoxHeight } = usePlotViewBox()
+  const target = selectedTarget
+  const hasTargetData = targets.has(target)
+  const trials = targets.get(target)
+  const adoptedTrial = adoptedTrials.get(target)
   const trial =
     selectedTrial != null && trials?.has(selectedTrial)
       ? selectedTrial
       : [...(trials?.keys() ?? [])].at(-1)
   const series = trial != null ? trials?.get(trial) : undefined
   const points = series?.points
-  if (target == null || trial == null || !points?.length) {
-    return <p className="firmware-tuning__chart-empty">暂无有效温度采样</p>
+  if (!hasTargetData || trial == null || !points?.length) {
+    return (
+      <output className="firmware-tuning__chart-empty" aria-label="暂无有效温度采样">
+        <ChartNoAxesCombined className="firmware-tuning__chart-empty-visual" aria-hidden="true" />
+        <div className="firmware-tuning__chart-empty-copy">
+          <strong>暂无有效温度采样</strong>
+          <span>温度曲线将在有效采样到达后显示。</span>
+        </div>
+      </output>
+    )
   }
   const trialOptions = [...(trials?.keys() ?? [])]
   const holdRange = holdRanges.get(`${target}:${trial}`)
@@ -135,10 +187,14 @@ export function FirmwareTuningTemperatureChart({
   }
   const min = Math.floor((low - 1) / 2) * 2
   const max = Math.ceil((Math.max(target, peak) + 1) / 2) * 2
-  const x = (time: number) => 42 + 338 * ((time - start) / Math.max(1, duration))
-  const plotBottom = viewBoxHeight - 22
+  const plotLeft = 42
+  const plotRight = Math.max(plotLeft + 1, viewBoxWidth - 20)
+  const plotTop = 30
+  const x = (time: number) =>
+    plotLeft + (plotRight - plotLeft) * ((time - start) / Math.max(1, duration))
+  const plotBottom = viewBoxHeight - 26
   const y = (temperature: number) =>
-    plotBottom - (plotBottom - 14) * ((temperature - min) / (max - min))
+    plotBottom - (plotBottom - plotTop) * ((temperature - min) / (max - min))
   const segments: Point[][] = []
   for (const point of points) {
     const last = segments.at(-1)
@@ -149,27 +205,7 @@ export function FirmwareTuningTemperatureChart({
   return (
     <div className="firmware-tuning__chart">
       <div className="firmware-tuning__chart-controls">
-        <RadioGroup.Root
-          className="industrial-workspace-switch firmware-tuning__chart-targets"
-          aria-label="曲线目标温度"
-          value={String(target)}
-          onValueChange={(value) => {
-            setSelectedTarget(Number(value))
-            setSelectedTrial(undefined)
-          }}
-        >
-          {[...targets.keys()]
-            .sort((a, b) => a - b)
-            .map((value) => (
-              <RadioGroup.Item
-                key={value}
-                value={String(value)}
-                className={value === target ? 'is-selected' : undefined}
-              >
-                {value}°C
-              </RadioGroup.Item>
-            ))}
-        </RadioGroup.Root>
+        <span className="firmware-tuning__chart-target-label">目标 {target} °C</span>
         <Select value={String(trial)} onValueChange={(value) => setSelectedTrial(Number(value))}>
           <SelectTrigger aria-label="曲线试验轮次" className="firmware-tuning__trial-select">
             <span className="firmware-tuning__trial-sizing">
@@ -204,7 +240,7 @@ export function FirmwareTuningTemperatureChart({
       </div>
       <div className="firmware-tuning__chart-plot" ref={containerRef}>
         <svg
-          viewBox={`0 0 400 ${viewBoxHeight}`}
+          viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
           role="img"
           aria-label={`${target} °C 温度曲线，虚线为目标温度`}
         >
@@ -213,39 +249,39 @@ export function FirmwareTuningTemperatureChart({
               key={sequence}
               className={`firmware-tuning__chart-phase--${phase}`}
               x={x(time)}
-              y="14"
+              y={plotTop}
               width={Math.max(0, x(phases[index + 1]?.time ?? end) - x(time))}
-              height={Math.max(0, plotBottom - 14)}
+              height={Math.max(0, plotBottom - plotTop)}
             />
           ))}
           {[min, (min + max) / 2, max].map((tick) => (
             <g key={tick}>
-              <text x="34" y={y(tick) + 3} textAnchor="end">
+              <text x={plotLeft - 8} y={y(tick) + 3} textAnchor="end">
                 {tick}
               </text>
               <line
-                x1="42"
-                x2="380"
+                x1={plotLeft}
+                x2={plotRight}
                 y1={y(tick)}
                 y2={y(tick)}
                 className="firmware-tuning__chart-grid"
               />
             </g>
           ))}
-          <text x="4" y="10">
+          <text x="4" y={plotTop - 14}>
             °C
           </text>
-          <text x="42" y={viewBoxHeight - 4} textAnchor="middle">
+          <text x={plotLeft} y={viewBoxHeight - 4} textAnchor="middle">
             0
           </text>
           {duration > 0 ? (
-            <text x="380" y={viewBoxHeight - 4} textAnchor="end">
+            <text x={plotRight} y={viewBoxHeight - 4} textAnchor="end">
               {duration.toFixed(1)} s
             </text>
           ) : null}
           <line
-            x1="42"
-            x2="380"
+            x1={plotLeft}
+            x2={plotRight}
             y1={y(target)}
             y2={y(target)}
             className="firmware-tuning__chart-target"
