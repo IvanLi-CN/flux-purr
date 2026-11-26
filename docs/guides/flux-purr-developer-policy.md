@@ -24,7 +24,7 @@
 
 ## 子系统基线
 
-- 固件主入口是 `firmware/src/bin/flux_purr.rs`；共享域逻辑在 `firmware/src/lib.rs` 与子模块中。
+- 固件主入口是 `firmware/src/bin/flux_purr.rs`，产物名 `flux-purr-firmware`；共享域逻辑在 `firmware/src/lib.rs` 与子模块中。该名必须与 `tools/flux-purr-devd` 的 `flux-purr` host CLI 保持不同：两者可能共用同一个 `target/`，同名会互相覆盖可执行文件。
 - 默认 MCU 方向是 ESP32-S3，当前硬件基线是 `ESP32-S3FH4R2`。
 - 对引脚、ADC、按键映射、电源控制以及 heater/fan safety 的改动，先查 `docs/hardware/` 与相关 `docs/specs/`。
 - Web UI 变更必须同时考虑 `web/` 运行时、Storybook 入口和必要测试。

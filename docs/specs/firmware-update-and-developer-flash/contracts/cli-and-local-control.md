@@ -5,7 +5,7 @@
 | User class | Command | Required firmware source | Forbidden firmware source and transport input |
 | --- | --- | --- | --- |
 | 一般用户 | `flux-purr update --port <serial-port> --bundle <local.fluxpurr-fw> [--devd <local-control-socket>]` | 本地 `.fluxpurr-fw`，且命中随 host-tools/Web 发布的 SHA-256 完整性清单 | ELF、BIN、artifact ID、manifest path、URL、自动选端口 |
-| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]` | 本地 ELF；缺省为 `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr` | Bundle、artifact ID、manifest path、URL、`--devd`、HTTP/devd |
+| 开发者 | `flux-purr flash --port <serial-port> [--elf <local-elf>] [--skip-backup --confirm NO_EEPROM_BACKUP]` | 本地 ELF；缺省为 `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware` | Bundle、artifact ID、manifest path、URL、`--devd`、HTTP/devd |
 | 开发者 | `flux-purr recover --port <serial-port> --elf <local-elf> --confirm ERASE` | 本地 ELF | Bundle、artifact ID、manifest path、URL、`--devd`、HTTP/devd |
 
 `--port` is required for every firmware operation above. A supplied path is the entire target identity: discovery, remembered defaults, interactive selection, and re-enumeration replacement are forbidden. Any unsupported flag fails during argument parsing before a serial operation, child process, or network operation begins.

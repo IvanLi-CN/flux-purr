@@ -120,7 +120,7 @@ None
 ## Verification
 
 - VER-DISPLAY-001 (covers: REQ-DISPLAY-005, REQ-DISPLAY-006, REQ-DISPLAY-007, REQ-DISPLAY-008, REQ-DISPLAY-009, REQ-DISPLAY-010, REQ-DISPLAY-011, REQ-DISPLAY-015, REQ-DISPLAY-017, REQ-DISPLAY-018): Given the release RAM ELF and the exact authorized port, When `flux-purr ram-run preview display` is run, Then the device reports a matching RAM identity and drives the display preview with heater off and PD/EEPROM untouched.
-- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020, REQ-DISPLAY-021, REQ-DISPLAY-022): Given `flux-purr` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧；编译配置和日志同时证明 Quad `2 MiB` PSRAM、PSRAM-only 驱动帧缓冲和 SPI2 `40 MHz` Mode 0。
+- VER-DISPLAY-002 (covers: REQ-DISPLAY-001, REQ-DISPLAY-002, REQ-DISPLAY-003, REQ-DISPLAY-004, REQ-DISPLAY-020, REQ-DISPLAY-021, REQ-DISPLAY-022): Given `flux-purr-firmware` device binary，When 使用 Xtensa 目标构建，Then `cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr-firmware --release` 成功，并通过启动顺序测试确认背光控制先于 PD，PD 启动服务先于显示初始化与启动帧；编译配置和日志同时证明 Quad `2 MiB` PSRAM、PSRAM-only 驱动帧缓冲和 SPI2 `40 MHz` Mode 0。
 - VER-DISPLAY-003 (covers: REQ-DISPLAY-014): Given the host and RAM quality gates, When the product/RAM tests, checker, and release builds run, Then all applicable gates pass.
 - VER-DISPLAY-004 (covers: REQ-DISPLAY-012, REQ-DISPLAY-013, REQ-DISPLAY-019): Given bring-up 验证版固件，When 固件启动并读取设备日志，Then 正常 App 路径先建立背光控制、完成有界 PD 启动服务，再显示 branded splash 并进入 Dashboard；Key Test 路径显示静态校准屏，并报告当前场景、方向配置与 profile。
 - VER-DISPLAY-005 (covers: REQ-DISPLAY-016): Given 主人提供实拍照片，When 对比 Storybook/checked-in renderer evidence 与 RAM bring-up 实机效果，Then 能明确确认或修正方向、镜像、偏移与 RGB/灰阶口径。
@@ -141,7 +141,7 @@ None
 - Unit tests: `cargo test --manifest-path firmware/Cargo.toml`
 - Lint: `cargo clippy --manifest-path firmware/Cargo.toml --all-targets --all-features -- -D warnings`
 - Host build: `cargo build --manifest-path firmware/Cargo.toml --release`
-- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr-firmware --release`
 
 ### Quality checks
 

@@ -172,7 +172,7 @@
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo fmt --manifest-path firmware/Cargo.toml --check`
-- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- Xtensa build: `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr-firmware --release`
 
 ## 文档更新（Docs to Update）
 

@@ -19,7 +19,7 @@
 ### REQ-FUDF-001
 
 - The system MUST provide the General User `update` and Developer `flash` firmware operations above, plus the explicitly destructive Developer `recover` operation.
-- Inputs: `update` requires an Explicit Serial Port and a local Firmware Update Bundle; `flash` requires an Explicit Serial Port and accepts only a local ELF, defaulting to `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`.
+- Inputs: `update` requires an Explicit Serial Port and a local Firmware Update Bundle; `flash` requires an Explicit Serial Port and accepts only a local ELF, defaulting to `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware`.
 - Outputs: both operations report the exact supplied port and a terminal result without selecting, remembering, discovering, or replacing a port.
 
 ### REQ-FUDF-002

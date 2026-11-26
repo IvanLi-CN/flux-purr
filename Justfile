@@ -23,7 +23,7 @@ check-devd:
     @bun run check:devd
 
 # Generate an offline factory image and verify its application partition size; no hardware access.
-firmware-image-check elf="firmware/target/xtensa-esp32s3-none-elf/release/flux-purr":
+firmware-image-check elf="firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware":
     @bash scripts/check-firmware-image-size.sh {{ quote(elf) }}
 
 # Check repeated public HTTP reads against one explicitly identified device; no writes or credentials.

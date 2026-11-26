@@ -9,7 +9,7 @@ fi
 cargo +esp clippy --locked \
   --manifest-path firmware/Cargo.toml \
   --target xtensa-esp32s3-none-elf \
-  --bin flux-purr \
+  --bin flux-purr-firmware \
   -- -D warnings \
      -D clippy::too_many_lines \
      -D clippy::too_many_arguments \

@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 # Shared offline implementation for Justfile and CI; never accesses a serial port.
-elf_path="${1:-firmware/target/xtensa-esp32s3-none-elf/release/flux-purr}"
+elf_path="${1:-firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware}"
 output_path=""
 log_path=""
 if [[ ! -f "$elf_path" ]]; then

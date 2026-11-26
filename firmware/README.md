@@ -178,7 +178,11 @@ or supported by the production `flux-purr` firmware artifact.
 - Repo-local config: `mcu-agentd.toml`
 - MCU id: `esp32s3_frontpanel`
 - Configured ELF artifact:
-  - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr`
+  - `firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware`
+- Binary naming: the product firmware binary is `flux-purr-firmware`, distinct
+  from the `flux-purr` host CLI in `tools/flux-purr-devd`. Both must keep
+  distinct names because they can share one `target/` directory, where a build
+  of either package would otherwise overwrite the other's executable.
 - `mcu-agentd` remains available for selector inspection and diagnostics. It is not a firmware installation path.
 - Typical diagnostic flow:
   - `source /Users/ivan/export-esp.sh`

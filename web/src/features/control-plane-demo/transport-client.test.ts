@@ -1286,7 +1286,7 @@ describe('control-plane transport client', () => {
                 files: [
                   {
                     kind: 'elf',
-                    path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
+                    path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware',
                     sha256: 'sha256:abc',
                     size: 42,
                     flashAddress: null,
@@ -1564,7 +1564,7 @@ describe('control-plane transport client', () => {
       files: [
         {
           kind: 'elf',
-          path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr',
+          path: 'firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware',
           sha256: 'sha256:abc',
           size: 42,
           flashAddress: null,

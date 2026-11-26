@@ -193,7 +193,7 @@ None
 
 - `cargo test --manifest-path firmware/Cargo.toml`
 - `cargo build --manifest-path firmware/Cargo.toml --release`
-- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr --release`
+- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --features esp32s3 --bin flux-purr-firmware --release`
 - `bun run --cwd web check`
 - `bun run --cwd web build`
 - `bun run --cwd web test:storybook`
