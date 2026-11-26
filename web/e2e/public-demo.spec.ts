@@ -411,6 +411,48 @@ test.describe('public demo build', () => {
     expect(overflowing.every((item) => item.text.length > 20)).toBe(true)
   })
 
+  test('keeps the panel kicker subordinate to the title it introduces', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/overview')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+    const kickers = page.locator('.industrial-panel-kicker')
+    await expect(kickers).toHaveCount(2)
+
+    const measured = await kickers.evaluateAll((nodes) =>
+      nodes.map((node) => {
+        const style = getComputedStyle(node)
+        const title = node.parentElement?.querySelector('h2')
+        const titleStyle = title ? getComputedStyle(title) : null
+        return {
+          text: node.textContent?.trim() ?? '',
+          weight: Number(style.fontWeight),
+          titleWeight: titleStyle ? Number(titleStyle.fontWeight) : 0,
+          size: Number.parseFloat(style.fontSize),
+          titleSize: titleStyle ? Number.parseFloat(titleStyle.fontSize) : 0,
+          transformed: style.textTransform,
+          color: style.color,
+        }
+      })
+    )
+
+    for (const kicker of measured) {
+      // Small install text, never a competing all-caps stamp.
+      expect(kicker.text.length).toBeGreaterThan(0)
+      expect(kicker.size).toBeGreaterThanOrEqual(11)
+      expect(kicker.size).toBeLessThan(kicker.titleSize)
+      expect(kicker.weight).toBeLessThan(kicker.titleWeight)
+      expect(kicker.transformed).not.toBe('uppercase')
+    }
+
+    // The dark log panel needs its own text token; the muted one is dark-on-dark.
+    const darkKicker = measured.find((kicker) => kicker.text === '全局日志')
+    const lightKicker = measured.find((kicker) => kicker.text === 'Dashboard')
+    expect(darkKicker).toBeDefined()
+    expect(darkKicker?.color).not.toBe(lightKicker?.color)
+  })
+
   test('gives the empty tuning chart a full-height illustration and uniform desktop spacing', async ({
     page,
   }) => {

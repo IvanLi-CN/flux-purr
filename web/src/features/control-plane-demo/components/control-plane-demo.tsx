@@ -10760,7 +10760,7 @@ function GlobalLogPanel({ events }: { events: EventLogEntry[] }) {
     <aside className="industrial-panel industrial-log-panel" aria-label="全局日志">
       <div className="industrial-log-panel__header">
         <div>
-          <p className="industrial-label text-[#a8b2d1]">全局日志</p>
+          <p className="industrial-panel-kicker">全局日志</p>
           <h2>运行时追踪</h2>
         </div>
         <fieldset className="industrial-log-filters">
@@ -10950,7 +10950,7 @@ function PanelHeader({ kicker, title }: { kicker: string; title: string }) {
   return (
     <header className="industrial-panel-header">
       <div>
-        <p className="industrial-label">{kicker}</p>
+        <p className="industrial-panel-kicker">{kicker}</p>
         <h2>{title}</h2>
       </div>
     </header>

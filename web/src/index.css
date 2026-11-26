@@ -3960,6 +3960,26 @@
     margin-bottom: 1rem;
   }
 
+  /* The panel kicker names the module its title belongs to. It stays quieter
+     than both the title and the uppercase data labels, so the heading owns the
+     row instead of competing with a second all-caps stamp. */
+  .industrial-panel-kicker {
+    margin: 0;
+    color: var(--industrial-muted-text);
+    font-family: "JetBrains Mono", "Roboto Mono", monospace;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1.2;
+    text-transform: none;
+  }
+
+  /* Dark panels invert the surface, so the muted token loses contrast. */
+  .industrial-panel--dark .industrial-panel-kicker,
+  .industrial-log-panel .industrial-panel-kicker {
+    color: color-mix(in oklch, #eef4f8 62%, transparent);
+  }
+
   .industrial-panel-header h2 {
     margin-top: 0.22rem;
     color: var(--industrial-text);
