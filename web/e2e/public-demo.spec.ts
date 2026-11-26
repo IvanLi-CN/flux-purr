@@ -280,7 +280,7 @@ test.describe('public demo build', () => {
     }
   })
 
-  test('opens the tuning identifier tooltip below the value so the copy button stays clear', async ({
+  test('shows the full identifier in the tooltip and leaves the controls usable', async ({
     page,
   }) => {
     await page.setViewportSize({ width: 1280, height: 860 })
@@ -295,51 +295,80 @@ test.describe('public demo build', () => {
 
     for (let index = 0; index < 2; index += 1) {
       const tooltip = page.locator('[data-slot="tooltip-content"]')
+      const trigger = summaries.nth(index)
       // The trigger lives inside the scroll area, so hover only lands once the
       // row is scrolled into view. Radix opens the bubble after a short delay.
-      await summaries.nth(index).scrollIntoViewIfNeeded()
-      await summaries.nth(index).hover()
-      await expect(summaries.nth(index)).toHaveAttribute('data-state', /open/, { timeout: 10_000 })
+      await trigger.scrollIntoViewIfNeeded()
+      await trigger.hover()
+      await expect(trigger).toHaveAttribute('data-state', /open/, { timeout: 10_000 })
 
-      const geometry = await page.evaluate((target) => {
+      const measured = await page.evaluate((target) => {
         const bubble = document.querySelector('[data-slot="tooltip-content"]')
-        const copy = document.querySelectorAll('.firmware-tuning__identifier-copy')[target]
-        const panel = document.querySelector('.firmware-tuning')
-        if (!bubble || !copy || !panel) throw new Error('Tooltip geometry targets are missing')
+        const triggers = document.querySelectorAll('.firmware-tuning__identifier-summary')
+        const copies = document.querySelectorAll('.firmware-tuning__identifier-copy')
+        if (!bubble || !copies[target]) throw new Error('Tooltip geometry targets are missing')
+
         const box = bubble.getBoundingClientRect()
-        const button = copy.getBoundingClientRect()
-        const frame = panel.getBoundingClientRect()
-        // Whatever the bubble floats over must stay clickable.
-        const hit = document.elementFromPoint(
-          button.left + button.width / 2,
-          button.top + button.height / 2
-        )
+        const ownButton = copies[target].getBoundingClientRect()
+        const ownRow = triggers[target].closest('.firmware-tuning__identifier-field')
+        // The bubble uses a shorthand font, so lineHeight computes to "normal";
+        // measure one line directly instead of dividing by a NaN.
+        const probe = bubble.cloneNode(true)
+        if (probe instanceof HTMLElement) {
+          probe.style.position = 'absolute'
+          probe.style.visibility = 'hidden'
+          probe.style.width = 'max-content'
+          probe.style.whiteSpace = 'nowrap'
+          document.body.append(probe)
+        }
+        const singleLine = probe instanceof HTMLElement ? probe.getBoundingClientRect().height : 0
+        probe.remove()
+
         return {
           side: bubble.getAttribute('data-side'),
-          overlapsButton: !(
-            box.bottom < button.top ||
-            box.top > button.bottom ||
-            box.right < button.left ||
-            box.left > button.right
+          // Radix mirrors the label into a hidden node for aria-describedby, so
+          // read the first text node rather than the concatenated tree.
+          text: (bubble.firstChild?.textContent ?? '').trim(),
+          expected: triggers[target].textContent ?? '',
+          width: box.width,
+          lines: singleLine > 0 ? Math.round(box.height / singleLine) : 1,
+          // The bubble must not sit on the button of the row it describes.
+          coversOwnButton: !(
+            box.bottom < ownButton.top ||
+            box.top > ownButton.bottom ||
+            box.right < ownButton.left ||
+            box.left > ownButton.right
           ),
-          insidePanel: box.left >= frame.left - 1 && box.right <= frame.right + 1,
-          copyReachable: hit === copy || copy.contains(hit),
+          inViewport: box.left >= 0 && box.right <= window.innerWidth,
+          rowWidth: ownRow?.getBoundingClientRect().width ?? 0,
+          // Whatever it floats over stays clickable, so overlap is harmless.
+          buttonsReachable: [...copies].every((copy) => {
+            const button = copy.getBoundingClientRect()
+            const hit = document.elementFromPoint(
+              button.left + button.width / 2,
+              button.top + button.height / 2
+            )
+            return hit === copy || copy.contains(hit)
+          }),
         }
       }, index)
 
       // Radix flips to the top when the bubble does not fit, which put it right
       // on top of the copy button for the same row.
-      expect(geometry.side).toBe('bottom')
-      expect(geometry.overlapsButton).toBe(false)
-      expect(geometry.insidePanel).toBe(true)
-      expect(geometry.copyReachable).toBe(true)
+      expect(measured.side).toBe('bottom')
+      expect(measured.coversOwnButton).toBe(false)
+      expect(measured.inViewport).toBe(true)
+      expect(measured.buttonsReachable).toBe(true)
+      // Identifiers are read by pattern, so the full value must stay on one line
+      // rather than be squeezed into the narrow column.
+      expect(measured.text).toBe(measured.expected)
+      expect(measured.lines).toBe(1)
+      expect(measured.width).toBeGreaterThan(measured.rowWidth)
 
       // A single jump skips the pointer leave event, so walk the pointer out in
       // steps to let Radix close the bubble before the next iteration.
       await page.mouse.move(900, 400, { steps: 25 })
-      await expect(summaries.nth(index)).toHaveAttribute('data-state', 'closed', {
-        timeout: 10_000,
-      })
+      await expect(trigger).toHaveAttribute('data-state', 'closed', { timeout: 10_000 })
       await expect(tooltip).toHaveCount(0)
     }
   })

@@ -369,9 +369,10 @@
 }
 
 .firmware-tuning__identifier-tooltip {
-  /* Stop short of the copy-button column on the row below, so the bubble never
-     floats over a control the reader may want to click. */
-  max-width: min(230px, 50vw);
+  /* Wide enough for a full sha256 on one line; identifiers are read by pattern,
+     so wrapping them defeats the purpose of the tooltip. */
+  max-width: min(560px, 50vw);
+  width: max-content;
   padding: 8px 10px;
   font:
     0.7rem / 1.35 ui-monospace,
@@ -379,6 +380,13 @@
     Menlo,
     monospace;
   overflow-wrap: anywhere;
+  /* The bubble overlaps the identifier row below it; let clicks reach the
+     controls underneath instead of shrinking the text to dodge them. */
+  pointer-events: none;
+}
+
+[data-radix-popper-content-wrapper]:has(.firmware-tuning__identifier-tooltip) {
+  pointer-events: none;
 }
 
 .firmware-tuning__identifier-empty {
