@@ -962,6 +962,8 @@ function IdentifierValue({
             <TooltipTrigger asChild>
               <span className="firmware-tuning__identifier-summary">{value}</span>
             </TooltipTrigger>
+            {/* Above would sit on this row's copy button; below keeps the
+                current row clear and only floats over the next one. */}
             <TooltipContent
               side="bottom"
               align="start"
