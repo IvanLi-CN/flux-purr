@@ -962,7 +962,13 @@ function IdentifierValue({
             <TooltipTrigger asChild>
               <span className="firmware-tuning__identifier-summary">{value}</span>
             </TooltipTrigger>
-            <TooltipContent className="firmware-tuning__identifier-tooltip">{value}</TooltipContent>
+            <TooltipContent
+              side="bottom"
+              align="start"
+              className="firmware-tuning__identifier-tooltip"
+            >
+              {value}
+            </TooltipContent>
           </Tooltip>
         ) : (
           <span className="firmware-tuning__identifier-summary firmware-tuning__identifier-empty">

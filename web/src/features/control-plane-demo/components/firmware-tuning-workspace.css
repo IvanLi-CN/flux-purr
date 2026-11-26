@@ -369,7 +369,9 @@
 }
 
 .firmware-tuning__identifier-tooltip {
-  max-width: min(420px, 50vw);
+  /* Stop short of the copy-button column on the row below, so the bubble never
+     floats over a control the reader may want to click. */
+  max-width: min(230px, 50vw);
   padding: 8px 10px;
   font:
     0.7rem / 1.35 ui-monospace,

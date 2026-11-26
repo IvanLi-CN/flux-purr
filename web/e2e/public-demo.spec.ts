@@ -280,6 +280,70 @@ test.describe('public demo build', () => {
     }
   })
 
+  test('opens the tuning identifier tooltip below the value so the copy button stays clear', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-save')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+    const summaries = page.locator('.firmware-tuning__identifier-summary')
+    // The status read resolves after mount; the summary renders an em dash until
+    // then and has no tooltip trigger at all.
+    await expect(summaries.first()).not.toHaveClass(/identifier-empty/, { timeout: 15_000 })
+
+    for (let index = 0; index < 2; index += 1) {
+      const tooltip = page.locator('[data-slot="tooltip-content"]')
+      // The trigger lives inside the scroll area, so hover only lands once the
+      // row is scrolled into view. Radix opens the bubble after a short delay.
+      await summaries.nth(index).scrollIntoViewIfNeeded()
+      await summaries.nth(index).hover()
+      await expect(summaries.nth(index)).toHaveAttribute('data-state', /open/, { timeout: 10_000 })
+
+      const geometry = await page.evaluate((target) => {
+        const bubble = document.querySelector('[data-slot="tooltip-content"]')
+        const copy = document.querySelectorAll('.firmware-tuning__identifier-copy')[target]
+        const panel = document.querySelector('.firmware-tuning')
+        if (!bubble || !copy || !panel) throw new Error('Tooltip geometry targets are missing')
+        const box = bubble.getBoundingClientRect()
+        const button = copy.getBoundingClientRect()
+        const frame = panel.getBoundingClientRect()
+        // Whatever the bubble floats over must stay clickable.
+        const hit = document.elementFromPoint(
+          button.left + button.width / 2,
+          button.top + button.height / 2
+        )
+        return {
+          side: bubble.getAttribute('data-side'),
+          overlapsButton: !(
+            box.bottom < button.top ||
+            box.top > button.bottom ||
+            box.right < button.left ||
+            box.left > button.right
+          ),
+          insidePanel: box.left >= frame.left - 1 && box.right <= frame.right + 1,
+          copyReachable: hit === copy || copy.contains(hit),
+        }
+      }, index)
+
+      // Radix flips to the top when the bubble does not fit, which put it right
+      // on top of the copy button for the same row.
+      expect(geometry.side).toBe('bottom')
+      expect(geometry.overlapsButton).toBe(false)
+      expect(geometry.insidePanel).toBe(true)
+      expect(geometry.copyReachable).toBe(true)
+
+      // A single jump skips the pointer leave event, so walk the pointer out in
+      // steps to let Radix close the bubble before the next iteration.
+      await page.mouse.move(900, 400, { steps: 25 })
+      await expect(summaries.nth(index)).toHaveAttribute('data-state', 'closed', {
+        timeout: 10_000,
+      })
+      await expect(tooltip).toHaveCount(0)
+    }
+  })
+
   test('lets the tuning identifiers use the full column width before clipping', async ({
     page,
   }) => {
