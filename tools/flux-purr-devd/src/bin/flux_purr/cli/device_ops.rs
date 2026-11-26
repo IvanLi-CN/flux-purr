@@ -3,12 +3,12 @@ use super::*;
 #[cfg(test)]
 #[path = "../product_flash_hil_tests.rs"]
 mod product_flash_hil;
-#[cfg(target_os = "macos")]
-use flux_purr_devd::serial::open_raw_usb_serial_jtag_port;
 use flux_purr_devd::serial::{
-    SerialPortProcessLock, UsbSerialIdentity, callout_usb_serial_jtag_path,
-    serial_port_usb_identity, serial_port_usb_identity_matches,
+    SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
+    serial_port_usb_identity_matches,
 };
+#[cfg(target_os = "macos")]
+use flux_purr_devd::serial::{callout_usb_serial_jtag_path, open_raw_usb_serial_jtag_port};
 use std::io::{Read, Write};
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
