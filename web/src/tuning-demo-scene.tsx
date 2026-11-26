@@ -29,30 +29,40 @@ export function isTuningDemoScene(scene: string | undefined): scene is TuningDem
 
 type PlotPhase = 'warmup' | 'approach' | 'hold'
 
-/** Deterministic in-progress curve: warmup, approach, then a trimmed hold. */
-const activeCurve: Array<{ phase: PlotPhase; temperatureCentiC: number }> = [
-  { phase: 'warmup', temperatureCentiC: 4_520 },
-  { phase: 'warmup', temperatureCentiC: 5_010 },
-  { phase: 'warmup', temperatureCentiC: 5_560 },
-  { phase: 'warmup', temperatureCentiC: 5_840 },
-  { phase: 'approach', temperatureCentiC: 5_950 },
-  { phase: 'approach', temperatureCentiC: 6_010 },
-  { phase: 'hold', temperatureCentiC: 5_990 },
-  { phase: 'hold', temperatureCentiC: 6_020 },
-  { phase: 'hold', temperatureCentiC: 6_000 },
-  { phase: 'hold', temperatureCentiC: 6_010 },
-  { phase: 'hold', temperatureCentiC: 5_990 },
-  { phase: 'hold', temperatureCentiC: 6_000 },
+/** One target's curve as ratios of its own target temperature. */
+const activeShape: Array<{ phase: PlotPhase; ratio: number }> = [
+  { phase: 'warmup', ratio: 0.753 },
+  { phase: 'warmup', ratio: 0.835 },
+  { phase: 'warmup', ratio: 0.927 },
+  { phase: 'warmup', ratio: 0.973 },
+  { phase: 'approach', ratio: 0.992 },
+  { phase: 'approach', ratio: 1.002 },
+  { phase: 'hold', ratio: 0.998 },
+  { phase: 'hold', ratio: 1.003 },
+  { phase: 'hold', ratio: 1.0 },
+  { phase: 'hold', ratio: 1.002 },
+  { phase: 'hold', ratio: 0.998 },
+  { phase: 'hold', ratio: 1.0 },
 ]
+
+/** Growth budget: one new sample every other poll, so a curve visibly fills in. */
+const ACTIVE_SAMPLE_INTERVAL_READS = 2
+const ACTIVE_INITIAL_SAMPLES = 3
 
 type SavePhase = 'review' | 'sealed' | 'saved' | 'canceled'
 type RunPhase = 'idle' | 'active' | 'canceled'
 
 export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
   const [deviceId] = useState(() => `demo-tuning-${crypto.randomUUID()}`)
-  const savePhase = useRef<SavePhase>('review')
-  const runPhase = useRef<RunPhase>(scene === 'tuning-active' ? 'active' : 'idle')
-  const activeReads = useRef(0)
+  // The scene change remounts this component, so mount-time values are enough.
+  // They live in a mutable box rather than state because a command and the read
+  // that follows it run inside one await chain: state written by sendCommand is
+  // still stale when that same chain immediately calls readStatus.
+  const phase = useRef({
+    savePhase: 'review' as SavePhase,
+    runPhase: (scene === 'tuning-active' ? 'active' : 'idle') as RunPhase,
+    activeReads: 0,
+  }).current
   const identity = {
     runId: deviceId,
     candidateId: deviceId,
@@ -72,15 +82,16 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
 
   function sampleEvent(
     sequence: number,
-    phase: ThermalTuningPhase,
-    temperatureCentiC: number
+    plotPhase: ThermalTuningPhase,
+    temperatureCentiC: number,
+    targetC: number
   ): ThermalTuningStatus['events']['events'][number] {
     return {
       sequence,
       elapsedMs: sequence * 25_000,
       kind: 'sample',
-      phase,
-      targetC: 60,
+      phase: plotPhase,
+      targetC,
       trialIndex: 0,
       reason: null,
       trial: null,
@@ -89,9 +100,9 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
         ...identity,
         sequence,
         elapsedMs: sequence * 25_000,
-        targetC: 60,
+        targetC,
         trialIndex: 0,
-        phase,
+        phase: plotPhase,
         temperatureCentiC,
         measurementValid: true,
         vinMv: 18_000,
@@ -104,7 +115,7 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
     }
   }
 
-  /** Standby: the workbench has a power class and identity but no run yet. */
+  /** Standby: a resolved power class, but no run, no targets and no trace yet. */
   function idleStatus(): ThermalTuningStatus {
     const trace = traceFor(-1, true)
     return {
@@ -130,17 +141,16 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
   }
 
   function canceledStatus(): ThermalTuningStatus {
-    const events = activeCurve
-      .slice(0, 6)
-      .map((point, sequence) => sampleEvent(sequence, point.phase, point.temperatureCentiC))
-    const trace = traceFor(events.length - 1, true)
+    const { events } = activeRun(EXECUTION_ORDER[0], activeShape.length)
+    const stopped = events.slice(0, 6)
+    const trace = traceFor(stopped.length - 1, true)
     return {
       ...identity,
       phase: 'canceled',
       trialPurpose: 'scout',
       terminalDisposition: 'canceled',
       reviewDisposition: 'complete',
-      targetsC: EXECUTION_ORDER,
+      targetsC: [EXECUTION_ORDER[0]],
       targetIndex: 0,
       armed: false,
       sealed: false,
@@ -148,26 +158,41 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       candidateProfile: null,
       previewReceipt: null,
       trace,
-      events: { trace, events, nextSequence: trace.lastSequence },
+      events: { trace, events: stopped, nextSequence: trace.lastSequence },
       saveReceipt: null,
     }
   }
 
-  /** Running: every read reveals a few more deterministic samples. */
+  /** `count` samples over the targets, spending one target's slots before the next. */
+  function activeRun(startTargetIndex: number, count: number) {
+    const events: ThermalTuningStatus['events']['events'] = []
+    for (let index = 0; index < count; index += 1) {
+      const targetIndex = startTargetIndex + Math.floor(index / activeShape.length)
+      const targetC = EXECUTION_ORDER[Math.min(targetIndex, EXECUTION_ORDER.length - 1)]
+      const { phase, ratio } = activeShape[index % activeShape.length]
+      events.push(sampleEvent(index, phase, Math.round(targetC * ratio * 100), targetC))
+    }
+    return { events }
+  }
+
+  /** Running: every other read reveals one more sample, walking the targets. */
   function activeStatus(after = -1): ThermalTuningStatus {
-    const visible = Math.min(activeCurve.length, 3 + activeReads.current * 2)
-    const events = activeCurve
-      .slice(0, visible)
-      .map((point, sequence) => sampleEvent(sequence, point.phase, point.temperatureCentiC))
-    const trace = traceFor(visible - 1, false)
+    const length = activeShape.length * EXECUTION_ORDER.length
+    const visible = Math.min(
+      length,
+      ACTIVE_INITIAL_SAMPLES + Math.floor(phase.activeReads / ACTIVE_SAMPLE_INTERVAL_READS)
+    )
+    const { events } = activeRun(0, visible)
+    const trace = traceFor(visible - 1, visible >= length)
+    const reached = events.slice(-1)[0]?.targetC ?? EXECUTION_ORDER[0]
     return {
       ...identity,
-      phase: activeCurve[visible - 1].phase,
+      phase: events[visible - 1].phase,
       trialPurpose: 'scout',
       terminalDisposition: 'running',
       reviewDisposition: 'pending',
-      targetsC: EXECUTION_ORDER,
-      targetIndex: 0,
+      targetsC: EXECUTION_ORDER.slice(0, EXECUTION_ORDER.indexOf(reached) + 1),
+      targetIndex: EXECUTION_ORDER.indexOf(reached),
       armed: true,
       sealed: false,
       saveConfirmed: false,
@@ -177,7 +202,7 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       events: {
         trace,
         events: events.filter(({ sequence }) => sequence > after),
-        nextSequence: null,
+        nextSequence: visible >= length ? trace.lastSequence : null,
       },
       saveReceipt: null,
     }
@@ -225,16 +250,9 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       })
     }
     targets.forEach((targetC, targetIndex) => {
-      const curve = [
-        { phase: 'warmup' as const, ratio: 0.72 },
-        { phase: 'warmup' as const, ratio: 0.94 },
-        { phase: 'approach' as const, ratio: 0.99 },
-        { phase: 'hold' as const, ratio: 1.004 },
-        { phase: 'hold' as const, ratio: 1.001 },
-      ]
-      for (const { phase, ratio } of curve) {
-        pushSample(targetC, phase, Math.round(targetC * ratio * 100), events.length)
-      }
+      pushSample(targetC, 'warmup', Math.round(targetC * 0.72 * 100), events.length)
+      pushSample(targetC, 'approach', Math.round(targetC * 0.995 * 100), events.length)
+      pushSample(targetC, 'hold', Math.round(targetC * 1.002 * 100), events.length)
       events.push({
         sequence: events.length,
         elapsedMs: events.length * 25_000,
@@ -272,7 +290,7 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
         phase: 'completed',
         decision: null,
       })
-    const trace = traceFor(events.length - 1, true)
+    const lastTrace = traceFor(events.length - 1, true)
     return {
       ...identity,
       phase: canceled ? 'canceled' : sealed ? 'sealed' : 'completed',
@@ -286,11 +304,14 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       saveConfirmed: saved,
       candidateProfile: null,
       previewReceipt: {},
-      trace,
+      trace: lastTrace,
       events: {
-        trace,
+        trace: lastTrace,
+        nextSequence: null,
+        // A read only carries what follows its cursor; re-sending acknowledged
+        // events would keep confirmedThrough one sequence behind the tail and
+        // the save path would exhaust its acknowledgement budget.
         events: events.filter(({ sequence }) => sequence > after),
-        nextSequence: trace.lastSequence,
       },
       saveReceipt: saved
         ? {
@@ -332,12 +353,12 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
         deviceId={deviceId}
         transport="mock"
         readStatus={async (cursor) => {
-          activeReads.current += 1
+          phase.activeReads += 1
           return activeStatus(cursor?.afterSequence)
         }}
         sendCommand={async (command) => {
           if (command.op !== 'cancel') throw new Error('本轮调优已在进行中。')
-          runPhase.current = 'canceled'
+          phase.runPhase = 'canceled'
           return canceledStatus()
         }}
       />
@@ -351,24 +372,24 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       transport="mock"
       readStatus={async (cursor) => {
         if (scene === 'tuning-idle') {
-          if (runPhase.current === 'active') {
-            activeReads.current += 1
+          if (phase.runPhase === 'active') {
+            phase.activeReads += 1
             return activeStatus(cursor?.afterSequence)
           }
-          return runPhase.current === 'canceled' ? canceledStatus() : idleStatus()
+          return phase.runPhase === 'canceled' ? canceledStatus() : idleStatus()
         }
-        if (savePhase.current === 'saved')
+        if (phase.savePhase === 'saved')
           throw new ControlPlaneClientError(
             'Mock response exceeded the LAN envelope.',
             'response_too_large',
             false
           )
         const next = saveStatus(
-          savePhase.current,
+          phase.savePhase,
           cursor?.afterSequence,
           scene === 'tuning-partial' ? PARTIAL_TARGETS : EXECUTION_ORDER
         )
-        if (savePhase.current === 'review' && !tuningOwnerSession.proofFor(deviceId, deviceId)) {
+        if (phase.savePhase === 'review' && !tuningOwnerSession.proofFor(deviceId, deviceId)) {
           tuningOwnerSession.acceptResponse(deviceId, 'start', { ...next, ownerProof })
         }
         return next
@@ -376,32 +397,33 @@ export function TuningDemoScene({ scene }: { scene: TuningDemoSceneId }) {
       sendCommand={async (command) => {
         if (scene === 'tuning-idle') {
           if (command.op === 'start') {
-            runPhase.current = 'active'
+            phase.runPhase = 'active'
+            phase.activeReads = 0
             // The start response carries the ownership proof for this tab; the
             // workspace registers it against the run identity it actually got.
             return { ...activeStatus(), ownerProof }
           }
           if (command.op === 'cancel') {
-            runPhase.current = 'canceled'
+            phase.runPhase = 'canceled'
             return canceledStatus()
           }
           throw new Error('待命场景只接受开始或停止。')
         }
         const targets = scene === 'tuning-partial' ? PARTIAL_TARGETS : EXECUTION_ORDER
-        if (command.op === 'seal' && savePhase.current === 'review') {
-          savePhase.current = 'sealed'
+        if (command.op === 'seal' && phase.savePhase === 'review') {
+          phase.savePhase = 'sealed'
           return saveStatus('sealed', -1, targets)
         }
         if (
           command.op === 'confirm_save' &&
-          savePhase.current === 'sealed' &&
+          phase.savePhase === 'sealed' &&
           command.ownerProof === ownerProof
         ) {
-          savePhase.current = 'saved'
+          phase.savePhase = 'saved'
           return saveStatus('saved', -1, targets)
         }
-        if (command.op === 'cancel' && savePhase.current !== 'saved') {
-          savePhase.current = 'canceled'
+        if (command.op === 'cancel' && phase.savePhase !== 'saved') {
+          phase.savePhase = 'canceled'
           return saveStatus('canceled', -1, targets)
         }
         throw new Error('请在 Demo Inspector 中选「重置应用状态」后重试。')

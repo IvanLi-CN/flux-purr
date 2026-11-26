@@ -160,11 +160,11 @@ The palette describes workshop materials and operational signals rather than bra
 - **Title** (Manrope, weight 800, 1.35rem, line-height 1.1): Strong module headings with a subtle embossed highlight.
 - **Body** (Manrope, weight 600, 1rem, line-height 1.45): Dense but readable operating copy, normally constrained to short instructions and status explanations.
 - **Label** (JetBrains Mono, weight 800, 0.7rem, line-height 1.2): Uppercase where appropriate, wide-set, and reserved for metadata, measurements, badges, and control legends.
-- **Panel kicker** (JetBrains Mono, weight 600, 0.72rem, line-height 1.2): Sentence case, light tracking, and the muted token; it names the module a panel title belongs to and never outranks that title.
+- **Panel kicker** (JetBrains Mono, weight 600, 0.72rem, line-height 1.2): Sentence case, light tracking, and the muted token; it labels the module a panel belongs to under the One Heading Rule.
 
 **The Data Face Rule.** Measurements, identifiers, timestamps, and machine state use the mono face; prose and navigation stay in the humanist face.
 
-**The One Heading Rule.** Each panel has one visual heading. A kicker stays below the title in size and weight, and never repeats the uppercase, wide-tracked treatment reserved for data labels; dark panels use their own light text token so the kicker does not disappear into the surface.
+**The One Heading Rule.** Each panel has one visual heading. A kicker names the module and never competes with the title: it stays below it in size and weight, keeps sentence case instead of the uppercase, wide-tracked data treatment, and switches to the light text token on dark panels so it does not disappear into the surface.
 
 ## Layout
 

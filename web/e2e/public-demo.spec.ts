@@ -730,6 +730,26 @@ test.describe('public demo build', () => {
     await expect(selected).toHaveText('60°C')
   })
 
+  test('grows the in-progress run across targets instead of pinning one', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning?demoScene=tuning-active')
+    const cells = page.locator('.firmware-tuning__target-grid button')
+    await expect(cells).toHaveCount(8)
+    await expect(page.locator('.firmware-tuning__target-grid button:enabled')).toHaveCount(1)
+
+    // A single hardcoded target left five cells permanently unsampled and the
+    // curve at its full length from the first frame.
+    await expect(page.locator('.firmware-tuning__target-grid button:enabled')).not.toHaveCount(1, {
+      timeout: 15_000,
+    })
+    const plot = page.locator('.firmware-tuning__chart-plot polyline').first()
+    const points = () =>
+      plot.evaluate((element) => (element.getAttribute('points') ?? '').trim().split(/\s+/).length)
+    const initial = await points()
+    expect(initial).toBeLessThan(12)
+    await expect.poll(points, { timeout: 20_000 }).toBeGreaterThan(initial)
+  })
+
   test('preserves the tuning chart area by keeping the facts row single-line', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 860 })
     await page.goto('/devices/fp-lab-01/calibration/firmware-tuning')
