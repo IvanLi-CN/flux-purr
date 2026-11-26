@@ -2276,16 +2276,13 @@
     overflow: hidden;
   }
 
+  /* The header row keeps one split for every width: a capped 280px identity
+     column and the rest for status. Narrow layouts below override this. */
   .industrial-console__top {
     display: grid;
+    grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
     gap: 0.8rem;
-    align-items: end;
-  }
-
-  @media (min-width: 940px) {
-    .industrial-console__top {
-      grid-template-columns: minmax(280px, 0.72fr) minmax(0, 1.28fr);
-    }
+    align-items: center;
   }
 
   .industrial-console__top h1 {
@@ -5734,10 +5731,6 @@
     font-size: 0.66rem;
   }
 
-  .industrial-console__top {
-    align-items: center;
-  }
-
   .industrial-view-tab {
     min-height: 48px;
     box-shadow:
@@ -6345,12 +6338,6 @@
     grid-template-rows: auto auto minmax(0, 1fr);
     gap: 0.65rem;
     padding: clamp(0.72rem, 1.4vw, 1rem);
-  }
-
-  .industrial-console__top {
-    grid-template-columns: minmax(220px, 0.58fr) minmax(0, 1.42fr);
-    gap: 0.8rem;
-    align-items: center;
   }
 
   .industrial-console__identity {
@@ -10090,10 +10077,6 @@
   min-height: 12rem;
   padding: 1rem;
   color: var(--industrial-muted-text);
-}
-
-.industrial-console__top {
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
 }
 
 .industrial-status-strip {
