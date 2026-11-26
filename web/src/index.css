@@ -745,7 +745,7 @@
   scrollbar-gutter: auto;
 }
 
-@media (min-width: 1180px) {
+@container (min-width: 1246px) {
   .industrial-calibration-tabs__content:has(.firmware-tuning) {
     overflow: hidden;
   }
@@ -754,6 +754,10 @@
 .industrial-calibration-tabs__firmware-scroll {
   height: 100%;
   min-height: 0;
+  /* Grid items default to min-width: auto, so the scroll area kept the width
+     it had at the widest layout and overflowed the column after the viewport
+     narrowed again. */
+  min-width: 0;
 }
 
 .industrial-calibration-tabs__firmware-scroll .simplebar-content {
@@ -788,7 +792,9 @@
   overflow: hidden;
 }
 
-@media (min-width: 760px) and (max-width: 1179px) {
+/* Keep the log strip compact while the workspace stacks, so the calibration
+   task keeps the height its chart needs. */
+@container (max-width: 1245px) {
   .industrial-console__workspace:has(.industrial-view-panel--calibration-workbench) {
     grid-template-rows: minmax(0, 1fr) 10rem;
   }
@@ -7293,6 +7299,7 @@
 
   .industrial-calibration-tabs__content {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.55rem;
     min-width: 0;
     min-height: 0;

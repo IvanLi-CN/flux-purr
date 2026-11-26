@@ -229,6 +229,57 @@ test.describe('public demo build', () => {
     expect(wideLogWidth).toBe(416)
   })
 
+  test('keeps the tuning workspace width monotonic across viewport resizes', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/calibration/firmware-tuning')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+    await expect(page.locator('.firmware-tuning__detail')).toBeVisible()
+
+    const measure = () =>
+      page.evaluate(() => {
+        const detail = document.querySelector('.firmware-tuning__detail')
+        const workspace = document.querySelector('.industrial-console__workspace')
+        const scroll = document.querySelector(
+          '.industrial-calibration-tabs__firmware-scroll .simplebar-content-wrapper'
+        )
+        if (!detail || !workspace) throw new Error('Tuning workspace is not rendered')
+        const scrollArea = document.querySelector('.industrial-calibration-tabs__firmware-scroll')
+        const content = scrollArea?.closest('.industrial-calibration-tabs__content')
+        if (!scrollArea || !content) throw new Error('Tuning scroll container is missing')
+        return {
+          detail: detail.getBoundingClientRect().width,
+          workspace: workspace.getBoundingClientRect().width,
+          content: content.getBoundingClientRect().width,
+          scrollArea: scrollArea.getBoundingClientRect().width,
+          overflow: scroll ? scroll.scrollHeight - scroll.clientHeight : 0,
+          horizontal: scroll ? scroll.scrollWidth - scroll.clientWidth : 0,
+        }
+      })
+
+    // The grid track used to latch on the widened content, so returning to the
+    // baseline viewport left the detail column stuck at the narrow-layout size.
+    const baseline = await measure()
+    expect(baseline.horizontal).toBe(0)
+
+    for (const width of [1180, 1280, 1180, 1280, 1100, 1280]) {
+      await page.setViewportSize({ width, height: 860 })
+      const current = await measure()
+      expect(current.horizontal).toBe(0)
+      // The scroll area is a grid item, so an unset min-width let it keep the
+      // width it had at the wider layout and spill out of its column.
+      expect(current.scrollArea).toBeLessThanOrEqual(current.content + 1)
+      expect(current.detail).toBeLessThanOrEqual(current.content + 1)
+      if (width === 1280) {
+        expect(current.detail).toBeCloseTo(baseline.detail, 0)
+        expect(current.workspace).toBeCloseTo(baseline.workspace, 0)
+        expect(current.overflow).toBeLessThanOrEqual(1)
+      } else {
+        expect(current.workspace).toBeLessThan(baseline.workspace)
+      }
+    }
+  })
+
   test('gives the empty tuning chart a full-height illustration and uniform desktop spacing', async ({
     page,
   }) => {
