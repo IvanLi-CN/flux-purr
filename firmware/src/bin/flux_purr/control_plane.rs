@@ -3600,25 +3600,24 @@ impl UsbResponseWriter {
                 Err(error) => Err(error),
             }
         } else if self.offset < self.response_len {
-            while self.offset < self.response_len && self.packet_len < USB_CONTROL_TX_PACKET_LEN {
+            while self.offset < self.response_len
+                && self.packet_len < USB_CONTROL_TX_PACKET_ENDPOINT_MAX
+            {
                 tx.write_byte_nb(bytes[self.offset])?;
                 self.offset += 1;
                 self.packet_len += 1;
             }
-            // ESP32-S3 Serial/JTAG automatically submits full FIFO packets.
-            // Only a final short packet needs an explicit submit; requesting
-            // another submit after a full packet can remain WouldBlock.
-            match (
-                self.offset == self.response_len,
-                self.packet_len == USB_CONTROL_TX_PACKET_LEN,
-            ) {
-                (true, true) => {
-                    self.packet_len = 0;
-                    self.response_len = 0;
-                }
-                (false, true) => self.packet_len = 0,
-                (true, false) => self.flush_pending = self.packet_len != 0,
-                (false, false) => {}
+            // Never depend on the endpoint's implicit 64-byte commit: a frame
+            // that ends exactly on a packet boundary was measured stalling in
+            // the endpoint FIFO until some unrelated write forced a submit
+            // (every stalled EEPROM snapshot chunk was a 192-byte frame, while
+            // all 254 non-aligned frames completed). Each packet stops one byte
+            // short of the endpoint maximum and is submitted explicitly, so a
+            // zero-length WR_DONE can never follow an already-committed FIFO.
+            if self.offset == self.response_len
+                || self.packet_len == USB_CONTROL_TX_PACKET_ENDPOINT_MAX
+            {
+                self.flush_pending = true;
             }
             Ok(self.is_complete())
         } else if self.packet_len != 0 {

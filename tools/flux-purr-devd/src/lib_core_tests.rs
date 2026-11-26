@@ -906,6 +906,45 @@ fn serial_bridge_error_preserves_wifi_state_and_records_event() {
     assert_eq!(device.events[0].payload["code"], "usb_response_timeout");
 }
 
+#[tokio::test]
+async fn native_status_probes_an_unidentified_record_instead_of_rejecting_it() {
+    // Discovery builds every native record from a placeholder with no probed
+    // firmware kind. The status route must reach the device and report the
+    // real transport outcome; validating the placeholder would instead answer
+    // `unknown_device` for a healthy device.
+    let state = AppState::test();
+    state.lock().unwrap().devices.insert(
+        "serial-unprobed".to_string(),
+        DeviceRecord::native_serial_placeholder(
+            "serial-unprobed",
+            "USB JTAG/serial debug unit".to_string(),
+            "/dev/cu.usbmodem-does-not-exist".to_string(),
+        ),
+    );
+    let error = device_status(
+        State(state.clone()),
+        AxumPath("serial-unprobed".to_string()),
+        Query(LeaseQuery { lease_id: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "lease_required");
+
+    let lease = state.lease_device("serial-unprobed").unwrap();
+    let error = device_status(
+        State(state.clone()),
+        AxumPath("serial-unprobed".to_string()),
+        Query(LeaseQuery {
+            lease_id: Some(lease.lease_id),
+        }),
+    )
+    .await
+    .unwrap_err();
+    // The route reached the serial probe and reported the transport failure
+    // instead of rejecting the placeholder identity.
+    assert_ne!(error.error.code, "unknown_device");
+}
+
 #[test]
 fn serial_monitor_log_line_records_serial_event_without_overwriting_errors() {
     let state = AppState::test();

@@ -624,6 +624,9 @@ Core commands:
 
 `hardware` stores USB targets. LAN records are stored separately in the same user configuration with their token excluded from CLI, daemon, trace, and error output. `flux-purr lan devices|refresh|scan|pair|status|runtime-set` operates a saved LAN target. `flux-purr lan request --id <id> --method get|post|put|delete --path <api-path> [--body|--body-file]` exposes the remaining authorized runtime, calibration, heater-curve, and thermal-profile API; every write creates and releases the device LAN lease around the request.
 
+
+A saved `hardware` entry stores its daemon endpoint only when `hardware save` received an explicit `--devd`; the managed daemon that a command starts is a temporary socket and is never persisted. Every command resolves the endpoint as: explicit `--devd`, then a saved endpoint that still names a local control socket, then the current default daemon. A saved value that is a URL or TCP address — including entries written before the socket-only control plane — is ignored instead of failing the command.
+
 `usb-port set` writes a user preference in the OS config directory, or under `FLUX_PURR_HOME` when set. The preference is not read as a firmware-operation target and cannot replace an explicit `--port`.
 
 ## Product Release Manifest
