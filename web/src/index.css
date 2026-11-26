@@ -11220,7 +11220,7 @@
     background: color-mix(in oklch, var(--industrial-accent) 8%, var(--industrial-panel));
     color: var(--industrial-accent);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 800;
     letter-spacing: 0;
     padding: 0.34rem 0.56rem;
@@ -11302,7 +11302,7 @@
     padding: 0 0.38rem 0 0;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 800;
   }
 
@@ -11317,7 +11317,7 @@
   .demo-inspector__scope-hint {
     margin: -0.15rem 0 0.6rem;
     color: var(--industrial-muted-text);
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     line-height: 1.4;
   }
 
@@ -11337,7 +11337,7 @@
   .demo-inspector__selection-summary span {
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     line-height: 1.4;
     overflow-wrap: anywhere;
   }
@@ -11363,7 +11363,7 @@
     padding: 0.25rem 0.5rem 0.35rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.61rem;
+    font-size: 0.7rem;
     font-weight: 800;
     text-transform: uppercase;
   }
@@ -11408,7 +11408,7 @@
   .demo-inspector__layout-menu small {
     margin-top: 0.12rem;
     color: var(--industrial-muted-text);
-    font-size: 0.59rem;
+    font-size: 0.7rem;
     line-height: 1.25;
   }
 
@@ -11473,7 +11473,7 @@
     margin-top: 0.18rem;
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.59rem;
+    font-size: 0.7rem;
     line-height: 1.35;
     overflow-wrap: anywhere;
   }
@@ -11559,7 +11559,7 @@
     min-height: 2.75rem;
     border-radius: 8px;
     color: var(--industrial-text);
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     font-weight: 750;
     line-height: 1.3;
     overflow-wrap: anywhere;
@@ -11669,7 +11669,7 @@
   .demo-inspector__help-panel strong {
     display: block;
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.66rem;
+    font-size: 0.7rem;
     font-weight: 850;
   }
 
@@ -11756,7 +11756,7 @@
   .demo-inspector__history-item span {
     color: var(--industrial-muted-text);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.6rem;
+    font-size: 0.7rem;
     overflow-wrap: anywhere;
   }
 
@@ -11775,7 +11775,7 @@
     color: var(--industrial-muted-text);
     box-shadow: var(--industrial-surface-inset);
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.62rem;
+    font-size: 0.7rem;
     padding: 0.5rem;
   }
 
@@ -11845,7 +11845,7 @@
     gap: 0.45rem;
     padding: 0 0.76rem;
     font-family: "JetBrains Mono", monospace;
-    font-size: 0.68rem;
+    font-size: 0.7rem;
     font-weight: 800;
   }
 

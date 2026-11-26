@@ -411,6 +411,42 @@ test.describe('public demo build', () => {
     expect(overflowing.every((item) => item.text.length > 20)).toBe(true)
   })
 
+  test('keeps every demo inspector label readable in both dock states', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/overview')
+
+    const measureSmallText = () =>
+      page.evaluate(() => {
+        const offenders: { text: string; size: number; className: string }[] = []
+        for (const root of document.querySelectorAll('.demo-inspector, .demo-inspector *')) {
+          const element = root as HTMLElement
+          if (!element.offsetParent) continue
+          const own = [...element.childNodes]
+            .filter((node) => node.nodeType === Node.TEXT_NODE)
+            .map((node) => node.textContent?.trim() ?? '')
+            .join('')
+          if (!own) continue
+          const size = Number.parseFloat(getComputedStyle(element).fontSize)
+          if (size < 11) {
+            offenders.push({
+              text: own.slice(0, 30),
+              size: Number(size.toFixed(2)),
+              className: String(element.className),
+            })
+          }
+        }
+        return offenders
+      })
+
+    // The collapsed bubble renders its own label, so both states need checking.
+    await expect(page.locator('.demo-inspector__bubble')).toBeVisible()
+    expect(await measureSmallText()).toEqual([])
+
+    await page.locator('.demo-inspector__bubble').click()
+    await expect(page.locator('.demo-inspector__group legend').first()).toBeVisible()
+    expect(await measureSmallText()).toEqual([])
+  })
+
   test('keeps the panel kicker subordinate to the title it introduces', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 860 })
     await page.goto('/devices/fp-lab-01/overview')
