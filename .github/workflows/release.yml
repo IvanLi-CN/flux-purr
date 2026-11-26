@@ -385,7 +385,7 @@ jobs:
           bundle="release-assets/flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"
           if asset_missing "flux-purr-firmware-v${PRODUCT_VERSION}.fluxpurr-fw"; then
             target/release/flux-purr-build-firmware-bundle \
-              --elf firmware/target/xtensa-esp32s3-none-elf/release/flux-purr \
+              --elf firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware \
               --partition-table firmware/partitions.csv \
               --version "${PRODUCT_VERSION}" \
               --source-sha "${FLUX_PURR_SOURCE_SHA}" \

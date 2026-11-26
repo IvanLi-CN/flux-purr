@@ -9,8 +9,10 @@ build = "build.rs"
 [lib]
 path = "src/lib.rs"
 
+# Distinct from the `flux-purr` host CLI binary so a host-target build of this
+# package cannot overwrite it in a shared `target/` directory.
 [[bin]]
-name = "flux-purr"
+name = "flux-purr-firmware"
 path = "src/bin/flux_purr.rs"
 
 [features]

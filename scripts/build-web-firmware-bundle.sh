@@ -15,7 +15,7 @@ IFS=$'\t' read -r version channel resolved_source_sha resolved_build_id < <(
 )
 source_sha="${resolved_source_sha}"
 build_id="${FLUX_PURR_BUILD_ID:-${resolved_build_id}}"
-elf="${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
+elf="${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware"
 # The development proxy exposes only this path as its local build. Replacing
 # it atomically prevents a long-lived Vite process from offering stale builds.
 output="${artifact_root}/flux-purr-current.fluxpurr-fw"

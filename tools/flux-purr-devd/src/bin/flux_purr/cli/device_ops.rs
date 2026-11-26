@@ -845,7 +845,7 @@ pub(crate) fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Erro
 }
 
 pub(crate) fn default_release_elf() -> PathBuf {
-    flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr")
+    flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware")
 }
 
 pub(crate) fn resolve_espflash_program() -> PathBuf {

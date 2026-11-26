@@ -1154,11 +1154,19 @@ fn artifact_catalog_uses_only_the_canonical_firmware_target() {
         .path()
         .join("firmware/target/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&canonical_path).unwrap();
-    fs::write(canonical_path.join("flux-purr"), b"current-firmware-image").unwrap();
+    fs::write(
+        canonical_path.join("flux-purr-firmware"),
+        b"current-firmware-image",
+    )
+    .unwrap();
 
     let stale_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&stale_path).unwrap();
-    fs::write(stale_path.join("flux-purr"), b"stale-firmware-image").unwrap();
+    fs::write(
+        stale_path.join("flux-purr-firmware"),
+        b"stale-firmware-image",
+    )
+    .unwrap();
 
     let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
 
@@ -1176,7 +1184,7 @@ fn artifact_catalog_uses_only_the_canonical_firmware_target() {
     assert_eq!(artifacts[0].files[0].kind, "elf");
     assert_eq!(
         artifacts[0].files[0].path,
-        "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
+        "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware"
     );
     assert_eq!(artifacts[0].files[0].size, 22);
     assert_eq!(artifacts[0].files[0].flash_address, None);
@@ -1190,7 +1198,11 @@ fn artifact_catalog_exposes_observer_firmware_separately() {
         .path()
         .join("firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&observer_path).unwrap();
-    fs::write(observer_path.join("flux-purr"), b"observer-firmware-image").unwrap();
+    fs::write(
+        observer_path.join("flux-purr-firmware"),
+        b"observer-firmware-image",
+    )
+    .unwrap();
 
     let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
 
@@ -1205,7 +1217,7 @@ fn artifact_catalog_exposes_observer_firmware_separately() {
     );
     assert_eq!(
         artifacts[0].files[0].path,
-        "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr"
+        "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr-firmware"
     );
 }
 

@@ -241,7 +241,7 @@ renderer for the linked fan chart. See the
   "files": [
     {
       "kind": "elf",
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452,
       "flashAddress": null
@@ -535,7 +535,7 @@ Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole
       "files": [
         {
           "kind": "elf",
-          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
           "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
           "size": 741452,
           "flashAddress": null
@@ -556,7 +556,7 @@ Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole
     "files": [
       {
         "kind": "elf",
-        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
         "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
         "size": 741452,
         "flashAddress": null
@@ -574,7 +574,7 @@ Successful response:
   "artifactId": "local-esp32s3-release",
   "files": [
     {
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452
     }

@@ -348,7 +348,7 @@ None
 - `cargo test --manifest-path tools/flux-purr-devd/Cargo.toml`
 - `bun run check:devd`
 - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- --json thermal self-test --device mock-fp-lab-01 --source-kind isolapurr --source-id iso-mock --source-url http://127.0.0.1:1 --dry-run`
-- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3 --bin flux-purr --release`
+- `source /Users/ivan/export-esp.sh && cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-none-elf --target-dir firmware/target --features esp32s3 --bin flux-purr-firmware --release`
 - `cargo run --manifest-path tools/flux-purr-devd/Cargo.toml --bin flux-purr -- ram-run preview frontpanel --port <authorized-port>`
 - `bun run --cwd web check`
 - `bun run --cwd web typecheck`
