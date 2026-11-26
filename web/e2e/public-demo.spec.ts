@@ -411,6 +411,75 @@ test.describe('public demo build', () => {
     expect(overflowing.every((item) => item.text.length > 20)).toBe(true)
   })
 
+  test('keeps the heater meter full width with an unscaled ramp and unclipped button shadows', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 860 })
+    await page.goto('/devices/fp-lab-01/overview')
+    const collapseInspector = page.getByRole('button', { name: '收起 Demo Inspector' })
+    if (await collapseInspector.isVisible()) await collapseInspector.click()
+
+    const meter = page.locator('.industrial-heat-output')
+    await expect(meter).toBeVisible()
+
+    const meterBox = await page.evaluate(() => {
+      const track = document.querySelector('.industrial-heat-output-track')
+      const field = document.querySelector('.industrial-heat-output')
+      if (!track || !field) throw new Error('Heater meter is missing')
+      const trackBox = track.getBoundingClientRect()
+      const reading = track.nextElementSibling?.getBoundingClientRect()
+      return {
+        trackWidth: trackBox.width,
+        readingWidth: reading?.width ?? 0,
+        radius: getComputedStyle(track).borderRadius,
+        value: Number((field as HTMLMeterElement).value),
+      }
+    })
+
+    // The bar follows the dial instead of stopping at a fixed cap.
+    expect(meterBox.trackWidth).toBeGreaterThan(360)
+    expect(Math.abs(meterBox.trackWidth - meterBox.readingWidth)).toBeLessThan(2)
+    // A pill, not a rectangle.
+    expect(Number.parseFloat(meterBox.radius)).toBeGreaterThan(6)
+    expect(meterBox.value).toBeGreaterThan(0)
+
+    const gradientSizing = await page.evaluate(() => {
+      const field = document.querySelector('.industrial-heat-output')
+      if (!field) throw new Error('Heater meter is missing')
+      const style = getComputedStyle(field)
+      return {
+        backgroundSize: style.backgroundSize,
+        clipPath: style.clipPath,
+        borderRadius: style.borderRadius,
+      }
+    })
+    // The ramp spans the whole track and is clipped to the value, so a partial
+    // reading shows the colour at that value rather than squashing the ramp.
+    expect(gradientSizing.backgroundSize).toContain('100%')
+    expect(gradientSizing.clipPath).toContain('inset')
+    // The reveal edge keeps a pill cap, so the fill never shows a square corner.
+    expect(gradientSizing.clipPath).toContain('round')
+
+    const shadow = await page.evaluate(() => {
+      const button = [...document.querySelectorAll('button')].find((node) =>
+        node.textContent?.includes('Hold heater')
+      )
+      const wrapper = document.querySelector(
+        '.industrial-dashboard-scroll .simplebar-content-wrapper'
+      )
+      if (!button || !wrapper) throw new Error('Heater hold button is missing')
+      return {
+        gap: wrapper.getBoundingClientRect().right - button.getBoundingClientRect().right,
+        hasLiftShadow: getComputedStyle(button).boxShadow !== 'none',
+      }
+    })
+
+    // SimpleBar clips its wrapper, so the shadow needs clearance to the right of
+    // the button instead of the button sitting flush against the edge.
+    expect(shadow.hasLiftShadow).toBe(true)
+    expect(shadow.gap).toBeGreaterThanOrEqual(8)
+  })
+
   test('keeps every demo inspector label readable in both dock states', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 860 })
     await page.goto('/devices/fp-lab-01/overview')

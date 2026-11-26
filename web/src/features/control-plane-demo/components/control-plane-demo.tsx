@@ -7649,15 +7649,16 @@ function DashboardView({
                 <strong>{formatTempNumber(device.currentTempC)}</strong>
                 {isRenderableTemperature(device.currentTempC) ? <span>℃</span> : null}
               </div>
-              <meter
-                className="industrial-heat-output"
-                aria-label="Heater output"
-                value={device.heaterOutputPercent}
-                min={0}
-                max={100}
-              >
-                <span style={{ width: `${device.heaterOutputPercent}%` }} />
-              </meter>
+              <div className="industrial-heat-output-track">
+                <meter
+                  className="industrial-heat-output"
+                  aria-label="Heater output"
+                  value={device.heaterOutputPercent}
+                  min={0}
+                  max={100}
+                  style={{ '--heat-output': device.heaterOutputPercent } as CSSProperties}
+                />
+              </div>
               <small>Heater {device.heaterOutputPercent}%</small>
             </section>
 
@@ -10159,15 +10160,16 @@ function CalibrationHeaterFeedback({
         <span>{heaterEnabled ? '加热强度' : '加热已停'}</span>
         <strong>{clampedOutput}%</strong>
       </div>
-      <meter
-        className="industrial-heat-output industrial-calibration-heater-feedback__meter"
-        aria-label="加热强度"
-        value={clampedOutput}
-        min={0}
-        max={100}
-      >
-        <span style={{ width: `${clampedOutput}%` }} />
-      </meter>
+      <div className="industrial-heat-output-track">
+        <meter
+          className="industrial-heat-output industrial-calibration-heater-feedback__meter"
+          aria-label="加热强度"
+          value={clampedOutput}
+          min={0}
+          max={100}
+          style={{ '--heat-output': clampedOutput } as CSSProperties}
+        />
+      </div>
     </div>
   )
 }
