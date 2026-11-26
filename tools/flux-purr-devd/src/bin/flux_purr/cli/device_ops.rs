@@ -3,12 +3,12 @@ use super::*;
 #[cfg(test)]
 #[path = "../product_flash_hil_tests.rs"]
 mod product_flash_hil;
-#[cfg(target_os = "macos")]
-use flux_purr_devd::serial::open_raw_usb_serial_jtag_port;
 use flux_purr_devd::serial::{
     SerialPortProcessLock, UsbSerialIdentity, serial_port_usb_identity,
     serial_port_usb_identity_matches,
 };
+#[cfg(target_os = "macos")]
+use flux_purr_devd::serial::{callout_usb_serial_jtag_path, open_raw_usb_serial_jtag_port};
 use std::io::{Read, Write};
 
 const DIRECT_SERIAL_LOCK_TIMEOUT: Duration = Duration::from_secs(180);
@@ -845,7 +845,7 @@ pub(crate) fn ensure_real_flash_enabled() -> Result<(), Box<dyn std::error::Erro
 }
 
 pub(crate) fn default_release_elf() -> PathBuf {
-    flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr")
+    flux_purr_repo_root().join("firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware")
 }
 
 pub(crate) fn resolve_espflash_program() -> PathBuf {
@@ -1075,7 +1075,10 @@ fn read_eeprom_snapshot_protocol_from_io<S: Read + Write + ?Sized>(
     port: &str,
     expected_usb_identity: Option<&UsbSerialIdentity>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
-    const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+    // Firmware drops a snapshot session after 30s without a read. Each chunk
+    // must therefore give up well inside that window, or a retry is rejected as
+    // `snapshot_session_invalid` instead of resuming the same session.
+    const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
     ensure_direct_usb_identity(port, expected_usb_identity)?;
     let session_id = format!("snapshot-{}", current_unix_millis());
     let open =
@@ -1095,34 +1098,14 @@ fn read_eeprom_snapshot_protocol_from_io<S: Read + Write + ?Sized>(
     }
     let mut snapshot = Vec::with_capacity(8192);
     for offset in (0..8192_u32).step_by(32) {
-        ensure_direct_usb_identity(port, expected_usb_identity)?;
-        write_snapshot_request(
+        snapshot.extend(read_snapshot_chunk(
             serial,
-            &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
-        )?;
-        ensure_direct_usb_identity(port, expected_usb_identity)?;
-        let response = read_snapshot_response(
-            serial,
+            port,
+            expected_usb_identity,
             &session_id,
-            StdInstant::now() + SNAPSHOT_RESPONSE_TIMEOUT,
-        )?;
-        if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
-            return Err("snapshot response returned an unexpected offset".into());
-        }
-        let bytes = response
-            .get("bytes")
-            .and_then(Value::as_array)
-            .ok_or("snapshot response missing bytes")?;
-        if bytes.len() != 32 {
-            return Err("snapshot response returned an invalid chunk".into());
-        }
-        for byte in bytes {
-            let value = byte
-                .as_u64()
-                .and_then(|value| u8::try_from(value).ok())
-                .ok_or("snapshot byte is not an octet")?;
-            snapshot.push(value);
-        }
+            offset,
+            SNAPSHOT_RESPONSE_TIMEOUT,
+        )?);
     }
     let digest = format!("sha256:{:x}", Sha256::digest(&snapshot));
     ensure_direct_usb_identity(port, expected_usb_identity)?;
@@ -1140,6 +1123,71 @@ fn read_eeprom_snapshot_protocol_from_io<S: Read + Write + ?Sized>(
         return Err("EEPROM snapshot hash verification failed".into());
     }
     Ok(snapshot)
+}
+
+/// Read one 32-byte chunk on the open session, retrying a silent firmware
+/// stall.
+///
+/// The application occasionally stops answering snapshot reads for longer than
+/// the response window without restarting, reporting an error, or emitting a
+/// transport fault; the same offset then answers normally. Replaying an
+/// idempotent read is the only host-side action that distinguishes that stall
+/// from a dead application, so retry a bounded number of times before failing.
+pub(crate) fn read_snapshot_chunk<S: Read + Write + ?Sized>(
+    serial: &mut S,
+    port: &str,
+    expected_usb_identity: Option<&UsbSerialIdentity>,
+    session_id: &str,
+    offset: u32,
+    response_timeout: Duration,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    const SNAPSHOT_CHUNK_ATTEMPTS: u8 = 3;
+    let mut last_error: Option<io::Error> = None;
+    for attempt in 0..SNAPSHOT_CHUNK_ATTEMPTS {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
+        write_snapshot_request(
+            serial,
+            &json!({"op":"eeprom_snapshot_read","requestId":session_id,"offset":offset,"length":32}),
+        )?;
+        ensure_direct_usb_identity(port, expected_usb_identity)?;
+        let response = match read_snapshot_response(
+            serial,
+            session_id,
+            StdInstant::now() + response_timeout,
+        ) {
+            Ok(response) => response,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if response.get("offset").and_then(Value::as_u64) != Some(u64::from(offset)) {
+            return Err("snapshot response returned an unexpected offset".into());
+        }
+        let bytes = response
+            .get("bytes")
+            .and_then(Value::as_array)
+            .ok_or("snapshot response missing bytes")?;
+        if bytes.len() != 32 {
+            return Err("snapshot response returned an invalid chunk".into());
+        }
+        let mut chunk = Vec::with_capacity(32);
+        for byte in bytes {
+            let value = byte
+                .as_u64()
+                .and_then(|value| u8::try_from(value).ok())
+                .ok_or("snapshot byte is not an octet")?;
+            chunk.push(value);
+        }
+        return Ok(chunk);
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "snapshot chunk timed out"))
+        .into())
 }
 
 pub(crate) fn read_legacy_eeprom_snapshot_from_io<S, C>(
@@ -1214,7 +1262,9 @@ fn open_snapshot_serial(
 ) -> Result<Box<dyn SnapshotSerial>, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     if snapshot_uses_raw_usb_port(port) {
-        return Ok(Box::new(open_raw_usb_serial_jtag_port(port)?));
+        return Ok(Box::new(open_raw_usb_serial_jtag_port(
+            &callout_usb_serial_jtag_path(port),
+        )?));
     }
 
     Ok(Box::new(
@@ -1226,7 +1276,10 @@ fn open_snapshot_serial(
 
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn snapshot_uses_raw_usb_port(port: &str) -> bool {
-    cfg!(target_os = "macos") && port.starts_with("/dev/cu.usbmodem")
+    // Both macOS device aliases address the same USB Serial/JTAG endpoint and
+    // both must bypass termios: configuring it resets the MCU mid-snapshot.
+    cfg!(target_os = "macos")
+        && (port.starts_with("/dev/cu.usbmodem") || port.starts_with("/dev/tty.usbmodem"))
 }
 
 fn write_snapshot_bytes<W: Write + ?Sized>(serial: &mut W, mut bytes: &[u8]) -> io::Result<()> {
@@ -1363,39 +1416,34 @@ where
     C: FnMut() -> StdInstant,
 {
     let mut observation = SnapshotResponseObservation::default();
+    let mut lines = SnapshotLineBuffer::default();
     loop {
         if now() >= deadline {
             return Err(snapshot_timeout_error(&observation));
         }
-        let mut bytes = Vec::new();
-        loop {
+        let bytes = loop {
+            if let Some(line) = lines.take_line()? {
+                break line;
+            }
             if now() >= deadline {
                 return Err(snapshot_timeout_error(&observation));
             }
-            let mut byte = [0_u8; 1];
-            match serial.read(&mut byte) {
-                Ok(1) if byte[0] == b'\n' => break,
-                Ok(1) => push_snapshot_response_byte(&mut bytes, byte[0])?,
-                Ok(_) => continue,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) && now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+            let mut chunk = [0_u8; 4096];
+            match serial.read(&mut chunk) {
+                Ok(0) => {}
+                Ok(read) => lines.extend(&chunk[..read]),
                 Err(error)
                     if matches!(
                         error.kind(),
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                     ) =>
                 {
-                    return Err(snapshot_timeout_error(&observation));
+                    // Sleep briefly so a non-blocking descriptor does not spin.
+                    std::thread::sleep(Duration::from_millis(5));
                 }
                 Err(error) => return Err(error),
             }
-        }
+        };
         if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) {
             observation.nonempty_lines = observation.nonempty_lines.saturating_add(1);
         }
@@ -1427,16 +1475,56 @@ where
     }
 }
 
-fn push_snapshot_response_byte(bytes: &mut Vec<u8>, byte: u8) -> io::Result<()> {
-    const SNAPSHOT_RESPONSE_LINE_LIMIT: usize = 16 * 1024;
-    if bytes.len() >= SNAPSHOT_RESPONSE_LINE_LIMIT {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "EEPROM snapshot response exceeded the JSONL frame limit",
-        ));
+/// Receive buffer that hands out one complete JSONL line at a time.
+///
+/// The snapshot protocol answers each request with one short JSONL frame, so a
+/// single buffered read usually carries the whole line. Reading one byte at a
+/// time instead cost roughly 300ms per 32-byte chunk: the firmware drains each
+/// reply one 64-byte packet per runtime turn, and that starvation eventually
+/// tripped its response deadline mid-snapshot. The scan cursor keeps the
+/// per-chunk cost linear; rescanning the whole buffer per byte made a
+/// 16 KiB overflow take seconds.
+const SNAPSHOT_RESPONSE_LINE_LIMIT: usize = 16 * 1024;
+
+#[derive(Default)]
+struct SnapshotLineBuffer {
+    pending: Vec<u8>,
+    scanned: usize,
+}
+
+impl SnapshotLineBuffer {
+    fn extend(&mut self, bytes: &[u8]) {
+        self.pending.extend_from_slice(bytes);
     }
-    bytes.push(byte);
-    Ok(())
+
+    fn take_line(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let search_from = self.scanned.min(self.pending.len());
+        let found = self.pending[search_from..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| search_from + offset);
+        let Some(newline) = found else {
+            if self.pending.len() >= SNAPSHOT_RESPONSE_LINE_LIMIT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "EEPROM snapshot response exceeded the JSONL frame limit",
+                ));
+            }
+            self.scanned = self.pending.len();
+            return Ok(None);
+        };
+        if newline >= SNAPSHOT_RESPONSE_LINE_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "EEPROM snapshot response exceeded the JSONL frame limit",
+            ));
+        }
+        let remainder = self.pending.split_off(newline + 1);
+        let mut line = std::mem::replace(&mut self.pending, remainder);
+        line.pop();
+        self.scanned = 0;
+        Ok(Some(line))
+    }
 }
 
 impl ManagedDevd {

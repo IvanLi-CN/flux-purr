@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-elf_path="${1:-${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr}"
+elf_path="${1:-${repo_root}/firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware}"
 min_boot_stack_headroom_bytes="${FLUX_PURR_BOOT_STACK_MIN_HEADROOM_BYTES:-32768}"
 min_pd_interrupt_headroom_bytes=65536
 
@@ -77,14 +77,14 @@ if (( max_boot_stack_bytes < 0 )); then
 fi
 
 runtime_loop_symbol="$("$nm_bin" -Sn --demangle "$elf_path" | awk '
-  /flux_purr::runtime::runtime_loop::run_runtime_loop::\{closure#0\}$/ {
+  /flux_purr_firmware::runtime::runtime_loop::run_runtime_loop::\{closure#0\}$/ {
     print $1 " runtime_loop"
     exit
   }
 ')"
 if [[ -z "$runtime_loop_symbol" ]]; then
   runtime_loop_symbol="$("$nm_bin" -Sn --demangle "$elf_path" | awk '
-    /flux_purr::runtime::boot::__run_frontpanel_runtime_task_task::.*>>::poll$/ {
+    /flux_purr_firmware::runtime::boot::__run_frontpanel_runtime_task_task::.*>>::poll$/ {
       print $1 " runtime_loop"
       exit
     }
@@ -153,9 +153,9 @@ while read -r address label; do
   fi
 done < <(
   "$nm_bin" -Sn --demangle "$elf_path" | awk '
-    /flux_purr::runtime::lan::dispatch_control_frame::\{closure#0\}$/ ||
-    /flux_purr::runtime::lan::process_thermal_tuning_read$/ ||
-    /flux_purr::runtime::lan::thermal_tuning_status$/ ||
+    /flux_purr_firmware::runtime::lan::dispatch_control_frame::\{closure#0\}$/ ||
+    /flux_purr_firmware::runtime::lan::process_thermal_tuning_read$/ ||
+    /flux_purr_firmware::runtime::lan::thermal_tuning_status$/ ||
     /flux_purr_write_thermal_tuning_status$/ ||
     /ThermalTuningRuntime>::events_after_into$/ {
       print $1 " " substr($0, index($0, $4))
@@ -189,7 +189,7 @@ control_segment_frame() {
       segment_frame_bytes="$frame_bytes"
     fi
   done < <(
-    "$nm_bin" -Sn --demangle "$elf_path" | awk -v name="flux_purr::runtime::${handler}" '
+    "$nm_bin" -Sn --demangle "$elf_path" | awk -v name="flux_purr_firmware::runtime::${handler}" '
       $3 ~ /^[tT]$/ {
         symbol = substr($0, index($0, $4))
         if (symbol == name || symbol == name "::{closure#0}") print $1 " " symbol
@@ -201,7 +201,7 @@ control_segment_frame() {
 
 for transport in USB LAN; do
   if [[ "$transport" == LAN ]] && ! "$nm_bin" -Sn --demangle "$elf_path" | awk '
-    /[tT] flux_purr::runtime::runtime_loop::runtime_execute_lan_command$/ { found = 1 }
+    /[tT] flux_purr_firmware::runtime::runtime_loop::runtime_execute_lan_command$/ { found = 1 }
     END { exit !found }
   '; then
     continue

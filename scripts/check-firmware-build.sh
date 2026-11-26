@@ -10,7 +10,7 @@ cargo +esp build --locked \
   --target xtensa-esp32s3-none-elf \
   --target-dir firmware/target \
   --release
-bash scripts/check-firmware-image-size.sh firmware/target/xtensa-esp32s3-none-elf/release/flux-purr
+bash scripts/check-firmware-image-size.sh firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware
 bash scripts/check-firmware-boot-stack.sh
 
 cargo +esp build --locked \
@@ -21,4 +21,4 @@ cargo +esp build --locked \
   --features "esp32s3,web_serial,frontpanel-key-test,buzzer-test" \
   --release
 bash scripts/check-firmware-boot-stack.sh \
-  firmware/target-no-net/xtensa-esp32s3-none-elf/release/flux-purr
+  firmware/target-no-net/xtensa-esp32s3-none-elf/release/flux-purr-firmware

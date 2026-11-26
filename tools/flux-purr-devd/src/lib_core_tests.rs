@@ -906,6 +906,45 @@ fn serial_bridge_error_preserves_wifi_state_and_records_event() {
     assert_eq!(device.events[0].payload["code"], "usb_response_timeout");
 }
 
+#[tokio::test]
+async fn native_status_probes_an_unidentified_record_instead_of_rejecting_it() {
+    // Discovery builds every native record from a placeholder with no probed
+    // firmware kind. The status route must reach the device and report the
+    // real transport outcome; validating the placeholder would instead answer
+    // `unknown_device` for a healthy device.
+    let state = AppState::test();
+    state.lock().unwrap().devices.insert(
+        "serial-unprobed".to_string(),
+        DeviceRecord::native_serial_placeholder(
+            "serial-unprobed",
+            "USB JTAG/serial debug unit".to_string(),
+            "/dev/cu.usbmodem-does-not-exist".to_string(),
+        ),
+    );
+    let error = device_status(
+        State(state.clone()),
+        AxumPath("serial-unprobed".to_string()),
+        Query(LeaseQuery { lease_id: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "lease_required");
+
+    let lease = state.lease_device("serial-unprobed").unwrap();
+    let error = device_status(
+        State(state.clone()),
+        AxumPath("serial-unprobed".to_string()),
+        Query(LeaseQuery {
+            lease_id: Some(lease.lease_id),
+        }),
+    )
+    .await
+    .unwrap_err();
+    // The route reached the serial probe and reported the transport failure
+    // instead of rejecting the placeholder identity.
+    assert_ne!(error.error.code, "unknown_device");
+}
+
 #[test]
 fn serial_monitor_log_line_records_serial_event_without_overwriting_errors() {
     let state = AppState::test();
@@ -1115,11 +1154,19 @@ fn artifact_catalog_uses_only_the_canonical_firmware_target() {
         .path()
         .join("firmware/target/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&canonical_path).unwrap();
-    fs::write(canonical_path.join("flux-purr"), b"current-firmware-image").unwrap();
+    fs::write(
+        canonical_path.join("flux-purr-firmware"),
+        b"current-firmware-image",
+    )
+    .unwrap();
 
     let stale_path = dir.path().join("target/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&stale_path).unwrap();
-    fs::write(stale_path.join("flux-purr"), b"stale-firmware-image").unwrap();
+    fs::write(
+        stale_path.join("flux-purr-firmware"),
+        b"stale-firmware-image",
+    )
+    .unwrap();
 
     let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
 
@@ -1137,7 +1184,7 @@ fn artifact_catalog_uses_only_the_canonical_firmware_target() {
     assert_eq!(artifacts[0].files[0].kind, "elf");
     assert_eq!(
         artifacts[0].files[0].path,
-        "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr"
+        "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware"
     );
     assert_eq!(artifacts[0].files[0].size, 22);
     assert_eq!(artifacts[0].files[0].flash_address, None);
@@ -1151,7 +1198,11 @@ fn artifact_catalog_exposes_observer_firmware_separately() {
         .path()
         .join("firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release");
     fs::create_dir_all(&observer_path).unwrap();
-    fs::write(observer_path.join("flux-purr"), b"observer-firmware-image").unwrap();
+    fs::write(
+        observer_path.join("flux-purr-firmware"),
+        b"observer-firmware-image",
+    )
+    .unwrap();
 
     let artifacts = discover_firmware_artifacts(Some(dir.path())).unwrap();
 
@@ -1166,7 +1217,7 @@ fn artifact_catalog_exposes_observer_firmware_separately() {
     );
     assert_eq!(
         artifacts[0].files[0].path,
-        "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr"
+        "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr-firmware"
     );
 }
 

@@ -285,7 +285,7 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
         (
             "local-esp32s3-release",
             "Local ESP32-S3 release (buzzer test)",
-            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+            "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
             "release + web_serial + net_http + buzzer-test",
             vec![
                 "web_serial".to_string(),
@@ -297,7 +297,7 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
         (
             "local-esp32s3-release-buzzer-observe",
             "Local ESP32-S3 release (buzzer observe)",
-            "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr",
+            "firmware/target/buzzer-observe/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
             "release + web_serial + net_http + buzzer-test + buzzer-observe",
             vec![
                 "web_serial".to_string(),
@@ -310,7 +310,7 @@ pub fn discover_firmware_artifacts(root: Option<&Path>) -> io::Result<Vec<Firmwa
         (
             "local-host-release",
             "Local host release",
-            "firmware/target/release/flux-purr",
+            "firmware/target/release/flux-purr-firmware",
             "host release",
             Vec::new(),
             "host_binary",

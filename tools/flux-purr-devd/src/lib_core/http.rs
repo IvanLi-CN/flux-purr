@@ -516,6 +516,30 @@ fn is_compatible_product_identity(identity: &Identity) -> bool {
         })
 }
 
+/// Gates a native read on a verified device identity.
+///
+/// Discovery seeds every native record with an unprobed placeholder
+/// (`firmware_kind: None`). Validating that placeholder would reject every
+/// command issued before some earlier call happened to cache a real identity,
+/// so probe once, cache the result, and validate the cached value thereafter.
+pub(crate) async fn ensure_native_serial_identity(
+    state: &AppState,
+    device_id: &str,
+    target: &DeviceRecord,
+) -> Result<(), HttpError> {
+    if target.identity.firmware_kind.is_some() {
+        return validate_native_serial_identity(&target.identity);
+    }
+    let identity =
+        serial_request_payload::<Identity>(state, target, "get_identity", "identity").await?;
+    validate_native_serial_identity(&identity)?;
+    if let Some(device) = state.lock()?.devices.get_mut(device_id) {
+        device.identity = identity;
+        device.connection = ConnectionState::Connected;
+    }
+    Ok(())
+}
+
 pub(crate) async fn reset_lan_pairing(
     State(state): State<AppState>,
     AxumPath(device_id): AxumPath<String>,
@@ -879,7 +903,7 @@ pub(crate) async fn device_status(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        validate_native_serial_identity(&target.identity)?;
+        ensure_native_serial_identity(&state, &device_id, &target).await?;
         let status = match serial_request_payload::<ControlPlaneStatus>(
             &state,
             &target,
@@ -929,7 +953,7 @@ pub(crate) async fn device_thermal_status(
         device(&state_lock, &device_id)?.clone()
     };
     if target.transport == DeviceTransport::NativeSerial {
-        validate_native_serial_identity(&target.identity)?;
+        ensure_native_serial_identity(&state, &device_id, &target).await?;
         let status = match serial_request_payload::<ThermalStatus>(
             &state,
             &target,

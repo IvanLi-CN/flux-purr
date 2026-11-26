@@ -241,7 +241,7 @@ renderer for the linked fan chart. See the
   "files": [
     {
       "kind": "elf",
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452,
       "flashAddress": null
@@ -535,7 +535,7 @@ Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole
       "files": [
         {
           "kind": "elf",
-          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+          "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
           "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
           "size": 741452,
           "flashAddress": null
@@ -556,7 +556,7 @@ Legacy save requests are rejected with `heater_curve_format_obsolete`. The whole
     "files": [
       {
         "kind": "elf",
-        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+        "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
         "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
         "size": 741452,
         "flashAddress": null
@@ -574,7 +574,7 @@ Successful response:
   "artifactId": "local-esp32s3-release",
   "files": [
     {
-      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr",
+      "path": "firmware/target/xtensa-esp32s3-none-elf/release/flux-purr-firmware",
       "sha256": "sha256:54362508abf2a6148b6aecba23032c7b67bf346bf288a7ae1aaccf24c68af113",
       "size": 741452
     }
@@ -623,6 +623,9 @@ Core commands:
 - `flux-purr usb-port show|set <port>`：保留为用户配置诊断命令；它不会为任何固件操作提供默认目标，`update`、`flash` 和 `recover` 始终要求显式 `--port`。
 
 `hardware` stores USB targets. LAN records are stored separately in the same user configuration with their token excluded from CLI, daemon, trace, and error output. `flux-purr lan devices|refresh|scan|pair|status|runtime-set` operates a saved LAN target. `flux-purr lan request --id <id> --method get|post|put|delete --path <api-path> [--body|--body-file]` exposes the remaining authorized runtime, calibration, heater-curve, and thermal-profile API; every write creates and releases the device LAN lease around the request.
+
+
+A saved `hardware` entry stores its daemon endpoint only when `hardware save` received an explicit `--devd`; the managed daemon that a command starts is a temporary socket and is never persisted. Every command resolves the endpoint as: explicit `--devd`, then a saved endpoint that still names a local control socket, then the current default daemon. A saved value that is a URL or TCP address — including entries written before the socket-only control plane — is ignored instead of failing the command.
 
 `usb-port set` writes a user preference in the OS config directory, or under `FLUX_PURR_HOME` when set. The preference is not read as a firmware-operation target and cannot replace an explicit `--port`.
 

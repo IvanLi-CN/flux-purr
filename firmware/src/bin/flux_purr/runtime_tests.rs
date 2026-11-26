@@ -3005,7 +3005,6 @@ fn protection_alarm_reuses_one_carrier_through_its_pulses_and_replay() {
 struct FakeUsbTx {
     capacity: usize,
     auto_commits_full_packet: bool,
-    rejects_empty_flush: bool,
     pending: std::vec::Vec<u8>,
     sent: std::vec::Vec<u8>,
     flush_count: usize,
@@ -3017,18 +3016,10 @@ impl FakeUsbTx {
         Self {
             capacity,
             auto_commits_full_packet: true,
-            rejects_empty_flush: false,
             pending: std::vec::Vec::new(),
             sent: std::vec::Vec::new(),
             flush_count: 0,
             operation_count: 0,
-        }
-    }
-
-    fn auto_commit_rejecting_empty_flush(capacity: usize) -> Self {
-        Self {
-            rejects_empty_flush: true,
-            ..Self::new(capacity)
         }
     }
 }
@@ -3050,9 +3041,6 @@ impl UsbControlTx for FakeUsbTx {
     fn flush_tx_nb(&mut self) -> Result<(), UsbTxError> {
         self.operation_count += 1;
         self.flush_count += 1;
-        if self.rejects_empty_flush && self.pending.is_empty() {
-            return Err(UsbTxError::WouldBlock);
-        }
         self.sent.extend_from_slice(&self.pending);
         self.pending.clear();
         Ok(())
@@ -3333,11 +3321,18 @@ fn usb_recovery_writer_resumes_after_host_absence_exceeds_the_response_deadline(
     let mut tx_buf = [0_u8; USB_CONTROL_TX_BUFFER_LEN];
     tx_buf[..payload.len()].copy_from_slice(payload);
 
+    // Each packet is now written and submitted in separate steps, so the first
+    // pump only fills the FIFO and arms the submit.
     assert_eq!(
         usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 0),
         UsbResponsePumpOutcome::Pending
     );
-    assert_eq!(tx.sent, payload[..64]);
+    assert!(tx.sent.is_empty());
+    assert_eq!(
+        usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 1),
+        UsbResponsePumpOutcome::Pending
+    );
+    assert_eq!(tx.sent, payload[..USB_CONTROL_TX_PACKET_ENDPOINT_MAX]);
     tx.capacity = 0;
 
     assert_eq!(
@@ -3345,7 +3340,7 @@ fn usb_recovery_writer_resumes_after_host_absence_exceeds_the_response_deadline(
         UsbResponsePumpOutcome::Pending
     );
     assert!(!writer.is_complete());
-    assert_eq!(tx.sent, payload[..64]);
+    assert_eq!(tx.sent, payload[..USB_CONTROL_TX_PACKET_ENDPOINT_MAX]);
     assert_eq!(
         usb_pump_recovery_response(&mut tx, &mut writer, &tx_buf, 20_000),
         UsbResponsePumpOutcome::Pending
@@ -3596,7 +3591,8 @@ fn usb_response_writer_limits_an_always_ready_endpoint_to_one_packet_per_step() 
         let complete = writer.step(&mut tx, &payload).unwrap_or(false);
         assert!(complete == writer.is_complete());
         assert!(
-            tx.operation_count.saturating_sub(operations_before) <= USB_CONTROL_TX_PACKET_LEN + 1
+            tx.operation_count.saturating_sub(operations_before)
+                <= USB_CONTROL_TX_PACKET_ENDPOINT_MAX + 1
         );
         operations_before = tx.operation_count;
         steps += 1;
@@ -3605,20 +3601,28 @@ fn usb_response_writer_limits_an_always_ready_endpoint_to_one_packet_per_step() 
 
     assert_eq!(tx.sent, payload);
     assert!(tx.pending.is_empty());
-    assert_eq!(tx.flush_count, 1);
+    // 180 bytes split into 63-byte packets: 63, 63, 54 — each explicitly
+    // submitted, never relying on the endpoint's implicit full-packet commit.
+    assert_eq!(tx.flush_count, 3);
 
+    // A frame that ends exactly on a 64-byte boundary must still submit its
+    // final packet. Skipping that submit left the tail in the endpoint FIFO,
+    // where it only surfaced after some later write, stalling real 192-byte
+    // snapshot responses on the device.
     let exact_packet = std::vec![b'y'; USB_CONTROL_TX_PACKET_LEN];
-    let mut exact_packet_tx =
-        FakeUsbTx::auto_commit_rejecting_empty_flush(USB_CONTROL_TX_PACKET_LEN);
+    let mut exact_packet_tx = FakeUsbTx::new(USB_CONTROL_TX_PACKET_LEN);
     let mut exact_packet_writer = UsbResponseWriter::new(&exact_packet);
-    assert!(
+    let mut steps = 0;
+    while !exact_packet_writer.is_complete() {
         exact_packet_writer
             .step(&mut exact_packet_tx, &exact_packet)
-            .expect("an auto-committed full packet completes without a flush")
-    );
-    assert!(exact_packet_writer.is_complete());
+            .expect("a full final packet must complete after its submit");
+        steps += 1;
+        assert!(steps <= 4);
+    }
     assert_eq!(exact_packet_tx.sent, exact_packet);
-    assert_eq!(exact_packet_tx.flush_count, 0);
+    assert!(exact_packet_tx.pending.is_empty());
+    assert!(exact_packet_tx.flush_count >= 1);
 
     writer.start(payload.len(), 10);
     assert!(writer.is_expired(10));

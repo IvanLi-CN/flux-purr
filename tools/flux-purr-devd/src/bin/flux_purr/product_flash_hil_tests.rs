@@ -62,3 +62,26 @@ fn direct_product_flash_rom_dwell_hil() {
     assert!(result["flash"]["success"].as_bool().unwrap());
     assert!(dwell_ms >= 15_000);
 }
+
+#[test]
+#[ignore = "requires an explicitly authorized product port; read-only EEPROM snapshot"]
+fn direct_product_eeprom_snapshot_hil() {
+    let port = std::env::var("FLUX_PURR_HIL_PORT").expect("exact authorized port");
+    let expected_serial = std::env::var("FLUX_PURR_HIL_USB_SERIAL").expect("USB identity");
+    let usb_identity = capture_direct_usb_identity(&port).unwrap();
+    assert_eq!(usb_identity.serial_number, expected_serial);
+    let _lock = acquire_direct_serial_lock(&port).unwrap();
+    let started = StdInstant::now();
+    let snapshot = read_eeprom_snapshot(&port, Some(&usb_identity)).unwrap();
+    let elapsed_ms = started.elapsed().as_millis();
+    assert_eq!(snapshot.len(), developer_backup::EEPROM_SNAPSHOT_BYTES);
+    // A real M24C64 carries FPR2 records; an all-0xFF image means the protocol
+    // answered while the bus returned nothing usable.
+    assert!(snapshot.iter().any(|byte| *byte != 0xff));
+    println!(
+        "EEPROM snapshot bytes={} elapsedMs={} digest={}",
+        snapshot.len(),
+        elapsed_ms,
+        hex::encode(Sha256::digest(&snapshot)),
+    );
+}

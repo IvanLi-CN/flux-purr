@@ -1028,6 +1028,12 @@ pub(crate) const USB_CONTROL_TX_BUFFER_LEN: usize =
     flux_purr_firmware::control_plane::USB_LINE_MAX_LEN;
 #[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
 pub(crate) const USB_CONTROL_TX_PACKET_LEN: usize = 64;
+#[cfg(any(all(target_arch = "xtensa", feature = "web_serial"), test))]
+// Write at most one byte less than the endpoint maximum per packet so every
+// submit lands on a non-full FIFO. A frame that ends exactly on a 64-byte
+// boundary otherwise relied on the endpoint's implicit commit, which was
+// measured leaving the tail resident until an unrelated write forced it.
+pub(crate) const USB_CONTROL_TX_PACKET_ENDPOINT_MAX: usize = USB_CONTROL_TX_PACKET_LEN - 1;
 #[cfg(target_arch = "xtensa")]
 pub(crate) const USB_CONTROL_TX_PACKET_BUDGET: usize = 256;
 #[cfg(any(target_arch = "xtensa", test))]

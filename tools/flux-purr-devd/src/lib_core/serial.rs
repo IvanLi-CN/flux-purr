@@ -2205,13 +2205,24 @@ pub(crate) async fn acquire_serial_process_lock(
 }
 
 pub(crate) fn is_esp_usb_serial_jtag_port(port_path: &str) -> bool {
-    port_path.starts_with("/dev/cu.usbmodem")
+    port_path.starts_with("/dev/cu.usbmodem") || port_path.starts_with("/dev/tty.usbmodem")
+}
+
+/// macOS exposes one USB Serial/JTAG endpoint as a dial-in `tty` node and a
+/// callout `cu` node. Open the callout node: the dial-in node waits on carrier
+/// state that USB Serial/JTAG never asserts.
+pub fn callout_usb_serial_jtag_path(port_path: &str) -> String {
+    port_path.strip_prefix("/dev/tty.").map_or_else(
+        || port_path.to_string(),
+        |suffix| format!("/dev/cu.{suffix}"),
+    )
 }
 
 pub(crate) fn open_serial_port(port_path: &str) -> Result<Box<dyn SerialSessionPort>, HttpError> {
     #[cfg(target_os = "macos")]
     if is_esp_usb_serial_jtag_port(port_path) {
-        let port = open_raw_usb_serial_jtag_port(port_path).map_err(|error| {
+        let callout = callout_usb_serial_jtag_path(port_path);
+        let port = open_raw_usb_serial_jtag_port(&callout).map_err(|error| {
             HttpError::new(
                 StatusCode::BAD_GATEWAY,
                 "serial_open_failed",
