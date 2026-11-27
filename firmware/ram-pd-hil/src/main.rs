@@ -2539,11 +2539,11 @@ mod device {
         } else {
             "summary_tier_count_nonzero"
         });
-        for index in 0..tier_count {
+        for (index, tier) in result.tiers.iter().take(tier_count).enumerate() {
             if index != 0 {
                 out.push(',').map_err(|_| core::fmt::Error)?;
             }
-            write_tier_summary(out, result.tiers[index], result.validate_vin)?;
+            write_tier_summary(out, *tier, result.validate_vin)?;
         }
         emit_stage("summary_tiers_done");
         let mut length_stage = String::<64>::new();
