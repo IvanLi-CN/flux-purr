@@ -14,9 +14,15 @@ import tarfile
 import tempfile
 import time
 
-# Exact assets selected by espup v0.19.0 for Rust 1.100.0.0 on hosted Linux.
+# Assets for Rust 1.100.0.0 on hosted Linux.
 # Upstream installers/layout: esp-rs/espup v0.19.0 src/toolchain/{rust,gcc,llvm}.rs.
 # Digests and asset IDs are bound to the official release metadata, not mirrors.
+#
+# GCC is pinned to 15.3.0 rather than espup's 16.1.0 default: 16.1.0 rejects the
+# `l32r` literals that esp-hal 1.1 places in `.rwtext` for `__pre_init` with
+# "dangerous relocation: l32r: literal placed after use", so the product image
+# cannot link. esp-hal 1.2.3 still emits the same sequence, so this is pinned
+# until upstream drops the `l32r`/`callx4` pre-init or declares 16.1 support.
 ASSETS = (
     ("esp-rs/rust-build", 755019413, "rust.tar.xz",
      "5a9fad3e2f842dd72719e47e38d58d76dfb8e26074c641083e02d7f66a340a0c",
@@ -24,8 +30,8 @@ ASSETS = (
     ("esp-rs/rust-build", 754702715, "rust-src.tar.xz",
      "bec4a2e7d914c237391f9dda1f530975d92fda6fb15b3c7ccc3053cb116f9d4e",
      "rust-src-nightly"),
-    ("espressif/crosstool-NG", 443370302, "gcc.tar.xz",
-     "f708752ebb35cab21f184b2574114ed1187619db0edb8a4ba913c06ca2fa675e",
+    ("espressif/crosstool-NG", 706271570, "gcc.tar.xz",
+     "1685bcec2f185aca63b135ca881bdcef747ac4232504c82007b49888b70976a3",
      "xtensa-esp-elf"),
     ("espressif/llvm-project", 562543347, "llvm.tar.xz",
      "34fa17a12ccdfc4b23c36928aed81ef6bd52af305a5246edf3712cc59129197b",
