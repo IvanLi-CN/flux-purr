@@ -1353,7 +1353,7 @@ fn thermal_tuning_start_response(
             // contract, sensor and thermal safety gates are satisfied.
             context.ui_state.heater_enabled = true;
             let mut random = [0u8; 32];
-            for chunk in random.chunks_exact_mut(4) {
+            for chunk in random.as_chunks_mut::<4>().0 {
                 chunk.copy_from_slice(&esp_hal::rng::Rng::new().random().to_le_bytes());
             }
             let proof =

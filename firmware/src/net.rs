@@ -1733,7 +1733,7 @@ fn random_u64() -> u64 {
 
 fn random_entropy() -> [u8; crate::lan::LAN_TOKEN_BYTES] {
     let mut out = [0u8; crate::lan::LAN_TOKEN_BYTES];
-    for chunk in out.chunks_exact_mut(4) {
+    for chunk in out.as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&random_u32().to_le_bytes());
     }
     out
