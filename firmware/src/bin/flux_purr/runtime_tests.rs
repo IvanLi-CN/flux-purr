@@ -7474,6 +7474,41 @@ fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
 }
 
 #[test]
+fn wifi_driver_state_tracks_the_driver_lifecycle_not_association() {
+    // esp-radio 0.18 cannot stop a live controller, so `stop_wifi_station` must
+    // never publish a stopped driver. A `Some(false)` publish there let a heater
+    // boundary measured without radio load authorize automatic output while the
+    // station was still associating.
+    let network = include_str!("../../net.rs");
+    let stop = network
+        .split("async fn stop_wifi_station")
+        .nth(1)
+        .and_then(|rest| rest.split("\nasync fn ").next())
+        .expect("stop_wifi_station must remain present");
+    assert!(
+        stop.contains("publish_wifi_hardware_state(Some(true))")
+            && !stop.contains("publish_wifi_hardware_state(Some(false))")
+            && !stop.contains("publish_wifi_hardware_state(Some(!stopped))"),
+        "stopping the station must keep the Wi-Fi driver state published as started"
+    );
+}
+
+#[test]
+fn wifi_radio_init_complete_is_emitted_after_radio_initialization() {
+    let network = include_str!("../../net.rs");
+    let wifi_new = network
+        .find("wifi::new(wifi_peripheral, wifi_driver_config())")
+        .expect("the station startup must initialize the radio through wifi::new");
+    let radio_complete = network
+        .find("boot_stage=wifi_radio_init_complete")
+        .expect("the radio stage must report completion");
+    assert!(
+        wifi_new < radio_complete,
+        "wifi_radio_init_complete must not be reported before the radio is initialized"
+    );
+}
+
+#[test]
 fn runtime_synchronization_uses_normal_static_storage() {
     let support = include_str!("support.rs");
     let pd_service = include_str!("pd_service.rs");

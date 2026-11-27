@@ -543,13 +543,15 @@ where
     F: FnMut(&'static [u8]),
 {
     report_stage(b"boot_stage=wifi_radio_init_start\n");
+    report_stage(b"boot_stage=wifi_interface_init_start\n");
     // esp-radio 0.18 owns radio initialization inside `wifi::new`; the
     // scheduler must already be running and the radio is deinitialized when
-    // the returned controller is dropped.
-    report_stage(b"boot_stage=wifi_radio_init_complete\n");
-    report_stage(b"boot_stage=wifi_interface_init_start\n");
+    // the returned controller is dropped. Both stages therefore complete only
+    // after the call returns, so a failure inside it is still attributed to
+    // `wifi_radio_init_start`.
     let (controller, interfaces) = wifi::new(wifi_peripheral, wifi_driver_config())
         .map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_radio_init_complete\n");
     report_stage(b"boot_stage=wifi_interface_init_complete\n");
     let station = interfaces.station;
     let names = device_names_from_mac(station.mac_address());
@@ -983,7 +985,15 @@ async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
     // boot-lifetime storage. Disconnecting leaves the station with no AP and no
     // pending association, which is the observable stop equivalent. The radio
     // itself stays powered until the controller is dropped.
-    let stopped = match controller.is_connected() {
+    //
+    // `WIFI_DRIVER_STATE` describes that driver lifecycle, not association, so
+    // it must stay `Some(true)`. Publishing `Some(false)` here let a heater
+    // boundary measured without radio load authorize automatic output while the
+    // station was still associating.
+    crate::heater_supply::publish_wifi_hardware_state(Some(true));
+    // The return value keeps the caller's "station has no link" timeout
+    // semantics: a station that is not associated is already stopped.
+    match controller.is_connected() {
         false => true,
         true => matches!(
             with_timeout(
@@ -993,9 +1003,7 @@ async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
             .await,
             Ok(Ok(_))
         ),
-    };
-    crate::heater_supply::publish_wifi_hardware_state(Some(!stopped));
-    stopped
+    }
 }
 
 async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {
