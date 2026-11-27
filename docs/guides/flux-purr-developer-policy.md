@@ -61,7 +61,7 @@ cargo +esp build --manifest-path firmware/Cargo.toml --target xtensa-esp32s3-non
 ```
 
 - 非硬件验证先于任何真机/HIL 操作完成。
-- CI 通过 GitHub 官方资产 API 下载固定的 Xtensa Rust `1.95.0.0`、rust-src、GCC `15.2.0_20250920` 和 LLVM `esp-20.1.1_20250829`，与 espup `v0.16.0` 在该配置下选择的组件一致。四份资产的 ID 与 SHA-256 固定，全部校验后才解压并调用上游 Rust 安装脚本；不依赖持续返回 504 的普通 release 下载地址。
+- CI 通过 GitHub 官方资产 API 下载固定的 Xtensa Rust `1.100.0.0`、rust-src、GCC `16.1.0_20260609` 和 LLVM `esp-22.1.4_20260825`，与 espup `v0.19.0` 在该配置下选择的组件一致。四份资产的 ID 与 SHA-256 固定，全部校验后才解压并调用上游 Rust 安装脚本；不依赖持续返回 504 的普通 release 下载地址。
 - 工具链安装仅允许在 GitHub-hosted Linux x86_64 job 内执行，使用该 job 的 `RUNNER_TEMP`，拒绝复用或删除已有半安装目录。只有已识别的 API 传输错误允许最多三次下载，退避 5 秒、15 秒；权限、摘要、归档、安装及版本校验失败直接阻断，成功后才发布环境变量。既有 Xtensa Clippy 和完整产品构建继续执行；不在开发者主机安装、卸载或修改全局工具链。
 - Agent 的离线固件镜像生成与分区大小检查统一通过 `just firmware-image-check [<local-elf>]` 执行，不直接运行 `espflash save-image`。该入口只读取本地 ELF、在临时目录生成镜像并检查 factory-app 分区，退出时清理临时产物，不连接串口、不烧录硬件；CI 构建检查复用同一个 `scripts/check-firmware-image-size.sh` 实现，无需额外安装 just。
 - 产品运行及真机 HIL 必须使用保留全部默认功能的固件，包括 Wi-Fi、HTTP、USB 控制和蜂鸣器。固件 crate 的 release 编译优化由 workspace 的 `opt-level = "z"` 与 `codegen-units = 1` 固定，依赖 crate 同样以 `opt-level = "z"` 构建；单个代码生成单元与依赖优化用于缩小完整功能镜像。整程序 LTO 不得启用：当前 esp-hal 1.1 与 esp-radio 0.18 组合在 `lto = true` 下于 `wifi_radio_init_start` 触发内存分配失败并复位循环。镜像必须满足既有 2 MiB factory-app 分区与启动栈预算；编译成功不能替代实际 app image 的分区大小检查。镜像超限必须通过构建或代码优化解决，不得裁剪必备功能，也不得把 no-network 编译检查产物替代为真机测试固件。
