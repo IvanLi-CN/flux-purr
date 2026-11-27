@@ -685,10 +685,7 @@ impl EquilibriumWindow {
             return self.observe(now_ms, temperature_centi_c);
         }
         let elapsed = now_ms.saturating_sub(self.started_ms.unwrap_or(now_ms));
-        if elapsed < 10_000 {
-            return false;
-        }
-        true
+        elapsed >= 10_000
     }
 }
 

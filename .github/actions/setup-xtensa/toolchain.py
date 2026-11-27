@@ -14,21 +14,21 @@ import tarfile
 import tempfile
 import time
 
-# Exact assets selected by espup v0.16.0 for Rust 1.95.0.0 on hosted Linux.
-# Upstream installers/layout: esp-rs/espup v0.16.0 src/toolchain/{rust,gcc,llvm}.rs.
+# Exact assets selected by espup v0.19.0 for Rust 1.100.0.0 on hosted Linux.
+# Upstream installers/layout: esp-rs/espup v0.19.0 src/toolchain/{rust,gcc,llvm}.rs.
 # Digests and asset IDs are bound to the official release metadata, not mirrors.
 ASSETS = (
     ("esp-rs/rust-build", 397028652, "rust.tar.xz",
-     "aad2fb24baeab6ad61c41f002f136fe0b416ef39a501d29750ab66c18a699433",
+     "5a9fad3e2f842dd72719e47e38d58d76dfb8e26074c641083e02d7f66a340a0c",
      "rust-nightly-x86_64-unknown-linux-gnu"),
-    ("esp-rs/rust-build", 396979378, "rust-src.tar.xz",
-     "708bee337ac2d41c0e861af93047bffec91a052fbcb4957925d840a41f327717",
+    ("esp-rs/rust-build", 754702715, "rust-src.tar.xz",
+     "bec4a2e7d914c237391f9dda1f530975d92fda6fb15b3c7ccc3053cb116f9d4e",
      "rust-src-nightly"),
-    ("espressif/crosstool-NG", 295390818, "gcc.tar.xz",
-     "e3d77ad14544814527bbe7a2d0f79ec4592a4e23392c51c7388c0e686b6a6977",
+    ("espressif/crosstool-NG", 443370302, "gcc.tar.xz",
+     "f708752ebb35cab21f184b2574114ed1187619db0edb8a4ba913c06ca2fa675e",
      "xtensa-esp-elf"),
-    ("espressif/llvm-project", 288862470, "llvm.tar.xz",
-     "0128e2a86b262e3edfce026034ede07e2f45732b10c6cb8ac522c8f4c72befd8",
+    ("espressif/llvm-project", 562543347, "llvm.tar.xz",
+     "34fa17a12ccdfc4b23c36928aed81ef6bd52af305a5246edf3712cc59129197b",
      "esp-clang"),
 )
 
@@ -82,7 +82,7 @@ def install(version, targets, export_file):
             or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted"):
         raise RuntimeError("Xtensa installation requires a disposable GitHub-hosted job")
     if (version, targets, platform.system(), platform.machine()) != (
-        "1.95.0.0", "esp32s3", "Linux", "x86_64",
+        "1.100.0.0", "esp32s3", "Linux", "x86_64",
     ):
         raise ValueError("unsupported pinned Xtensa toolchain configuration")
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
@@ -103,7 +103,7 @@ def install(version, targets, export_file):
             ], check=True)
     subprocess.run(["rustup", "toolchain", "link", "esp", str(esp)], check=True)
     result = subprocess.run(["rustc", "+esp", "--version"], check=True, capture_output=True, text=True)
-    if not re.search(r"\brustc 1\.95\.0(?:\.0)?(?:[ -])", result.stdout):
+    if not re.search(r"\brustc 1\.100\.0(?:\.0)?(?:[ -])", result.stdout):
         raise ValueError("installed Xtensa Rust version mismatch")
     library_path = root / "esp-clang/lib"
     gcc_bin = root / "xtensa-esp-elf/bin"

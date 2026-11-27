@@ -119,14 +119,14 @@ class InstallTests(unittest.TestCase):
 
     def run_command(self, command, **options):
         self.events.append(command[0])
-        return subprocess.CompletedProcess(command, 0, stdout="rustc 1.95.0.0 (fixture)")
+        return subprocess.CompletedProcess(command, 0, stdout="rustc 1.100.0.0 (fixture)")
 
     def install(self, **overrides):
         with patch.object(MODULE.platform, "system", return_value="Linux"), \
                 patch.object(MODULE.platform, "machine", return_value="x86_64"), \
                 patch.object(MODULE, "download", side_effect=overrides.get("download", self.download)), \
                 patch.object(MODULE.subprocess, "run", side_effect=overrides.get("run", self.run_command)):
-            MODULE.install(overrides.get("version", "1.95.0.0"), "esp32s3", self.export)
+            MODULE.install(overrides.get("version", "1.100.0.0"), "esp32s3", self.export)
 
     def test_all_assets_verified_before_installer_and_exports_published_last(self):
         self.install()

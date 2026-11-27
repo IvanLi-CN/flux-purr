@@ -250,10 +250,7 @@ where
             return Err("local control request cannot contain JSON and bytes".into());
         }
     };
-    let response = app(state)
-        .oneshot(builder.body(body)?)
-        .await
-        .map_err(|error| io::Error::other(error.to_string()))?;
+    let response = app(state).oneshot(builder.body(body)?).await?;
     let status = response.status().as_u16();
     let bytes = to_bytes(response.into_body(), LOCAL_CONTROL_MAX_FRAME_BYTES).await?;
     let body = serde_json::from_slice(&bytes)

@@ -94,8 +94,7 @@ impl SourceCapabilities {
         }
 
         let mut matched_voltage = false;
-        for index in 0..usize::from(self.count) {
-            let object = self.objects[index];
+        for object in self.objects.iter().take(usize::from(self.count)).copied() {
             let voltage_matches = match target.mode {
                 Mode::Fixed => object.mode == Mode::Fixed && object.min_mv == target.voltage_mv,
                 Mode::Pps => {
@@ -129,8 +128,7 @@ impl SourceCapabilities {
     }
 
     pub fn select_default_5v(self) -> Option<SelectedContract> {
-        for index in 0..usize::from(self.count) {
-            let object = self.objects[index];
+        for object in self.objects.iter().take(usize::from(self.count)).copied() {
             if object.mode == Mode::Fixed
                 && object.min_mv == DEFAULT_CONTRACT_MV
                 && object.max_ma > 0
@@ -203,7 +201,7 @@ pub fn decode_source_capabilities(
 
     let mut capabilities = SourceCapabilities::empty();
     capabilities.count = count as u8;
-    for index in 0..count {
+    for (index, slot) in capabilities.objects.iter_mut().enumerate().take(count) {
         let offset = index * 4;
         let raw = u32::from_le_bytes([
             payload[offset],
@@ -212,7 +210,7 @@ pub fn decode_source_capabilities(
             payload[offset + 3],
         ]);
         if let Some(object) = decode_object(raw, (index + 1) as u8) {
-            capabilities.objects[index] = object;
+            *slot = object;
         }
     }
     Ok(capabilities)

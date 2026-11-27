@@ -7906,17 +7906,17 @@ fn transient_trace_compaction_handles_non_monotonic_rtd_samples() {
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     };
-    for index in 0..=100 {
+    for (index, sample) in job.samples.iter_mut().enumerate().take(101) {
         let temperature = if index % 2 == 0 { 220.0 } else { 80.0 };
-        job.samples[index] = ThermalPlantTransientSample {
+        *sample = ThermalPlantTransientSample {
             elapsed_ticks: index as u32 * 10,
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature),
             heater_voltage_125mv: 160,
             duty_percent: 100,
         };
     }
-    for index in 101..128 {
-        job.samples[index] = ThermalPlantTransientSample {
+    for (index, sample) in job.samples.iter_mut().enumerate().skip(101).take(27) {
+        *sample = ThermalPlantTransientSample {
             elapsed_ticks: index as u32 * 10,
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(80.0),
             heater_voltage_125mv:
@@ -20649,12 +20649,6 @@ fn live_boundary_points_cap_a_confirmed_request_to_the_measured_ceiling() {
         ..MemoryConfig::default()
     };
     flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
-    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
-    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
-        min_mv: 3_300,
-        max_mv: 21_000,
-        max_ma: 3_000,
-    });
     let query = |temperature_centi_c, current_rtd_mv, current_request_mv| {
         boundary
             .safe_point(

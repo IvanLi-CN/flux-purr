@@ -5,7 +5,7 @@ inputs:
   version:
     description: Xtensa Rust toolchain version.
     required: false
-    default: 1.95.0.0
+    default: 1.100.0.0
   buildtargets:
     description: Comma-separated Espressif build targets.
     required: false
@@ -35,7 +35,7 @@ runs:
           echo "CLANG_PATH=${CLANG_PATH}" >> "$GITHUB_ENV"
         fi
 
-        cargo install espflash --version 4.5.0 --locked
+        cargo install espflash --version 4.7.0 --locked
 
         # Fail setup when the Espressif toolchain cannot provide Clippy. The
         # target lint is a required check for Xtensa-only firmware sources.
