@@ -321,7 +321,7 @@ jobs:
         if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.4.5"
 
       - name: Install Web dependencies
         if: steps.release.outputs.enabled == 'true' && steps.recovery_assets.outputs.status != 'complete'
@@ -567,7 +567,7 @@ jobs:
         if: steps.release.outputs.enabled == 'true'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.10"
+          bun-version: "1.4.5"
 
       - name: Prepare EdgeOne deployment helper
         if: steps.release.outputs.enabled == 'true'
