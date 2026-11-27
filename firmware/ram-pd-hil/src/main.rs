@@ -642,18 +642,27 @@ mod device {
         use core::fmt::Write;
         let _ = result.push_str("{\"kind\":\"capabilities\",\"count\":");
         let _ = write!(result, "{},\"rawPdos\":[", capabilities.count);
-        for index in 0..usize::from(capabilities.count) {
+        for (index, object) in capabilities
+            .objects
+            .iter()
+            .take(usize::from(capabilities.count))
+            .enumerate()
+        {
             if index != 0 {
                 let _ = result.push(',');
             }
-            let _ = write!(result, "{}", capabilities.objects[index].raw);
+            let _ = write!(result, "{}", object.raw);
         }
         let _ = result.push_str("],\"objects\":[");
-        for index in 0..usize::from(capabilities.count) {
+        for (index, object) in capabilities
+            .objects
+            .iter()
+            .take(usize::from(capabilities.count))
+            .enumerate()
+        {
             if index != 0 {
                 let _ = result.push(',');
             }
-            let object = capabilities.objects[index];
             let _ = write!(
                 result,
                 "{{\"position\":{},\"mode\":\"{}\",\"minMv\":{},\"maxMv\":{},\"maxMa\":{},\"raw\":{}}}",
@@ -2169,8 +2178,8 @@ mod device {
                     StopReason::Cancelled => "cancelled",
                     StopReason::GlobalTimeout => "global_timeout",
                 };
-                for remaining in index..pd::TOTAL_TIERS {
-                    result.tiers[remaining] = TierRecord {
+                for (remaining, slot) in result.tiers.iter_mut().enumerate().skip(index) {
+                    *slot = TierRecord {
                         target: pd::target_at(remaining).unwrap_or(pd::Target {
                             mode: pd::Mode::Fixed,
                             voltage_mv: 0,
@@ -2273,8 +2282,8 @@ mod device {
             // non-blocking.
             drain_progress(usb);
             if matches!(tier.status, "cancelled" | "global_timeout") {
-                for remaining in index + 1..pd::TOTAL_TIERS {
-                    result.tiers[remaining] = TierRecord {
+                for (remaining, slot) in result.tiers.iter_mut().enumerate().skip(index + 1) {
+                    *slot = TierRecord {
                         target: pd::target_at(remaining).unwrap_or(pd::Target {
                             mode: pd::Mode::Fixed,
                             voltage_mv: 0,
@@ -2507,11 +2516,17 @@ mod device {
                 .map_err(|_| core::fmt::Error)?;
         }
         if source_count != 0 {
-            for index in 0..source_count {
+            for (index, object) in result
+                .source_capabilities
+                .objects
+                .iter()
+                .take(source_count)
+                .enumerate()
+            {
                 if index != 0 {
                     out.push(',').map_err(|_| core::fmt::Error)?;
                 }
-                push_u32(out, result.source_capabilities.objects[index].raw)?;
+                push_u32(out, object.raw)?;
             }
             out.push_str("],\"objects\":[]}")
                 .map_err(|_| core::fmt::Error)?;
