@@ -18,7 +18,7 @@ import time
 # Upstream installers/layout: esp-rs/espup v0.19.0 src/toolchain/{rust,gcc,llvm}.rs.
 # Digests and asset IDs are bound to the official release metadata, not mirrors.
 ASSETS = (
-    ("esp-rs/rust-build", 397028652, "rust.tar.xz",
+    ("esp-rs/rust-build", 755019413, "rust.tar.xz",
      "5a9fad3e2f842dd72719e47e38d58d76dfb8e26074c641083e02d7f66a340a0c",
      "rust-nightly-x86_64-unknown-linux-gnu"),
     ("esp-rs/rust-build", 754702715, "rust-src.tar.xz",
