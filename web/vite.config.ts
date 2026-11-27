@@ -14,8 +14,7 @@ import { playwright } from '@vitest/browser-playwright'
 import { unzipSync } from 'fflate'
 import { defineConfig, type Plugin } from 'vite'
 
-const dirname =
-  typeof __dirname !== 'undefined' ? __dirname : path.dirname(fileURLToPath(import.meta.url))
+const dirname = import.meta.dirname ?? path.dirname(fileURLToPath(import.meta.url))
 const repoRoot = path.resolve(dirname, '..')
 
 function productBuildInfo() {
