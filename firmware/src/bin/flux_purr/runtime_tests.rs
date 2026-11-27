@@ -331,7 +331,7 @@ fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
     assert!(!task.contains("set_timeout("));
     assert!(
         start_rtos.find("configure_watchdog_before_rtos(timg0.wdt)")
-            < start_rtos.find("esp_rtos::start(timg0.timer0)")
+            < start_rtos.find("esp_rtos::start(timg0.timer0, scheduler_interrupt)")
     );
 }
 
@@ -449,7 +449,7 @@ fn pd_service_preempts_lower_priority_application_work() {
         "PD policy must have a dedicated Embassy task"
     );
     assert!(
-        boot.contains("start_pd_realtime_executor(software_interrupts.software_interrupt2)")
+        boot.contains("start_pd_realtime_executor(software_interrupt2)")
             && boot.contains("InterruptExecutor::new(software_interrupt)")
             && boot.contains("executor.start(Priority::Priority3)")
             && boot.contains("buzzer_realtime_executor.start(Priority::Priority2)")
@@ -7288,11 +7288,11 @@ fn runtime_ready_boot_stage_is_emitted_after_the_first_ui_and_before_runtime_loo
     assert!(
         normalized_entrypoint.contains("runtime::run(spawner).await;")
             && boot.contains("initialize_runtime_state_from_ready(spawner, ready).await")
-            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains("run_boot_runtime_finalize_task(spawner, state)")
             && boot.contains(
                 "async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntimeState>)"
             )
-            && boot.contains(".spawn(run_frontpanel_runtime_task(state))")
+            && boot.contains("run_frontpanel_runtime_task(state).expect(")
             && runtime_loop.contains("async fn run_runtime_loop(mut state: Box<RuntimeLoopState>)")
     );
 }
@@ -7366,8 +7366,8 @@ fn usb_control_rx_line_uses_bss_instead_of_the_runtime_heap() {
 fn runtime_heap_keeps_boot_handoff_capacity_without_networking() {
     assert_eq!(
         RUNTIME_HEAP_SIZE,
-        52 * 1024,
-        "the diagnostic build must retain enough heap for complete boot states"
+        56 * 1024,
+        "the diagnostic build must retain enough heap for complete boot states and the esp-radio 0.18 Wi-Fi driver"
     );
 }
 
@@ -7381,23 +7381,23 @@ fn boot_stages_handoff_the_heap_pipeline_between_normal_executor_tasks() {
             && boot.contains("init_runtime_heap();")
             && boot.contains("let pipeline_storage = Box::<BootPipeline>::new_uninit();")
             && boot.contains("BootPipeline::new(system_tokens, device_tokens)")
-            && boot.contains(".spawn(run_boot_system_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_system_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_system_stage_task")
             && boot.contains("let system_storage = Box::<BootSystem>::new_uninit();")
             && boot.contains(
                 "pipeline.system = Some(initialize_boot_system(\n        spawner,\n        system_tokens,\n        system_storage,\n    ));"
             )
-            && boot.contains(".spawn(run_boot_pd_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_pd_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_pd_stage_task")
-            && boot.contains(".spawn(run_boot_display_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_display_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_display_stage_task")
-            && boot.contains(".spawn(run_boot_memory_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_memory_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_memory_stage_task")
-            && boot.contains(".spawn(run_boot_runtime_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_runtime_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_stage_task")
-            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains("run_boot_runtime_finalize_task(spawner, state)")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_finalize_task")
-            && boot.contains(".spawn(run_frontpanel_runtime_task(state))"),
+            && boot.contains("run_frontpanel_runtime_task(state).expect("),
         "each ordered boot stage must hand the heap pipeline to the next task"
     );
     assert!(
@@ -7559,8 +7559,8 @@ fn post_system_boot_handoff_starts_after_the_allocator_is_ready() {
         "the root task must heap-pin the system stage before asynchronous boot work"
     );
     assert!(
-        normalized_boot.contains(".spawn(run_boot_system_stage_task(spawner,pipeline))")
-            && normalized_boot.contains(".spawn(run_boot_pd_stage_task(spawner,pipeline))"),
+        normalized_boot.contains("run_boot_system_stage_task(spawner,pipeline).expect(")
+            && normalized_boot.contains("run_boot_pd_stage_task(spawner,pipeline).expect("),
         "the post-system boot pipeline must move to its first task after heap initialization"
     );
     assert!(

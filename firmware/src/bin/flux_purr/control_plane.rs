@@ -3863,7 +3863,13 @@ pub(crate) fn usb_response(
 pub(crate) fn hardware_identity() -> Identity {
     #[cfg(target_arch = "xtensa")]
     {
-        let mut identity = Identity::firmware_from_mac(esp_hal::efuse::Efuse::mac_address());
+        let mut identity = Identity::firmware_from_mac({
+            let mac =
+                esp_hal::efuse::interface_mac_address(esp_hal::efuse::InterfaceMacAddress::Station);
+            let mut bytes = [0_u8; 6];
+            bytes.copy_from_slice(mac.as_bytes());
+            bytes
+        });
         let reason = reset_reason_log_line(esp_hal::system::reset_reason())
             .trim()
             .strip_prefix("reset_reason=")

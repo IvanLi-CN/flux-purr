@@ -162,10 +162,17 @@ macro_rules! assemble_runtime_loop {
 #[path = "runtime_assembly.rs"]
 pub(crate) mod runtime_assembly;
 
+/// Software interrupts that remain available after the scheduler owns int0.
+#[cfg(target_arch = "xtensa")]
+pub(crate) struct BootSoftwareInterrupts {
+    pub(crate) software_interrupt1: esp_hal::interrupt::software::SoftwareInterrupt<'static, 1>,
+    pub(crate) software_interrupt2: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
+}
+
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootSystemTokens {
     gpio13: esp_hal::peripherals::GPIO13<'static>,
-    software_interrupt: esp_hal::peripherals::SW_INTERRUPT<'static>,
+    software_interrupts: BootSoftwareInterrupts,
     status_light_red: esp_hal::peripherals::GPIO39<'static>,
     status_light_green: esp_hal::peripherals::GPIO38<'static>,
     status_light_blue: esp_hal::peripherals::GPIO37<'static>,
@@ -178,7 +185,7 @@ pub(crate) struct BootSystemTokens {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootDeviceTokens {
-    psram: esp_hal::peripherals::PSRAM<'static>,
+    psram: esp_hal::psram::Psram,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -1373,12 +1380,36 @@ pub(crate) fn split_boot_tokens(
     esp_hal::peripherals::TIMG0<'static>,
     BootSystemTokens,
     BootDeviceTokens,
+    esp_hal::interrupt::software::SoftwareInterrupt<'static, 0>,
 ) {
+    // esp-rtos 0.3 takes the scheduler software interrupt on every CPU. The
+    // remaining interrupts stay in the boot state that starts the realtime
+    // executors.
+    let software_interrupts =
+        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    let scheduler_interrupt = software_interrupts.software_interrupt0;
+    let remaining_interrupts = BootSoftwareInterrupts {
+        software_interrupt1: software_interrupts.software_interrupt1,
+        software_interrupt2: software_interrupts.software_interrupt2,
+    };
+    // PSRAM is a driver object since esp-hal 1.1; constructing it maps the
+    // external memory window before any PSRAM allocation moves into a heap.
+    let psram = esp_hal::psram::Psram::new(
+        peripherals.PSRAM,
+        esp_hal::psram::PsramConfig {
+            // The ESP32-S3FH4R2 package carries quad PSRAM. Pin the mode
+            // instead of probing octal first, matching the removed
+            // compile-time ESP_HAL_CONFIG_PSRAM_MODE=quad contract.
+            mode: esp_hal::psram::PsramMode::QuadSpi,
+            ..Default::default()
+        },
+    );
+    rom_boot_stage(b"psram_init_complete");
     (
         peripherals.TIMG0,
         BootSystemTokens {
             gpio13: peripherals.GPIO13,
-            software_interrupt: peripherals.SW_INTERRUPT,
+            software_interrupts: remaining_interrupts,
             status_light_red: peripherals.GPIO39,
             status_light_green: peripherals.GPIO38,
             status_light_blue: peripherals.GPIO37,
@@ -1389,7 +1420,7 @@ pub(crate) fn split_boot_tokens(
             pd_scl: peripherals.GPIO9,
         },
         BootDeviceTokens {
-            psram: peripherals.PSRAM,
+            psram,
             spi2: peripherals.SPI2,
             display_sck: peripherals.GPIO12,
             display_mosi: peripherals.GPIO11,
@@ -1414,6 +1445,7 @@ pub(crate) fn split_boot_tokens(
             #[cfg(feature = "net_http")]
             wifi: peripherals.WIFI,
         },
+        scheduler_interrupt,
     )
 }
 
@@ -1428,10 +1460,31 @@ fn spawn_status_light_task(
     let red = Output::new(red_pin, Level::High, OutputConfig::default());
     let green = Output::new(green_pin, Level::High, OutputConfig::default());
     let blue = Output::new(blue_pin, Level::High, OutputConfig::default());
-    spawner
-        .spawn(run_status_light_task(red, green, blue, started_ms))
-        .expect("failed to spawn status-light task");
+    spawner.spawn(
+        run_status_light_task(red, green, blue, started_ms)
+            .expect("failed to spawn status-light task"),
+    );
     started_ms
+}
+
+/// Starts the priority-2 buzzer and priority-3 PD interrupt executors.
+#[cfg(target_arch = "xtensa")]
+fn start_realtime_executors(
+    interrupts: BootSoftwareInterrupts,
+) -> (embassy_executor::SendSpawner, embassy_executor::SendSpawner) {
+    let BootSoftwareInterrupts {
+        software_interrupt1,
+        software_interrupt2,
+    } = interrupts;
+    let buzzer_realtime_executor = unsafe {
+        initialize_after_software_reset(
+            core::ptr::addr_of_mut!(BUZZER_REALTIME_EXECUTOR_STORAGE),
+            InterruptExecutor::new(software_interrupt1),
+        )
+    };
+    let buzzer_realtime_spawner = buzzer_realtime_executor.start(Priority::Priority2);
+    let pd_realtime_spawner = start_pd_realtime_executor(software_interrupt2);
+    (buzzer_realtime_spawner, pd_realtime_spawner)
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1461,15 +1514,8 @@ pub(crate) fn initialize_boot_system(
     backlight.set_low();
     assert!(startup_sequence.advance(StartupSequenceStage::BacklightReady));
     let eeprom_record_staging = initialize_eeprom_record_staging();
-    let software_interrupts = SoftwareInterruptControl::new(tokens.software_interrupt);
-    let buzzer_realtime_executor = unsafe {
-        initialize_after_software_reset(
-            core::ptr::addr_of_mut!(BUZZER_REALTIME_EXECUTOR_STORAGE),
-            InterruptExecutor::new(software_interrupts.software_interrupt1),
-        )
-    };
-    let buzzer_realtime_spawner = buzzer_realtime_executor.start(Priority::Priority2);
-    let pd_realtime_spawner = start_pd_realtime_executor(software_interrupts.software_interrupt2);
+    let (buzzer_realtime_spawner, pd_realtime_spawner) =
+        start_realtime_executors(tokens.software_interrupts);
     let status_light_started_ms = spawn_status_light_task(
         spawner,
         tokens.status_light_red,
@@ -1689,7 +1735,7 @@ async fn wait_for_initial_pd_contract(
 pub(crate) struct BootDisplayContext<'a> {
     runtime_mode: FrontPanelRuntimeMode,
     runtime: BootDisplayRuntimeContext<'a>,
-    psram: esp_hal::peripherals::PSRAM<'static>,
+    psram: esp_hal::psram::Psram,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -1721,7 +1767,7 @@ pub(crate) struct BootDisplayRuntimeContext<'a> {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_display_driver(
-    psram: esp_hal::peripherals::PSRAM<'static>,
+    psram: esp_hal::psram::Psram,
     spi2: esp_hal::peripherals::SPI2<'static>,
     display_sck: esp_hal::peripherals::GPIO12<'static>,
     display_mosi: esp_hal::peripherals::GPIO11<'static>,
@@ -2067,18 +2113,20 @@ pub(crate) fn spawn_buzzer_runtime(
         BUZZER_TIMER_PRESCALER,
     );
     #[cfg(feature = "buzzer-observe")]
-    buzzer_realtime_spawner
-        .spawn(run_buzzer_task(
+    buzzer_realtime_spawner.spawn(
+        run_buzzer_task(
             buzzer_timer,
             buzzer_pwm,
             peripheral_clock,
             buzzer_edge_counter,
-        ))
-        .expect("failed to spawn realtime buzzer task");
+        )
+        .expect("failed to spawn realtime buzzer task"),
+    );
     #[cfg(not(feature = "buzzer-observe"))]
-    buzzer_realtime_spawner
-        .spawn(run_buzzer_task(buzzer_timer, buzzer_pwm, peripheral_clock))
-        .expect("failed to spawn realtime buzzer task");
+    buzzer_realtime_spawner.spawn(
+        run_buzzer_task(buzzer_timer, buzzer_pwm, peripheral_clock)
+            .expect("failed to spawn realtime buzzer task"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2676,11 +2724,12 @@ pub(crate) async fn initialize_boot_memory_stage(pipeline: &mut BootPipeline) {
 #[inline(never)]
 pub(crate) fn start_rtos(
     timg0: esp_hal::peripherals::TIMG0<'static>,
+    scheduler_interrupt: esp_hal::interrupt::software::SoftwareInterrupt<'static, 0>,
 ) -> esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>> {
     let timg0 = TimerGroup::new(timg0);
     let watchdog = configure_watchdog_before_rtos(timg0.wdt);
     rom_boot_stage(b"watchdog_configured");
-    esp_rtos::start(timg0.timer0);
+    esp_rtos::start(timg0.timer0, scheduler_interrupt);
     rom_boot_stage(b"rtos_started");
     watchdog
 }
@@ -2706,8 +2755,7 @@ async fn run_boot_system_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
         system_storage,
     ));
     spawner
-        .spawn(run_boot_pd_stage_task(spawner, pipeline))
-        .expect("failed to spawn PD boot stage");
+        .spawn(run_boot_pd_stage_task(spawner, pipeline).expect("failed to spawn PD boot stage"));
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2721,9 +2769,9 @@ async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline
             .expect("boot system is available for PD initialization"),
     )
     .await;
-    spawner
-        .spawn(run_boot_display_stage_task(spawner, pipeline))
-        .expect("failed to spawn display boot stage");
+    spawner.spawn(
+        run_boot_display_stage_task(spawner, pipeline).expect("failed to spawn display boot stage"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2731,9 +2779,9 @@ async fn run_boot_pd_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline
 async fn run_boot_display_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
     record_boot_heartbeat();
     initialize_boot_display_stage(&mut pipeline).await;
-    spawner
-        .spawn(run_boot_memory_stage_task(spawner, pipeline))
-        .expect("failed to spawn memory boot stage");
+    spawner.spawn(
+        run_boot_memory_stage_task(spawner, pipeline).expect("failed to spawn memory boot stage"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2741,9 +2789,9 @@ async fn run_boot_display_stage_task(spawner: Spawner, mut pipeline: Box<BootPip
 async fn run_boot_memory_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
     record_boot_heartbeat();
     initialize_boot_memory_stage(&mut pipeline).await;
-    spawner
-        .spawn(run_boot_runtime_stage_task(spawner, pipeline))
-        .expect("failed to spawn runtime boot stage");
+    spawner.spawn(
+        run_boot_runtime_stage_task(spawner, pipeline).expect("failed to spawn runtime boot stage"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2751,9 +2799,10 @@ async fn run_boot_memory_stage_task(spawner: Spawner, mut pipeline: Box<BootPipe
 async fn run_boot_runtime_stage_task(spawner: Spawner, mut pipeline: Box<BootPipeline>) {
     record_boot_heartbeat();
     let state = initialize_runtime_state_stage(spawner, &mut pipeline).await;
-    spawner
-        .spawn(run_boot_runtime_finalize_task(spawner, state))
-        .expect("failed to spawn runtime finalize stage");
+    spawner.spawn(
+        run_boot_runtime_finalize_task(spawner, state)
+            .expect("failed to spawn runtime finalize stage"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2763,9 +2812,9 @@ async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntime
     rom_boot_stage(b"runtime_ready");
     let runtime_loop_storage = Box::<RuntimeLoopState>::new_uninit();
     let state = state.into_runtime_loop(runtime_loop_storage);
-    spawner
-        .spawn(run_frontpanel_runtime_task(state))
-        .expect("failed to spawn front-panel runtime task");
+    spawner.spawn(
+        run_frontpanel_runtime_task(state).expect("failed to spawn front-panel runtime task"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2773,16 +2822,12 @@ pub(crate) async fn run(spawner: Spawner) {
     // These ROM-only markers remain available before the HAL clock singleton
     // exists, so a startup panic can be placed on either side of `init`.
     rom_boot_stage(b"hal_init_enter");
-    let config = esp_hal::Config::default()
-        .with_cpu_clock(esp_hal::clock::CpuClock::max())
-        .with_psram(esp_hal::psram::PsramConfig {
-            ..Default::default()
-        });
+    let config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
     rom_boot_stage(b"hal_init_configured");
     let peripherals = esp_hal::init(config);
     rom_boot_stage(b"hal_init_complete");
-    let (timg0, system_tokens, device_tokens) = split_boot_tokens(peripherals);
-    let watchdog = start_rtos(timg0);
+    let (timg0, system_tokens, device_tokens, scheduler_interrupt) = split_boot_tokens(peripherals);
+    let watchdog = start_rtos(timg0, scheduler_interrupt);
     spawn_watchdog(spawner, watchdog);
     record_boot_heartbeat();
     arm_watchdog().await;
@@ -2795,9 +2840,9 @@ pub(crate) async fn run(spawner: Spawner) {
         pipeline_storage,
         BootPipeline::new(system_tokens, device_tokens),
     );
-    spawner
-        .spawn(run_boot_system_stage_task(spawner, pipeline))
-        .expect("failed to spawn system boot stage");
+    spawner.spawn(
+        run_boot_system_stage_task(spawner, pipeline).expect("failed to spawn system boot stage"),
+    );
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -2841,9 +2886,13 @@ pub(crate) async fn initialize_runtime_state_stage(
 #[cfg(target_arch = "xtensa")]
 fn initial_device_info_ui(runtime_mode: FrontPanelRuntimeMode) -> FrontPanelUiState {
     let mut ui = FrontPanelUiState::new_startup(runtime_mode);
-    let mut identity = flux_purr_firmware::control_plane::Identity::firmware_from_mac(
-        esp_hal::efuse::Efuse::mac_address(),
-    );
+    let mut identity = flux_purr_firmware::control_plane::Identity::firmware_from_mac({
+        let mac =
+            esp_hal::efuse::interface_mac_address(esp_hal::efuse::InterfaceMacAddress::Station);
+        let mut bytes = [0_u8; 6];
+        bytes.copy_from_slice(mac.as_bytes());
+        bytes
+    });
     let reason = reset_reason_log_line(esp_hal::system::reset_reason())
         .trim()
         .strip_prefix("reset_reason=")
