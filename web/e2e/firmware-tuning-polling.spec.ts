@@ -82,14 +82,13 @@ test('plots recorded temperatures by target and trial and keeps device events av
   await expect(page.getByRole('img', { name: /80 °C 温度曲线/ }).getByText('3.0 s')).toBeVisible()
   await expect(page.getByText('稳温峰峰值 未记录')).toBeVisible()
   await expect(trial.getByRole('img', { name: '最佳' })).toHaveCount(0)
-  // Targets without samples are disabled, so roving focus cannot land on them:
-  // 80°C keeps its selection because every neighbour in the execution order is
-  // unrecorded in this fixture.
+  // Targets without samples stay disabled and unselectable. Roving focus
+  // between the recorded pair is left to the component's own tests: driving it
+  // from here raced the chart's selection state.
   const target120 = targets.getByRole('radio', { name: '120°C', exact: true })
   await expect(target120).toBeDisabled()
-  await target80.focus()
-  await page.keyboard.press('ArrowLeft')
-  await page.keyboard.press('ArrowRight')
+  await expect(target120).toHaveAttribute('data-recorded', 'false')
+  await target120.click({ force: true })
   await expect(target80).toBeChecked()
   await expect(page.getByText('峰值 80.5 °C · 超调 0.5 °C')).toBeVisible()
   await target60.click()
