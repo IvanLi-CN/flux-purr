@@ -561,6 +561,14 @@ jobs:
           PY
           )
 
+      # Recovery with intact assets skips the build steps, so Bun is absent
+      # here while the deployment helper still shells out to bunx.
+      - name: Setup Bun for EdgeOne deployment
+        if: steps.release.outputs.enabled == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
       - name: Prepare EdgeOne deployment helper
         if: steps.release.outputs.enabled == 'true'
         env:
