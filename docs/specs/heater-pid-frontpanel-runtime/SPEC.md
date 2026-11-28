@@ -59,7 +59,7 @@
 
 - REQ-SOURCE-NEGOTIATION: 正常加热、固件调优和产品 rapid 标定 MUST 按 [ADR 0028](../../adr/0028-source-capability-driven-heater-negotiation.md) 使用实际所选 PDO/APDO 的电流能力，受 5A 硬件上限和协议编码约束，不得隐式施加 3A、60W 或 65W 封顶。`pps3a|pps5a` 参数库名称不得限制协商能力；21V/3A 模拟只允许显式手动或台架配置。已验证满输出上限达到源端点时 MUST 可申请该端点，不得固定减去 100mV；较低温区边界的安全裕量保持。供电边界格式 7 保存实际扫描电流，兼容读取原始 3A 格式 6；旧低电流观测仅可作为相同来源范围下的保守电压证明，不能改写成新电流记录或外推电压。瞬态拟合与重放 MUST 使用轨迹配对边界电流。以下条款中的固定 3A 扫描/合同或 v6-only 约束由本条替代，显式 3A 台架验收仍保持其限定场景。
 
-- 正常运行和真机调优固件必须保留全部默认功能，包括Wi-Fi、HTTP、USB控制和蜂鸣器。固件package的release配置固定为`opt-level="z"`、`codegen-units=1`；实际ESP-IDF factory app image不得超过既有2MiB分区，并须通过启动栈预算检查。编译成功、ELF文件大小或无网络配置编译通过均不能替代完整功能app image的检查。
+- 正常运行和真机调优固件必须保留全部默认功能，包括Wi-Fi、HTTP、USB控制和蜂鸣器。固件package的release配置固定为`opt-level="z"`、`codegen-units=1`；实际ESP-IDF factory app image不得超过既有2MiB分区，并须通过启动栈预算检查。编译成功、ELF文件大小或无网络配置编译通过均不能替代完整功能app image的检查。堆上持有的运行时状态必须逐字段构造，不得用 `const`/`static` 聚合初始化：该聚合会被物化为烧录的 `.rodata` 模板，再复制进堆。
 - REQ-AUTO-RESISTANCE: Auto/W65 正常自动加热 MUST 使用 ADR 0019 定义的整机供电边界；旧版合同电流反推的电阻曲线和关联热模型 MUST 视为不存在，不得迁移、投影、预览或兜底。缺少适用边界的区域 MUST 明确使用预设电气模型估算，不得描述成实测标定。显式 W100 不属于本 3A 边界要求，受独立 5A 资格门禁约束。
 - REQ-AUTO-CANDIDATE: Auto/W65 正常自动加热 MUST 对每个实际 PPS/APDO 独立编码电流并计算安全电压和 Pmax；MUST NOT 固定预留 200mA 或编造未知辅助功耗。PPS 优先，Fixed 仅在其满导通负载满足同一边界时可选，候选不得跨档位拼接。W100 只能使用已确认的 5A 合同路径，不得由模式标志升级 3A 合同。
 - REQ-AUTO-WATTS: Auto/W65 正常自动加热 MUST 保持统一的模型估算瓦特基准；PPS Warmup/全速有非零功率需求时 MUST 以适用实测 `safe_request_mv` 下的工作点为目标，在安全旧合同内遵守既有 500mV 连续调压步长，合同确认后 GPIO47 MUST 保持 `100%` 静态全导通，不得使用 1–99% PWM 软启动；Approach/Hold 才使用已确认合同下的瓦特到电压与中间 duty 分配。最终电压不得越过安全上限。整数 mW 的满量程 MUST 对应其量化电压上限及 `100%` 静态导通，不得二次取整为少一档电压或 99%。W100 沿用其独立 5A 生产控制器，不得把本 3A 边界的功率声明套用于 W100。
