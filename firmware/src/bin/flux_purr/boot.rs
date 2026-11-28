@@ -165,8 +165,8 @@ pub(crate) mod runtime_assembly;
 /// Software interrupts that remain available after the scheduler owns int0.
 #[cfg(target_arch = "xtensa")]
 pub(crate) struct BootSoftwareInterrupts {
-    pub(crate) software_interrupt1: esp_hal::interrupt::software::SoftwareInterrupt<'static, 1>,
-    pub(crate) software_interrupt2: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
+    pub(crate) software_interrupt1: esp_hal::peripherals::FROM_CPU_INTR1<'static>,
+    pub(crate) software_interrupt2: esp_hal::peripherals::FROM_CPU_INTR2<'static>,
 }
 
 #[cfg(target_arch = "xtensa")]
@@ -1380,17 +1380,16 @@ pub(crate) fn split_boot_tokens(
     esp_hal::peripherals::TIMG0<'static>,
     BootSystemTokens,
     BootDeviceTokens,
-    esp_hal::interrupt::software::SoftwareInterrupt<'static, 0>,
+    esp_hal::peripherals::FROM_CPU_INTR0<'static>,
 ) {
-    // esp-rtos 0.3 takes the scheduler software interrupt on every CPU. The
+    // esp-rtos 0.4 takes the scheduler software interrupt on every CPU. The
     // remaining interrupts stay in the boot state that starts the realtime
-    // executors.
-    let software_interrupts =
-        esp_hal::interrupt::software::SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
-    let scheduler_interrupt = software_interrupts.software_interrupt0;
+    // executors. esp-hal 1.2 exposes them as individual peripherals instead of a
+    // `SoftwareInterruptControl` wrapper.
+    let scheduler_interrupt = peripherals.FROM_CPU_INTR0;
     let remaining_interrupts = BootSoftwareInterrupts {
-        software_interrupt1: software_interrupts.software_interrupt1,
-        software_interrupt2: software_interrupts.software_interrupt2,
+        software_interrupt1: peripherals.FROM_CPU_INTR1,
+        software_interrupt2: peripherals.FROM_CPU_INTR2,
     };
     // PSRAM is a driver object since esp-hal 1.1; constructing it maps the
     // external memory window before any PSRAM allocation moves into a heap.
@@ -1489,7 +1488,7 @@ fn start_realtime_executors(
 
 #[cfg(target_arch = "xtensa")]
 fn start_pd_realtime_executor(
-    software_interrupt: esp_hal::interrupt::software::SoftwareInterrupt<'static, 2>,
+    software_interrupt: esp_hal::peripherals::FROM_CPU_INTR2<'static>,
 ) -> embassy_executor::SendSpawner {
     let executor = unsafe {
         initialize_after_software_reset(
@@ -2724,7 +2723,7 @@ pub(crate) async fn initialize_boot_memory_stage(pipeline: &mut BootPipeline) {
 #[inline(never)]
 pub(crate) fn start_rtos(
     timg0: esp_hal::peripherals::TIMG0<'static>,
-    scheduler_interrupt: esp_hal::interrupt::software::SoftwareInterrupt<'static, 0>,
+    scheduler_interrupt: esp_hal::peripherals::FROM_CPU_INTR0<'static>,
 ) -> esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>> {
     let timg0 = TimerGroup::new(timg0);
     let watchdog = configure_watchdog_before_rtos(timg0.wdt);

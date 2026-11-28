@@ -56,14 +56,14 @@ embedded-hal-async = "1.0.0"
 embedded-hal-bus = { version = "0.3.0", features = ["async"] }
 embedded-io-async = { version = "0.7.0", optional = true }
 embedded-storage = "0.3.1"
-esp-hal = { version = "1.1.2", features = ["esp32s3", "unstable"] }
-esp-rtos = { version = "0.3.0", features = ["embassy", "esp32s3", "esp-alloc"] }
+esp-hal = { version = "1.2.3", features = ["esp32s3", "unstable"] }
+esp-rtos = { version = "0.4.0", features = ["embassy", "esp32s3", "esp-alloc"] }
 esp-bootloader-esp-idf = { version = "0.5.0", features = ["esp32s3"] }
 fusb302 = { version = "0.1.0", features = ["async"] }
 embassy-net = { version = "0.9.1", default-features = false, features = ["dhcpv4", "dhcpv4-hostname", "medium-ethernet", "multicast", "tcp", "udp"], optional = true }
 embassy-sync = "0.8.0"
-esp-alloc = "0.10.0"
-esp-radio = { version = "0.18.0", features = ["esp32s3", "unstable", "wifi"], optional = true }
+esp-alloc = "0.11.0"
+esp-radio = { version = "1.0.0-beta.1", features = ["esp32s3", "unstable", "wifi"], optional = true }
 static_cell = "2.1.0"
 
 [dev-dependencies]

@@ -100,7 +100,7 @@ static WIFI_CANCEL_NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static LAN_RUNTIME: RuntimeStatusMutex = BlockingMutex::new(RefCell::new(LanRuntimeState::empty()));
 static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
-static NET_RUNNER: StaticCell<embassy_net::Runner<'static, Interface<'static>>> = StaticCell::new();
+static NET_RUNNER: StaticCell<embassy_net::Runner<'static, Interface>> = StaticCell::new();
 static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
 // The mutation-capable HTTP worker owns its full request workspace outside the
 // executor arena. Lightweight readers are served from published snapshots.
@@ -549,11 +549,11 @@ where
     // the returned controller is dropped. Both stages therefore complete only
     // after the call returns, so a failure inside it is still attributed to
     // `wifi_radio_init_start`.
-    let (controller, interfaces) = wifi::new(wifi_peripheral, wifi_driver_config())
+    let controller = WifiController::new(wifi_peripheral, wifi_driver_config())
         .map_err(|_| LanStartupError::WifiInitialization)?;
     report_stage(b"boot_stage=wifi_radio_init_complete\n");
+    let station = Interface::station();
     report_stage(b"boot_stage=wifi_interface_init_complete\n");
-    let station = interfaces.station;
     let names = device_names_from_mac(station.mac_address());
     // Boot restoration is initialization, not a live reconfiguration. Do not
     // leave an apply signal pending: consuming it after the first DHCP lease
@@ -647,7 +647,7 @@ fn wifi_driver_config() -> wifi::ControllerConfig {
 }
 
 #[embassy_executor::task]
-async fn network_task(runner: &'static mut embassy_net::Runner<'static, Interface<'static>>) {
+async fn network_task(runner: &'static mut embassy_net::Runner<'static, Interface>) {
     runner.run().await;
 }
 
@@ -807,10 +807,18 @@ async fn start_wifi_driver(
     config: &WifiRuntimeConfig,
     shared_i2c: &SharedI2cBus,
 ) -> bool {
+    // Invalid SSID/password lengths cannot be represented in the driver's
+    // bounded types; treat them as a driver configuration failure.
+    let Ok(ssid) = config.ssid.as_str().try_into() else {
+        return false;
+    };
+    let Ok(password) = alloc::string::String::from(config.password.as_str()).try_into() else {
+        return false;
+    };
     let client = wifi::Config::Station(
         StationConfig::default()
-            .with_ssid(config.ssid.as_str())
-            .with_password(alloc::string::String::from(config.password.as_str())),
+            .with_ssid(ssid)
+            .with_authentication(wifi::AuthenticationMethodConfig::WpaWpa2Personal(password)),
     );
     stack.set_config_v4(net_config(config).ipv4);
     crate::heater_supply::publish_wifi_hardware_state(None);

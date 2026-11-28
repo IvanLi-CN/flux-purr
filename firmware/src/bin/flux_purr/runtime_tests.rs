@@ -7497,8 +7497,8 @@ fn wifi_driver_state_tracks_the_driver_lifecycle_not_association() {
 fn wifi_radio_init_complete_is_emitted_after_radio_initialization() {
     let network = include_str!("../../net.rs");
     let wifi_new = network
-        .find("wifi::new(wifi_peripheral, wifi_driver_config())")
-        .expect("the station startup must initialize the radio through wifi::new");
+        .find("WifiController::new(wifi_peripheral, wifi_driver_config())")
+        .expect("the station startup must initialize the radio through WifiController::new");
     let radio_complete = network
         .find("boot_stage=wifi_radio_init_complete")
         .expect("the radio stage must report completion");

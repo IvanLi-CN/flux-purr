@@ -77,7 +77,7 @@ pub(crate) use esp_hal::{
     },
     time::{Duration as HalDuration, Rate},
     timer::timg::TimerGroup,
-    usb_serial_jtag::UsbSerialJtag,
+    usb::usb_serial_jtag::UsbSerialJtag,
 };
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
 pub(crate) use esp_hal::{

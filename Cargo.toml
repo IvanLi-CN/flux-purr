@@ -15,13 +15,7 @@ opt-level = "z"
 codegen-units = 1
 
 # Dependencies default to opt-level 3, which inlines aggressively and grows the
-# fixed 2 MiB factory-app image past its partition after the esp-hal 1.1 and
-# esp-radio 0.18 upgrade. The firmware package keeps its own `opt-level = "z"`.
+# fixed 2 MiB factory-app image past its partition after the esp-hal and
+# esp-radio upgrade. The firmware package keeps its own `opt-level = "z"`.
 [profile.release.package."*"]
 opt-level = "z"
-
-# esp-hal's RAM-resident pre-init code must not be size-optimised: LLVM then
-# emits literal pools that newer xtensa linkers reject as dangerous l2r
-# relocations inside `.rwtext`.
-[profile.release.package.esp-hal]
-opt-level = 3
