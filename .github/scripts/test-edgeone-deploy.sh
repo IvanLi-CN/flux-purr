@@ -4,6 +4,7 @@ set -euo pipefail
 root_dir="$(git rev-parse --show-toplevel)"
 deploy_script="${root_dir}/.github/scripts/deploy-edgeone.sh"
 fake_bunx="${root_dir}/.github/scripts/test-fixtures/fake-edgeone-bunx"
+fake_tee="${root_dir}/.github/scripts/test-fixtures/tee"
 test_root="$(mktemp -d)"
 trap 'rm -rf "${test_root}"' EXIT
 
@@ -168,8 +169,8 @@ grep -Fq "EDGEONE_FAILURE_CLASS=project_or_permission" "${project_permission_log
 
 : > "${count_file}"
 capture_failure_log="${test_root}/capture-failure.log"
-if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
-  EDGEONE_API_TOKEN='<REDACTED>' \
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_TEE_BIN="${fake_tee}" \
   EDGEONE_BUNX_BIN="${fake_bunx}" \
   EDGEONE_TEST_COUNT_FILE="${count_file}" \
   EDGEONE_TEST_FAIL_UNTIL=1 \
@@ -188,8 +189,8 @@ grep -Fq "output capture failed" "${capture_failure_log}"
 
 : > "${count_file}"
 remote_capture_failure_log="${test_root}/remote-capture-failure.log"
-if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
-  EDGEONE_API_TOKEN='<REDACTED>' \
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_TEE_BIN="${fake_tee}" \
   EDGEONE_BUNX_BIN="${fake_bunx}" \
   EDGEONE_TEST_COUNT_FILE="${count_file}" \
   EDGEONE_TEST_FAIL_UNTIL=1 \
@@ -209,8 +210,8 @@ grep -Fq "ambiguous remote state" "${remote_capture_failure_log}"
 
 : > "${count_file}"
 successful_capture_failure_log="${test_root}/successful-capture-failure.log"
-if PATH="${root_dir}/.github/scripts/test-fixtures:${PATH}" \
-  EDGEONE_API_TOKEN='<REDACTED>' \
+if EDGEONE_API_TOKEN='<REDACTED>' \
+  EDGEONE_TEE_BIN="${fake_tee}" \
   EDGEONE_BUNX_BIN="${fake_bunx}" \
   EDGEONE_TEST_COUNT_FILE="${count_file}" \
   EDGEONE_MAX_ATTEMPTS=3 \

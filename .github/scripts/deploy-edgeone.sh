@@ -28,6 +28,14 @@ fi
 
 cli_version="${EDGEONE_CLI_VERSION:-1.6.18}"
 bunx_bin="${EDGEONE_BUNX_BIN:-bunx}"
+# `tee` must be an external binary: the output-capture failure path is driven by
+# its exit status, and a shell that provides `tee` as a builtin would silently
+# bypass any PATH replacement. Tests point this at a fixture.
+tee_bin="${EDGEONE_TEE_BIN:-tee}"
+if [[ "${tee_bin}" == */* ]] && [[ ! -x "${tee_bin}" ]]; then
+  echo "EDGEONE_TEE_BIN must point to an executable file: ${tee_bin}" >&2
+  exit 2
+fi
 max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"
 retry_delays_text="${EDGEONE_RETRY_DELAYS_SECONDS:-30 60}"
 attempt_logs_dir="$(mktemp -d)"
@@ -63,7 +71,7 @@ run_deploy() {
     "${deploy_directory}" \
     -n "${project_name}" \
     -e production \
-    -t "${EDGEONE_API_TOKEN}" 2>&1 | tee "${output_file}"
+    -t "${EDGEONE_API_TOKEN}" 2>&1 | "${tee_bin}" "${output_file}"
   pipeline_status=("${PIPESTATUS[@]}")
   status="${pipeline_status[0]}"
   tee_status="${pipeline_status[1]}"
