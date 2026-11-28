@@ -10,6 +10,12 @@ members = [
   "tools/rust-style-check",
 ]
 
+[profile.release]
+# esp-hal and esp-radio carry much of the Wi-Fi stack as generic code that
+# monomorphises per call site. Cross-crate inlining removes the duplicated
+# copies and keeps the fixed 2 MiB factory app inside its partition.
+lto = "fat"
+
 [profile.release.package.flux-purr-firmware]
 opt-level = "z"
 codegen-units = 1

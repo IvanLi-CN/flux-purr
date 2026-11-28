@@ -69,7 +69,7 @@ mod device {
             timer::PwmWorkingMode,
         },
         time::{Duration as HalDuration, Instant, Rate},
-        usb_serial_jtag::UsbSerialJtag,
+        usb::usb_serial_jtag::UsbSerialJtag,
     };
     use flux_purr_pd_sink_core as pd;
     use fusb302::{

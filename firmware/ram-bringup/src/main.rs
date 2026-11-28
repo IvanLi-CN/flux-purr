@@ -35,7 +35,7 @@ mod device {
             master::{Config as SpiConfig, Spi},
         },
         time::Rate,
-        usb_serial_jtag::UsbSerialJtag,
+        usb::usb_serial_jtag::UsbSerialJtag,
     };
     use heapless::String;
 

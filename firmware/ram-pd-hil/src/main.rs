@@ -62,7 +62,7 @@ mod device {
         gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
         i2c::master::{Config as I2cConfig, I2c, SoftwareTimeout},
         time::{Duration as HalDuration, Instant, Rate},
-        usb_serial_jtag::UsbSerialJtag,
+        usb::usb_serial_jtag::UsbSerialJtag,
     };
     use fusb302::{
         CcPin, CcPull, DataRole, Fusb302, InterruptMasks, PdPacket, PdRevision, PhyConfig,
