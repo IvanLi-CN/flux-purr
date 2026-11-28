@@ -66,7 +66,7 @@ assert "release-upload-list.txt" in release
 assert "release-missing-assets.txt" in release
 assert "prepare_release_recovery.py" in release
 assert "release-identity" in release
-assert "actions/upload-artifact@v4" in release
+assert "actions/upload-artifact@v7" in release
 assert "sha256_file" in (root / ".github/scripts/prepare_release_recovery.py").read_text(encoding="utf-8")
 assert "asset_missing()" in release
 assert "create_release_archive.py" in release
@@ -104,7 +104,7 @@ for workflow in (ci_pr, ci_main):
     assert "test-manual-release.sh" in workflow
     assert "if: always()" in workflow
     assert "Fail closed when source validation fails" in workflow
-    assert "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7" in workflow
+    assert "go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12" in workflow
 
 for old_path in (
     ".github/workflows/label-gate.yml",

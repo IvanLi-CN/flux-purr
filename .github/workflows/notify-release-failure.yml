@@ -21,7 +21,7 @@ jobs:
       summary: ${{ steps.context.outputs.summary }}
     steps:
       - name: Checkout trusted release helpers
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         continue-on-error: true
         with:
           ref: main
