@@ -69,7 +69,7 @@ mod device {
             timer::PwmWorkingMode,
         },
         time::{Duration as HalDuration, Instant, Rate},
-        usb_serial_jtag::UsbSerialJtag,
+        usb::usb_serial_jtag::UsbSerialJtag,
     };
     use flux_purr_pd_sink_core as pd;
     use fusb302::{
@@ -587,18 +587,27 @@ mod device {
         let _ = result.push_str("{\"kind\":\"capabilities\",\"count\":");
         let _ = push_small_u32(&mut result, u32::from(capabilities.count));
         let _ = result.push_str(",\"rawPdos\":[");
-        for index in 0..usize::from(capabilities.count) {
+        for (index, object) in capabilities
+            .objects
+            .iter()
+            .take(usize::from(capabilities.count))
+            .enumerate()
+        {
             if index != 0 {
                 let _ = result.push(',');
             }
-            let _ = push_small_u32(&mut result, capabilities.objects[index].raw);
+            let _ = push_small_u32(&mut result, object.raw);
         }
         let _ = result.push_str("],\"objects\":[");
-        for index in 0..usize::from(capabilities.count) {
+        for (index, object) in capabilities
+            .objects
+            .iter()
+            .take(usize::from(capabilities.count))
+            .enumerate()
+        {
             if index != 0 {
                 let _ = result.push(',');
             }
-            let object = capabilities.objects[index];
             let _ = result.push_str("{\"position\":");
             let _ = push_small_u32(&mut result, u32::from(object.position));
             let _ = result.push_str(",\"mode\":\"");
@@ -2124,8 +2133,8 @@ mod device {
                     StopReason::Cancelled => "cancelled",
                     StopReason::GlobalTimeout => "global_timeout",
                 };
-                for remaining in index..pd::TOTAL_TIERS {
-                    result.tiers[remaining] = TierRecord {
+                for (remaining, slot) in result.tiers.iter_mut().enumerate().skip(index) {
+                    *slot = TierRecord {
                         target: pd::target_at(remaining).unwrap_or(pd::Target {
                             mode: pd::Mode::Fixed,
                             voltage_mv: 0,
@@ -2223,8 +2232,8 @@ mod device {
             result.tiers[index] = tier;
             result.tier_count = index + 1;
             if matches!(tier.status, "cancelled" | "global_timeout") {
-                for remaining in index + 1..pd::TOTAL_TIERS {
-                    result.tiers[remaining] = TierRecord {
+                for (remaining, slot) in result.tiers.iter_mut().enumerate().skip(index + 1) {
+                    *slot = TierRecord {
                         target: pd::target_at(remaining).unwrap_or(pd::Target {
                             mode: pd::Mode::Fixed,
                             voltage_mv: 0,
@@ -2836,11 +2845,17 @@ mod device {
         push_u32(out, u32::from(result.source_capabilities.count))?;
         out.push_str(",\"rawPdos\":[")
             .map_err(|_| core::fmt::Error)?;
-        for index in 0..usize::from(result.source_capabilities.count).min(pd::MAX_SOURCE_PDOS) {
+        for (index, object) in result
+            .source_capabilities
+            .objects
+            .iter()
+            .take(usize::from(result.source_capabilities.count).min(pd::MAX_SOURCE_PDOS))
+            .enumerate()
+        {
             if index != 0 {
                 out.push(',').map_err(|_| core::fmt::Error)?;
             }
-            push_u32(out, result.source_capabilities.objects[index].raw)?;
+            push_u32(out, object.raw)?;
         }
         out.push_str("],\"objects\":[]},\"selection\":")
             .map_err(|_| core::fmt::Error)?;
@@ -2935,11 +2950,17 @@ mod device {
                 .map_err(|_| core::fmt::Error)?;
         }
         if source_count != 0 {
-            for index in 0..source_count {
+            for (index, object) in result
+                .source_capabilities
+                .objects
+                .iter()
+                .take(source_count)
+                .enumerate()
+            {
                 if index != 0 {
                     out.push(',').map_err(|_| core::fmt::Error)?;
                 }
-                push_u32(out, result.source_capabilities.objects[index].raw)?;
+                push_u32(out, object.raw)?;
             }
             out.push_str("],\"objects\":[]}")
                 .map_err(|_| core::fmt::Error)?;
@@ -2952,11 +2973,11 @@ mod device {
         } else {
             "summary_tier_count_nonzero"
         });
-        for index in 0..tier_count {
+        for (index, tier) in result.tiers.iter().take(tier_count).enumerate() {
             if index != 0 {
                 out.push(',').map_err(|_| core::fmt::Error)?;
             }
-            write_tier_summary(out, result.tiers[index], result.validate_vin)?;
+            write_tier_summary(out, *tier, result.validate_vin)?;
         }
         emit_stage("summary_tiers_done");
         let mut length_stage = String::<64>::new();

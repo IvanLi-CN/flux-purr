@@ -35,7 +35,7 @@ mod device {
             master::{Config as SpiConfig, Spi},
         },
         time::Rate,
-        usb_serial_jtag::UsbSerialJtag,
+        usb::usb_serial_jtag::UsbSerialJtag,
     };
     use heapless::String;
 
@@ -506,7 +506,7 @@ mod device {
             let frame: &[u8] = match pattern {
                 DisplayPattern::Calibration => &CALIBRATION_FRAME,
                 DisplayPattern::Solid(rgb565) => {
-                    for chunk in pixels.chunks_exact_mut(2) {
+                    for chunk in pixels.as_chunks_mut::<2>().0 {
                         chunk.copy_from_slice(&rgb565);
                     }
                     &pixels

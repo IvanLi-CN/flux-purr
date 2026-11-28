@@ -367,19 +367,19 @@ fn low_power_coasting_evidence(
         && evidence
             .approach_median_output_permille
             .is_some_and(|median| median > 100 && median <= maintenance);
-    if !evidence.tunable_stop
-        || evidence.target_c > 150
-        || !evidence.full_speed_failed
-        || evidence.stable_window_verified
-        || !evidence.first_band_observed
-        || evidence.hold_sample_count < 3
-        || !(limited_maintenance
+    evidence.tunable_stop
+        && evidence.target_c <= 150
+        && evidence.full_speed_failed
+        && !evidence.stable_window_verified
+        && evidence.first_band_observed
+        && evidence.hold_sample_count >= 3
+        && (limited_maintenance
             || evidence.hold_off_sample_count == evidence.hold_sample_count
             || (evidence.hold_entry_pulse_only
                 && evidence.hold_off_sample_count.saturating_mul(10)
                     >= evidence.hold_sample_count.saturating_mul(9)))
-        || stability_gate_evidence(evidence).0 != GateFailure::BrokeHigh
-        || !evidence.approach_output_range.is_some_and(|(min, max)| {
+        && stability_gate_evidence(evidence).0 == GateFailure::BrokeHigh
+        && evidence.approach_output_range.is_some_and(|(min, max)| {
             min >= crate::thermal_plant::APPROACH_MIN_PERMILLE
                 && max <= 1_000
                 && (limited_maintenance
@@ -389,10 +389,6 @@ fn low_power_coasting_evidence(
                         .approach_median_output_permille
                         .is_some_and(|median| median <= 100))
         })
-    {
-        return false;
-    }
-    true
 }
 
 pub(crate) fn braking_boundary_damping_candidate(

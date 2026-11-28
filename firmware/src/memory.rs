@@ -3312,14 +3312,14 @@ fn encode_heater_curve_raw_observations(config: &HeaterCurveRawObservations, out
 
 fn decode_heater_curve_raw_observations(bytes: &[u8]) -> HeaterCurveRawObservations {
     let mut config = HeaterCurveRawObservations::default();
-    for index in 0..HEATER_CURVE_MAX_POINTS {
+    for (index, slot) in config.points.iter_mut().enumerate() {
         let offset = index * 8;
         let read = |field: usize| {
             u16::from_le_bytes([bytes[offset + field * 2], bytes[offset + field * 2 + 1]])
         };
         let raw_rtd_adc_mv = read(0);
         if raw_rtd_adc_mv != u16::MAX {
-            config.points[index] = Some(HeaterCurveRawObservation {
+            *slot = Some(HeaterCurveRawObservation {
                 raw_rtd_adc_mv,
                 heater_voltage_mv: read(1),
                 heater_current_ma: read(2),
@@ -4047,11 +4047,11 @@ fn decode_packed_thermal_profile(bytes: &[u8]) -> Option<ThermalControlProfileCo
         settings: decode_thermal_control_profile_settings(&bytes[settings_start..settings_end]),
         ..ThermalControlProfileConfig::default()
     };
-    for (slot, packed) in config
-        .points
-        .iter_mut()
-        .zip(bytes[settings_end..].chunks_exact(THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN))
-    {
+    for (slot, packed) in config.points.iter_mut().zip(
+        bytes[settings_end..]
+            .as_chunks::<THERMAL_CONTROL_PROFILE_PACKED_POINT_PAYLOAD_LEN>()
+            .0,
+    ) {
         *slot = Some(decode_packed_profile_point(packed));
     }
     Some(config)

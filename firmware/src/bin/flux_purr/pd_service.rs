@@ -914,7 +914,5 @@ pub(crate) fn spawn_pd_service(
 ) {
     let bus_address = i2c.into_bus_address();
     spawn_power_coordinator(spawner);
-    spawner
-        .spawn(pd_service_task(bus_address, runtime))
-        .expect("failed to spawn PD service task");
+    spawner.spawn(pd_service_task(bus_address, runtime).expect("failed to spawn PD service task"));
 }

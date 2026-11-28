@@ -23,9 +23,10 @@
     "check:e2e": "bash scripts/check-web-e2e.sh"
   },
   "devDependencies": {
-    "@commitlint/cli": "^20.4.2",
-    "@commitlint/config-conventional": "^20.4.2",
-    "commitlint-plugin-function-rules": "^4.3.2",
-    "lefthook": "^2.1.2"
-  }
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "commitlint-plugin-function-rules": "^5.0.1",
+    "lefthook": "^2.2.4"
+  },
+  "packageManager": "bun@1.4.5"
 }

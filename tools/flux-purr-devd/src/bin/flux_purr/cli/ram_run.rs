@@ -1754,7 +1754,7 @@ fn decode_summary_chunk(
         return Err("PD HIL summary chunk has odd-length hex data".into());
     }
     let mut decoded = Vec::with_capacity(encoded.len() / 2);
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
         let high = hex_nibble(pair[0]).ok_or("PD HIL summary chunk has invalid hex data")?;
         let low = hex_nibble(pair[1]).ok_or("PD HIL summary chunk has invalid hex data")?;
         decoded.push((high << 4) | low);

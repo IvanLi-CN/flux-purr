@@ -511,7 +511,7 @@ const STARTUP_SPLASH_LIGHT_TEMPLATE_FRAME: &[u8; DISPLAY_FRAMEBUFFER_BYTES] =
     ));
 
 fn render_rgb565le_asset(canvas: &mut DisplayCanvas, frame: &[u8; DISPLAY_FRAMEBUFFER_BYTES]) {
-    for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.chunks_exact(2)) {
+    for (pixel, bytes) in canvas.pixels_mut().iter_mut().zip(frame.as_chunks::<2>().0) {
         *pixel = RawU16::new(u16::from_le_bytes([bytes[0], bytes[1]])).into();
     }
 }

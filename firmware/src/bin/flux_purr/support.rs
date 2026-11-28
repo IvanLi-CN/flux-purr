@@ -62,10 +62,10 @@ pub(crate) use esp_hal::{
     analog::adc::{
         Adc, AdcCalBasic, AdcCalCurve, AdcCalScheme, AdcChannel, AdcConfig, Attenuation,
     },
-    efuse::{AdcCalibUnit, Efuse},
+    efuse::AdcCalibUnit,
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
     i2c::master::{Config as I2cConfig, I2c as HalI2c, SoftwareTimeout},
-    interrupt::{Priority, software::SoftwareInterruptControl},
+    interrupt::Priority,
     mcpwm::{
         McPwm, PeripheralClockConfig,
         operator::{Operator, PwmActions, PwmPin, PwmPinConfig, PwmUpdateMethod},
@@ -77,7 +77,7 @@ pub(crate) use esp_hal::{
     },
     time::{Duration as HalDuration, Rate},
     timer::timg::TimerGroup,
-    usb_serial_jtag::UsbSerialJtag,
+    usb::usb_serial_jtag::UsbSerialJtag,
 };
 #[cfg(all(target_arch = "xtensa", feature = "buzzer-observe"))]
 pub(crate) use esp_hal::{
@@ -512,8 +512,10 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // Boot handoffs allocate complete runtime states after display initialization.
 // They need the same headroom regardless of whether the optional LAN task is
 // linked: a no-network diagnostic image must remain a valid boot diagnostic.
+// esp-radio 0.18 also serves the Wi-Fi driver's startup allocations from this
+// heap, so the region covers both consumers.
 #[cfg(any(target_arch = "xtensa", test))]
-pub(crate) const RUNTIME_HEAP_SIZE: usize = 52 * 1024;
+pub(crate) const RUNTIME_HEAP_SIZE: usize = 56 * 1024;
 
 #[cfg(target_arch = "xtensa")]
 #[unsafe(link_section = ".dram2_uninit")]
@@ -605,12 +607,12 @@ fn validate_psram_mapping(start: *mut u8, size: usize) -> bool {
 
 #[cfg(target_arch = "xtensa")]
 pub(crate) fn initialize_display_graphics(
-    psram: &esp_hal::peripherals::PSRAM<'static>,
+    psram: &esp_hal::psram::Psram,
 ) -> Result<
     &'static mut [Rgb565; flux_purr_firmware::display::DISPLAY_PIXELS],
     DisplayGraphicsInitError,
 > {
-    let (start, size) = esp_hal::psram::psram_raw_parts(psram);
+    let (start, size) = psram.raw_parts();
     if !validate_psram_mapping(start, size) {
         return Err(DisplayGraphicsInitError::PsramUnavailable);
     }

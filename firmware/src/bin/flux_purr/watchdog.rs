@@ -166,7 +166,5 @@ pub(crate) fn spawn_watchdog(
     spawner: Spawner,
     watchdog: esp_hal::timer::timg::Wdt<esp_hal::peripherals::TIMG0<'static>>,
 ) {
-    spawner
-        .spawn(watchdog_task(watchdog))
-        .expect("failed to spawn watchdog supervisor");
+    spawner.spawn(watchdog_task(watchdog).expect("failed to spawn watchdog supervisor"));
 }

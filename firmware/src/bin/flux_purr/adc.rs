@@ -188,19 +188,20 @@ pub(crate) fn initialize_adc1(
     vin_gpio: esp_hal::peripherals::GPIO1<'static>,
     rtd_gpio: esp_hal::peripherals::GPIO2<'static>,
 ) -> (Adc1Driver, VinAdcPin, RtdAdcPin, Option<Adc1Curve>) {
-    let efuse_version = Efuse::rtc_calib_version();
-    let init_code = Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
-    let reference_code = Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
+    let efuse_version = esp_hal::efuse::rtc_calib_version();
+    let init_code = esp_hal::efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
+    let reference_code =
+        esp_hal::efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION);
     let reference_mv = (efuse_version == 1)
-        .then(|| Efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION));
+        .then(|| esp_hal::efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION));
     let efuse_ready = efuse_version == 1
         && init_code.is_some()
         && reference_code.is_some()
         && reference_mv.is_some();
     let vin_attenuation = adc1_attenuation(AdcCalibrationChannel::Vin);
     let vin_efuse_ready = efuse_version == 1
-        && Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, vin_attenuation).is_some()
-        && Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, vin_attenuation).is_some();
+        && esp_hal::efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, vin_attenuation).is_some()
+        && esp_hal::efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, vin_attenuation).is_some();
     #[cfg(feature = "web_serial")]
     {
         ADC_CALIBRATION_SOURCE.store(
@@ -2095,12 +2096,15 @@ pub(crate) fn heater_supply_adc_metadata() -> flux_purr_firmware::heater_supply:
 {
     flux_purr_firmware::heater_supply::BoundaryAdcMetadata {
         divider_supply_mv: RTD_DIVIDER_SUPPLY_MV,
-        reference_mv: Efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION),
-        reference_code: Efuse::rtc_calib_cal_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION)
+        reference_mv: esp_hal::efuse::rtc_calib_cal_mv(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION),
+        reference_code: esp_hal::efuse::rtc_calib_cal_code(
+            AdcCalibUnit::ADC1,
+            RTD_SAMPLE_ATTENUATION,
+        )
+        .unwrap_or(u16::MAX),
+        init_code: esp_hal::efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION)
             .unwrap_or(u16::MAX),
-        init_code: Efuse::rtc_calib_init_code(AdcCalibUnit::ADC1, RTD_SAMPLE_ATTENUATION)
-            .unwrap_or(u16::MAX),
-        efuse_version: Efuse::rtc_calib_version(),
+        efuse_version: esp_hal::efuse::rtc_calib_version(),
         attenuation_db: 6,
     }
 }

@@ -42,10 +42,7 @@ use embassy_sync::{
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use embedded_io_async::Write;
 use esp_hal::{Async, i2c::master::I2c, peripherals::WIFI, rng::Rng};
-use esp_radio::{
-    Controller as RadioController, init as radio_init,
-    wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
-};
+use esp_radio::wifi::{self, Interface, WifiController, sta::StationConfig};
 use heapless::{String, Vec};
 
 /// The already initialized I2C0 bus shared with the PD service and EEPROM.
@@ -94,18 +91,16 @@ static CONTROL_REVISION: AtomicU32 = AtomicU32::new(0);
 static PAIRING_CODE_MIRROR: AtomicU32 = AtomicU32::new(0);
 static WIFI_CONFIG: WifiConfigMutex = Mutex::new(WifiRuntimeConfig::empty());
 static WIFI_APPLY_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-// A WiFi cancel receipt is issued only after the station controller has
-// completed `stop_async`. This prevents USB callers from treating a local
-// request as a completed device-side cancellation.
+// A WiFi cancel receipt is issued only after the station has been disconnected
+// and the driver lifecycle settled. This prevents USB callers from treating a
+// local request as a completed device-side cancellation.
 static WIFI_CANCEL_ACK: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 static WIFI_CANCEL_REQUEST_ID: AtomicU32 = AtomicU32::new(0);
 static WIFI_CANCEL_NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 static LAN_RUNTIME: RuntimeStatusMutex = BlockingMutex::new(RefCell::new(LanRuntimeState::empty()));
 static WIFI_PROVISIONING: WifiProvisioningMutex = Mutex::new(WifiProvisioningMachine::new());
 static NET_RESOURCES: StaticCell<StackResources<8>> = StaticCell::new();
-static NET_RUNNER: StaticCell<embassy_net::Runner<'static, WifiDevice<'static>>> =
-    StaticCell::new();
-static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new();
+static NET_RUNNER: StaticCell<embassy_net::Runner<'static, Interface>> = StaticCell::new();
 static WIFI_CONTROLLER: StaticCell<WifiController<'static>> = StaticCell::new();
 // The mutation-capable HTTP worker owns its full request workspace outside the
 // executor arena. Lightweight readers are served from published snapshots.
@@ -548,14 +543,17 @@ where
     F: FnMut(&'static [u8]),
 {
     report_stage(b"boot_stage=wifi_radio_init_start\n");
-    let radio = radio_init().map_err(|_| LanStartupError::WifiInitialization)?;
-    report_stage(b"boot_stage=wifi_radio_init_complete\n");
-    let radio = RADIO_CONTROLLER.init(radio);
     report_stage(b"boot_stage=wifi_interface_init_start\n");
-    let (controller, interfaces) = wifi::new(radio, wifi_peripheral, wifi_driver_config())
+    // esp-radio 0.18 owns radio initialization inside `wifi::new`; the
+    // scheduler must already be running and the radio is deinitialized when
+    // the returned controller is dropped. Both stages therefore complete only
+    // after the call returns, so a failure inside it is still attributed to
+    // `wifi_radio_init_start`.
+    let controller = WifiController::new(wifi_peripheral, wifi_driver_config())
         .map_err(|_| LanStartupError::WifiInitialization)?;
+    report_stage(b"boot_stage=wifi_radio_init_complete\n");
+    let station = Interface::station();
     report_stage(b"boot_stage=wifi_interface_init_complete\n");
-    let station = interfaces.sta;
     let names = device_names_from_mac(station.mac_address());
     // Boot restoration is initialization, not a live reconfiguration. Do not
     // leave an apply signal pending: consuming it after the first DHCP lease
@@ -586,12 +584,10 @@ where
     let runner = NET_RUNNER.init(runner);
     let controller = WIFI_CONTROLLER.init(controller);
 
-    spawner
-        .spawn(wifi_task(controller, stack, shared_i2c))
-        .map_err(|_| LanStartupError::WifiTaskCapacity)?;
-    spawner
-        .spawn(network_task(runner))
-        .map_err(|_| LanStartupError::NetworkTaskCapacity)?;
+    spawner.spawn(
+        wifi_task(controller, stack, shared_i2c).map_err(|_| LanStartupError::WifiTaskCapacity)?,
+    );
+    spawner.spawn(network_task(runner).map_err(|_| LanStartupError::NetworkTaskCapacity)?);
     report_stage(b"boot_stage=wifi_core_tasks_spawned\n");
     let sockets = [
         TcpSocket::new(
@@ -617,9 +613,10 @@ where
     ];
     for mut socket in sockets {
         socket.set_timeout(Some(Duration::from_secs(5)));
-        spawner
-            .spawn(http_connection_task(stack, HttpSocket(socket)))
-            .map_err(|_| LanStartupError::HttpTaskCapacity)?;
+        spawner.spawn(
+            http_connection_task(stack, HttpSocket(socket))
+                .map_err(|_| LanStartupError::HttpTaskCapacity)?,
+        );
     }
     HTTP_WORKSPACES
         .send(HttpWorkspaceSlot {
@@ -633,9 +630,7 @@ where
             response_slot: 1,
         })
         .await;
-    spawner
-        .spawn(mdns_task(stack, names))
-        .map_err(|_| LanStartupError::MdnsTaskCapacity)?;
+    spawner.spawn(mdns_task(stack, names).map_err(|_| LanStartupError::MdnsTaskCapacity)?);
     report_stage(b"boot_stage=wifi_all_tasks_spawned\n");
     Ok(())
 }
@@ -643,8 +638,8 @@ where
 /// The LAN control plane has bounded, low-throughput traffic. esp-radio owns
 /// these pools at runtime, so this budget must live next to its constructor
 /// rather than in legacy esp-wifi build environment variables.
-fn wifi_driver_config() -> wifi::Config {
-    wifi::Config::default()
+fn wifi_driver_config() -> wifi::ControllerConfig {
+    wifi::ControllerConfig::default()
         .with_static_rx_buf_num(6)
         .with_dynamic_rx_buf_num(8)
         .with_dynamic_tx_buf_num(8)
@@ -652,7 +647,7 @@ fn wifi_driver_config() -> wifi::Config {
 }
 
 #[embassy_executor::task]
-async fn network_task(runner: &'static mut embassy_net::Runner<'static, WifiDevice<'static>>) {
+async fn network_task(runner: &'static mut embassy_net::Runner<'static, Interface>) {
     runner.run().await;
 }
 
@@ -812,39 +807,31 @@ async fn start_wifi_driver(
     config: &WifiRuntimeConfig,
     shared_i2c: &SharedI2cBus,
 ) -> bool {
-    let client = ModeConfig::Client(
-        ClientConfig::default()
-            .with_ssid(alloc::string::String::from(config.ssid.as_str()))
-            .with_password(alloc::string::String::from(config.password.as_str())),
+    // Invalid SSID/password lengths cannot be represented in the driver's
+    // bounded types; treat them as a driver configuration failure.
+    let Ok(ssid) = config.ssid.as_str().try_into() else {
+        return false;
+    };
+    let Ok(password) = alloc::string::String::from(config.password.as_str()).try_into() else {
+        return false;
+    };
+    let client = wifi::Config::Station(
+        StationConfig::default()
+            .with_ssid(ssid)
+            .with_authentication(wifi::AuthenticationMethodConfig::WpaWpa2Personal(password)),
     );
     stack.set_config_v4(net_config(config).ipv4);
     crate::heater_supply::publish_wifi_hardware_state(None);
-    // start_async calls the synchronous radio start on its first poll. Let an
-    // in-flight I2C transaction finish before that call blocks this executor;
-    // release the bus before waiting for the driver's asynchronous start event.
+    // `set_config` performs the synchronous radio start/restart itself. Let an
+    // in-flight I2C transaction finish before that call blocks this executor.
     let driver_started = crate::async_start::after_resource_idle(shared_i2c.lock(), || async {
-        let driver_configured = controller.set_config(&client).is_ok();
-        driver_configured
-            && (matches!(controller.is_started(), Ok(true))
-                || matches!(
-                    with_timeout(
-                        Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                        controller.start_async(),
-                    )
-                    .await,
-                    Ok(Ok(()))
-                ))
+        controller.set_config(&client).is_ok()
     })
     .await;
-    // `start_async` has already established the driver when it returns true.
-    // A second `is_started` probe can transiently fail while the radio is
-    // settling; publishing that probe as `None` would make automatic heating
-    // fail-safe indefinitely even though the network stack is usable.
-    crate::heater_supply::publish_wifi_hardware_state(if driver_started {
-        Some(true)
-    } else {
-        controller.is_started().ok()
-    });
+    // `set_config` applies and starts the driver synchronously. A failure resets
+    // the mode to NULL and stops the controller, so the published state is
+    // either definitively started or definitively stopped.
+    crate::heater_supply::publish_wifi_hardware_state(Some(driver_started));
     if driver_started {
         return true;
     }
@@ -865,8 +852,24 @@ async fn await_wifi_association(
     stack: Stack<'static>,
     config: &WifiRuntimeConfig,
 ) -> bool {
-    let association_started =
-        matches!(controller.is_connected(), Ok(true)) || controller.connect().is_ok();
+    // `connect_async` associates and returns only after the station joins the
+    // access point, so it replaces the former `connect()` plus link-up poll.
+    let association_started = if controller.is_connected() {
+        true
+    } else {
+        match select(
+            with_timeout(
+                Duration::from_secs(WIFI_ASSOCIATION_TIMEOUT_SECS),
+                controller.connect_async(),
+            ),
+            WIFI_APPLY_SIGNAL.wait(),
+        )
+        .await
+        {
+            Either::First(result) => result.is_ok(),
+            Either::Second(()) => return false,
+        }
+    };
     let association_timed_out = if association_started {
         match select(
             with_timeout(
@@ -947,7 +950,7 @@ async fn wait_wifi_disconnect(
     summary.transition_sequence = connected.transition_sequence;
     set_network_summary(summary).await;
     match select(
-        controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
+        controller.wait_for_disconnect_async(),
         WIFI_APPLY_SIGNAL.wait(),
     )
     .await
@@ -985,26 +988,30 @@ async fn wait_wifi_disconnect(
 
 async fn stop_wifi_station(controller: &mut WifiController<'static>) -> bool {
     crate::heater_supply::publish_wifi_hardware_state(None);
-    let stopped = match controller.is_started() {
-        Ok(false) => true,
-        Ok(true) => matches!(
+    // esp-radio 0.18 removed `stop_async` and `is_started`: the driver cannot be
+    // stopped while its controller is alive, and this controller is one-time
+    // boot-lifetime storage. Disconnecting leaves the station with no AP and no
+    // pending association, which is the observable stop equivalent. The radio
+    // itself stays powered until the controller is dropped.
+    //
+    // `WIFI_DRIVER_STATE` describes that driver lifecycle, not association, so
+    // it must stay `Some(true)`. Publishing `Some(false)` here let a heater
+    // boundary measured without radio load authorize automatic output while the
+    // station was still associating.
+    crate::heater_supply::publish_wifi_hardware_state(Some(true));
+    // The return value keeps the caller's "station has no link" timeout
+    // semantics: a station that is not associated is already stopped.
+    match controller.is_connected() {
+        false => true,
+        true => matches!(
             with_timeout(
                 Duration::from_secs(WIFI_DRIVER_TRANSITION_TIMEOUT_SECS),
-                controller.stop_async(),
+                controller.disconnect_async(),
             )
             .await,
-            Ok(Ok(()))
+            Ok(Ok(_))
         ),
-        Err(_) => false,
-    };
-    // A successful stop is authoritative. Do not turn a transient follow-up
-    // probe error into an unknown state that blocks the next clean start.
-    crate::heater_supply::publish_wifi_hardware_state(if stopped {
-        Some(false)
-    } else {
-        controller.is_started().ok()
-    });
-    stopped
+    }
 }
 
 async fn set_network_summary(summary: NetworkSummary) -> NetworkSummary {
@@ -1734,7 +1741,7 @@ fn random_u64() -> u64 {
 
 fn random_entropy() -> [u8; crate::lan::LAN_TOKEN_BYTES] {
     let mut out = [0u8; crate::lan::LAN_TOKEN_BYTES];
-    for chunk in out.chunks_exact_mut(4) {
+    for chunk in out.as_chunks_mut::<4>().0 {
         chunk.copy_from_slice(&random_u32().to_le_bytes());
     }
     out

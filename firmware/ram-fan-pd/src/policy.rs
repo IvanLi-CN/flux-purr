@@ -89,8 +89,12 @@ pub fn select_fan_contract(
     }
 
     let mut best_pps: Option<SelectedContract> = None;
-    for index in 0..usize::from(capabilities.count).min(capabilities.objects.len()) {
-        let object = capabilities.objects[index];
+    for object in capabilities
+        .objects
+        .iter()
+        .take(usize::from(capabilities.count))
+        .copied()
+    {
         if object.mode != Mode::Pps || object.max_ma < 50 {
             continue;
         }

@@ -331,7 +331,7 @@ fn watchdog_configures_clock_derived_timeout_before_rtos_handoff() {
     assert!(!task.contains("set_timeout("));
     assert!(
         start_rtos.find("configure_watchdog_before_rtos(timg0.wdt)")
-            < start_rtos.find("esp_rtos::start(timg0.timer0)")
+            < start_rtos.find("esp_rtos::start(timg0.timer0, scheduler_interrupt)")
     );
 }
 
@@ -449,7 +449,7 @@ fn pd_service_preempts_lower_priority_application_work() {
         "PD policy must have a dedicated Embassy task"
     );
     assert!(
-        boot.contains("start_pd_realtime_executor(software_interrupts.software_interrupt2)")
+        boot.contains("start_pd_realtime_executor(software_interrupt2)")
             && boot.contains("InterruptExecutor::new(software_interrupt)")
             && boot.contains("executor.start(Priority::Priority3)")
             && boot.contains("buzzer_realtime_executor.start(Priority::Priority2)")
@@ -7288,11 +7288,11 @@ fn runtime_ready_boot_stage_is_emitted_after_the_first_ui_and_before_runtime_loo
     assert!(
         normalized_entrypoint.contains("runtime::run(spawner).await;")
             && boot.contains("initialize_runtime_state_from_ready(spawner, ready).await")
-            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains("run_boot_runtime_finalize_task(spawner, state)")
             && boot.contains(
                 "async fn run_boot_runtime_finalize_task(spawner: Spawner, state: Box<BootRuntimeState>)"
             )
-            && boot.contains(".spawn(run_frontpanel_runtime_task(state))")
+            && boot.contains("run_frontpanel_runtime_task(state).expect(")
             && runtime_loop.contains("async fn run_runtime_loop(mut state: Box<RuntimeLoopState>)")
     );
 }
@@ -7366,8 +7366,8 @@ fn usb_control_rx_line_uses_bss_instead_of_the_runtime_heap() {
 fn runtime_heap_keeps_boot_handoff_capacity_without_networking() {
     assert_eq!(
         RUNTIME_HEAP_SIZE,
-        52 * 1024,
-        "the diagnostic build must retain enough heap for complete boot states"
+        56 * 1024,
+        "the diagnostic build must retain enough heap for complete boot states and the esp-radio 0.18 Wi-Fi driver"
     );
 }
 
@@ -7381,23 +7381,23 @@ fn boot_stages_handoff_the_heap_pipeline_between_normal_executor_tasks() {
             && boot.contains("init_runtime_heap();")
             && boot.contains("let pipeline_storage = Box::<BootPipeline>::new_uninit();")
             && boot.contains("BootPipeline::new(system_tokens, device_tokens)")
-            && boot.contains(".spawn(run_boot_system_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_system_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_system_stage_task")
             && boot.contains("let system_storage = Box::<BootSystem>::new_uninit();")
             && boot.contains(
                 "pipeline.system = Some(initialize_boot_system(\n        spawner,\n        system_tokens,\n        system_storage,\n    ));"
             )
-            && boot.contains(".spawn(run_boot_pd_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_pd_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_pd_stage_task")
-            && boot.contains(".spawn(run_boot_display_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_display_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_display_stage_task")
-            && boot.contains(".spawn(run_boot_memory_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_memory_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_memory_stage_task")
-            && boot.contains(".spawn(run_boot_runtime_stage_task(spawner, pipeline))")
+            && boot.contains("run_boot_runtime_stage_task(spawner, pipeline).expect(")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_stage_task")
-            && boot.contains(".spawn(run_boot_runtime_finalize_task(spawner, state))")
+            && boot.contains("run_boot_runtime_finalize_task(spawner, state)")
             && boot.contains("#[embassy_executor::task]\nasync fn run_boot_runtime_finalize_task")
-            && boot.contains(".spawn(run_frontpanel_runtime_task(state))"),
+            && boot.contains("run_frontpanel_runtime_task(state).expect("),
         "each ordered boot stage must hand the heap pipeline to the next task"
     );
     assert!(
@@ -7470,6 +7470,41 @@ fn boot_memory_future_is_heap_pinned_before_eeprom_initialization() {
             "Box::pin(initialize_boot_memory(memory_context,eeprom_record_staging,)).await"
         ),
         "the EEPROM startup future must not be nested on the guarded boot stack"
+    );
+}
+
+#[test]
+fn wifi_driver_state_tracks_the_driver_lifecycle_not_association() {
+    // esp-radio 0.18 cannot stop a live controller, so `stop_wifi_station` must
+    // never publish a stopped driver. A `Some(false)` publish there let a heater
+    // boundary measured without radio load authorize automatic output while the
+    // station was still associating.
+    let network = include_str!("../../net.rs");
+    let stop = network
+        .split("async fn stop_wifi_station")
+        .nth(1)
+        .and_then(|rest| rest.split("\nasync fn ").next())
+        .expect("stop_wifi_station must remain present");
+    assert!(
+        stop.contains("publish_wifi_hardware_state(Some(true))")
+            && !stop.contains("publish_wifi_hardware_state(Some(false))")
+            && !stop.contains("publish_wifi_hardware_state(Some(!stopped))"),
+        "stopping the station must keep the Wi-Fi driver state published as started"
+    );
+}
+
+#[test]
+fn wifi_radio_init_complete_is_emitted_after_radio_initialization() {
+    let network = include_str!("../../net.rs");
+    let wifi_new = network
+        .find("WifiController::new(wifi_peripheral, wifi_driver_config())")
+        .expect("the station startup must initialize the radio through WifiController::new");
+    let radio_complete = network
+        .find("boot_stage=wifi_radio_init_complete")
+        .expect("the radio stage must report completion");
+    assert!(
+        wifi_new < radio_complete,
+        "wifi_radio_init_complete must not be reported before the radio is initialized"
     );
 }
 
@@ -7559,8 +7594,8 @@ fn post_system_boot_handoff_starts_after_the_allocator_is_ready() {
         "the root task must heap-pin the system stage before asynchronous boot work"
     );
     assert!(
-        normalized_boot.contains(".spawn(run_boot_system_stage_task(spawner,pipeline))")
-            && normalized_boot.contains(".spawn(run_boot_pd_stage_task(spawner,pipeline))"),
+        normalized_boot.contains("run_boot_system_stage_task(spawner,pipeline).expect(")
+            && normalized_boot.contains("run_boot_pd_stage_task(spawner,pipeline).expect("),
         "the post-system boot pipeline must move to its first task after heap initialization"
     );
     assert!(
@@ -7906,17 +7941,17 @@ fn transient_trace_compaction_handles_non_monotonic_rtd_samples() {
             duty_percent: 0,
         }; THERMAL_PLANT_TRANSIENT_MAX_SAMPLES],
     };
-    for index in 0..=100 {
+    for (index, sample) in job.samples.iter_mut().enumerate().take(101) {
         let temperature = if index % 2 == 0 { 220.0 } else { 80.0 };
-        job.samples[index] = ThermalPlantTransientSample {
+        *sample = ThermalPlantTransientSample {
             elapsed_ticks: index as u32 * 10,
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(temperature),
             heater_voltage_125mv: 160,
             duty_percent: 100,
         };
     }
-    for index in 101..128 {
-        job.samples[index] = ThermalPlantTransientSample {
+    for (index, sample) in job.samples.iter_mut().enumerate().skip(101).take(27) {
+        *sample = ThermalPlantTransientSample {
             elapsed_ticks: index as u32 * 10,
             raw_rtd_adc_mv: runtime_test_raw_rtd_adc_mv_for_temp(80.0),
             heater_voltage_125mv:
@@ -20649,12 +20684,6 @@ fn live_boundary_points_cap_a_confirmed_request_to_the_measured_ceiling() {
         ..MemoryConfig::default()
     };
     flux_purr_firmware::heater_supply::publish_wifi_hardware_state(Some(false));
-    let mut manual = thermal_plant_job_manual_pps(21_000, 3_000);
-    manual.capability_apdos[0] = Some(ch224q::PpsApdo {
-        min_mv: 3_300,
-        max_mv: 21_000,
-        max_ma: 3_000,
-    });
     let query = |temperature_centi_c, current_rtd_mv, current_request_mv| {
         boundary
             .safe_point(

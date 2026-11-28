@@ -176,12 +176,8 @@ fn status_has_new_evidence(
             return true;
         }
     }
-    if current.get("terminalDisposition").and_then(Value::as_str) != Some("running")
+    current.get("terminalDisposition").and_then(Value::as_str) != Some("running")
         && current.pointer("/events/nextSequence") != previous.pointer("/events/nextSequence")
-    {
-        return true;
-    }
-    false
 }
 
 pub(crate) async fn run_firmware_tuning(
