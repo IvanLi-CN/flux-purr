@@ -16,6 +16,7 @@ ci_main = (root / ".github/workflows/ci-main.yml").read_text(encoding="utf-8")
 notify = (root / ".github/workflows/notify-release-failure.yml").read_text(encoding="utf-8")
 quality = json.loads((root / ".github/quality-gates.json").read_text(encoding="utf-8"))
 edgeone_helper = (root / ".github/scripts/deploy-edgeone.sh").read_text(encoding="utf-8")
+edgeone_test = (root / ".github/scripts/test-edgeone-deploy.sh").read_text(encoding="utf-8")
 safe_extract = root / ".github/scripts/safe_extract_release_archive.py"
 
 assert "workflow_dispatch:" in release
@@ -148,6 +149,9 @@ assert 'max_attempts="${EDGEONE_MAX_ATTEMPTS:-3}"' in edgeone_helper
 assert "deployment_started" in edgeone_helper
 assert "retryable_preflight_failure" in edgeone_helper
 assert "PIPESTATUS" in edgeone_helper
+assert 'tee_bin="${EDGEONE_TEE_BIN:-tee}"' in edgeone_helper
+assert '| "${tee_bin}" "${output_file}"' in edgeone_helper
+assert 'EDGEONE_TEE_BIN="${fake_tee}"' in edgeone_test
 
 print("release workflow fixtures passed")
 PY
